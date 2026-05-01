@@ -18,8 +18,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use tau_proto::{
-    ClientKind, ConnectionId, Event, EventSelector, LifecycleSubscribe, SessionId, ToolCallId,
-    ToolName, ToolRequest, ToolSpec,
+    ClientKind, ConnectionId, Event, EventSelector, LifecycleSubscribe, LogEventId, SessionId,
+    ToolCallId, ToolName, ToolRequest, ToolSpec,
 };
 
 /// The origin class of one live connection.
@@ -1015,6 +1015,14 @@ enum PersistedSessionRecord {
     },
 }
 
+/// One durable session-scoped protocol event.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PersistedSessionEvent {
+    pub id: LogEventId,
+    pub source: Option<ConnectionId>,
+    pub event: Event,
+}
+
 /// Per-session sidecar metadata at `<state_dir>/<session_id>/meta.json`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SessionMeta {
@@ -1460,6 +1468,43 @@ impl SessionStore {
         self.append(&session_id.into(), SessionEntry::ToolActivity(activity))
     }
 
+    /// Appends one non-transient protocol event to the durable per-session
+    /// event log.
+    pub fn append_session_event(
+        &mut self,
+        session_id: &str,
+        source: Option<ConnectionId>,
+        event: Event,
+    ) -> Result<LogEventId, SessionStoreError> {
+        self.ensure_locked(session_id)?;
+        let session_dir = self.session_dir(session_id);
+        fs::create_dir_all(&session_dir).map_err(|source| {
+            SessionStoreError::CreateParentDirectory {
+                path: session_dir.clone(),
+                source,
+            }
+        })?;
+        let events_path = session_dir.join("events.cbor");
+        let next_id = next_session_event_id(&events_path)?;
+        let record = PersistedSessionEvent {
+            id: next_id,
+            source,
+            event,
+        };
+        append_cbor_record(&events_path, &record)?;
+        touch_meta(&session_dir.join("meta.json"))?;
+        Ok(next_id)
+    }
+
+    /// Loads durable per-session protocol events.
+    pub fn session_events(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<PersistedSessionEvent>, SessionStoreError> {
+        let path = self.session_dir(session_id).join("events.cbor");
+        load_session_events(&path)
+    }
+
     /// Returns the state dir this store is rooted at.
     #[must_use]
     pub fn state_dir(&self) -> &Path {
@@ -1625,6 +1670,10 @@ fn load_session_log(
 }
 
 fn append_record(path: &Path, record: &PersistedSessionRecord) -> Result<(), SessionStoreError> {
+    append_cbor_record(path, record)
+}
+
+fn append_cbor_record<T: Serialize>(path: &Path, record: &T) -> Result<(), SessionStoreError> {
     let mut encoded = Vec::new();
     ciborium::into_writer(record, &mut encoded).map_err(|source| SessionStoreError::Encode {
         path: path.to_path_buf(),
@@ -1653,6 +1702,64 @@ fn append_record(path: &Path, record: &PersistedSessionRecord) -> Result<(), Ses
         path: path.to_path_buf(),
         source,
     })
+}
+
+fn load_session_events(path: &Path) -> Result<Vec<PersistedSessionEvent>, SessionStoreError> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut events = Vec::new();
+    read_cbor_records(path, |record: PersistedSessionEvent| {
+        events.push(record);
+    })?;
+    Ok(events)
+}
+
+fn next_session_event_id(path: &Path) -> Result<LogEventId, SessionStoreError> {
+    let events = load_session_events(path)?;
+    Ok(events
+        .last()
+        .map(|record| LogEventId::new(record.id.get() + 1))
+        .unwrap_or_else(|| LogEventId::new(0)))
+}
+
+fn read_cbor_records<T, F>(path: &Path, mut handle: F) -> Result<(), SessionStoreError>
+where
+    T: for<'de> Deserialize<'de>,
+    F: FnMut(T),
+{
+    let mut file = File::open(path).map_err(|source| SessionStoreError::Open {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    loop {
+        let mut length_bytes = [0_u8; 8];
+        match file.read_exact(&mut length_bytes) {
+            Ok(()) => {}
+            Err(source) if source.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+            Err(source) => {
+                return Err(SessionStoreError::Read {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        }
+
+        let record_length = u64::from_le_bytes(length_bytes) as usize;
+        let mut record_bytes = vec![0_u8; record_length];
+        file.read_exact(&mut record_bytes)
+            .map_err(|source| SessionStoreError::Read {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        let record: T = ciborium::from_reader(record_bytes.as_slice()).map_err(|source| {
+            SessionStoreError::Decode {
+                path: path.to_path_buf(),
+                source,
+            }
+        })?;
+        handle(record);
+    }
 }
 
 /// Snapshot-friendly in-memory client inbox for tests and in-process adapters.

@@ -1337,6 +1337,17 @@ impl Event {
         }
     }
 
+    /// True for events that are useful while work is in progress but
+    /// redundant once a later completion event exists. Transient
+    /// events are not written to durable session event logs.
+    #[must_use]
+    pub const fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Self::AgentResponseUpdated(_) | Self::ToolProgress(_) | Self::ShellCommandProgress(_)
+        )
+    }
+
     /// Peels off a `LogEvent` envelope, returning `(Some(id), inner)`
     /// for log-delivered events and `(None, self)` for direct ones.
     /// Receivers that want at-least-once semantics ack the returned id

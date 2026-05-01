@@ -871,6 +871,7 @@ impl Harness {
 
     /// Publishes an event to both the event bus and the event log.
     fn publish_event(&mut self, source: Option<&str>, event: Event) {
+        self.persist_session_event(source, &event);
         let seq = self
             .event_log
             .append(source.map(tau_proto::ConnectionId::from), event.clone());
@@ -882,6 +883,58 @@ impl Harness {
             event: Box::new(event),
         });
         let _ = self.bus.publish_from(source, log_event);
+    }
+
+    fn persist_session_event(&mut self, source: Option<&str>, event: &Event) {
+        if event.is_transient() {
+            return;
+        }
+        let Some(session_id) = self.session_id_for_event(event) else {
+            return;
+        };
+        let source = source.map(tau_proto::ConnectionId::from);
+        let _ = self
+            .store
+            .append_session_event(session_id.as_str(), source, event.clone());
+    }
+
+    fn session_id_for_event(&self, event: &Event) -> Option<SessionId> {
+        match event {
+            Event::UiPromptSubmitted(prompt) => Some(prompt.session_id.clone()),
+            Event::UiShellCommand(command) => Some(command.session_id.clone()),
+            Event::UiSwitchSession(req) => Some(req.new_session_id.clone()),
+            Event::UiTreeRequest(req) => Some(req.session_id.clone()),
+            Event::UiNavigateTree(req) => Some(req.session_id.clone()),
+            Event::SessionPromptQueued(queued) => Some(queued.session_id.clone()),
+            Event::SessionStarted(started) => Some(started.session_id.clone()),
+            Event::SessionShutdown(shutdown) => Some(shutdown.session_id.clone()),
+            Event::SessionPromptCreated(created) => Some(created.session_id.clone()),
+            Event::AgentPromptSubmitted(submitted) => self
+                .prompt_sessions
+                .get(&submitted.session_prompt_id)
+                .cloned(),
+            Event::AgentResponseUpdated(updated) => self
+                .prompt_sessions
+                .get(&updated.session_prompt_id)
+                .cloned(),
+            Event::AgentResponseFinished(finished) => self
+                .prompt_sessions
+                .get(&finished.session_prompt_id)
+                .cloned(),
+            Event::ToolRequest(request) => {
+                self.pending_tool_sessions.get(&request.call_id).cloned()
+            }
+            Event::ToolResult(result) => self.pending_tool_sessions.get(&result.call_id).cloned(),
+            Event::ToolError(error) => self.pending_tool_sessions.get(&error.call_id).cloned(),
+            Event::ToolProgress(progress) => {
+                self.pending_tool_sessions.get(&progress.call_id).cloned()
+            }
+            Event::ShellCommandFinished(finished) => Some(finished.session_id.clone()),
+            Event::ExtAgentsMdAvailable(_) | Event::ExtensionContextReady(_) => {
+                Some(self.current_session_id.clone())
+            }
+            _ => None,
+        }
     }
 
     fn enable_debug_log(&mut self, dir: &Path) -> Result<PathBuf, HarnessError> {
@@ -1126,6 +1179,7 @@ impl Harness {
             }
             Event::ToolRequest(request) => {
                 self.persist_tool_request(&request)?;
+                self.publish_event(Some(source_id), Event::ToolRequest(request.clone()));
                 match self
                     .registry
                     .route_tool_request(&mut self.bus, source_id, request.clone())
@@ -1141,17 +1195,17 @@ impl Harness {
                             message: "no live provider available".to_owned(),
                             details: None,
                         };
+                        self.publish_event(None, Event::ToolError(error.clone()));
                         self.persist_tool_error(&error)?;
-                        self.publish_event(None, Event::ToolError(error));
                     }
                     Err(error) => return Err(HarnessError::ToolRoute(error)),
                 }
             }
             Event::ToolResult(result) => {
                 if self.pending_tool_sessions.contains_key(&result.call_id) {
-                    self.persist_tool_result(&result)?;
                     let call_id = result.call_id.to_string();
-                    self.publish_event(Some(source_id), Event::ToolResult(result));
+                    self.publish_event(Some(source_id), Event::ToolResult(result.clone()));
+                    self.persist_tool_result(&result)?;
                     self.on_tool_call_complete(&call_id);
                 } else {
                     self.emit_info(&format!(
@@ -1162,9 +1216,9 @@ impl Harness {
             }
             Event::ToolError(error) => {
                 if self.pending_tool_sessions.contains_key(&error.call_id) {
-                    self.persist_tool_error(&error)?;
                     let call_id = error.call_id.to_string();
-                    self.publish_event(Some(source_id), Event::ToolError(error));
+                    self.publish_event(Some(source_id), Event::ToolError(error.clone()));
+                    self.persist_tool_error(&error)?;
                     self.on_tool_call_complete(&call_id);
                 } else {
                     self.emit_info(&format!(
@@ -1226,7 +1280,6 @@ impl Harness {
                 self.publish_event(Some(source_id), event);
             }
             Event::AgentResponseFinished(response) => {
-                self.publish_event(None, Event::AgentResponseFinished(response.clone()));
                 self.handle_agent_response_finished(response)?;
             }
             other => {
@@ -1251,6 +1304,7 @@ impl Harness {
                     Ok(()) => {
                         let selectors_for_replay = subscribe.selectors.clone();
                         self.publish_event(Some(client_id), Event::LifecycleSubscribe(subscribe));
+                        self.replay_session_events(client_id, &selectors_for_replay);
                         self.replay_harness_info(client_id, &selectors_for_replay);
                         Ok(true)
                     }
@@ -1352,8 +1406,6 @@ impl Harness {
                 Ok(true)
             }
             Event::UiPromptSubmitted(prompt) => {
-                self.publish_event(Some(client_id), Event::UiPromptSubmitted(prompt.clone()));
-
                 let submission =
                     self.submit_user_prompt(prompt.session_id.clone(), prompt.text.clone())?;
                 if matches!(submission, PromptSubmission::Queued) {
@@ -1700,6 +1752,21 @@ impl Harness {
         );
     }
 
+    fn replay_session_events(&mut self, client_id: &str, selectors: &[EventSelector]) {
+        let Ok(events) = self.store.session_events(self.current_session_id.as_str()) else {
+            return;
+        };
+        for entry in events {
+            if selector_matches_event(selectors, &entry.event) {
+                let event = Event::LogEvent(tau_proto::LogEvent {
+                    id: entry.id,
+                    event: Box::new(entry.event),
+                });
+                let _ = self.bus.send_to(client_id, entry.source.as_deref(), event);
+            }
+        }
+    }
+
     /// Replays harness info, extension lifecycle events, and the
     /// results of eager session discovery to a late-joining client.
     ///
@@ -1800,6 +1867,13 @@ impl Harness {
         session_id: SessionId,
         text: String,
     ) -> Result<(), HarnessError> {
+        self.publish_event(
+            None,
+            Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
+                session_id: session_id.clone(),
+                text: text.clone(),
+            }),
+        );
         self.store
             .append_user_message(session_id.as_str(), text.clone())?;
         self.turn_state = TurnState::AgentThinking {
@@ -2161,7 +2235,8 @@ impl Harness {
         // which would silently misroute the duplicate.
         let Some(session_id) = self
             .prompt_sessions
-            .remove(response.session_prompt_id.as_str())
+            .get(response.session_prompt_id.as_str())
+            .cloned()
         else {
             self.emit_info(&format!(
                 "discarding duplicate agent response for session_prompt_id={}",
@@ -2169,6 +2244,10 @@ impl Harness {
             ));
             return Ok(());
         };
+
+        self.publish_event(None, Event::AgentResponseFinished(response.clone()));
+        self.prompt_sessions
+            .remove(response.session_prompt_id.as_str());
         self.completed_prompts
             .insert(response.session_prompt_id.clone());
 
@@ -2509,6 +2588,7 @@ impl Harness {
             .insert(call_id.clone(), session_id.into());
         self.pending_tool_names
             .insert(call_id.clone(), tool_name.clone());
+        self.publish_event(None, Event::ToolRequest(request.clone()));
 
         match self
             .registry
@@ -3080,14 +3160,6 @@ fn load_last_efforts(
                 continue;
             };
             levels.insert(model.clone(), level);
-        }
-    }
-
-    if levels.is_empty() {
-        if let Some(model) = json["last_selected_model"].as_str() {
-            if let Some(level) = json["last_effort"].as_str().and_then(parse_effort) {
-                levels.insert(model.to_owned(), level);
-            }
         }
     }
 
@@ -4602,6 +4674,89 @@ mod tests {
     }
 
     #[test]
+    fn late_joining_ui_client_receives_replayed_session_events() {
+        let td = TempDir::new().expect("tempdir");
+        let sp = td.path().join("state");
+        let mut h = echo_harness(&sp).expect("start");
+
+        h.send_user_message("s1", "hello replay", None)
+            .expect("send message");
+
+        let events = h.store.session_events("s1").expect("session events");
+        assert!(
+            events
+                .iter()
+                .any(|entry| matches!(entry.event, Event::UiPromptSubmitted(_))),
+            "user prompt should be in durable session event log"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|entry| matches!(entry.event, Event::AgentResponseFinished(_))),
+            "final agent response should be in durable session event log"
+        );
+        assert!(
+            events.iter().all(|entry| !entry.event.is_transient()),
+            "transient events must not be persisted"
+        );
+
+        let (server_end, client_end) = UnixStream::pair().expect("pair");
+        client_end
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("read timeout");
+        h.accept_client(server_end).expect("accept");
+        let ui_conn = h
+            .bus
+            .connections()
+            .into_iter()
+            .find(|c| c.name == "socket-ui")
+            .expect("ui connection")
+            .id
+            .to_string();
+
+        h.handle_client_event(
+            &ui_conn,
+            Event::LifecycleSubscribe(LifecycleSubscribe {
+                selectors: vec![
+                    EventSelector::Prefix("ui.".to_owned()),
+                    EventSelector::Prefix("agent.".to_owned()),
+                ],
+            }),
+        )
+        .expect("subscribe");
+
+        let mut reader = EventReader::new(BufReader::new(client_end));
+        let mut got_prompt = false;
+        let mut got_response = false;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && !(got_prompt && got_response) {
+            let Ok(Some(event)) = reader.read_event() else {
+                break;
+            };
+            let (_log_id, inner) = event.peel_log();
+            match inner {
+                Event::UiPromptSubmitted(prompt) if prompt.text == "hello replay" => {
+                    got_prompt = true;
+                }
+                Event::AgentResponseFinished(finished)
+                    if finished
+                        .text
+                        .as_deref()
+                        .is_some_and(|text| text.contains("hello replay")) =>
+                {
+                    got_response = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(got_prompt, "late UI should replay prior user prompt");
+        assert!(got_response, "late UI should replay prior agent response");
+
+        h.shutdown().expect("shutdown");
+    }
+
+    #[test]
     fn late_joining_ui_client_receives_replayed_agents_md_and_context_ready() {
         // The CLI connects after the daemon's eager init has already
         // fired, so live subscription would miss `ExtAgentsMdAvailable`
@@ -5063,30 +5218,6 @@ mod tests {
     }
 
     // -- Skills --
-
-    #[test]
-    fn load_harness_state_prefers_per_model_effort_and_migrates_legacy_value() {
-        let td = TempDir::new().expect("tempdir");
-        let dirs = tau_config::settings::TauDirs {
-            config_dir: Some(td.path().to_path_buf()),
-            state_dir: Some(td.path().join("state")),
-        };
-        std::fs::create_dir_all(dirs.state_dir.as_ref().expect("state dir")).expect("mkdir");
-        std::fs::write(
-            dirs.state_dir
-                .as_ref()
-                .expect("state dir")
-                .join("harness.json5"),
-            r#"{
-                "last_selected_model": "openai/gpt-4.1",
-                "last_effort": "high"
-            }"#,
-        )
-        .expect("write state");
-
-        let levels = load_last_efforts(&dirs);
-        assert_eq!(levels.get("openai/gpt-4.1"), Some(&tau_proto::Effort::High));
-    }
 
     #[test]
     fn selected_effort_is_model_specific_and_clamped() {

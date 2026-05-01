@@ -461,10 +461,24 @@ struct DiscoveredAgentsFile {
 const HARNESS_CONNECTION_ID: &str = "__harness__";
 
 struct Harness {
+    /// Sender side of the harness's central event channel. Cloned into
+    /// each per-connection reader thread so they can feed
+    /// `HarnessEvent`s back into the main loop.
     tx: Sender<HarnessEvent>,
+    /// Receiver side of the central event channel. The main loop
+    /// blocks on this and dispatches one `HarnessEvent` at a time.
     rx: Receiver<HarnessEvent>,
+    /// Routes protocol events between connections (agent ↔ extensions
+    /// ↔ socket clients). Owns connection state and per-connection
+    /// outgoing queues.
     bus: EventBus,
+    /// Maps tool name → providing connection. Used to route an
+    /// outgoing `ToolRequest` to the extension that registered the
+    /// tool.
     registry: ToolRegistry,
+    /// Append-only on-disk session store. Owns the `SessionTree` per
+    /// session id (user/agent messages and tool activity), backed by
+    /// `<state_dir>/<session_id>/log.cbor`.
     store: SessionStore,
     /// The single session this harness owns. UserMessages with a
     /// different `session_id` are rejected. Pi-style: one harness =
@@ -472,18 +486,48 @@ struct Harness {
     /// harness down and respawns extensions; that's a future
     /// `switch_session` operation, not silent multi-session.
     current_session_id: SessionId,
+    /// FIFO of session ids for tool calls the agent has just emitted
+    /// but for which we haven't yet seen the corresponding outgoing
+    /// `ToolRequest`. The agent's `ToolUse` event doesn't carry a
+    /// session id, so we tag the next request popped from this queue
+    /// with the recorded session.
     pending_request_sessions: VecDeque<SessionId>,
+    /// `call_id` → `session_id` for every tool call currently in
+    /// flight. Read by `session_id_for_event` to attribute incoming
+    /// `ToolResult` / `ToolError` / `ToolProgress` events back to the
+    /// originating session.
     pending_tool_sessions: std::collections::HashMap<ToolCallId, SessionId>,
+    /// `call_id` → tool name for in-flight calls. Used for lifecycle
+    /// messages and debug formatting where the result event itself
+    /// only carries the id.
     pending_tool_names: std::collections::HashMap<ToolCallId, ToolName>,
+    /// `call_id` → connection id of the extension currently servicing
+    /// the call. Needed to route cancellation requests back to the
+    /// right provider.
     pending_tool_providers: std::collections::HashMap<ToolCallId, tau_proto::ConnectionId>,
+    /// Append-only ring of recent protocol events. Client follower
+    /// threads tail this log on connect to replay state and stay live.
     event_log: std::sync::Arc<EventLog>,
     /// Writer channels for socket clients, keyed by connection ID.
     /// Used to start follower threads for log-based replay + delivery.
     client_writers: std::collections::HashMap<tau_proto::ConnectionId, Sender<Event>>,
+    /// Buffered human-readable lifecycle messages (extension init,
+    /// model changes, etc.) surfaced to the UI as part of the next
+    /// `InteractionOutcome`.
     lifecycle_messages: Vec<String>,
+    /// Every spawned or in-process extension. Indexed by position;
+    /// supervises restart, shutdown, and per-extension ack state.
     extensions: Vec<ExtensionEntry>,
+    /// Connection id assigned to the agent extension. Other code paths
+    /// branch on this to special-case agent traffic (e.g. tool-call
+    /// emission, session prompt routing).
     agent_connection_id: tau_proto::ConnectionId,
+    /// Monotonic source for `ExtensionInstanceId`s, bumped as
+    /// extensions are constructed. Underscore-prefixed because nothing
+    /// reads it after `new`/`new_supervised` returns.
     _next_instance_counter: u64,
+    /// Monotonic counter used to mint synthetic `sp-N`
+    /// `SessionPromptId`s when dispatching prompts to the agent.
     next_session_prompt_id: u64,
     /// Monotonic counter used to mint synthetic `ToolCallId`s when
     /// the agent emits a tool call with an empty id. See

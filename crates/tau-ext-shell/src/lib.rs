@@ -1731,21 +1731,30 @@ const DEFAULT_TIMEOUT_SECS: u64 = 120;
 /// stripped so commands run in a predictable environment instead of
 /// inheriting whatever the harness happened to be launched with.
 const ENV_ALLOWLIST: &[&str] = &[
-    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TZ", "LANG", "LC_ALL", "LC_CTYPE",
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TMPDIR",
+    "TZ",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
     "LC_MESSAGES",
 ];
 
 /// Sanitize a `Command` so the child runs with a minimal environment
 /// and is fully detached from the harness's controlling terminal:
 ///
-/// - Replaces the inherited environment with [`ENV_ALLOWLIST`] plus
-///   `TERM=dumb` / `NO_COLOR=1` / `CLICOLOR=0` so well-behaved tools
-///   suppress ANSI escapes and TTY-only fancy output.
-/// - Closes stdin so interactive prompts (`sudo`, `ssh`, `read`) fail
-///   fast instead of hanging on input that will never arrive.
-/// - On Unix, runs `setsid()` in the child so it becomes the leader
-///   of a new session with no controlling terminal — even an explicit
-///   `open("/dev/tty")` will fail rather than reach the harness's tty.
+/// - Replaces the inherited environment with [`ENV_ALLOWLIST`] plus `TERM=dumb`
+///   / `NO_COLOR=1` / `CLICOLOR=0` so well-behaved tools suppress ANSI escapes
+///   and TTY-only fancy output.
+/// - Closes stdin so interactive prompts (`sudo`, `ssh`, `read`) fail fast
+///   instead of hanging on input that will never arrive.
+/// - On Unix, runs `setsid()` in the child so it becomes the leader of a new
+///   session with no controlling terminal — even an explicit `open("/dev/tty")`
+///   will fail rather than reach the harness's tty.
 fn apply_command_isolation(cmd: &mut Command) {
     cmd.env_clear();
     for key in ENV_ALLOWLIST {

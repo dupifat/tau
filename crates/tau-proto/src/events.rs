@@ -241,6 +241,7 @@ impl EventName {
     pub const UI_SWITCH_SESSION: Self = Self::from_static(EventCategory::Ui, "switch_session");
     pub const UI_TREE_REQUEST: Self = Self::from_static(EventCategory::Ui, "tree_request");
     pub const UI_NAVIGATE_TREE: Self = Self::from_static(EventCategory::Ui, "navigate_tree");
+    pub const UI_PROMPT_DRAFT: Self = Self::from_static(EventCategory::Ui, "prompt_draft");
 
     pub const TERM_OSC1337_SET_USER_VAR: Self =
         Self::from_static(EventCategory::Term, "osc1337_set_user_var");
@@ -923,6 +924,26 @@ pub struct UiPromptSubmitted {
     pub originator: PromptOriginator,
 }
 
+/// A trailing-edge debounced snapshot of the in-progress prompt the
+/// user is composing in the UI. Emitted at most once per second
+/// while the user is typing; carries the full current contents of
+/// the prompt buffer.
+///
+/// Always transient — never persisted to the per-session event log,
+/// never folded into the session tree. Subscribers use it to detect
+/// "user is alive" without polling: e.g. dpc-notifications resets
+/// its idle deadline on every draft event so the desktop notification
+/// doesn't fire while the user is mid-sentence.
+///
+/// Future consumers might use the text for autocomplete, draft
+/// restoration on UI reconnect, or in-progress prompt sync across
+/// multiple attached UIs.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiPromptDraft {
+    pub session_id: SessionId,
+    pub text: String,
+}
+
 /// The user requests switching to a different model.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiModelSelect {
@@ -1382,6 +1403,8 @@ pub enum Event {
     // UI
     #[serde(rename = "ui.prompt_submitted")]
     UiPromptSubmitted(UiPromptSubmitted),
+    #[serde(rename = "ui.prompt_draft")]
+    UiPromptDraft(UiPromptDraft),
     #[serde(rename = "ui.model_select")]
     UiModelSelect(UiModelSelect),
     #[serde(rename = "ui.set_effort")]
@@ -1472,6 +1495,7 @@ impl Event {
             Self::HarnessEffortsAvailable(_) => EventName::HARNESS_EFFORTS_AVAILABLE,
             Self::EmitEvent(_) => EventName::HARNESS_EMIT,
             Self::UiPromptSubmitted(_) => EventName::UI_PROMPT_SUBMITTED,
+            Self::UiPromptDraft(_) => EventName::UI_PROMPT_DRAFT,
             Self::UiModelSelect(_) => EventName::UI_MODEL_SELECT,
             Self::UiSetEffort(_) => EventName::UI_SET_EFFORT,
             Self::UiDetachRequest(_) => EventName::UI_DETACH_REQUEST,
@@ -1508,7 +1532,10 @@ impl Event {
     pub const fn defaults_to_transient(&self) -> bool {
         matches!(
             self,
-            Self::AgentResponseUpdated(_) | Self::ToolProgress(_) | Self::ShellCommandProgress(_)
+            Self::AgentResponseUpdated(_)
+                | Self::ToolProgress(_)
+                | Self::ShellCommandProgress(_)
+                | Self::UiPromptDraft(_)
         )
     }
 

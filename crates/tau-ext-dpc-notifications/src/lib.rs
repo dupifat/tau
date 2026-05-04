@@ -219,6 +219,10 @@ where
             EventSelector::Exact(tau_proto::EventName::AGENT_PROMPT_SUBMITTED),
             EventSelector::Exact(tau_proto::EventName::AGENT_RESPONSE_FINISHED),
             EventSelector::Exact(tau_proto::EventName::UI_PROMPT_SUBMITTED),
+            // Trailing-edge debounced typing pings from the UI:
+            // bumps the idle deadline so the desktop notification
+            // doesn't fire while the user is mid-sentence.
+            EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT),
             EventSelector::Exact(tau_proto::EventName::LIFECYCLE_CONFIGURE),
             EventSelector::Exact(tau_proto::EventName::LIFECYCLE_DISCONNECT),
             // Side-query results come back point-to-point from the
@@ -354,6 +358,25 @@ where
                             writer.write_event(&sound_event(VALUE_AGENT_START))?;
                             writer.flush()?;
                             waiting_for_final_response = true;
+                        }
+                    }
+                    Event::UiPromptDraft(_) => {
+                        // The user is mid-typing — push the idle
+                        // deadline back so the desktop notification
+                        // doesn't fire while they're composing. Only
+                        // applies in `WaitingIdle`; if we've already
+                        // dispatched a side-query summarization
+                        // (`WaitingSummary`), let it complete
+                        // normally so the side conversation isn't
+                        // billed for nothing. TODO: when prompt
+                        // cancellation lands, cancel the in-flight
+                        // side query here too.
+                        if let Some(IdleState::WaitingIdle { deadline }) = idle.as_mut() {
+                            *deadline = Instant::now() + idle_duration;
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                "extended idle deadline on prompt draft",
+                            );
                         }
                     }
                     Event::AgentResponseFinished(finished) => {
@@ -804,6 +827,196 @@ mod tests {
         );
 
         // Cleanly disconnect so the extension exits.
+        writer
+            .write_event(&Event::LifecycleDisconnect(LifecycleDisconnect {
+                reason: None,
+            }))
+            .expect("write");
+        writer.flush().expect("flush");
+        drop(writer);
+        drop(reader);
+        handle.join().expect("ext thread");
+    }
+
+    /// Trailing-edge typing pings (`UiPromptDraft`) arriving during
+    /// the `WaitingIdle` window must extend the deadline so the
+    /// idle notification doesn't fire while the user is still
+    /// composing. Without this, a slow typer would get the
+    /// "what were you working on?" notification mid-sentence.
+    #[test]
+    fn prompt_draft_extends_idle_deadline() {
+        use std::os::unix::net::UnixStream;
+
+        use tau_proto::UiPromptDraft;
+
+        let (test_side, ext_side) = UnixStream::pair().expect("pair");
+        let ext_reader = ext_side.try_clone().expect("clone");
+        let ext_writer = ext_side;
+        let handle = thread::spawn(move || {
+            run_with_idle_and_summary_timeout(
+                ext_reader,
+                ext_writer,
+                Duration::from_millis(200),
+                Duration::from_millis(50),
+            )
+            .expect("run");
+        });
+
+        let test_writer_stream = test_side.try_clone().expect("clone");
+        let mut writer = EventWriter::new(test_writer_stream);
+        let mut reader = EventReader::new(test_side);
+
+        for _ in 0..3 {
+            reader.read_event().expect("read").expect("lifecycle");
+        }
+
+        // Arm the idle deadline.
+        writer
+            .write_event(&Event::AgentResponseFinished(AgentResponseFinished {
+                session_prompt_id: "sp-0".into(),
+                text: Some("done".into()),
+                tool_calls: Vec::new(),
+                input_tokens: None,
+                cached_tokens: None,
+                thinking: None,
+                originator: tau_proto::PromptOriginator::User,
+            }))
+            .expect("write");
+        writer.flush().expect("flush");
+
+        // end-of-turn sound.
+        let _end = reader.read_event().expect("read").expect("end");
+
+        // Send several drafts ~100ms apart. Each one resets the
+        // 200ms idle deadline; if the extension honors them
+        // correctly no `ExtAgentQuery` should fire during this
+        // window.
+        for i in 0..5 {
+            writer
+                .write_event(&Event::UiPromptDraft(UiPromptDraft {
+                    session_id: "s1".into(),
+                    text: format!("partial draft {i}"),
+                }))
+                .expect("write");
+            writer.flush().expect("flush");
+            thread::sleep(Duration::from_millis(100));
+        }
+
+        // Stop typing. The next event the extension emits must be
+        // the side-query — and crucially, the elapsed time before
+        // it fires must be >= the original 200ms (because we kept
+        // resetting the deadline) plus the final ~200ms wait.
+        let started = Instant::now();
+        let query = reader.read_event().expect("read").expect("query");
+        let elapsed = started.elapsed();
+        let Event::ExtAgentQuery(_) = query else {
+            panic!("expected ExtAgentQuery, got {query:?}");
+        };
+        // Without the deadline reset, the query would have fired
+        // at idle_duration (200ms) into the typing window — i.e.
+        // ~300ms before we started timing — so the read here would
+        // return ~immediately. With the reset, the most recent
+        // draft (sent ~100ms ago) bumped the deadline ~200ms into
+        // the future, so the read should block for roughly 100ms.
+        // 30ms is a deliberately loose lower bound so CI jitter
+        // doesn't flake the test.
+        assert!(
+            elapsed >= Duration::from_millis(30),
+            "ExtAgentQuery fired too soon ({elapsed:?}); idle deadline wasn't reset",
+        );
+
+        // Disconnect to let the extension exit.
+        writer
+            .write_event(&Event::LifecycleDisconnect(LifecycleDisconnect {
+                reason: None,
+            }))
+            .expect("write");
+        writer.flush().expect("flush");
+        drop(writer);
+        drop(reader);
+        handle.join().expect("ext thread");
+    }
+
+    /// `UiPromptDraft` arriving while a side-query summary is
+    /// already in flight must NOT cancel it (we don't yet have
+    /// prompt cancellation). The summary completes normally and
+    /// surfaces as the notification body.
+    #[test]
+    fn prompt_draft_during_waiting_summary_does_not_cancel() {
+        use std::os::unix::net::UnixStream;
+
+        use tau_proto::UiPromptDraft;
+
+        let (test_side, ext_side) = UnixStream::pair().expect("pair");
+        let ext_reader = ext_side.try_clone().expect("clone");
+        let ext_writer = ext_side;
+        let handle = thread::spawn(move || {
+            run_with_idle_and_summary_timeout(
+                ext_reader,
+                ext_writer,
+                Duration::from_millis(50),
+                Duration::from_secs(5),
+            )
+            .expect("run");
+        });
+
+        let test_writer_stream = test_side.try_clone().expect("clone");
+        let mut writer = EventWriter::new(test_writer_stream);
+        let mut reader = EventReader::new(test_side);
+
+        for _ in 0..3 {
+            reader.read_event().expect("read").expect("lifecycle");
+        }
+
+        writer
+            .write_event(&Event::AgentResponseFinished(AgentResponseFinished {
+                session_prompt_id: "sp-0".into(),
+                text: Some("done".into()),
+                tool_calls: Vec::new(),
+                input_tokens: None,
+                cached_tokens: None,
+                thinking: None,
+                originator: tau_proto::PromptOriginator::User,
+            }))
+            .expect("write");
+        writer.flush().expect("flush");
+
+        let _end = reader.read_event().expect("read").expect("end");
+        let query = reader.read_event().expect("read").expect("query");
+        let Event::ExtAgentQuery(query) = query else {
+            panic!("expected ExtAgentQuery, got {query:?}");
+        };
+
+        // User starts typing AFTER we've dispatched the side query.
+        // The summary must still be allowed to land.
+        writer
+            .write_event(&Event::UiPromptDraft(UiPromptDraft {
+                session_id: "s1".into(),
+                text: "typing while summary is in flight".into(),
+            }))
+            .expect("write");
+        writer.flush().expect("flush");
+
+        // Now deliver the summary result.
+        writer
+            .write_event(&Event::ExtAgentQueryResult(
+                tau_proto::ExtAgentQueryResult {
+                    query_id: query.query_id,
+                    text: "the model's summary".into(),
+                    error: None,
+                },
+            ))
+            .expect("write");
+        writer.flush().expect("flush");
+
+        // Notification must use the summary body, not be cancelled.
+        let text = reader.read_event().expect("read").expect("text");
+        let Event::Osc1337SetUserVar(osc) = text else {
+            panic!("expected populated text OSC, got {text:?}");
+        };
+        let payload: serde_json::Value = serde_json::from_str(&osc.value).expect("payload is JSON");
+        assert_eq!(payload["body"], "the model's summary");
+
         writer
             .write_event(&Event::LifecycleDisconnect(LifecycleDisconnect {
                 reason: None,

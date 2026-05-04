@@ -9,14 +9,94 @@ use std::io::{self, BufReader, BufWriter};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tau_harness::runtime_dir;
 use tau_proto::{
     CborValue, ClientKind, Event, EventReader, EventSelector, EventWriter, LifecycleDisconnect,
-    LifecycleHello, LifecycleSubscribe, PROTOCOL_VERSION, UiPromptSubmitted,
+    LifecycleHello, LifecycleSubscribe, PROTOCOL_VERSION, UiPromptDraft, UiPromptSubmitted,
 };
+
+/// Shared writer handle: the input loop and the prompt-draft debounce
+/// thread both need to send events on the same socket. Stream
+/// `write()` calls are atomic only up to `PIPE_BUF` (~4 KB on
+/// AF_UNIX) so we serialize whole-event writes through a `Mutex`
+/// instead of risking a long draft burst interleaving with a
+/// `UiPromptSubmitted` mid-byte. Contention is essentially zero —
+/// debounce fires at most once per second per typing burst.
+type WriterHandle = Arc<Mutex<EventWriter<BufWriter<UnixStream>>>>;
+
+/// Lock the writer, write one event and flush. Returns the underlying
+/// `io::Error` on failure so callers can use `?` or discard with
+/// `let _ = …`.
+fn send_event(writer: &WriterHandle, event: &Event) -> io::Result<()> {
+    let mut w = writer.lock().expect("writer mutex poisoned");
+    w.write_event(event).map_err(io::Error::other)?;
+    w.flush()
+}
+
+/// Debounce period for `UiPromptDraft` emission while the user is
+/// typing. Kept generous on purpose: the only consumer today
+/// (dpc-notifications) only cares about second-or-better resolution
+/// to bump its idle deadline.
+const DRAFT_DEBOUNCE: Duration = Duration::from_secs(1);
+
+/// Single-slot mailbox the input loop pushes the latest prompt
+/// snapshot into; the debounce thread drains it. `pending = None` +
+/// `done = false` means "nothing to send, keep waiting"; `done =
+/// true` is the shutdown signal.
+#[derive(Default)]
+struct DraftSlot {
+    pending: Option<UiPromptDraft>,
+    done: bool,
+}
+
+/// Shared handle for the debounce mailbox. Wakeups are coordinated
+/// via the `Condvar`; the debounce thread waits on it for new drafts
+/// or a shutdown signal, the input loop notifies it on every
+/// `BufferChanged`.
+type DraftHandle = Arc<(Mutex<DraftSlot>, Condvar)>;
+
+/// Trailing-edge debounce: wait for at least one draft to appear,
+/// send the *latest* one (any older draft was overwritten by a more
+/// recent typing burst), then sleep `DRAFT_DEBOUNCE` before looking
+/// at the slot again. The sleep is interruptible via the `done`
+/// shutdown signal so process exit is prompt.
+///
+/// Never drops a notification: a draft pushed during the
+/// sleep stays in the slot and is sent on the next iteration.
+fn debounce_loop(handle: DraftHandle, writer: WriterHandle) {
+    let (mtx, cv) = &*handle;
+    loop {
+        // Wait for a draft to send, or shutdown.
+        let snapshot = {
+            let mut g = mtx.lock().expect("draft slot mutex poisoned");
+            while g.pending.is_none() && !g.done {
+                g = cv.wait(g).expect("draft slot mutex poisoned");
+            }
+            if g.done && g.pending.is_none() {
+                return;
+            }
+            g.pending.take()
+        };
+        if let Some(draft) = snapshot {
+            // Best-effort: a write failure means the socket is gone,
+            // and the input loop will notice on its next write.
+            let _ = send_event(&writer, &Event::UiPromptDraft(draft));
+        }
+        // Coalesce subsequent typing into one event per window. Wake
+        // early on shutdown so we don't spend a second sleeping after
+        // the user already typed `/quit`.
+        let g = mtx.lock().expect("draft slot mutex poisoned");
+        let (g, _timed_out) = cv
+            .wait_timeout_while(g, DRAFT_DEBOUNCE, |s| !s.done)
+            .expect("draft slot mutex poisoned");
+        if g.done && g.pending.is_none() {
+            return;
+        }
+    }
+}
 
 const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -271,18 +351,21 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
     // needed since they operate on cloned halves of the same stream.
     let stream = UnixStream::connect(&socket_path)?;
     let read_stream = stream.try_clone()?;
-    let mut writer = EventWriter::new(BufWriter::new(stream));
+    let writer: WriterHandle = Arc::new(Mutex::new(EventWriter::new(BufWriter::new(stream))));
 
     // Handshake.
-    writer
-        .write_event(&Event::LifecycleHello(LifecycleHello {
+    send_event(
+        &writer,
+        &Event::LifecycleHello(LifecycleHello {
             protocol_version: PROTOCOL_VERSION,
             client_name: "tau-chat".into(),
             client_kind: ClientKind::Ui,
-        }))
-        .map_err(CliError::Encode)?;
-    writer
-        .write_event(&Event::LifecycleSubscribe(LifecycleSubscribe {
+        }),
+    )
+    .map_err(CliError::Io)?;
+    send_event(
+        &writer,
+        &Event::LifecycleSubscribe(LifecycleSubscribe {
             selectors: vec![
                 EventSelector::Prefix("ui.".to_owned()),
                 EventSelector::Prefix("session.".to_owned()),
@@ -293,9 +376,9 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
                 EventSelector::Prefix("shell.".to_owned()),
                 EventSelector::Prefix("term.".to_owned()),
             ],
-        }))
-        .map_err(CliError::Encode)?;
-    writer.flush()?;
+        }),
+    )
+    .map_err(CliError::Io)?;
 
     // Background socket reader — decodes events and sends them to
     // a channel as `RendererCmd::Remote`. The input thread pushes
@@ -410,19 +493,44 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
         }
     });
 
-    // Terminal input loop — owns the writer, no locking needed. Theme
-    // clone is for printing local validation errors (e.g. `/effort
-    // foo`) through the same TermHandle as remote events, so they
-    // don't garble the TUI like `eprintln!` would.
+    // Spawn the prompt-draft debounce thread. The input loop signals
+    // it on every `BufferChanged` event with the latest buffer
+    // contents; the thread coalesces a typing burst into one
+    // `UiPromptDraft` per `DRAFT_DEBOUNCE` window and sends it on the
+    // shared writer.
+    let draft_handle: DraftHandle = Arc::new((Mutex::new(DraftSlot::default()), Condvar::new()));
+    let debounce_thread = {
+        let handle = draft_handle.clone();
+        let writer = writer.clone();
+        std::thread::spawn(move || debounce_loop(handle, writer))
+    };
+
+    // Terminal input loop — shares the writer with the debounce
+    // thread via `WriterHandle`. Theme clone is for printing local
+    // validation errors (e.g. `/effort foo`) through the same
+    // TermHandle as remote events, so they don't garble the TUI like
+    // `eprintln!` would.
     let mut active_session_id = session_id.to_owned();
     let exit = terminal_input_loop(
         &mut term,
-        &mut writer,
+        &writer,
         &mut active_session_id,
         effort_state,
         theme,
         event_tx,
+        &draft_handle,
     )?;
+
+    // Tell the debounce thread to exit and wait for it so we don't
+    // race with the disconnect below (the thread might otherwise
+    // emit one final draft on the closing socket and trip an `EPIPE`).
+    {
+        let (mtx, cv) = &*draft_handle;
+        let mut g = mtx.lock().expect("draft slot mutex poisoned");
+        g.done = true;
+        cv.notify_all();
+    }
+    let _ = debounce_thread.join();
 
     // Send disconnect (best effort). Reason differs so the daemon's
     // debug log makes the distinction visible.
@@ -430,10 +538,12 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
         InputLoopExit::Quit => "quit",
         InputLoopExit::Detach => "detach",
     };
-    let _ = writer.write_event(&Event::LifecycleDisconnect(LifecycleDisconnect {
-        reason: Some(reason.to_owned()),
-    }));
-    let _ = writer.flush();
+    let _ = send_event(
+        &writer,
+        &Event::LifecycleDisconnect(LifecycleDisconnect {
+            reason: Some(reason.to_owned()),
+        }),
+    );
 
     // Drop the writer (closes the write half) which will cause the
     // socket reader to get EOF and exit. The renderer drains remaining
@@ -484,11 +594,12 @@ enum RendererCmd {
 
 fn terminal_input_loop(
     term: &mut tau_cli_term::HighTerm,
-    writer: &mut EventWriter<BufWriter<UnixStream>>,
+    writer: &WriterHandle,
     session_id: &mut String,
     effort_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
     theme: tau_themes::Theme,
     renderer_tx: std::sync::mpsc::Sender<RendererCmd>,
+    draft_handle: &DraftHandle,
 ) -> Result<InputLoopExit, CliError> {
     // Cloned `TermHandle` so we can `print_output` for client-side
     // validation errors (`/effort foo`, `/tree blah`) from this
@@ -517,40 +628,44 @@ fn terminal_input_loop(
                     // then exit the UI. If the write fails we still
                     // exit — the daemon will notice the disconnect
                     // and fall back to its default behavior.
-                    let _ =
-                        writer.write_event(&Event::UiDetachRequest(tau_proto::UiDetachRequest {}));
-                    let _ = writer.flush();
+                    let _ = send_event(
+                        writer,
+                        &Event::UiDetachRequest(tau_proto::UiDetachRequest {}),
+                    );
                     return Ok(InputLoopExit::Detach);
                 }
                 if text == "/new" {
                     let cwd = std::env::current_dir()?;
                     let new_id = mint_session_id(&cwd);
-                    let _ =
-                        writer.write_event(&Event::UiSwitchSession(tau_proto::UiSwitchSession {
+                    let _ = send_event(
+                        writer,
+                        &Event::UiSwitchSession(tau_proto::UiSwitchSession {
                             new_session_id: new_id.as_str().into(),
                             reason: tau_proto::SessionStartReason::New,
-                        }));
-                    let _ = writer.flush();
+                        }),
+                    );
                     *session_id = new_id;
                     continue;
                 }
                 if text == "/tree" {
-                    let _ = writer.write_event(&Event::UiTreeRequest(tau_proto::UiTreeRequest {
-                        session_id: session_id.as_str().into(),
-                    }));
-                    let _ = writer.flush();
+                    let _ = send_event(
+                        writer,
+                        &Event::UiTreeRequest(tau_proto::UiTreeRequest {
+                            session_id: session_id.as_str().into(),
+                        }),
+                    );
                     continue;
                 }
                 if let Some(arg) = text.strip_prefix("/tree ") {
                     match arg.trim().parse::<u64>() {
                         Ok(node_id) => {
-                            let _ = writer.write_event(&Event::UiNavigateTree(
-                                tau_proto::UiNavigateTree {
+                            let _ = send_event(
+                                writer,
+                                &Event::UiNavigateTree(tau_proto::UiNavigateTree {
                                     session_id: session_id.as_str().into(),
                                     node_id,
-                                },
-                            ));
-                            let _ = writer.flush();
+                                }),
+                            );
                         }
                         Err(_) => {
                             print_local("/tree <id>: id must be a non-negative integer");
@@ -561,9 +676,10 @@ fn terminal_input_loop(
                 if let Some(arg) = text.strip_prefix("/effort ") {
                     match arg.trim().parse::<tau_proto::Effort>() {
                         Ok(level) => {
-                            let _ = writer
-                                .write_event(&Event::UiSetEffort(tau_proto::UiSetEffort { level }));
-                            let _ = writer.flush();
+                            let _ = send_event(
+                                writer,
+                                &Event::UiSetEffort(tau_proto::UiSetEffort { level }),
+                            );
                         }
                         Err(msg) => print_local(&format!("/effort: {msg}")),
                     }
@@ -584,11 +700,12 @@ fn terminal_input_loop(
                 if let Some(model) = text.strip_prefix("/model ") {
                     let model = model.trim();
                     if !model.is_empty() {
-                        let _ =
-                            writer.write_event(&Event::UiModelSelect(tau_proto::UiModelSelect {
+                        let _ = send_event(
+                            writer,
+                            &Event::UiModelSelect(tau_proto::UiModelSelect {
                                 model: model.into(),
-                            }));
-                        let _ = writer.flush();
+                            }),
+                        );
                     }
                     continue;
                 }
@@ -615,22 +732,45 @@ fn terminal_input_loop(
                     continue;
                 }
 
-                if writer
-                    .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
+                if send_event(
+                    writer,
+                    &Event::UiPromptSubmitted(UiPromptSubmitted {
                         session_id: session_id.as_str().into(),
                         text: text.to_owned(),
                         originator: tau_proto::PromptOriginator::User,
-                    }))
-                    .is_err()
+                    }),
+                )
+                .is_err()
                 {
                     return Ok(InputLoopExit::Quit);
                 }
-                if writer.flush().is_err() {
-                    return Ok(InputLoopExit::Quit);
+                // Submission terminates the in-flight draft window —
+                // the buffer just got cleared by the user pressing
+                // Enter, so any pending draft is now stale.
+                {
+                    let (mtx, _cv) = &**draft_handle;
+                    if let Ok(mut g) = mtx.lock() {
+                        g.pending = None;
+                    }
                 }
             }
             TermEvent::Eof => return Ok(InputLoopExit::Quit),
-            TermEvent::Resize { .. } | TermEvent::BufferChanged => {}
+            TermEvent::Resize { .. } => {}
+            TermEvent::BufferChanged => {
+                // Trailing-edge debounce: stash the latest buffer
+                // contents and wake the debounce thread; it will
+                // coalesce a typing burst into one `UiPromptDraft`
+                // per `DRAFT_DEBOUNCE` window.
+                let text = term.handle().get_buffer();
+                let (mtx, cv) = &**draft_handle;
+                if let Ok(mut g) = mtx.lock() {
+                    g.pending = Some(UiPromptDraft {
+                        session_id: session_id.as_str().into(),
+                        text,
+                    });
+                    cv.notify_one();
+                }
+            }
             TermEvent::BackTab => {
                 // Pi-style: cycle effort. Read the current
                 // level from the shared atomic the renderer keeps in
@@ -640,9 +780,10 @@ fn terminal_input_loop(
                 let current =
                     effort_from_u8(effort_state.load(std::sync::atomic::Ordering::Relaxed));
                 let next = current.next();
-                let _ =
-                    writer.write_event(&Event::UiSetEffort(tau_proto::UiSetEffort { level: next }));
-                let _ = writer.flush();
+                let _ = send_event(
+                    writer,
+                    &Event::UiSetEffort(tau_proto::UiSetEffort { level: next }),
+                );
             }
         }
     }
@@ -786,7 +927,7 @@ fn format_token_count(tokens: u64) -> String {
 /// `!`/`!!` line. Returns `Err` only on write failure (same caller
 /// pattern as the other slash commands — input loop keeps going).
 fn send_shell_command(
-    writer: &mut EventWriter<BufWriter<UnixStream>>,
+    writer: &WriterHandle,
     session_id: &str,
     command: &str,
     include_in_context: bool,
@@ -798,15 +939,16 @@ fn send_shell_command(
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     );
-    writer
-        .write_event(&Event::UiShellCommand(tau_proto::UiShellCommand {
+    send_event(
+        writer,
+        &Event::UiShellCommand(tau_proto::UiShellCommand {
             session_id: session_id.into(),
             command_id: command_id.into(),
             command: command.to_owned(),
             include_in_context,
-        }))
-        .map_err(|_| ())?;
-    writer.flush().map_err(|_| ())
+        }),
+    )
+    .map_err(|_| ())
 }
 
 // ---------------------------------------------------------------------------

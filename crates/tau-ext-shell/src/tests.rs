@@ -1,0 +1,1050 @@
+use std::os::unix::net::UnixStream;
+use std::thread;
+
+use tau_proto::{EventName, ToolInvoke};
+use tempfile::TempDir;
+
+use super::*;
+
+fn cbor_int_field(value: &CborValue, key: &str) -> Option<i128> {
+    match value {
+        CborValue::Map(entries) => entries.iter().find_map(|(k, v)| match (k, v) {
+            (CborValue::Text(k), CborValue::Integer(n)) if k == key => Some((*n).into()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+fn spawn_extension() -> (
+    EventReader<BufReader<UnixStream>>,
+    EventWriter<BufWriter<UnixStream>>,
+) {
+    let (runtime_stream, harness_stream) = UnixStream::pair().expect("stream pair should open");
+    let reader_stream = runtime_stream
+        .try_clone()
+        .expect("runtime reader clone should succeed");
+    thread::spawn(move || {
+        run_impl(reader_stream, runtime_stream, true).expect("extension should run");
+    });
+    (
+        EventReader::new(BufReader::new(
+            harness_stream
+                .try_clone()
+                .expect("harness reader clone should succeed"),
+        )),
+        EventWriter::new(BufWriter::new(harness_stream)),
+    )
+}
+
+/// Consumes startup events (hello, subscribe, registers, ready).
+fn drain_startup(reader: &mut EventReader<BufReader<UnixStream>>) {
+    for expected in [
+        EventName::LIFECYCLE_HELLO,
+        EventName::LIFECYCLE_SUBSCRIBE,
+        EventName::TOOL_REGISTER, // echo
+        EventName::TOOL_REGISTER, // read
+        EventName::TOOL_REGISTER, // write
+        EventName::TOOL_REGISTER, // edit
+        EventName::TOOL_REGISTER, // grep
+        EventName::TOOL_REGISTER, // find
+        EventName::TOOL_REGISTER, // ls
+        EventName::TOOL_REGISTER, // shell
+        EventName::LIFECYCLE_READY,
+    ] {
+        let event = reader
+            .read_event()
+            .expect("read")
+            .expect("startup event should arrive");
+        assert_eq!(event.name(), expected);
+    }
+}
+
+#[test]
+fn discover_agents_files_walks_ancestor_chain_in_order() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let root = tempdir.path();
+    let nested = root.join("pkg/src");
+    fs::create_dir_all(&nested).expect("mkdir");
+
+    let root_agents = root.join("AGENTS.md");
+    let pkg_agents = root.join("pkg").join("AGENTS.md");
+    let empty_agents = root.join("pkg").join("src").join("AGENTS.md");
+
+    fs::write(&root_agents, "# Root\n- rule one\n").expect("write root");
+    fs::write(&pkg_agents, "# Package\n- rule two\n").expect("write pkg");
+    fs::write(&empty_agents, "   \n").expect("write empty");
+
+    let discovered = discover_agents_files_from(&nested);
+    assert_eq!(discovered.len(), 2);
+    assert_eq!(
+        discovered[0].file_path,
+        root_agents.canonicalize().expect("canonical root")
+    );
+    assert_eq!(
+        discovered[1].file_path,
+        pkg_agents.canonicalize().expect("canonical pkg")
+    );
+    assert!(discovered[0].content.contains("rule one"));
+    assert!(discovered[1].content.contains("rule two"));
+}
+
+#[test]
+fn discover_agents_files_from_roots_keeps_home_before_repo_chain() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let home = tempdir.path().join("home");
+    let repo = tempdir.path().join("repo");
+    fs::create_dir_all(home.join(".agents")).expect("home agents dir");
+    fs::create_dir_all(repo.join("pkg")).expect("repo pkg dir");
+
+    let home_agents = home.join(".agents").join("AGENTS.md");
+    let repo_agents = repo.join("AGENTS.md");
+    let pkg_agents = repo.join("pkg").join("AGENTS.md");
+    fs::write(&home_agents, "# Home\n- personal rule\n").expect("write home");
+    fs::write(&repo_agents, "# Repo\n- repo rule\n").expect("write repo");
+    fs::write(&pkg_agents, "# Package\n- package rule\n").expect("write pkg");
+
+    let discovered = discover_agents_files_from_roots(vec![
+        home.join(".agents"),
+        repo.clone(),
+        repo.join("pkg"),
+    ]);
+
+    let paths: Vec<PathBuf> = discovered.iter().map(|f| f.file_path.clone()).collect();
+    assert_eq!(
+        paths,
+        vec![
+            home_agents.canonicalize().expect("canonical home"),
+            repo_agents.canonicalize().expect("canonical repo"),
+            pkg_agents.canonicalize().expect("canonical pkg"),
+        ]
+    );
+}
+
+#[test]
+fn session_started_emits_ready_after_startup() {
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+
+    writer
+        .write_event(&Event::SessionStarted(SessionStarted {
+            session_id: "s1".into(),
+            reason: tau_proto::SessionStartReason::Initial,
+        }))
+        .expect("request");
+    writer.flush().expect("flush");
+
+    loop {
+        let event = reader.read_event().expect("read").expect("context event");
+        if event.name() == EventName::EXTENSION_CONTEXT_READY {
+            let Event::ExtensionContextReady(ready) = event else {
+                unreachable!("matched on event name");
+            };
+            assert_eq!(ready.session_id, "s1");
+            break;
+        }
+    }
+
+    writer
+        .write_event(&Event::LifecycleDisconnect(
+            tau_proto::LifecycleDisconnect { reason: None },
+        ))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+#[test]
+fn extension_reads_file() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("README.txt");
+    fs::write(&file_path, "hello from file").expect("write fixture");
+
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+
+    writer
+        .write_event(&Event::ToolInvoke(ToolInvoke {
+            call_id: "call-1".into(),
+            tool_name: READ_TOOL_NAME.into(),
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("path".to_owned()),
+                CborValue::Text(file_path.display().to_string()),
+            )]),
+        }))
+        .expect("invoke");
+    writer.flush().expect("flush");
+
+    let result = reader.read_event().expect("read").expect("result");
+    let Event::ToolResult(result) = result else {
+        panic!("expected tool result");
+    };
+    assert_eq!(result.tool_name, READ_TOOL_NAME);
+    assert_eq!(
+        optional_argument_text(&result.result, "content"),
+        Some("hello from file".to_owned())
+    );
+
+    writer
+        .write_event(&Event::LifecycleDisconnect(
+            tau_proto::LifecycleDisconnect { reason: None },
+        ))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+#[test]
+fn extension_read_missing_file_reports_error() {
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+
+    writer
+        .write_event(&Event::ToolInvoke(ToolInvoke {
+            call_id: "call-1".into(),
+            tool_name: READ_TOOL_NAME.into(),
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("path".to_owned()),
+                CborValue::Text("/definitely/missing/file.txt".to_owned()),
+            )]),
+        }))
+        .expect("invoke");
+    writer.flush().expect("flush");
+
+    let error = reader.read_event().expect("read").expect("error");
+    let Event::ToolError(error) = error else {
+        panic!("expected tool error");
+    };
+    assert!(!error.message.contains("failed to read"));
+    assert!(error.message.contains("No such file or directory"));
+
+    writer
+        .write_event(&Event::LifecycleDisconnect(
+            tau_proto::LifecycleDisconnect { reason: None },
+        ))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+#[test]
+fn extension_writes_file() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("output.txt");
+
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+
+    writer
+        .write_event(&Event::ToolInvoke(ToolInvoke {
+            call_id: "call-1".into(),
+            tool_name: WRITE_TOOL_NAME.into(),
+            arguments: CborValue::Map(vec![
+                (
+                    CborValue::Text("path".to_owned()),
+                    CborValue::Text(file_path.display().to_string()),
+                ),
+                (
+                    CborValue::Text("content".to_owned()),
+                    CborValue::Text("written content".to_owned()),
+                ),
+            ]),
+        }))
+        .expect("invoke");
+    writer.flush().expect("flush");
+
+    let result = reader.read_event().expect("read").expect("result");
+    let Event::ToolResult(result) = result else {
+        panic!("expected tool result");
+    };
+    assert_eq!(result.tool_name, WRITE_TOOL_NAME);
+    assert_eq!(
+        fs::read_to_string(&file_path).expect("read back"),
+        "written content"
+    );
+
+    writer
+        .write_event(&Event::LifecycleDisconnect(
+            tau_proto::LifecycleDisconnect { reason: None },
+        ))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+#[test]
+fn extension_write_missing_parent_reports_short_error() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let missing_parent = tempdir.path().join("missing-parent");
+    let file_path = missing_parent.join("child.txt");
+    fs::write(&missing_parent, "not a dir").expect("write blocker");
+
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+
+    writer
+        .write_event(&Event::ToolInvoke(ToolInvoke {
+            call_id: "call-1".into(),
+            tool_name: WRITE_TOOL_NAME.into(),
+            arguments: CborValue::Map(vec![
+                (
+                    CborValue::Text("path".to_owned()),
+                    CborValue::Text(file_path.display().to_string()),
+                ),
+                (
+                    CborValue::Text("content".to_owned()),
+                    CborValue::Text("x".to_owned()),
+                ),
+            ]),
+        }))
+        .expect("invoke");
+    writer.flush().expect("flush");
+
+    let error = reader.read_event().expect("read").expect("error");
+    let Event::ToolError(error) = error else {
+        panic!("expected tool error");
+    };
+    assert_eq!(error.tool_name, WRITE_TOOL_NAME);
+    assert!(!error.message.contains("failed to create directories"));
+    assert!(!error.message.contains(file_path.to_string_lossy().as_ref()));
+    assert!(error.message.contains("Not a directory"));
+
+    writer
+        .write_event(&Event::LifecycleDisconnect(
+            tau_proto::LifecycleDisconnect { reason: None },
+        ))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+#[test]
+fn extension_write_directory_reports_short_error() {
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+
+    writer
+        .write_event(&Event::ToolInvoke(ToolInvoke {
+            call_id: "call-1".into(),
+            tool_name: WRITE_TOOL_NAME.into(),
+            arguments: CborValue::Map(vec![
+                (
+                    CborValue::Text("path".to_owned()),
+                    CborValue::Text("/tmp".to_owned()),
+                ),
+                (
+                    CborValue::Text("content".to_owned()),
+                    CborValue::Text("x".to_owned()),
+                ),
+            ]),
+        }))
+        .expect("invoke");
+    writer.flush().expect("flush");
+
+    let error = reader.read_event().expect("read").expect("error");
+    let Event::ToolError(error) = error else {
+        panic!("expected tool error");
+    };
+    assert_eq!(error.tool_name, WRITE_TOOL_NAME);
+    assert!(!error.message.contains("failed to write"));
+    assert!(error.message.contains("Is a directory"));
+
+    writer
+        .write_event(&Event::LifecycleDisconnect(
+            tau_proto::LifecycleDisconnect { reason: None },
+        ))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+#[test]
+fn extension_writes_file_creates_directories() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("a/b/c/deep.txt");
+
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+
+    writer
+        .write_event(&Event::ToolInvoke(ToolInvoke {
+            call_id: "call-1".into(),
+            tool_name: WRITE_TOOL_NAME.into(),
+            arguments: CborValue::Map(vec![
+                (
+                    CborValue::Text("path".to_owned()),
+                    CborValue::Text(file_path.display().to_string()),
+                ),
+                (
+                    CborValue::Text("content".to_owned()),
+                    CborValue::Text("deep content".to_owned()),
+                ),
+            ]),
+        }))
+        .expect("invoke");
+    writer.flush().expect("flush");
+
+    let result = reader.read_event().expect("read").expect("result");
+    assert!(matches!(result, Event::ToolResult(_)));
+    assert_eq!(
+        fs::read_to_string(&file_path).expect("read back"),
+        "deep content"
+    );
+
+    writer
+        .write_event(&Event::LifecycleDisconnect(
+            tau_proto::LifecycleDisconnect { reason: None },
+        ))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+#[test]
+fn edit_read_failure_reports_short_reason() {
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+
+    writer
+        .write_event(&Event::ToolInvoke(ToolInvoke {
+            call_id: "call-1".into(),
+            tool_name: EDIT_TOOL_NAME.into(),
+            arguments: CborValue::Map(vec![
+                (
+                    CborValue::Text("path".to_owned()),
+                    CborValue::Text("/definitely/missing/file.txt".to_owned()),
+                ),
+                (
+                    CborValue::Text("edits".to_owned()),
+                    CborValue::Array(vec![CborValue::Map(vec![
+                        (
+                            CborValue::Text("oldText".to_owned()),
+                            CborValue::Text("a".to_owned()),
+                        ),
+                        (
+                            CborValue::Text("newText".to_owned()),
+                            CborValue::Text("b".to_owned()),
+                        ),
+                    ])]),
+                ),
+            ]),
+        }))
+        .expect("invoke");
+    writer.flush().expect("flush");
+
+    let error = reader.read_event().expect("read").expect("error");
+    let Event::ToolError(error) = error else {
+        panic!("expected tool error");
+    };
+    assert_eq!(error.tool_name, EDIT_TOOL_NAME);
+    assert!(!error.message.contains("failed to read"));
+    assert!(error.message.contains("No such file or directory"));
+
+    writer
+        .write_event(&Event::LifecycleDisconnect(
+            tau_proto::LifecycleDisconnect { reason: None },
+        ))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+#[test]
+fn edit_errors_use_short_reasons() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("edit.txt");
+    fs::write(&file_path, "hello\nworld\n").expect("write");
+
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+
+    writer
+        .write_event(&Event::ToolInvoke(ToolInvoke {
+            call_id: "call-1".into(),
+            tool_name: EDIT_TOOL_NAME.into(),
+            arguments: CborValue::Map(vec![
+                (
+                    CborValue::Text("path".to_owned()),
+                    CborValue::Text(file_path.display().to_string()),
+                ),
+                (
+                    CborValue::Text("edits".to_owned()),
+                    CborValue::Array(vec![CborValue::Map(vec![
+                        (
+                            CborValue::Text("oldText".to_owned()),
+                            CborValue::Text("missing".to_owned()),
+                        ),
+                        (
+                            CborValue::Text("newText".to_owned()),
+                            CborValue::Text("x".to_owned()),
+                        ),
+                    ])]),
+                ),
+            ]),
+        }))
+        .expect("invoke");
+    writer.flush().expect("flush");
+
+    let error = reader.read_event().expect("read").expect("error");
+    let Event::ToolError(error) = error else {
+        panic!("expected tool error");
+    };
+    assert_eq!(error.tool_name, EDIT_TOOL_NAME);
+    assert_eq!(error.message, "not found");
+
+    writer
+        .write_event(&Event::LifecycleDisconnect(
+            tau_proto::LifecycleDisconnect { reason: None },
+        ))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+#[test]
+fn edit_errors_include_path_details() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("edit.txt");
+    fs::write(&file_path, "hello\nworld\n").expect("write");
+
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+
+    writer
+        .write_event(&Event::ToolInvoke(ToolInvoke {
+            call_id: "call-1".into(),
+            tool_name: EDIT_TOOL_NAME.into(),
+            arguments: CborValue::Map(vec![
+                (
+                    CborValue::Text("path".to_owned()),
+                    CborValue::Text(file_path.display().to_string()),
+                ),
+                (
+                    CborValue::Text("edits".to_owned()),
+                    CborValue::Array(vec![CborValue::Map(vec![
+                        (
+                            CborValue::Text("oldText".to_owned()),
+                            CborValue::Text("missing".to_owned()),
+                        ),
+                        (
+                            CborValue::Text("newText".to_owned()),
+                            CborValue::Text("x".to_owned()),
+                        ),
+                    ])]),
+                ),
+            ]),
+        }))
+        .expect("invoke");
+    writer.flush().expect("flush");
+
+    let error = reader.read_event().expect("read").expect("error");
+    let Event::ToolError(error) = error else {
+        panic!("expected tool error");
+    };
+    assert_eq!(error.tool_name, EDIT_TOOL_NAME);
+    assert_eq!(error.message, "not found");
+    let details = error.details.expect("details");
+    let path = cbor_map_text(&details, "path").expect("path");
+    assert_eq!(path, file_path.display().to_string());
+
+    writer
+        .write_event(&Event::LifecycleDisconnect(
+            tau_proto::LifecycleDisconnect { reason: None },
+        ))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+#[test]
+fn extension_finds_files() {
+    let tempdir = TempDir::new().expect("tempdir");
+    fs::create_dir_all(tempdir.path().join("src/nested")).expect("mkdir");
+    fs::write(tempdir.path().join("src/lib.rs"), "pub fn one() {}\n").expect("write");
+    fs::write(
+        tempdir.path().join("src/nested/mod.rs"),
+        "pub fn two() {}\n",
+    )
+    .expect("write");
+    fs::write(tempdir.path().join("README.md"), "# hi\n").expect("write");
+
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+
+    writer
+        .write_event(&Event::ToolInvoke(ToolInvoke {
+            call_id: "call-1".into(),
+            tool_name: FIND_TOOL_NAME.into(),
+            arguments: CborValue::Map(vec![
+                (
+                    CborValue::Text("pattern".to_owned()),
+                    CborValue::Text("**/*.rs".to_owned()),
+                ),
+                (
+                    CborValue::Text("path".to_owned()),
+                    CborValue::Text(tempdir.path().display().to_string()),
+                ),
+            ]),
+        }))
+        .expect("invoke");
+    writer.flush().expect("flush");
+
+    let result = reader.read_event().expect("read").expect("result");
+    let Event::ToolResult(result) = result else {
+        panic!("expected tool result");
+    };
+    assert_eq!(result.tool_name, FIND_TOOL_NAME);
+    assert_eq!(cbor_int_field(&result.result, "matches"), Some(2));
+    let output = cbor_map_text(&result.result, "output").expect("output");
+    assert!(output.contains("src/lib.rs"));
+    assert!(output.contains("src/nested/mod.rs"));
+    assert!(!output.contains("README.md"));
+
+    writer
+        .write_event(&Event::LifecycleDisconnect(
+            tau_proto::LifecycleDisconnect { reason: None },
+        ))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+#[test]
+fn extension_lists_directory_contents() {
+    let tempdir = TempDir::new().expect("tempdir");
+    fs::create_dir_all(tempdir.path().join("src")).expect("mkdir");
+    fs::write(tempdir.path().join("README.md"), "# hi\n").expect("write");
+    fs::write(tempdir.path().join(".env"), "SECRET=1\n").expect("write");
+
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+
+    writer
+        .write_event(&Event::ToolInvoke(ToolInvoke {
+            call_id: "call-1".into(),
+            tool_name: LS_TOOL_NAME.into(),
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("path".to_owned()),
+                CborValue::Text(tempdir.path().display().to_string()),
+            )]),
+        }))
+        .expect("invoke");
+    writer.flush().expect("flush");
+
+    let result = reader.read_event().expect("read").expect("result");
+    let Event::ToolResult(result) = result else {
+        panic!("expected tool result");
+    };
+    assert_eq!(result.tool_name, LS_TOOL_NAME);
+    assert_eq!(cbor_int_field(&result.result, "entries"), Some(3));
+    let output = cbor_map_text(&result.result, "output").expect("output");
+    assert!(output.contains(".env"));
+    assert!(output.contains("README.md"));
+    assert!(output.contains("src/"));
+
+    writer
+        .write_event(&Event::LifecycleDisconnect(
+            tau_proto::LifecycleDisconnect { reason: None },
+        ))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+#[test]
+fn shell_tool_reports_progress_and_success() {
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+
+    writer
+        .write_event(&Event::ToolInvoke(ToolInvoke {
+            call_id: "call-1".into(),
+            tool_name: SHELL_TOOL_NAME.into(),
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("command".to_owned()),
+                CborValue::Text("printf hello".to_owned()),
+            )]),
+        }))
+        .expect("invoke");
+    writer.flush().expect("flush");
+
+    let progress = reader.read_event().expect("read").expect("progress");
+    assert!(matches!(progress, Event::ToolProgress(_)));
+
+    let result = reader.read_event().expect("read").expect("result");
+    let Event::ToolResult(result) = result else {
+        panic!("expected tool result");
+    };
+    assert_eq!(result.tool_name, SHELL_TOOL_NAME);
+    assert_eq!(
+        optional_argument_text(&result.result, "stdout"),
+        Some("hello".to_owned())
+    );
+
+    writer
+        .write_event(&Event::LifecycleDisconnect(
+            tau_proto::LifecycleDisconnect { reason: None },
+        ))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+#[test]
+fn shell_tool_reports_failures_with_details() {
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+
+    writer
+        .write_event(&Event::ToolInvoke(ToolInvoke {
+            call_id: "call-1".into(),
+            tool_name: SHELL_TOOL_NAME.into(),
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("command".to_owned()),
+                CborValue::Text("exit 7".to_owned()),
+            )]),
+        }))
+        .expect("invoke");
+    writer.flush().expect("flush");
+
+    let _progress = reader.read_event().expect("read").expect("progress");
+
+    let error = reader.read_event().expect("read").expect("error");
+    let Event::ToolError(error) = error else {
+        panic!("expected tool error");
+    };
+    assert_eq!(error.tool_name, SHELL_TOOL_NAME);
+    assert!(error.message.contains("command exited with status 7"));
+    assert!(error.details.is_some());
+
+    writer
+        .write_event(&Event::LifecycleDisconnect(
+            tau_proto::LifecycleDisconnect { reason: None },
+        ))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+// -- Truncation ---------------------------------------------------------
+
+#[test]
+fn truncate_head_short_input_unchanged() {
+    let input = "line 1\nline 2\nline 3";
+    let result = truncate_head(input);
+    assert!(!result.was_truncated);
+    assert_eq!(result.content, input);
+}
+
+#[test]
+fn truncate_head_limits_by_lines() {
+    let lines: Vec<String> = (1..=MAX_OUTPUT_LINES + 500)
+        .map(|i| format!("line {i}"))
+        .collect();
+    let input = lines.join("\n");
+    let result = truncate_head(&input);
+    assert!(result.was_truncated);
+    assert!(result.content.contains("line 1\n"));
+    assert!(result.content.contains("[Showing lines 1-"));
+    assert!(
+        result
+            .content
+            .contains("Use start_line and line_count to continue reading.")
+    );
+    // Should not contain lines beyond the limit.
+    let content_before_notice = result.content.split("\n\n[").next().unwrap_or("");
+    let kept_count = content_before_notice.lines().count();
+    assert!(kept_count <= MAX_OUTPUT_LINES);
+}
+
+#[test]
+fn truncate_head_limits_by_bytes() {
+    // Create input that's within line count but exceeds byte limit.
+    let big_line = "x".repeat(MAX_OUTPUT_BYTES + 100);
+    let input = format!("first\n{big_line}\nthird");
+    let result = truncate_head(&input);
+    assert!(result.was_truncated);
+    assert!(result.content.starts_with("first"));
+    assert!(result.content.contains("[Showing lines 1-"));
+}
+
+#[test]
+fn grep_result_map_echoes_request_context_for_ui() {
+    // The CLI renders grep completions using fields read back from
+    // the tool result (pattern/path/glob/matches/output). Lock the
+    // wire contract so a future shape change doesn't silently
+    // regress the UI back to "grep: done".
+    let with_glob = grep_result_map(
+        "foo",
+        "src",
+        Some("*.rs"),
+        Some(0),
+        3,
+        "src/a.rs:1:foo".to_owned(),
+    );
+    assert_eq!(cbor_map_text(&with_glob, "pattern"), Some("foo"));
+    assert_eq!(cbor_map_text(&with_glob, "path"), Some("src"));
+    assert_eq!(cbor_map_text(&with_glob, "glob"), Some("*.rs"));
+    assert_eq!(cbor_int_field(&with_glob, "status"), Some(0));
+    assert_eq!(cbor_int_field(&with_glob, "matches"), Some(3));
+    assert_eq!(cbor_map_text(&with_glob, "output"), Some("src/a.rs:1:foo"));
+    assert_eq!(cbor_int_field(&with_glob, "output_lines"), Some(1));
+    assert_eq!(cbor_int_field(&with_glob, "output_bytes"), Some(14));
+
+    // No-glob form omits the field entirely rather than emitting
+    // an empty string.
+    let no_glob = grep_result_map("foo", ".", None, Some(1), 0, "no matches found".to_owned());
+    assert!(cbor_map_text(&no_glob, "glob").is_none());
+    assert_eq!(cbor_int_field(&no_glob, "status"), Some(1));
+    assert_eq!(cbor_int_field(&no_glob, "matches"), Some(0));
+    assert_eq!(cbor_int_field(&no_glob, "output_lines"), Some(1));
+    assert_eq!(cbor_int_field(&no_glob, "output_bytes"), Some(16));
+}
+
+#[test]
+fn command_details_value_records_stdout_and_stderr_stats() {
+    let details = command_details_value(
+        "echo hi".to_owned(),
+        None,
+        Some(0),
+        "hi\nthere\n".to_owned(),
+        "oops\n".to_owned(),
+    );
+    assert_eq!(cbor_int_field(&details, "stdout_lines"), Some(2));
+    assert_eq!(cbor_int_field(&details, "stdout_bytes"), Some(9));
+    assert_eq!(cbor_int_field(&details, "stderr_lines"), Some(1));
+    assert_eq!(cbor_int_field(&details, "stderr_bytes"), Some(5));
+}
+
+#[test]
+fn is_grep_match_line_classifies_match_and_context_lines() {
+    // Basic match / context forms.
+    assert!(is_grep_match_line("foo/bar.rs:10:hello"));
+    assert!(!is_grep_match_line("foo/bar.rs-10-hello"));
+
+    // Paths containing `-` must not trip the classifier — the `-`
+    // in "tool-exercise" has no digits after it, so the scan skips
+    // past it to the real `:2:` separator.
+    assert!(is_grep_match_line(
+        "tmp/tool-exercise/beta/nested/notes.md:2:foo bar"
+    ));
+    assert!(!is_grep_match_line(
+        "tmp/tool-exercise/beta/nested/notes.md-2-foo bar"
+    ));
+    assert!(is_grep_match_line(
+        "tmp/tool-exercise/generated.txt:2:SECOND"
+    ));
+
+    // Group separator and blank lines are not matches.
+    assert!(!is_grep_match_line("--"));
+    assert!(!is_grep_match_line(""));
+}
+
+#[test]
+fn truncate_tail_short_input_unchanged() {
+    let input = "line 1\nline 2\nline 3";
+    let result = truncate_tail(input);
+    assert!(!result.was_truncated);
+    assert_eq!(result.content, input);
+}
+
+#[test]
+fn truncate_tail_keeps_last_lines() {
+    let lines: Vec<String> = (1..=MAX_OUTPUT_LINES + 500)
+        .map(|i| format!("line {i}"))
+        .collect();
+    let input = lines.join("\n");
+    let result = truncate_tail(&input);
+    assert!(result.was_truncated);
+    assert!(
+        result
+            .content
+            .contains(&format!("line {}", MAX_OUTPUT_LINES + 500))
+    );
+    assert!(result.content.contains("[Showing lines"));
+    // Should not contain the very first line.
+    assert!(!result.content.contains("line 1\n"));
+}
+
+#[test]
+fn truncate_tail_limits_by_bytes() {
+    let big_line = "x".repeat(MAX_OUTPUT_BYTES + 100);
+    let input = format!("first\nsecond\n{big_line}\nlast");
+    let result = truncate_tail(&input);
+    assert!(result.was_truncated);
+    assert!(result.content.contains("last"));
+    assert!(result.content.contains("[Showing lines"));
+}
+
+#[test]
+fn slice_lines_returns_requested_window() {
+    let sliced = slice_lines("a\nb\nc\nd", 2, Some(2));
+    assert_eq!(sliced.content, "b\nc");
+    assert_eq!(sliced.start_line, 2);
+    assert_eq!(sliced.line_count, 2);
+}
+
+#[test]
+fn slice_lines_clamps_past_end() {
+    let sliced = slice_lines("a\nb\nc", 10, Some(5));
+    assert_eq!(sliced.content, "");
+    assert_eq!(sliced.start_line, 10);
+    assert_eq!(sliced.line_count, 0);
+}
+
+#[test]
+fn read_file_honors_start_line_and_line_count() {
+    let td = TempDir::new().expect("tempdir");
+    let path = td.path().join("small.txt");
+    std::fs::write(&path, "line 1\nline 2\nline 3\nline 4\nline 5\n").expect("write");
+
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("path".to_owned()),
+            CborValue::Text(path.display().to_string()),
+        ),
+        (
+            CborValue::Text("start_line".to_owned()),
+            CborValue::Integer(2.into()),
+        ),
+        (
+            CborValue::Text("line_count".to_owned()),
+            CborValue::Integer(3.into()),
+        ),
+    ]);
+    let result = read_file(&args).expect("read");
+    assert_eq!(
+        cbor_map_text(&result, "content"),
+        Some("line 2\nline 3\nline 4")
+    );
+    assert_eq!(cbor_int_field(&result, "start_line"), Some(2));
+    assert_eq!(cbor_int_field(&result, "line_count"), Some(3));
+    assert_eq!(cbor_int_field(&result, "total_lines"), Some(5));
+}
+
+#[test]
+fn read_file_rejects_invalid_line_arguments() {
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("path".to_owned()),
+            CborValue::Text("x".to_owned()),
+        ),
+        (
+            CborValue::Text("start_line".to_owned()),
+            CborValue::Integer(0.into()),
+        ),
+    ]);
+    assert_eq!(
+        read_file(&args).expect_err("start_line=0 should fail"),
+        "start_line must be >= 1"
+    );
+
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("path".to_owned()),
+            CborValue::Text("x".to_owned()),
+        ),
+        (
+            CborValue::Text("line_count".to_owned()),
+            CborValue::Integer(0.into()),
+        ),
+    ]);
+    assert_eq!(
+        read_file(&args).expect_err("line_count=0 should fail"),
+        "line_count must be >= 1"
+    );
+}
+
+#[test]
+fn read_file_truncates_large_output() {
+    let td = TempDir::new().expect("tempdir");
+    let path = td.path().join("big.txt");
+    let lines: Vec<String> = (1..=3000).map(|i| format!("line {i}")).collect();
+    std::fs::write(&path, lines.join("\n")).expect("write");
+
+    let args = CborValue::Map(vec![(
+        CborValue::Text("path".to_owned()),
+        CborValue::Text(path.display().to_string()),
+    )]);
+    let result = read_file(&args).expect("read");
+    let content = cbor_map_text(&result, "content").expect("content field");
+    assert!(content.contains("line 1\n"));
+    assert!(content.contains("[Showing lines 1-"));
+    assert!(content.contains("Use start_line and line_count to continue reading."));
+    assert_eq!(cbor_int_field(&result, "start_line"), Some(1));
+    assert_eq!(cbor_int_field(&result, "line_count"), Some(3000));
+    assert_eq!(cbor_int_field(&result, "total_lines"), Some(3000));
+}
+
+#[test]
+fn run_find_double_star_matches_top_level_files() {
+    // Regression: `**/*.rs` should match both nested AND
+    // top-level Rust files. `globset`'s native `**` requires one
+    // path separator; we work around that in `compile_find_glob`.
+    let tempdir = TempDir::new().expect("tempdir");
+    fs::create_dir_all(tempdir.path().join("src")).expect("mkdir");
+    fs::write(tempdir.path().join("top.rs"), "fn top() {}\n").expect("write top");
+    fs::write(tempdir.path().join("src/lib.rs"), "fn nested() {}\n").expect("write nested");
+    fs::write(tempdir.path().join("README.md"), "# hi\n").expect("write readme");
+
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("pattern".to_owned()),
+            CborValue::Text("**/*.rs".to_owned()),
+        ),
+        (
+            CborValue::Text("path".to_owned()),
+            CborValue::Text(tempdir.path().display().to_string()),
+        ),
+    ]);
+    let result = run_find(&args).expect("find");
+
+    assert_eq!(cbor_int_field(&result, "matches"), Some(2));
+    let output = cbor_map_text(&result, "output").expect("output");
+    assert!(
+        output.contains("top.rs"),
+        "top-level match missing: {output}"
+    );
+    assert!(
+        output.contains("src/lib.rs"),
+        "nested match missing: {output}"
+    );
+    assert!(!output.contains("README.md"));
+}
+
+#[test]
+fn run_find_returns_matching_files() {
+    let tempdir = TempDir::new().expect("tempdir");
+    fs::create_dir_all(tempdir.path().join("src/nested")).expect("mkdir");
+    fs::write(tempdir.path().join("src/lib.rs"), "pub fn one() {}\n").expect("write");
+    fs::write(
+        tempdir.path().join("src/nested/mod.rs"),
+        "pub fn two() {}\n",
+    )
+    .expect("write");
+    fs::write(tempdir.path().join("README.md"), "# hi\n").expect("write");
+
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("pattern".to_owned()),
+            CborValue::Text("**/*.rs".to_owned()),
+        ),
+        (
+            CborValue::Text("path".to_owned()),
+            CborValue::Text(tempdir.path().display().to_string()),
+        ),
+    ]);
+    let result = run_find(&args).expect("find");
+
+    assert_eq!(cbor_int_field(&result, "matches"), Some(2));
+    let output = cbor_map_text(&result, "output").expect("output");
+    assert!(output.contains("src/lib.rs"));
+    assert!(output.contains("src/nested/mod.rs"));
+    assert!(!output.contains("README.md"));
+}
+
+#[test]
+fn run_ls_lists_directory_contents() {
+    let tempdir = TempDir::new().expect("tempdir");
+    fs::create_dir_all(tempdir.path().join("src")).expect("mkdir");
+    fs::write(tempdir.path().join("README.md"), "# hi\n").expect("write");
+    fs::write(tempdir.path().join(".env"), "SECRET=1\n").expect("write");
+
+    let args = CborValue::Map(vec![(
+        CborValue::Text("path".to_owned()),
+        CborValue::Text(tempdir.path().display().to_string()),
+    )]);
+    let result = run_ls(&args).expect("ls");
+
+    assert_eq!(cbor_int_field(&result, "entries"), Some(3));
+    let output = cbor_map_text(&result, "output").expect("output");
+    assert!(output.contains(".env"));
+    assert!(output.contains("README.md"));
+    assert!(output.contains("src/"));
+}

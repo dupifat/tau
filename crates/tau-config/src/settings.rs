@@ -47,7 +47,8 @@ impl Default for CliSettings {
 /// Mutable CLI state persisted across runs at
 /// `<state_dir>/cli.json`. Distinct from `CliSettings` (config) —
 /// this file is written by the CLI itself in response to slash
-/// commands like `/show-diff` and `/show-thinking`.
+/// commands like `/show-diff`, `/show-thinking`, and
+/// `/show-cache-stats`.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct CliState {
@@ -57,6 +58,9 @@ pub struct CliState {
     /// Whether to render the agent's reasoning summary (the
     /// `agent.thinking` block). Toggled by `/show-thinking`.
     pub show_thinking: bool,
+    /// Whether to render provider prompt-cache hit stats in the model
+    /// status bar. Toggled by `/show-cache-stats`.
+    pub show_cache_stats: bool,
 }
 
 impl Default for CliState {
@@ -64,6 +68,7 @@ impl Default for CliState {
         Self {
             show_diff: false,
             show_thinking: true,
+            show_cache_stats: true,
         }
     }
 }
@@ -666,6 +671,7 @@ mod tests {
         assert_eq!(state, CliState::default());
         assert!(!state.show_diff);
         assert!(state.show_thinking);
+        assert!(state.show_cache_stats);
     }
 
     #[test]
@@ -678,6 +684,7 @@ mod tests {
         let original = CliState {
             show_diff: true,
             show_thinking: false,
+            show_cache_stats: false,
         };
         original.save(&dirs);
         assert!(td.path().join("cli.json").exists());

@@ -430,6 +430,10 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
             "Toggle expanded vs compact display of file edit diffs",
         ),
         SlashCommand::new(
+            "/show-cache-stats",
+            "Toggle provider prompt-cache hit stats in the status bar",
+        ),
+        SlashCommand::new(
             "/show-thinking",
             "Toggle visibility of the agent's reasoning summary blocks",
         ),
@@ -470,8 +474,8 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
     let renderer_completion_data = completion_data;
     // Pre-build the renderer so we can grab its `effort_state`
     // handle for the input loop's Shift+Tab cycle. Load the
-    // persisted `cli.json` state so toggles like `/show-diff` and
-    // `/show-thinking` survive restarts.
+    // persisted `cli.json` state so toggles like `/show-diff`,
+    // `/show-thinking`, and `/show-cache-stats` survive restarts.
     let dirs = tau_config::settings::TauDirs::default();
     let cli_state = tau_config::settings::CliState::load(&dirs);
     let renderer = EventRenderer::new_with_state(
@@ -489,6 +493,7 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
                 RendererCmd::Remote(event) => renderer.handle(&event),
                 RendererCmd::ToggleDiffs => renderer.toggle_diffs_expanded(),
                 RendererCmd::ToggleThinking => renderer.toggle_thinking_visible(),
+                RendererCmd::ToggleCacheStats => renderer.toggle_cache_stats_visible(),
             }
         }
     });
@@ -588,6 +593,7 @@ enum InputLoopExit {
 enum RendererCmd {
     /// `/show-thinking` toggle.
     ToggleThinking,
+    ToggleCacheStats,
     Remote(Event),
     ToggleDiffs,
 }
@@ -695,6 +701,10 @@ fn terminal_input_loop(
                 }
                 if text == "/show-thinking" {
                     let _ = renderer_tx.send(RendererCmd::ToggleThinking);
+                    continue;
+                }
+                if text == "/show-cache-stats" {
+                    let _ = renderer_tx.send(RendererCmd::ToggleCacheStats);
                     continue;
                 }
                 if let Some(model) = text.strip_prefix("/model ") {
@@ -812,33 +822,35 @@ fn effort_from_u8(value: u8) -> tau_proto::Effort {
 }
 
 /// Format the context-usage chip for the status bar. Three cases:
-/// - context window known → `" {percent}%/{window}"` (e.g. `" 6%/200k"`)
-/// - window unknown but token count reported → `" {tokens}/?"`
+/// - context window known → `" ctx:{percent}%/{window}"` (e.g. `"
+///   ctx:6%/200k"`)
+/// - window unknown but token count reported → `" ctx:{tokens}/?"`
 /// - nothing known yet → empty string (chip suppressed)
 fn format_context_chip(
     input_tokens: Option<u64>,
-    cached_tokens: Option<u64>,
     percent: Option<u8>,
     window: Option<u64>,
 ) -> String {
-    let cache_suffix = match cached_tokens {
-        Some(0) | None => String::new(),
-        Some(tokens) => format!(" cache:{}", format_token_count(tokens)),
-    };
     match (window, percent, input_tokens) {
-        (Some(w), Some(p), _) => format!(" {p}%/{}{}", format_token_count(w), cache_suffix),
+        (Some(w), Some(p), _) => format!(" ctx:{p}%/{}", format_token_count(w)),
         // Window not configured — fall back to raw token count so the
         // user can see usage exists and add `contextWindow` to fix it.
-        (None, _, Some(t)) => format!(" {}/?{}", format_token_count(t), cache_suffix),
+        (None, _, Some(t)) => format!(" ctx:{}/?", format_token_count(t)),
         _ => String::new(),
     }
 }
 
-fn format_turn_metrics_chip(latency: Option<Duration>, cache_hit_percent: Option<u8>) -> String {
-    let mut chip = String::new();
-    if let Some(percent) = cache_hit_percent {
-        chip.push_str(&format!(" hit:{percent}%"));
+fn format_cache_hit_chip(input_tokens: Option<u64>, cached_tokens: Option<u64>) -> String {
+    match (cache_hit_percent(input_tokens, cached_tokens), input_tokens) {
+        (Some(percent), Some(tokens)) => {
+            format!(" hit:{percent}%/{}", format_token_count(tokens))
+        }
+        _ => String::new(),
     }
+}
+
+fn format_turn_metrics_chip(latency: Option<Duration>) -> String {
+    let mut chip = String::new();
     if let Some(latency) = latency {
         chip.push_str(&format!(" resp:{}", format_latency(latency)));
     }
@@ -1572,7 +1584,8 @@ struct EventRenderer {
     /// either the full text or removed, so the toggle takes effect
     /// retroactively across the visible transcript.
     thinking_history: Vec<ThinkingBlockEntry>,
-    /// Where to persist `show_diff` / `show_thinking` toggles.
+    /// Where to persist `show_diff` / `show_thinking` /
+    /// `show_cache_stats` toggles.
     state_dirs: tau_config::settings::TauDirs,
     /// Current model id (cached so we can re-render the status bar
     /// when the effort changes, and vice versa).
@@ -1591,10 +1604,11 @@ struct EventRenderer {
     current_context_cached_tokens: Option<u64>,
     /// Current model context window, in tokens, if known.
     current_context_window: Option<u64>,
+    /// Whether to render provider prompt-cache hit stats in the
+    /// model status bar.
+    show_cache_stats: bool,
     /// End-to-end latency of the most recently completed prompt.
     last_turn_latency: Option<Duration>,
-    /// Cache hit rate of the most recently completed prompt.
-    last_turn_cache_hit_percent: Option<u8>,
     /// Shared effort mirror for the input thread.
     effort_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
 }
@@ -1672,6 +1686,7 @@ impl EventRenderer {
             prompt_started_at: HashMap::new(),
             diffs_expanded: state.show_diff,
             show_thinking: state.show_thinking,
+            show_cache_stats: state.show_cache_stats,
             thinking_history: Vec::new(),
             state_dirs,
             current_model: tau_proto::ModelId::from(""),
@@ -1681,7 +1696,6 @@ impl EventRenderer {
             current_context_cached_tokens: None,
             current_context_window: None,
             last_turn_latency: None,
-            last_turn_cache_hit_percent: None,
             effort_state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(effort_to_u8(
                 tau_proto::Effort::Off,
             ))),
@@ -1692,6 +1706,7 @@ impl EventRenderer {
         tau_config::settings::CliState {
             show_diff: self.diffs_expanded,
             show_thinking: self.show_thinking,
+            show_cache_stats: self.show_cache_stats,
         }
         .save(&self.state_dirs);
     }
@@ -1764,6 +1779,13 @@ impl EventRenderer {
         self.save_cli_state();
     }
 
+    /// Flip provider prompt-cache hit stats in the status bar.
+    fn toggle_cache_stats_visible(&mut self) {
+        self.show_cache_stats = !self.show_cache_stats;
+        self.render_model_status();
+        self.save_cli_state();
+    }
+
     /// Clears all session-scoped UI state and re-renders an empty
     /// transcript. Persistent user preferences such as `/show-diff`
     /// and `/show-thinking` are intentionally preserved.
@@ -1789,7 +1811,6 @@ impl EventRenderer {
         self.current_context_input_tokens = None;
         self.current_context_cached_tokens = None;
         self.last_turn_latency = None;
-        self.last_turn_cache_hit_percent = None;
         self.handle.clear_output();
         if !self.current_model.is_empty() {
             self.render_model_status();
@@ -1809,13 +1830,22 @@ impl EventRenderer {
             };
             let context = format_context_chip(
                 self.current_context_input_tokens,
-                self.current_context_cached_tokens,
                 self.current_context_percent,
                 self.current_context_window,
             );
-            let turn_metrics =
-                format_turn_metrics_chip(self.last_turn_latency, self.last_turn_cache_hit_percent);
-            format!("{} ({level}){context}{turn_metrics}", self.current_model)
+            let cache = if self.show_cache_stats {
+                format_cache_hit_chip(
+                    self.current_context_input_tokens,
+                    self.current_context_cached_tokens,
+                )
+            } else {
+                String::new()
+            };
+            let turn_metrics = format_turn_metrics_chip(self.last_turn_latency);
+            format!(
+                "{} ({level}){context}{cache}{turn_metrics}",
+                self.current_model
+            )
         };
         let block = themed_block(&self.theme, names::MODEL_STATUS, label);
         match self.model_status_block {
@@ -1957,8 +1987,6 @@ impl EventRenderer {
                     .prompt_started_at
                     .remove(spid)
                     .map(|started_at| started_at.elapsed());
-                self.last_turn_cache_hit_percent =
-                    cache_hit_percent(finished.input_tokens, finished.cached_tokens);
 
                 // Finalize the thinking block above the response.
                 // Prefer the finished event's payload if it carries
@@ -2183,7 +2211,6 @@ impl EventRenderer {
                 self.current_model = selected.model.clone();
                 self.current_context_window = selected.context_window;
                 self.last_turn_latency = None;
-                self.last_turn_cache_hit_percent = None;
                 self.render_model_status();
             }
             Event::HarnessContextUsageChanged(changed) => {
@@ -3363,34 +3390,40 @@ mod tests {
     fn format_context_chip_picks_format_by_known_fields() {
         // Both window and percent known → percent/window chip.
         assert_eq!(
-            super::format_context_chip(Some(12_000), Some(9_000), Some(6), Some(200_000)),
-            " 6%/200k cache:9k",
+            super::format_context_chip(Some(12_000), Some(6), Some(200_000)),
+            " ctx:6%/200k",
         );
         // Window unknown, tokens reported → tokens/? fallback.
         assert_eq!(
-            super::format_context_chip(Some(12_000), None, None, None),
-            " 12k/?",
+            super::format_context_chip(Some(12_000), None, None),
+            " ctx:12k/?",
         );
         // Window known but no usage report yet still shows the percent
         // (which the harness initialized to 0 on model select).
         assert_eq!(
-            super::format_context_chip(None, None, Some(0), Some(200_000)),
-            " 0%/200k",
+            super::format_context_chip(None, Some(0), Some(200_000)),
+            " ctx:0%/200k",
         );
         // Nothing known → empty.
-        assert_eq!(super::format_context_chip(None, None, None, None), "");
+        assert_eq!(super::format_context_chip(None, None, None), "");
     }
 
     #[test]
-    fn format_turn_metrics_chip_includes_hit_rate_and_latency() {
+    fn format_cache_hit_chip_matches_context_chip_shape() {
         assert_eq!(
-            super::format_turn_metrics_chip(Some(Duration::from_millis(1_240)), Some(75)),
-            " hit:75% resp:1.2s",
+            super::format_cache_hit_chip(Some(12_000), Some(9_000)),
+            " hit:75%/12k",
         );
+        assert_eq!(super::format_cache_hit_chip(Some(12_000), None), "");
+    }
+
+    #[test]
+    fn format_turn_metrics_chip_includes_latency() {
         assert_eq!(
-            super::format_turn_metrics_chip(Some(Duration::from_millis(420)), None),
-            " resp:420ms",
+            super::format_turn_metrics_chip(Some(Duration::from_millis(1_240))),
+            " resp:1.2s",
         );
+        assert_eq!(super::format_turn_metrics_chip(None), "");
     }
 
     #[test]

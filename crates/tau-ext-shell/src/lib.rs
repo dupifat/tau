@@ -1730,6 +1730,9 @@ const DEFAULT_TIMEOUT_SECS: u64 = 120;
 /// credentials, shell history config, dev-shell injections) is
 /// stripped so commands run in a predictable environment instead of
 /// inheriting whatever the harness happened to be launched with.
+///
+/// Tau's own version metadata is preserved so the agent can verify
+/// what harness build it is running under when asked.
 const ENV_ALLOWLIST: &[&str] = &[
     "PATH",
     "HOME",
@@ -1742,6 +1745,8 @@ const ENV_ALLOWLIST: &[&str] = &[
     "LC_ALL",
     "LC_CTYPE",
     "LC_MESSAGES",
+    "TAU_VERSION",
+    "TAU_BUILD",
 ];
 
 /// Sanitize a `Command` so the child runs with a minimal environment

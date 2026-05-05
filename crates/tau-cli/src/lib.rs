@@ -13,6 +13,11 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tau_harness::runtime_dir;
+
+mod built_info {
+    include!(concat!(env!("OUT_DIR"), "/built.rs"));
+}
+
 use tau_proto::{
     CborValue, ClientKind, Event, EventReader, EventSelector, EventWriter, LifecycleDisconnect,
     LifecycleHello, LifecycleSubscribe, PROTOCOL_VERSION, UiPromptDraft, UiPromptSubmitted,
@@ -301,6 +306,14 @@ fn resolve_daemon(attach: bool, session_id: &str) -> Result<DaemonHandle, CliErr
     start_daemon(session_id)
 }
 
+fn build_revision() -> String {
+    match (built_info::GIT_COMMIT_HASH, built_info::GIT_DIRTY) {
+        (Some(hash), Some(true)) => format!("{hash}-modified"),
+        (Some(hash), _) => hash.to_owned(),
+        _ => "unknown".to_owned(),
+    }
+}
+
 /// Spawns a new harness daemon and waits for its socket to be ready.
 fn start_daemon(session_id: &str) -> Result<DaemonHandle, CliError> {
     let tau_binary = std::env::current_exe()?;
@@ -310,6 +323,7 @@ fn start_daemon(session_id: &str) -> Result<DaemonHandle, CliError> {
         .arg("harness")
         .env("TAU_SESSION_ID", session_id)
         .env("TAU_VERSION", env!("CARGO_PKG_VERSION"))
+        .env("TAU_BUILD", build_revision())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())

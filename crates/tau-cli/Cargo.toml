@@ -27,6 +27,9 @@ tau-ext-dpc-notifications.workspace = true
 tau-ext-shell.workspace = true
 tau-ext-test-dummy.workspace = true
 
+[build-dependencies]
+built.workspace = true
+
 [dev-dependencies]
 tau-cli-term-raw = { workspace = true }
 tempfile.workspace = true

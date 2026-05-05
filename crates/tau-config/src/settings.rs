@@ -749,7 +749,7 @@ mod tests {
                 config: serde_json::json!({}),
             },
             BuiltinExtension {
-                name: "dpc_notifications",
+                name: "dpc-notifications",
                 command: vec!["tau".into(), "ext".into(), "ext-dpc-notifications".into()],
                 role: Some("tool"),
                 enable: false,

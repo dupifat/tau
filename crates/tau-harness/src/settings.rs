@@ -62,7 +62,7 @@ pub fn builtin_extensions() -> Vec<tau_config::settings::BuiltinExtension> {
             config: serde_json::json!({}),
         },
         BuiltinExtension {
-            name: "dpc_notifications",
+            name: "dpc-notifications",
             command: vec![
                 tau_binary,
                 "ext".to_owned(),

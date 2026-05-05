@@ -94,7 +94,7 @@ surface typos to the user.
 ```json5
 {
   extensions: {
-    dpc_notifications: {
+    "dpc-notifications": {
       enable: true,
       config: {
         // Idle window (seconds) before the extension nudges the
@@ -149,10 +149,10 @@ idle_command: [
 
 ## Tracing
 
-The extension uses the `dpc_notifications` tracing target:
+The extension uses the `dpc-notifications` tracing target:
 
 ```sh
-TAU_EXT_LOG=dpc_notifications=debug tau …
+TAU_EXT_LOG=dpc-notifications=debug tau …
 ```
 
 `debug` shows `received ExtAgentQueryResult { idle_state, query_id,

@@ -77,8 +77,8 @@ pub const SUMMARY_TIMEOUT_SECONDS: u64 = 10;
 /// timer fires. Mirrors the prompt Pi's `idle-notification.ts` uses,
 /// adapted for our harness-mediated query path.
 const SUMMARY_INSTRUCTION: &str = "Summarize in one short sentence: what \
-were you working on, and what do you need from the user now? Keep it \
-under 100 characters. Output only the summary, nothing else.";
+is the last thing you did or what do you need from the user now? Keep it \
+under 200 characters. Output only the summary, nothing else.";
 
 /// Static fallback body used when the summary request errors out,
 /// returns empty text, or doesn't arrive within

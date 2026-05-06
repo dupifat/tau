@@ -44,6 +44,7 @@
         };
 
         tauBuildPlaceholder = "01234569abcdef7afa1d2683a099c7af48a523c1";
+        tauBuildDatePlaceholder = "1970-01-01 00:00";
         tauBuildRevision =
           if (self ? rev) && (builtins.stringLength self.rev == 40) then
             self.rev
@@ -53,8 +54,16 @@
             self.dirtyRev
           else
             tauBuildPlaceholder;
+        tauBuildShortRevision = builtins.substring 0 7 tauBuildRevision;
+        tauBuildDate =
+          if self ? lastModifiedDate then
+            "${builtins.substring 0 4 self.lastModifiedDate}-${builtins.substring 4 2 self.lastModifiedDate}-${
+              builtins.substring 6 2 self.lastModifiedDate
+            } ${builtins.substring 8 2 self.lastModifiedDate}:${builtins.substring 10 2 self.lastModifiedDate}"
+          else
+            tauBuildDatePlaceholder;
 
-        replaceTauBuildRevision =
+        replaceTauBuildInfo =
           package:
           pkgs.stdenv.mkDerivation {
             pname = projectName;
@@ -69,7 +78,10 @@
               cp -a ${package} $out
               chmod -R u+w $out
               for path in $(${pkgs.findutils}/bin/find $out -type f -executable); do
-                ${pkgs.bbe}/bin/bbe -e 's/${tauBuildPlaceholder}/${tauBuildRevision}/' "$path" -o ./tmp
+                ${pkgs.bbe}/bin/bbe \
+                  -e 's/${builtins.substring 0 7 tauBuildPlaceholder}/${tauBuildShortRevision}/' \
+                  -e 's/${tauBuildDatePlaceholder}/${tauBuildDate}/' \
+                  "$path" -o ./tmp
                 cat ./tmp > "$path"
               done
             '';
@@ -84,6 +96,7 @@
               nativeBuildInputs = [ ];
               BUILT_OVERRIDE_tau-cli_GIT_COMMIT_HASH = tauBuildPlaceholder;
               BUILT_OVERRIDE_tau-cli_GIT_COMMIT_HASH_SHORT = builtins.substring 0 7 tauBuildPlaceholder;
+              TAU_LAST_MODIFIED = tauBuildDatePlaceholder;
             };
           in
           rec {
@@ -102,7 +115,7 @@
               cargoArtifacts = workspaceDeps;
             };
 
-            tau = replaceTauBuildRevision (
+            tau = replaceTauBuildInfo (
               craneLib.buildPackage {
                 cargoArtifacts = workspaceDeps;
                 cargoExtraArgs = "-p tau";

@@ -68,8 +68,8 @@ tau-themes = { path = "crates/tau-themes" }
 # External crates
 base64 = "0.22"
 bon = "3"
-built = { version = "0.8", features = ["git2"] }
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
+built = { version = "0.8", features = ["chrono", "git2"] }
+time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 comfy-table = "7"
 ciborium = "0.2.2"
 config = { version = "0.15", default-features = false, features = ["json5"] }

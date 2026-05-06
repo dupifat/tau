@@ -307,10 +307,41 @@ fn resolve_daemon(attach: bool, session_id: &str) -> Result<DaemonHandle, CliErr
 }
 
 fn build_revision() -> String {
-    match (built_info::GIT_COMMIT_HASH, built_info::GIT_DIRTY) {
+    match (built_info::GIT_COMMIT_HASH_SHORT, built_info::GIT_DIRTY) {
         (Some(hash), Some(true)) => format!("{hash}-modified"),
         (Some(hash), _) => hash.to_owned(),
         _ => "unknown".to_owned(),
+    }
+}
+
+fn build_last_modified() -> Option<String> {
+    option_env!("TAU_LAST_MODIFIED")
+        .filter(|date| !date.is_empty())
+        .map(str::to_owned)
+        .or_else(|| short_built_time(built_info::BUILT_TIME_UTC))
+        .filter(|date| date != "1980-01-01 00:00")
+}
+
+fn short_built_time(time: &str) -> Option<String> {
+    let input_format = time::macros::format_description!(
+        "[weekday repr:short], [day padding:none] [month repr:short] [year] [hour]:[minute]:[second] [offset_hour sign:mandatory][offset_minute]"
+    );
+    let output_format = time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]");
+    time::OffsetDateTime::parse(time, input_format)
+        .ok()?
+        .format(output_format)
+        .ok()
+}
+
+fn build_label() -> String {
+    match build_last_modified() {
+        Some(date) => format!(
+            "tau {} ({}, {})",
+            env!("CARGO_PKG_VERSION"),
+            build_revision(),
+            date
+        ),
+        None => format!("tau {} ({})", env!("CARGO_PKG_VERSION"), build_revision()),
     }
 }
 
@@ -324,6 +355,7 @@ fn start_daemon(session_id: &str) -> Result<DaemonHandle, CliError> {
         .env("TAU_SESSION_ID", session_id)
         .env("TAU_VERSION", env!("CARGO_PKG_VERSION"))
         .env("TAU_BUILD", build_revision())
+        .envs(build_last_modified().map(|date| ("TAU_LAST_MODIFIED", date)))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -472,7 +504,7 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
         let pun = random_startup_pun();
         let banner = StyledText::from(vec![
             Span::new("▀█▀▀ ", accent),
-            Span::plain(format!("tau {}", env!("CARGO_PKG_VERSION"))),
+            Span::plain(build_label()),
             Span::new("\n", Default::default()),
             Span::new(" █▄▖ ", accent),
             Span::plain(pun),

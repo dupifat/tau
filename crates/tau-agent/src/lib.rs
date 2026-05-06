@@ -6,9 +6,14 @@
 pub(crate) mod openai;
 mod responses;
 
+use std::collections::VecDeque;
 use std::error::Error;
 use std::io::{BufReader, BufWriter, Read, Write};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread;
+use std::time::{Duration, Instant};
 
+use backon::BackoffBuilder;
 use tau_config::settings::{self, ModelRegistry, ProviderConfig};
 use tau_proto::{
     Ack, AgentPromptSubmitted, AgentResponseFinished, AgentResponseUpdated, ClientKind, Event,
@@ -29,12 +34,15 @@ pub fn run_stdio() -> Result<(), Box<dyn Error>> {
 }
 
 /// Runs the agent over arbitrary reader/writer streams.
+///
+/// The reader is moved to a background thread so the main loop can
+/// `recv_timeout` on it during retry-backoff sleeps and wake early
+/// when the harness disconnects (or queues another event).
 pub fn run<R, W>(reader: R, writer: W) -> Result<(), Box<dyn Error>>
 where
-    R: Read,
+    R: Read + Send + 'static,
     W: Write,
 {
-    let mut reader = EventReader::new(BufReader::new(reader));
     let mut writer = EventWriter::new(BufWriter::new(writer));
 
     let model_registry = settings::load_models().unwrap_or_default();
@@ -56,9 +64,34 @@ where
     }))?;
     writer.flush()?;
 
+    // Pump events from the reader into a channel. The main loop consumes
+    // from `event_rx`; backoff sleeps use `recv_timeout` on the same
+    // receiver so a `LifecycleDisconnect` (or sender drop on EOF) wakes
+    // us out of a wait we'd otherwise be deaf to.
+    let (event_tx, event_rx) = mpsc::channel::<Event>();
+    thread::spawn(move || {
+        let mut reader = EventReader::new(BufReader::new(reader));
+        loop {
+            match reader.read_event() {
+                Ok(Some(event)) => {
+                    if event_tx.send(event).is_err() {
+                        return;
+                    }
+                }
+                Ok(None) | Err(_) => return,
+            }
+        }
+    });
+
+    let mut deferred: VecDeque<Event> = VecDeque::new();
+
     loop {
-        let Some(event) = reader.read_event()? else {
-            return Ok(());
+        let event = match deferred.pop_front() {
+            Some(e) => e,
+            None => match event_rx.recv() {
+                Ok(e) => e,
+                Err(_) => return Ok(()),
+            },
         };
         // Peel the LogEvent envelope. The agent processes one prompt at
         // a time (serial), so acks are trivially in order: ack right
@@ -95,6 +128,11 @@ where
                 }))?;
                 writer.flush()?;
 
+                let mut retry_ctx = RetryContext {
+                    event_rx: &event_rx,
+                    deferred: &mut deferred,
+                };
+
                 // Resolve backend from the model specified in the prompt.
                 let backend = prompt
                     .model
@@ -103,10 +141,22 @@ where
 
                 match backend {
                     Some(BackendConfig::ChatCompletions(cfg)) => {
-                        handle_chat_completions(&session_prompt_id, &cfg, &prompt, &mut writer)?;
+                        handle_chat_completions(
+                            &session_prompt_id,
+                            &cfg,
+                            &prompt,
+                            &mut writer,
+                            &mut retry_ctx,
+                        )?;
                     }
                     Some(BackendConfig::Responses(cfg)) => {
-                        handle_responses(&session_prompt_id, &cfg, &prompt, &mut writer)?;
+                        handle_responses(
+                            &session_prompt_id,
+                            &cfg,
+                            &prompt,
+                            &mut writer,
+                            &mut retry_ctx,
+                        )?;
                     }
                     None => {
                         let msg = match &prompt.model {
@@ -134,6 +184,54 @@ where
         if let Some(id) = log_id {
             writer.write_event(&Event::Ack(Ack { up_to: id }))?;
             writer.flush()?;
+        }
+    }
+}
+
+/// What the retry loop needs from the agent's main event pump:
+/// access to the channel of incoming events (so a long backoff sleep
+/// can wake on disconnect / queued prompts) and a deferred buffer
+/// for events that arrive mid-sleep but belong to a later main-loop
+/// iteration.
+struct RetryContext<'a> {
+    event_rx: &'a Receiver<Event>,
+    deferred: &'a mut VecDeque<Event>,
+}
+
+/// Outcome of an interruptible sleep.
+enum SleepOutcome {
+    /// Slept the full duration.
+    Elapsed,
+    /// Woken by a `LifecycleDisconnect` (or reader EOF). The caller
+    /// should stop retrying and finalize the prompt.
+    Aborted,
+}
+
+impl<'a> RetryContext<'a> {
+    /// Sleep for up to `delay`, but wake early if the harness sends a
+    /// `LifecycleDisconnect` (or the reader thread exits). Any other
+    /// events that arrive mid-sleep are stashed onto the deferred
+    /// buffer so the main loop processes them after the current
+    /// prompt finishes.
+    fn sleep_or_abort(&mut self, delay: Duration) -> SleepOutcome {
+        let deadline = Instant::now() + delay;
+        loop {
+            let now = Instant::now();
+            let Some(remaining) = deadline.checked_duration_since(now) else {
+                return SleepOutcome::Elapsed;
+            };
+            match self.event_rx.recv_timeout(remaining) {
+                Err(RecvTimeoutError::Timeout) => return SleepOutcome::Elapsed,
+                Err(RecvTimeoutError::Disconnected) => return SleepOutcome::Aborted,
+                Ok(event) => {
+                    let abort = event.name() == EventName::LIFECYCLE_DISCONNECT;
+                    self.deferred.push_back(event);
+                    if abort {
+                        return SleepOutcome::Aborted;
+                    }
+                    // Otherwise keep waiting out the rest of the backoff.
+                }
+            }
         }
     }
 }
@@ -300,11 +398,123 @@ fn extract_copilot_base_url(token: &str) -> Option<String> {
 // LLM backends
 // ---------------------------------------------------------------------------
 
+/// Maximum number of retry attempts before giving up on a transient
+/// LLM error. Combined with [`llm_retry_schedule`]'s fibonacci shape
+/// (min 10s), this caps total wait time at roughly 9 minutes.
+const LLM_MAX_RETRIES: usize = 8;
+
+/// Build a fibonacci backoff schedule for retrying transient LLM
+/// errors. Roughly: 10s, 10s, 20s, 30s, 50s, 80s, 130s, 210s — eight
+/// retries, ~9 minutes total wait before we give up. Jittered to
+/// avoid lockstep retries from many agents hitting a recovering
+/// upstream simultaneously.
+fn llm_retry_schedule() -> backon::FibonacciBackoff {
+    backon::FibonacciBuilder::default()
+        .with_min_delay(Duration::from_secs(10))
+        .with_max_times(LLM_MAX_RETRIES)
+        .with_jitter()
+        .build()
+}
+
+/// Retry an LLM streaming call with fibonacci backoff for transient
+/// errors.
+///
+/// `call` is re-invoked from scratch each attempt — if a previous
+/// attempt streamed partial text via its `on_update`, the next
+/// attempt's updates will overwrite it on the way through. Between
+/// attempts we paint a transient retry banner over the response
+/// block (via `AgentResponseUpdated.text`) so the user sees what's
+/// happening; the banner is replaced by real content as soon as the
+/// next attempt's first delta arrives.
+///
+/// The backoff sleep is interruptible: a `LifecycleDisconnect`
+/// arriving mid-sleep aborts the retry and the call returns the
+/// last error.
+fn with_llm_retry<F, W: Write>(
+    session_prompt_id: &str,
+    originator: &tau_proto::PromptOriginator,
+    writer: &mut EventWriter<BufWriter<W>>,
+    retry_ctx: &mut RetryContext<'_>,
+    mut call: F,
+) -> Result<openai::StreamState, openai::OpenAiError>
+where
+    F: FnMut(&mut EventWriter<BufWriter<W>>) -> Result<openai::StreamState, openai::OpenAiError>,
+{
+    let mut backoff = llm_retry_schedule();
+    let max_attempts = LLM_MAX_RETRIES;
+    let mut attempt = 0_usize;
+    loop {
+        let error = match call(writer) {
+            Ok(state) => return Ok(state),
+            Err(e) => e,
+        };
+        if !error.is_retryable() {
+            return Err(error);
+        }
+        let Some(delay) = backoff.next() else {
+            return Err(error);
+        };
+        attempt += 1;
+        tracing::warn!(
+            target: LOG_TARGET,
+            session_prompt_id = %session_prompt_id,
+            "LLM error, retrying in {delay:?} (attempt {attempt}/{max_attempts}): {error}",
+        );
+        emit_retry_banner(
+            session_prompt_id,
+            originator,
+            writer,
+            &error,
+            delay,
+            attempt,
+            max_attempts,
+        );
+        if matches!(retry_ctx.sleep_or_abort(delay), SleepOutcome::Aborted) {
+            tracing::info!(
+                target: LOG_TARGET,
+                session_prompt_id = %session_prompt_id,
+                "retry aborted by disconnect/cancel",
+            );
+            return Err(error);
+        }
+    }
+}
+
+/// Paint a transient banner into the assistant response block so the
+/// user can see we're waiting on an upstream retry. Best-effort:
+/// write/flush failures are dropped, matching how the streaming
+/// `on_update` handles them.
+fn emit_retry_banner<W: Write>(
+    session_prompt_id: &str,
+    originator: &tau_proto::PromptOriginator,
+    writer: &mut EventWriter<BufWriter<W>>,
+    error: &openai::OpenAiError,
+    delay: Duration,
+    attempt: usize,
+    max_attempts: usize,
+) {
+    let banner = format!(
+        "⏳ provider error — retrying in {}s (attempt {}/{})\n\n> {}",
+        delay.as_secs(),
+        attempt,
+        max_attempts,
+        error,
+    );
+    let _ = writer.write_event(&Event::AgentResponseUpdated(AgentResponseUpdated {
+        session_prompt_id: session_prompt_id.into(),
+        text: banner,
+        thinking: None,
+        originator: originator.clone(),
+    }));
+    let _ = writer.flush();
+}
+
 fn handle_chat_completions<W: Write>(
     session_prompt_id: &str,
     config: &openai::OpenAiConfig,
     prompt: &tau_proto::SessionPromptCreated,
     writer: &mut EventWriter<BufWriter<W>>,
+    retry_ctx: &mut RetryContext<'_>,
 ) -> Result<(), Box<dyn Error>> {
     let request = openai::PromptPayload {
         system_prompt: &prompt.system_prompt,
@@ -315,15 +525,24 @@ fn handle_chat_completions<W: Write>(
     };
 
     let originator = prompt.originator.clone();
-    match openai::chat_completion_stream(config, &request, |text_so_far, thinking_so_far| {
-        let _ = writer.write_event(&Event::AgentResponseUpdated(AgentResponseUpdated {
-            session_prompt_id: session_prompt_id.into(),
-            text: text_so_far.to_owned(),
-            thinking: thinking_so_far.map(str::to_owned),
-            originator: originator.clone(),
-        }));
-        let _ = writer.flush();
-    }) {
+    let result = with_llm_retry(
+        session_prompt_id,
+        &originator,
+        writer,
+        retry_ctx,
+        |writer| {
+            openai::chat_completion_stream(config, &request, |text_so_far, thinking_so_far| {
+                let _ = writer.write_event(&Event::AgentResponseUpdated(AgentResponseUpdated {
+                    session_prompt_id: session_prompt_id.into(),
+                    text: text_so_far.to_owned(),
+                    thinking: thinking_so_far.map(str::to_owned),
+                    originator: originator.clone(),
+                }));
+                let _ = writer.flush();
+            })
+        },
+    );
+    match result {
         Ok(state) => finish_stream(session_prompt_id, &prompt.originator, state, writer)?,
         Err(error) => finish_error(session_prompt_id, &prompt.originator, error, writer)?,
     }
@@ -335,6 +554,7 @@ fn handle_responses<W: Write>(
     config: &responses::ResponsesConfig,
     prompt: &tau_proto::SessionPromptCreated,
     writer: &mut EventWriter<BufWriter<W>>,
+    retry_ctx: &mut RetryContext<'_>,
 ) -> Result<(), Box<dyn Error>> {
     let request = openai::PromptPayload {
         system_prompt: &prompt.system_prompt,
@@ -345,15 +565,24 @@ fn handle_responses<W: Write>(
     };
 
     let originator = prompt.originator.clone();
-    match responses::responses_stream(config, &request, |text_so_far, thinking_so_far| {
-        let _ = writer.write_event(&Event::AgentResponseUpdated(AgentResponseUpdated {
-            session_prompt_id: session_prompt_id.into(),
-            text: text_so_far.to_owned(),
-            thinking: thinking_so_far.map(str::to_owned),
-            originator: originator.clone(),
-        }));
-        let _ = writer.flush();
-    }) {
+    let result = with_llm_retry(
+        session_prompt_id,
+        &originator,
+        writer,
+        retry_ctx,
+        |writer| {
+            responses::responses_stream(config, &request, |text_so_far, thinking_so_far| {
+                let _ = writer.write_event(&Event::AgentResponseUpdated(AgentResponseUpdated {
+                    session_prompt_id: session_prompt_id.into(),
+                    text: text_so_far.to_owned(),
+                    thinking: thinking_so_far.map(str::to_owned),
+                    originator: originator.clone(),
+                }));
+                let _ = writer.flush();
+            })
+        },
+    );
+    match result {
         Ok(state) => finish_stream(session_prompt_id, &prompt.originator, state, writer)?,
         Err(error) => finish_error(session_prompt_id, &prompt.originator, error, writer)?,
     }

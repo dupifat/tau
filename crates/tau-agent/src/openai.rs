@@ -69,6 +69,43 @@ impl std::fmt::Display for OpenAiError {
 
 impl std::error::Error for OpenAiError {}
 
+impl OpenAiError {
+    /// Whether this error is plausibly transient and worth retrying.
+    ///
+    /// We treat transport hiccups, mid-stream IO breaks, and
+    /// server-side stream errors (overload, upstream timeout) as
+    /// retryable. JSON parse failures, missing-choices, and 4xx
+    /// statuses other than 408/425/429 are treated as our bug or a
+    /// deterministic request-level rejection — retrying just burns
+    /// quota.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            // Underlying ureq transport: connect failure, DNS, read
+            // timeout, mid-stream socket close.
+            Self::Http(_) => true,
+            // I/O reading the SSE response body.
+            Self::Io(_) => true,
+            // Likely a harness bug (we mis-parsed the wire format),
+            // or the provider returned something we can't decode.
+            // Either way, retry won't help.
+            Self::Json(_) => false,
+            Self::NoChoices => false,
+            Self::HttpStatus(code, body) => match *code {
+                408 | 425 | 429 | 500..=599 => true,
+                // Code 0 is synthesized by the Responses backend for
+                // SSE-level events: the body is prefixed with
+                // "stream error:" (mid-stream provider hiccup —
+                // overload, upstream timeout, gateway reset),
+                // "response failed:" (deterministic model error),
+                // or "response incomplete:" (request-level cap).
+                // Only the first class is worth retrying.
+                0 => body.starts_with("stream error:"),
+                _ => false,
+            },
+        }
+    }
+}
+
 /// Accumulated streaming state.
 pub struct StreamState {
     pub text: String,

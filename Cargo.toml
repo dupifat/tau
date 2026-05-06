@@ -66,6 +66,7 @@ tau-test-support = { path = "crates/tau-test-support" }
 tau-themes = { path = "crates/tau-themes" }
 
 # External crates
+backon = "1"
 base64 = "0.22"
 bon = "3"
 built = { version = "0.8", features = ["chrono", "git2"] }

@@ -141,6 +141,7 @@ fn representative_events() -> Vec<Event> {
                 payload: CborValue::Text("working".to_owned()),
             })),
             transient: true,
+            interception: None,
         }),
         Event::LogEvent(LogEvent {
             id: LogEventId::new(42),

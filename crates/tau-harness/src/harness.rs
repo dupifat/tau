@@ -2,7 +2,7 @@
 //! store, and the live extensions; routes every event between the agent,
 //! tools, and clients.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -16,9 +16,10 @@ use tau_core::{
 };
 use tau_proto::{
     AgentResponseFinished, AgentToolCall, CborValue, ClientKind, Event, EventSelector,
-    HarnessContextUsageChanged, HarnessModelSelected, HarnessModelsAvailable, LifecycleDisconnect,
-    ModelId, SessionId, SessionPromptCreated, SessionPromptId, SessionPromptQueued, ToolCallId,
-    ToolDefinition, ToolError, ToolName, ToolRegister, ToolRequest,
+    ExtensionName, HarnessContextUsageChanged, HarnessIntercepted, HarnessModelSelected,
+    HarnessModelsAvailable, InterceptionPriority, LifecycleDisconnect, ModelId, SessionId,
+    SessionPromptCreated, SessionPromptId, SessionPromptQueued, ToolCallId, ToolDefinition,
+    ToolError, ToolName, ToolRegister, ToolRequest,
 };
 
 use crate::conversation::{Conversation, ConversationId, ConversationTurnState};
@@ -153,6 +154,8 @@ pub(crate) struct Harness {
     pub(crate) turn_state: TurnState,
     /// Append-only event debug log.
     pub(crate) debug_log: Option<DebugEventLog>,
+    /// Event emission interceptors, exact name first and prefix fallback.
+    pub(crate) interceptors: InterceptorRegistry,
     /// All available models as `"provider/model_id"` strings.
     pub(crate) available_models: Vec<ModelId>,
     /// Currently selected model as `"provider/model_id"`.
@@ -207,6 +210,121 @@ pub(crate) struct Harness {
 }
 
 pub(crate) type AgentRunner = fn(UnixStream, UnixStream) -> Result<(), String>;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct InterceptorRegistration {
+    priority: InterceptionPriority,
+    component_name: ExtensionName,
+    connection_id: tau_proto::ConnectionId,
+}
+
+impl Ord for InterceptorRegistration {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.priority
+            .cmp(&other.priority)
+            .then_with(|| {
+                self.component_name
+                    .as_str()
+                    .cmp(other.component_name.as_str())
+            })
+            .then_with(|| {
+                self.connection_id
+                    .as_str()
+                    .cmp(other.connection_id.as_str())
+            })
+    }
+}
+
+impl PartialOrd for InterceptorRegistration {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct InterceptorRegistry {
+    exact: BTreeMap<tau_proto::EventName, BTreeSet<InterceptorRegistration>>,
+    prefix: BTreeMap<String, BTreeSet<InterceptorRegistration>>,
+}
+
+impl InterceptorRegistry {
+    fn replace_for_connection(
+        &mut self,
+        connection_id: &str,
+        component_name: ExtensionName,
+        selectors: Vec<EventSelector>,
+        priority: InterceptionPriority,
+    ) {
+        self.remove_connection(connection_id);
+        let registration = InterceptorRegistration {
+            priority,
+            component_name,
+            connection_id: connection_id.into(),
+        };
+        for selector in selectors {
+            match selector {
+                EventSelector::Exact(name) => {
+                    self.exact
+                        .entry(name)
+                        .or_default()
+                        .insert(registration.clone());
+                }
+                EventSelector::Prefix(prefix) => {
+                    self.prefix
+                        .entry(prefix)
+                        .or_default()
+                        .insert(registration.clone());
+                }
+            }
+        }
+    }
+
+    fn remove_connection(&mut self, connection_id: &str) {
+        for registrations in self.exact.values_mut() {
+            registrations.retain(|r| r.connection_id.as_str() != connection_id);
+        }
+        self.exact
+            .retain(|_, registrations| !registrations.is_empty());
+        for registrations in self.prefix.values_mut() {
+            registrations.retain(|r| r.connection_id.as_str() != connection_id);
+        }
+        self.prefix
+            .retain(|_, registrations| !registrations.is_empty());
+    }
+
+    fn next_for(
+        &self,
+        event: &Event,
+        cursor: Option<(InterceptionPriority, &str)>,
+    ) -> Option<InterceptorRegistration> {
+        let name = event.name();
+        if let Some(next) = self.next_in_set(self.exact.get(&name), cursor) {
+            return Some(next);
+        }
+        self.prefix
+            .iter()
+            .filter(|(prefix, _)| name.matches_prefix(prefix))
+            .filter_map(|(_, registrations)| self.next_in_set(Some(registrations), cursor))
+            .min()
+    }
+
+    fn next_in_set(
+        &self,
+        registrations: Option<&BTreeSet<InterceptorRegistration>>,
+        cursor: Option<(InterceptionPriority, &str)>,
+    ) -> Option<InterceptorRegistration> {
+        registrations?
+            .iter()
+            .find(|registration| {
+                cursor.is_none_or(|(priority, connection_id)| {
+                    priority < registration.priority
+                        || (priority == registration.priority
+                            && connection_id < registration.connection_id.as_str())
+                })
+            })
+            .cloned()
+    }
+}
 
 pub(crate) fn default_agent_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
     tau_agent::run(r, w).map_err(|e| e.to_string())
@@ -340,6 +458,7 @@ impl Harness {
             default_conversation_id,
             turn_state: TurnState::Idle,
             debug_log: None,
+            interceptors: InterceptorRegistry::default(),
             available_models,
             selected_model,
             selected_effort,
@@ -516,6 +635,7 @@ impl Harness {
             default_conversation_id,
             turn_state: TurnState::Idle,
             debug_log: None,
+            interceptors: InterceptorRegistry::default(),
             available_models,
             selected_model,
             selected_effort,
@@ -669,15 +789,40 @@ impl Harness {
     /// Publishes an event to both the event bus and the event log.
     fn publish_event(&mut self, source: Option<&str>, event: Event) {
         let transient = event.defaults_to_transient();
-        self.publish_event_with_transient(source, event, transient);
+        self.publish_event_with_interception(source, event, transient, None);
     }
 
-    fn publish_event_with_transient(
+    fn publish_event_with_interception(
         &mut self,
         source: Option<&str>,
         event: Event,
         transient: bool,
+        interception: Option<InterceptionPriority>,
     ) {
+        let cursor = match interception {
+            Some(priority) => Some((priority, source.unwrap_or(""))),
+            None => None,
+        };
+        if let Some(interceptor) = self.interceptors.next_for(&event, cursor) {
+            tracing::debug!(
+                target: "tau_harness::interception",
+                event = %event.name(),
+                priority = interceptor.priority.0,
+                component = %interceptor.component_name,
+                connection_id = %interceptor.connection_id,
+                "intercepting event emission"
+            );
+            let _ = self.bus.send_to(
+                interceptor.connection_id.as_str(),
+                None,
+                Event::HarnessIntercepted(HarnessIntercepted {
+                    event: Box::new(event),
+                    transient,
+                    interception: Some(interceptor.priority),
+                }),
+            );
+            return;
+        }
         self.persist_session_event(source, &event, transient);
         let seq = self
             .event_log
@@ -971,6 +1116,20 @@ impl Harness {
                     .set_subscriptions(source_id, subscribe.selectors.clone())?;
                 self.publish_event(Some(source_id), Event::LifecycleSubscribe(subscribe));
             }
+            Event::LifecycleIntercept(intercept) => {
+                let component_name = self
+                    .bus
+                    .connection(source_id)
+                    .map(|m| ExtensionName::from(m.name.clone()))
+                    .unwrap_or_else(|| ExtensionName::from(source_id.to_owned()));
+                self.interceptors.replace_for_connection(
+                    source_id,
+                    component_name,
+                    intercept.selectors.clone(),
+                    intercept.priority,
+                );
+                self.publish_event(Some(source_id), Event::LifecycleIntercept(intercept));
+            }
             Event::LifecycleReady(ready) => {
                 self.emit_extension_ready(source_id);
                 self.publish_event(Some(source_id), Event::LifecycleReady(ready));
@@ -978,7 +1137,12 @@ impl Harness {
                 self.try_advance_queue();
             }
             Event::EmitEvent(emit) => {
-                self.publish_event_with_transient(Some(source_id), *emit.event, emit.transient);
+                self.publish_event_with_interception(
+                    Some(source_id),
+                    *emit.event,
+                    emit.transient,
+                    emit.interception,
+                );
             }
             Event::ToolRegister(ToolRegister { tool }) => {
                 let _ = self.registry.register(source_id, tool);
@@ -1286,6 +1450,7 @@ impl Harness {
 
     fn handle_disconnect(&mut self, connection_id: &str) {
         self.remove_discovered_context(connection_id);
+        self.interceptors.remove_connection(connection_id);
         self.maybe_complete_session_init_for_disconnect(connection_id);
         self.fail_pending_tool_calls_for_connection(connection_id);
         self.set_extension_state(connection_id, ExtensionState::Disconnected);

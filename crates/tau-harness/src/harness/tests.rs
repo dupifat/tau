@@ -11,9 +11,9 @@ use tau_core::{
 };
 use tau_proto::{
     AgentResponseFinished, AgentToolCall, CborValue, Event, EventReader, EventSelector,
-    EventWriter, ExtAgentQuery, LifecycleDisconnect, LifecycleSubscribe, SessionPromptCreated,
-    SessionPromptId, ToolCallId, ToolName, ToolResult, ToolSideEffects, ToolSpec,
-    UiPromptSubmitted,
+    EventWriter, ExtAgentQuery, InterceptionPriority, LifecycleDisconnect, LifecycleIntercept,
+    LifecycleSubscribe, SessionPromptCreated, SessionPromptId, ToolCallId, ToolName, ToolResult,
+    ToolSideEffects, ToolSpec, UiPromptDraft, UiPromptSubmitted,
 };
 use tempfile::TempDir;
 
@@ -3562,4 +3562,326 @@ fn read_prompt_created(h: &Harness, spid: &SessionPromptId) -> SessionPromptCrea
             _ => {}
         }
     }
+}
+
+fn intercepted_payload(
+    events: &Arc<Mutex<Vec<RoutedEvent>>>,
+) -> (Event, bool, Option<InterceptionPriority>) {
+    let events = events.lock().expect("events mutex");
+    let intercepted = events
+        .iter()
+        .find_map(|routed| match &routed.event {
+            Event::HarnessIntercepted(intercepted) => Some(intercepted),
+            _ => None,
+        })
+        .expect("intercepted event delivered");
+    (
+        (*intercepted.event).clone(),
+        intercepted.transient,
+        intercepted.interception,
+    )
+}
+
+fn draft_event(text: &str) -> Event {
+    Event::UiPromptDraft(UiPromptDraft {
+        session_id: "s1".into(),
+        text: text.to_owned(),
+    })
+}
+
+#[test]
+fn interception_exact_selector_intercepts_before_log() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let interceptor = connect_test_tool(&mut h, "interceptor");
+    let start_seq = h.event_log.next_seq();
+
+    h.handle_extension_event(
+        "interceptor",
+        Event::LifecycleIntercept(LifecycleIntercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+            priority: InterceptionPriority(0),
+        }),
+    )
+    .expect("intercept registration");
+    let after_registration_seq = h.event_log.next_seq();
+
+    h.publish_event(None, draft_event("held"));
+
+    let (event, transient, cursor) = intercepted_payload(&interceptor);
+    assert_eq!(event, draft_event("held"));
+    assert!(
+        transient,
+        "UiPromptDraft default transient flag is preserved"
+    );
+    assert_eq!(cursor, Some(InterceptionPriority(0)));
+    assert_eq!(h.event_log.next_seq(), after_registration_seq);
+    assert!(after_registration_seq < start_seq + 2);
+}
+
+#[test]
+fn interception_drop_prevents_final_delivery() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        Event::LifecycleIntercept(LifecycleIntercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+            priority: InterceptionPriority(0),
+        }),
+    )
+    .expect("intercept registration");
+    let after_registration_seq = h.event_log.next_seq();
+
+    h.publish_event(None, draft_event("dropped"));
+
+    assert_eq!(h.event_log.next_seq(), after_registration_seq);
+}
+
+#[test]
+fn interception_redelivery_reaches_log_after_last_interceptor() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        Event::LifecycleIntercept(LifecycleIntercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+            priority: InterceptionPriority(0),
+        }),
+    )
+    .expect("intercept registration");
+    let after_registration_seq = h.event_log.next_seq();
+
+    h.handle_extension_event(
+        "interceptor",
+        Event::EmitEvent(tau_proto::EmitEvent {
+            event: Box::new(draft_event("released")),
+            transient: true,
+            interception: Some(InterceptionPriority(0)),
+        }),
+    )
+    .expect("redelivery");
+
+    let entry = h
+        .event_log
+        .get_next_from(after_registration_seq)
+        .expect("released event in log");
+    assert_eq!(entry.event, draft_event("released"));
+}
+
+#[test]
+fn interception_redelivery_can_modify_event() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        Event::LifecycleIntercept(LifecycleIntercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+            priority: InterceptionPriority(0),
+        }),
+    )
+    .expect("intercept registration");
+    let after_registration_seq = h.event_log.next_seq();
+
+    h.handle_extension_event(
+        "interceptor",
+        Event::EmitEvent(tau_proto::EmitEvent {
+            event: Box::new(draft_event("modified")),
+            transient: true,
+            interception: Some(InterceptionPriority(0)),
+        }),
+    )
+    .expect("redelivery");
+
+    let entry = h
+        .event_log
+        .get_next_from(after_registration_seq)
+        .expect("modified event in log");
+    assert_eq!(entry.event, draft_event("modified"));
+}
+
+#[test]
+fn interception_priority_orders_lower_values_first() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let low = connect_test_tool(&mut h, "low");
+    let high = connect_test_tool(&mut h, "high");
+    for (name, priority) in [("low", 10), ("high", 0)] {
+        h.handle_extension_event(
+            name,
+            Event::LifecycleIntercept(LifecycleIntercept {
+                selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+                priority: InterceptionPriority(priority),
+            }),
+        )
+        .expect("intercept registration");
+    }
+
+    h.publish_event(None, draft_event("ordered"));
+
+    assert!(
+        high.lock()
+            .expect("high events")
+            .iter()
+            .any(|event| matches!(event.event, Event::HarnessIntercepted(_)))
+    );
+    assert!(
+        !low.lock()
+            .expect("low events")
+            .iter()
+            .any(|event| matches!(event.event, Event::HarnessIntercepted(_)))
+    );
+}
+
+#[test]
+fn interception_same_priority_orders_by_component_name_and_redelivery_continues() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let alpha = connect_test_tool(&mut h, "alpha");
+    let beta = connect_test_tool(&mut h, "beta");
+    for name in ["beta", "alpha"] {
+        h.handle_extension_event(
+            name,
+            Event::LifecycleIntercept(LifecycleIntercept {
+                selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+                priority: InterceptionPriority(0),
+            }),
+        )
+        .expect("intercept registration");
+    }
+
+    h.publish_event(None, draft_event("chain"));
+    assert!(
+        alpha
+            .lock()
+            .expect("alpha events")
+            .iter()
+            .any(|event| matches!(event.event, Event::HarnessIntercepted(_)))
+    );
+    assert!(
+        !beta
+            .lock()
+            .expect("beta events")
+            .iter()
+            .any(|event| matches!(event.event, Event::HarnessIntercepted(_)))
+    );
+
+    h.handle_extension_event(
+        "alpha",
+        Event::EmitEvent(tau_proto::EmitEvent {
+            event: Box::new(draft_event("chain")),
+            transient: true,
+            interception: Some(InterceptionPriority(0)),
+        }),
+    )
+    .expect("redelivery");
+    assert!(
+        beta.lock()
+            .expect("beta events")
+            .iter()
+            .any(|event| matches!(event.event, Event::HarnessIntercepted(_)))
+    );
+}
+
+#[test]
+fn interception_exact_beats_prefix_even_with_lower_prefix_priority() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let exact = connect_test_tool(&mut h, "exact");
+    let prefix = connect_test_tool(&mut h, "prefix");
+    h.handle_extension_event(
+        "prefix",
+        Event::LifecycleIntercept(LifecycleIntercept {
+            selectors: vec![EventSelector::Prefix("ui".to_owned())],
+            priority: InterceptionPriority(-100),
+        }),
+    )
+    .expect("prefix registration");
+    h.handle_extension_event(
+        "exact",
+        Event::LifecycleIntercept(LifecycleIntercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+            priority: InterceptionPriority(100),
+        }),
+    )
+    .expect("exact registration");
+
+    h.publish_event(None, draft_event("exact"));
+
+    assert!(
+        exact
+            .lock()
+            .expect("exact events")
+            .iter()
+            .any(|event| matches!(event.event, Event::HarnessIntercepted(_)))
+    );
+    assert!(
+        !prefix
+            .lock()
+            .expect("prefix events")
+            .iter()
+            .any(|event| matches!(event.event, Event::HarnessIntercepted(_)))
+    );
+}
+
+#[test]
+fn interception_redelivery_none_restarts_from_beginning() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let interceptor = connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        Event::LifecycleIntercept(LifecycleIntercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+            priority: InterceptionPriority(0),
+        }),
+    )
+    .expect("intercept registration");
+
+    h.publish_event(None, draft_event("again"));
+    h.handle_extension_event(
+        "interceptor",
+        Event::EmitEvent(tau_proto::EmitEvent {
+            event: Box::new(draft_event("again")),
+            transient: true,
+            interception: None,
+        }),
+    )
+    .expect("redelivery");
+
+    let count = interceptor
+        .lock()
+        .expect("events")
+        .iter()
+        .filter(|event| matches!(event.event, Event::HarnessIntercepted(_)))
+        .count();
+    assert_eq!(count, 2);
+}
+
+#[test]
+fn interception_disconnect_clears_registration() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        Event::LifecycleIntercept(LifecycleIntercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+            priority: InterceptionPriority(0),
+        }),
+    )
+    .expect("intercept registration");
+    h.handle_disconnect("interceptor");
+    let after_disconnect_seq = h.event_log.next_seq();
+
+    h.publish_event(None, draft_event("not intercepted"));
+
+    let entry = h
+        .event_log
+        .get_next_from(after_disconnect_seq)
+        .expect("event reaches log");
+    assert_eq!(entry.event, draft_event("not intercepted"));
 }

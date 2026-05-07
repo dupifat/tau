@@ -26,7 +26,7 @@ use crate::{
 /// closed set. Unknown categories — e.g. from a future extension that
 /// invents its own family — round-trip through [`EventCategory::Other`]
 /// without losing fidelity.
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub enum EventCategory {
     Lifecycle,
     Tool,
@@ -100,7 +100,7 @@ impl fmt::Display for EventCategory {
 /// closed enum. Borrowed `&'static str` for the well-known constants
 /// declared on [`EventName`]; owned `String` for anything decoded
 /// from the wire or constructed at runtime.
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct EventCall(std::borrow::Cow<'static, str>);
 
 impl EventCall {
@@ -143,7 +143,7 @@ impl From<String> for EventCall {
 /// values directly on this type (`EventName::TOOL_REGISTER`, etc.) so
 /// match-arm-style call sites keep their compactness while gaining
 /// a typed `category` to branch on.
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct EventName {
     pub category: EventCategory,
     pub call: EventCall,
@@ -187,6 +187,7 @@ impl EventName {
 
     pub const LIFECYCLE_HELLO: Self = Self::from_static(EventCategory::Lifecycle, "hello");
     pub const LIFECYCLE_SUBSCRIBE: Self = Self::from_static(EventCategory::Lifecycle, "subscribe");
+    pub const LIFECYCLE_INTERCEPT: Self = Self::from_static(EventCategory::Lifecycle, "intercept");
     pub const LIFECYCLE_READY: Self = Self::from_static(EventCategory::Lifecycle, "ready");
     pub const LIFECYCLE_DISCONNECT: Self =
         Self::from_static(EventCategory::Lifecycle, "disconnect");
@@ -234,6 +235,7 @@ impl EventName {
     pub const HARNESS_EFFORTS_AVAILABLE: Self =
         Self::from_static(EventCategory::Harness, "efforts_available");
     pub const HARNESS_EMIT: Self = Self::from_static(EventCategory::Harness, "emit");
+    pub const HARNESS_INTERCEPTED: Self = Self::from_static(EventCategory::Harness, "intercepted");
 
     pub const UI_PROMPT_SUBMITTED: Self = Self::from_static(EventCategory::Ui, "prompt_submitted");
     pub const UI_MODEL_SELECT: Self = Self::from_static(EventCategory::Ui, "model_select");
@@ -375,6 +377,21 @@ pub struct LifecycleHello {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LifecycleSubscribe {
     pub selectors: Vec<EventSelector>,
+}
+
+/// Interception priority. Lower numeric values run first.
+#[derive(
+    Clone, Copy, Debug, Default, Eq, PartialEq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct InterceptionPriority(pub i64);
+
+/// Interception request describing which event emissions a participant wants
+/// to handle before they reach the event log and regular subscribers.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LifecycleIntercept {
+    pub selectors: Vec<EventSelector>,
+    pub priority: InterceptionPriority,
 }
 
 /// Readiness notification emitted after startup or handshake.
@@ -942,6 +959,22 @@ pub struct EmitEvent {
     pub event: Box<Event>,
     #[serde(default, skip_serializing_if = "core::ops::Not::not")]
     pub transient: bool,
+    /// Redelivery cursor. `None` starts interception from the beginning.
+    /// When set by an interceptor, the harness resumes after that priority
+    /// and the sending component at that priority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interception: Option<InterceptionPriority>,
+}
+
+/// Directed harness → interceptor message carrying an event emission that has
+/// not reached the event log yet.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HarnessIntercepted {
+    pub event: Box<Event>,
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub transient: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interception: Option<InterceptionPriority>,
 }
 
 /// Receiver → sender acknowledgement that all log events with id
@@ -1398,6 +1431,8 @@ pub enum Event {
     LifecycleHello(LifecycleHello),
     #[serde(rename = "lifecycle.subscribe")]
     LifecycleSubscribe(LifecycleSubscribe),
+    #[serde(rename = "lifecycle.intercept")]
+    LifecycleIntercept(LifecycleIntercept),
     #[serde(rename = "lifecycle.ready")]
     LifecycleReady(LifecycleReady),
     #[serde(rename = "lifecycle.disconnect")]
@@ -1466,6 +1501,8 @@ pub enum Event {
     HarnessEffortsAvailable(HarnessEffortsAvailable),
     #[serde(rename = "harness.emit")]
     EmitEvent(EmitEvent),
+    #[serde(rename = "harness.intercepted")]
+    HarnessIntercepted(HarnessIntercepted),
 
     // UI
     #[serde(rename = "ui.prompt_submitted")]
@@ -1533,6 +1570,7 @@ impl Event {
         match self {
             Self::LifecycleHello(_) => EventName::LIFECYCLE_HELLO,
             Self::LifecycleSubscribe(_) => EventName::LIFECYCLE_SUBSCRIBE,
+            Self::LifecycleIntercept(_) => EventName::LIFECYCLE_INTERCEPT,
             Self::LifecycleReady(_) => EventName::LIFECYCLE_READY,
             Self::LifecycleDisconnect(_) => EventName::LIFECYCLE_DISCONNECT,
             Self::LifecycleConfigure(_) => EventName::LIFECYCLE_CONFIGURE,
@@ -1564,6 +1602,7 @@ impl Event {
             Self::HarnessEffortChanged(_) => EventName::HARNESS_EFFORT_CHANGED,
             Self::HarnessEffortsAvailable(_) => EventName::HARNESS_EFFORTS_AVAILABLE,
             Self::EmitEvent(_) => EventName::HARNESS_EMIT,
+            Self::HarnessIntercepted(_) => EventName::HARNESS_INTERCEPTED,
             Self::UiPromptSubmitted(_) => EventName::UI_PROMPT_SUBMITTED,
             Self::UiPromptDraft(_) => EventName::UI_PROMPT_DRAFT,
             Self::UiModelSelect(_) => EventName::UI_MODEL_SELECT,

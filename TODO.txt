@@ -1,0 +1,1 @@
+- Enforce unique component names at runtime; interception tie-breaks currently assume names are unique.

@@ -1941,6 +1941,158 @@ fn skill_tool_returns_error_for_unknown_skill() {
 }
 
 #[test]
+fn skill_load_unknown_attaches_split_name_search_suggestions() {
+    // Agents routinely guess at skill names; when the load misses we
+    // free-search using the requested name split on `-`/`_` so the
+    // error response carries plausible alternatives.
+    //
+    // Use synthetic tokens that won't collide with the user's real
+    // `~/.agents/skills` library that `echo_harness` discovers, then
+    // wipe `discovered_skills` so the assertions are deterministic.
+    const PREFIX: &str = "qzxtest";
+    const TKLANG: &str = "qzxlang";
+    const TKSTYLE: &str = "qzxstyle";
+
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+
+    let make_skill = |name: &str, description: &str| {
+        let dir = td.path().join(name);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("SKILL.md");
+        std::fs::write(
+            &path,
+            format!("---\nname: {name}\ndescription: {description}\n---\nbody"),
+        )
+        .expect("write");
+        path
+    };
+    let lang_name = format!("{PREFIX}-{TKLANG}-helper");
+    let style_name = format!("{PREFIX}-{TKSTYLE}-guide");
+    let decoy_name = "totally-unrelated-skill".to_owned();
+    let lang_path = make_skill(&lang_name, &format!("{TKLANG} helpers"));
+    let style_path = make_skill(&style_name, &format!("{TKSTYLE} guide"));
+    let decoy_path = make_skill(&decoy_name, "unrelated thing");
+
+    let mut h = echo_harness(&sp).expect("start");
+    h.discovered_skills.clear();
+    for (name, desc, path) in [
+        (
+            lang_name.clone(),
+            format!("{TKLANG} helpers"),
+            lang_path,
+        ),
+        (
+            style_name.clone(),
+            format!("{TKSTYLE} guide"),
+            style_path,
+        ),
+        (
+            decoy_name.clone(),
+            "unrelated thing".to_owned(),
+            decoy_path,
+        ),
+    ] {
+        h.discovered_skills.insert(
+            tau_proto::SkillName::from(name.as_str()),
+            DiscoveredSkill {
+                source_id: "skills".into(),
+                description: desc,
+                file_path: path,
+                add_to_prompt: false,
+            },
+        );
+    }
+
+    let requested = format!("{PREFIX}-{TKLANG}-{TKSTYLE}");
+    append_user_message_via_event(&mut h, "s1", "load skill");
+    let cid = h.default_conversation_id.clone();
+    seed_tools_running(&mut h, &cid, vec!["call-miss".into()]);
+    let call = AgentToolCall {
+        id: "call-miss".into(),
+        name: "skill".into(),
+        arguments: CborValue::Map(vec![
+            (
+                CborValue::Text("action".to_owned()),
+                CborValue::Text("load".to_owned()),
+            ),
+            (
+                CborValue::Text("name".to_owned()),
+                CborValue::Text(requested.clone()),
+            ),
+        ]),
+    };
+    h.handle_skill_tool_call(&cid, &call).expect("skill call");
+
+    let events = h.store.session_events("s1").expect("session events");
+    let err = events
+        .iter()
+        .find_map(|entry| match &entry.event {
+            Event::ToolError(e) if e.call_id.as_str() == "call-miss" => Some(e),
+            _ => None,
+        })
+        .expect("tool error");
+    assert!(
+        err.message.contains("unknown skill"),
+        "unexpected message: {}",
+        err.message
+    );
+    let details = err.details.as_ref().expect("details");
+    let CborValue::Map(entries) = details else {
+        panic!("details should be a map: {details:?}");
+    };
+    let get = |key: &str| entries.iter().find_map(|(k, v)| match k {
+        CborValue::Text(s) if s == key => Some(v),
+        _ => None,
+    });
+    assert_eq!(
+        get("name"),
+        Some(&CborValue::Text(requested.clone())),
+        "details.name should echo the requested name"
+    );
+    let queries = match get("queries") {
+        Some(CborValue::Array(a)) => a.clone(),
+        other => panic!("queries should be array: {other:?}"),
+    };
+    let needles: Vec<String> = queries
+        .iter()
+        .filter_map(|v| match v {
+            CborValue::Text(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(needles, vec![PREFIX, TKLANG, TKSTYLE]);
+    let matches = match get("matches") {
+        Some(CborValue::Array(a)) => a.clone(),
+        other => panic!("matches should be array: {other:?}"),
+    };
+    let match_names: Vec<String> = matches
+        .iter()
+        .filter_map(|m| match m {
+            CborValue::Map(fields) => fields.iter().find_map(|(k, v)| match (k, v) {
+                (CborValue::Text(k), CborValue::Text(v)) if k == "name" => Some(v.clone()),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .collect();
+    // Both helpers should be suggested (each shares two needles with
+    // the requested name); the unrelated decoy must not appear.
+    assert!(
+        match_names.iter().any(|n| n == &lang_name),
+        "expected {lang_name} in suggestions, got: {match_names:?}"
+    );
+    assert!(
+        match_names.iter().any(|n| n == &style_name),
+        "expected {style_name} in suggestions, got: {match_names:?}"
+    );
+    assert!(
+        !match_names.iter().any(|n| n == &decoy_name),
+        "unrelated decoy leaked into suggestions: {match_names:?}"
+    );
+}
+
+#[test]
 fn skill_tool_search_matches_name_description_and_optional_content() {
     // The search action backs progressive skill discovery: when most
     // skills are not advertised at session start, the agent must be

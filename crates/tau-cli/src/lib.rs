@@ -1416,6 +1416,24 @@ fn websearch_stats_suffix(text: &str) -> ToolSuffixSegment {
     }
 }
 
+/// Render the `queries` array from a skill search/load-error result
+/// as a single space-separated string. Non-text entries are skipped
+/// rather than failing the render.
+fn format_skill_query_list(queries: &[CborValue]) -> String {
+    let mut out = String::new();
+    for q in queries {
+        if let CborValue::Text(s) = q {
+            if !s.is_empty() {
+                if !out.is_empty() {
+                    out.push(' ');
+                }
+                out.push_str(s);
+            }
+        }
+    }
+    out
+}
+
 /// Error-path display: `<tool_name> <args> <err>`.
 fn format_tool_error(tool_name: &str, args: String, error_message: &str) -> ToolCallDisplay {
     ToolCallDisplay {
@@ -1560,36 +1578,62 @@ fn format_tool_completion(
         // the generic fallback it will land in the catch-all below.
         "skill" => {
             // Distinguish search vs load by the result shape: search
-            // results carry `query` + `matches`, load results carry
-            // `name` + `content`.
-            if let Some(query) = cbor_text_field(details, "query") {
-                let scope = if cbor_bool_field(details, "search_content").unwrap_or(false) {
-                    " [content]"
-                } else {
-                    ""
-                };
-                let args = format!("search: {query}{scope}");
-                if let Some(msg) = error_message {
-                    format_tool_error("skill", args, msg)
-                } else {
-                    let count = cbor_array_field(details, "matches")
-                        .map(<[CborValue]>::len)
-                        .unwrap_or(0);
-                    ToolCallDisplay {
-                        tool_name: "skill".into(),
-                        args,
-                        suffixes: vec![info_suffix(format!("({count} matches)")), ok_suffix()],
+            // results carry `queries` + `matches`; load successes
+            // carry `name` + `content`; load failures carry `name`
+            // plus a search-shaped `queries` + `matches` echo built
+            // from the requested name's word-like tokens.
+            let queries = cbor_array_field(details, "queries")
+                .map(format_skill_query_list)
+                .filter(|s| !s.is_empty());
+            let load_name = cbor_text_field(details, "name");
+            let match_count = cbor_array_field(details, "matches")
+                .map(<[CborValue]>::len)
+                .unwrap_or(0);
+            let scope = if cbor_bool_field(details, "search_content").unwrap_or(false) {
+                " [content]"
+            } else {
+                ""
+            };
+            match (queries, load_name.clone(), error_message) {
+                // Failed load with auto-search hint. Show the
+                // requested name as args and surface the suggestion
+                // count next to the error so the user can tell at a
+                // glance whether to expect useful follow-ups.
+                (Some(_), Some(name), Some(msg)) => ToolCallDisplay {
+                    tool_name: "skill".into(),
+                    args: name,
+                    suffixes: vec![
+                        info_suffix(format!("({match_count} suggestions)")),
+                        err_suffix(Some(msg)),
+                    ],
+                },
+                // Plain skill search (success or error).
+                (Some(query_str), _, error_message) => {
+                    let args = format!("search: {query_str}{scope}");
+                    if let Some(msg) = error_message {
+                        format_tool_error("skill", args, msg)
+                    } else {
+                        ToolCallDisplay {
+                            tool_name: "skill".into(),
+                            args,
+                            suffixes: vec![
+                                info_suffix(format!("({match_count} matches)")),
+                                ok_suffix(),
+                            ],
+                        }
                     }
                 }
-            } else {
-                let name = cbor_text_field(details, "name").unwrap_or_default();
-                if let Some(msg) = error_message {
-                    format_tool_error("skill", name, msg)
-                } else {
-                    ToolCallDisplay {
-                        tool_name: "skill".into(),
-                        args: name,
-                        suffixes: vec![info_suffix("loaded".to_owned()), ok_suffix()],
+                // Plain skill load (success or non-suggestion error).
+                (None, _, error_message) => {
+                    let name = load_name.unwrap_or_default();
+                    if let Some(msg) = error_message {
+                        format_tool_error("skill", name, msg)
+                    } else {
+                        ToolCallDisplay {
+                            tool_name: "skill".into(),
+                            args: name,
+                            suffixes: vec![info_suffix("loaded".to_owned()), ok_suffix()],
+                        }
                     }
                 }
             }

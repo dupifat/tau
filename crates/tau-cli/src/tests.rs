@@ -1119,6 +1119,89 @@ fn edit_completion_uses_diff_chip() {
     ));
 }
 
+/// A successful skill load shows the skill name and a `loaded`
+/// confirmation; a missed load shows the requested name, the count
+/// of split-name suggestions returned in `details`, and the error
+/// message — so the user can see at a glance whether the agent has
+/// useful follow-ups available.
+#[test]
+fn skill_completion_renders_load_paths() {
+    // Successful load.
+    let load_ok = CborValue::Map(vec![
+        (
+            CborValue::Text("name".into()),
+            CborValue::Text("my-skill".into()),
+        ),
+        (
+            CborValue::Text("content".into()),
+            CborValue::Text("body".into()),
+        ),
+    ]);
+    let ok = super::format_tool_completion("skill", &load_ok, None);
+    assert_eq!(ok.args, "my-skill");
+    assert_eq!(ok.suffixes.len(), 2);
+    assert_eq!(ok.suffixes[0].text, "loaded");
+    assert!(matches!(ok.suffixes[0].status, super::ToolStatus::Info));
+    assert_eq!(ok.suffixes[1].text, "ok");
+
+    // Failed load with split-name search suggestions.
+    let load_miss = CborValue::Map(vec![
+        (
+            CborValue::Text("name".into()),
+            CborValue::Text("foo-bar-baz".into()),
+        ),
+        (
+            CborValue::Text("queries".into()),
+            CborValue::Array(vec![
+                CborValue::Text("foo".into()),
+                CborValue::Text("bar".into()),
+                CborValue::Text("baz".into()),
+            ]),
+        ),
+        (
+            CborValue::Text("search_content".into()),
+            CborValue::Bool(false),
+        ),
+        (
+            CborValue::Text("matches".into()),
+            CborValue::Array(vec![
+                CborValue::Map(vec![(
+                    CborValue::Text("name".into()),
+                    CborValue::Text("foo-bar".into()),
+                )]),
+                CborValue::Map(vec![(
+                    CborValue::Text("name".into()),
+                    CborValue::Text("baz-helper".into()),
+                )]),
+            ]),
+        ),
+    ]);
+    let miss =
+        super::format_tool_completion("skill", &load_miss, Some("unknown skill: foo-bar-baz"));
+    assert_eq!(miss.args, "foo-bar-baz");
+    assert_eq!(miss.suffixes.len(), 2);
+    assert_eq!(miss.suffixes[0].text, "(2 suggestions)");
+    assert!(matches!(
+        miss.suffixes[0].status,
+        super::ToolStatus::Info
+    ));
+    assert!(miss.suffixes[1].text.contains("unknown skill"));
+    assert!(matches!(
+        miss.suffixes[1].status,
+        super::ToolStatus::Error
+    ));
+
+    // Plain load error without suggestions (e.g. missing argument)
+    // still renders as a plain error.
+    let plain_err = CborValue::Null;
+    let plain = super::format_tool_completion("skill", &plain_err, Some("missing argument"));
+    assert_eq!(plain.suffixes.len(), 1);
+    assert!(matches!(
+        plain.suffixes[0].status,
+        super::ToolStatus::Error
+    ));
+}
+
 /// Reproduces the user-reported bug: send 3 prompts during the
 /// first response's streaming. After all responses complete, the
 /// prompt must be visible and all 3 responses rendered.

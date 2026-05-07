@@ -3122,11 +3122,25 @@ impl Harness {
             });
         };
         let Some(skill) = self.discovered_skills.get(name) else {
+            // Same agent that asked for `dpc-rust-code-style` very likely
+            // wanted one of the skills containing "rust" or "style", so
+            // run a free search using the requested name split into
+            // word-like tokens. Returning the hits in `details` lets the
+            // agent pick the right name on a follow-up call without
+            // having to issue an explicit `search` first; the
+            // surrounding event is still an error so it can't be
+            // mistaken for a successful load.
+            let needles = split_skill_name_into_needles(name);
+            let matches = if needles.is_empty() {
+                Vec::new()
+            } else {
+                self.search_discovered_skills(&needles, false)
+            };
             return Event::ToolError(tau_proto::ToolError {
                 call_id: call_id.clone(),
                 tool_name: tool_name.clone(),
                 message: format!("unknown skill: {name}"),
-                details: None,
+                details: Some(skill_load_not_found_details(name, &needles, &matches)),
             });
         };
         match std::fs::read_to_string(&skill.file_path) {
@@ -3174,11 +3188,58 @@ impl Harness {
             }
         };
         let search_content = cbor_map_bool(arguments, "search_content").unwrap_or(false);
+        let hits = self.search_discovered_skills(&needles, search_content);
 
-        // Score each skill by how many of the needles match it. A skill
-        // that matches more terms is more likely the right answer when
-        // the agent fired several plausible spellings at the same time
-        // ("commit", "git commit", "version control").
+        let matches = CborValue::Array(
+            hits.into_iter()
+                .map(|(hit_count, name, description)| {
+                    CborValue::Map(vec![
+                        (
+                            CborValue::Text("name".to_owned()),
+                            CborValue::Text(name),
+                        ),
+                        (
+                            CborValue::Text("description".to_owned()),
+                            CborValue::Text(description),
+                        ),
+                        (
+                            CborValue::Text("hit_count".to_owned()),
+                            CborValue::Integer((hit_count as u64).into()),
+                        ),
+                    ])
+                })
+                .collect(),
+        );
+        let queries_echo =
+            CborValue::Array(needles.iter().map(|n| CborValue::Text(n.clone())).collect());
+        Event::ToolResult(tau_proto::ToolResult {
+            call_id: call_id.clone(),
+            tool_name: tool_name.clone(),
+            result: CborValue::Map(vec![
+                (CborValue::Text("queries".to_owned()), queries_echo),
+                (
+                    CborValue::Text("search_content".to_owned()),
+                    CborValue::Bool(search_content),
+                ),
+                (CborValue::Text("matches".to_owned()), matches),
+            ]),
+        })
+    }
+
+    /// Score each discovered skill by how many of `needles` match its
+    /// name, description, and (when `search_content`) body. A skill
+    /// that matches more terms is more likely the right answer when
+    /// the agent fired several plausible spellings at the same time
+    /// ("commit", "git commit", "version control"). Returns
+    /// `(hit_count, name, description)` rows sorted by descending
+    /// hit count, with ties broken by name for deterministic output.
+    ///
+    /// Needles are expected to already be lowercased.
+    fn search_discovered_skills(
+        &self,
+        needles: &[String],
+        search_content: bool,
+    ) -> Vec<(usize, String, String)> {
         let mut hits: Vec<(usize, &tau_proto::SkillName, &DiscoveredSkill)> = self
             .discovered_skills
             .iter()
@@ -3211,47 +3272,84 @@ impl Harness {
                 (hit_count > 0).then_some((hit_count, name, skill))
             })
             .collect();
-        // Higher hit_count first; tie-break on name for deterministic
-        // output across runs.
         hits.sort_by(|(ac, an, _), (bc, bn, _)| {
             bc.cmp(ac).then_with(|| an.as_str().cmp(bn.as_str()))
         });
-
-        let matches = CborValue::Array(
-            hits.into_iter()
-                .map(|(hit_count, name, skill)| {
-                    CborValue::Map(vec![
-                        (
-                            CborValue::Text("name".to_owned()),
-                            CborValue::Text(name.as_str().to_owned()),
-                        ),
-                        (
-                            CborValue::Text("description".to_owned()),
-                            CborValue::Text(skill.description.clone()),
-                        ),
-                        (
-                            CborValue::Text("hit_count".to_owned()),
-                            CborValue::Integer((hit_count as u64).into()),
-                        ),
-                    ])
-                })
-                .collect(),
-        );
-        let queries_echo =
-            CborValue::Array(needles.iter().map(|n| CborValue::Text(n.clone())).collect());
-        Event::ToolResult(tau_proto::ToolResult {
-            call_id: call_id.clone(),
-            tool_name: tool_name.clone(),
-            result: CborValue::Map(vec![
-                (CborValue::Text("queries".to_owned()), queries_echo),
-                (
-                    CborValue::Text("search_content".to_owned()),
-                    CborValue::Bool(search_content),
-                ),
-                (CborValue::Text("matches".to_owned()), matches),
-            ]),
-        })
+        hits.into_iter()
+            .map(|(hit_count, name, skill)| {
+                (hit_count, name.as_str().to_owned(), skill.description.clone())
+            })
+            .collect()
     }
+}
+
+/// Split a skill name into lowercased word-like needles by treating
+/// `-` and `_` as separators. Used when an agent's `load` request
+/// names a skill that doesn't exist: searching the discovered skills
+/// for these needles often surfaces the one the agent actually
+/// wanted (e.g. `dpc-rust-code-style` → `[dpc, rust, code, style]`).
+/// Empty parts are dropped; duplicates are removed in first-seen
+/// order so a name like `foo-foo` doesn't double-count itself.
+fn split_skill_name_into_needles(name: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for part in name.split(['-', '_']) {
+        if part.is_empty() {
+            continue;
+        }
+        let lower = part.to_lowercase();
+        if !out.iter().any(|existing| existing == &lower) {
+            out.push(lower);
+        }
+    }
+    out
+}
+
+/// Build the `details` payload for a failed `skill` load. Mirrors
+/// the shape of a successful `search` result (`query`,
+/// `search_content`, `matches`) so a UI that already knows how to
+/// render skill-search hits can show the suggestion count next to
+/// the error, and so the agent reading the details on its next turn
+/// sees a familiar structure.
+fn skill_load_not_found_details(
+    name: &str,
+    needles: &[String],
+    matches: &[(usize, String, String)],
+) -> CborValue {
+    let matches_cbor = CborValue::Array(
+        matches
+            .iter()
+            .map(|(hit_count, skill_name, description)| {
+                CborValue::Map(vec![
+                    (
+                        CborValue::Text("name".to_owned()),
+                        CborValue::Text(skill_name.clone()),
+                    ),
+                    (
+                        CborValue::Text("description".to_owned()),
+                        CborValue::Text(description.clone()),
+                    ),
+                    (
+                        CborValue::Text("hit_count".to_owned()),
+                        CborValue::Integer((*hit_count as u64).into()),
+                    ),
+                ])
+            })
+            .collect(),
+    );
+    let queries_echo =
+        CborValue::Array(needles.iter().map(|n| CborValue::Text(n.clone())).collect());
+    CborValue::Map(vec![
+        (
+            CborValue::Text("name".to_owned()),
+            CborValue::Text(name.to_owned()),
+        ),
+        (CborValue::Text("queries".to_owned()), queries_echo),
+        (
+            CborValue::Text("search_content".to_owned()),
+            CborValue::Bool(false),
+        ),
+        (CborValue::Text("matches".to_owned()), matches_cbor),
+    ])
 }
 
 /// Parse the `query` argument of a `skill` tool call's `search` action

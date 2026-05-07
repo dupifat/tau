@@ -963,14 +963,17 @@ impl Term {
                 // Shift+Enter / Alt+Enter both insert a newline into
                 // the buffer rather than submitting — same affordance
                 // Slack/Discord/ChatGPT use. Shift+Enter only reaches
-                // us on terminals where the kitty keyboard protocol
-                // survives the push (kitty, foot, alacritty, recent
-                // iTerm2/WezTerm/Windows Terminal); Alt+Enter is the
-                // universal fallback because every terminal sends
-                // `\e\r` for it regardless of protocol negotiation.
-                // Legacy terminals without kitty support collapse
-                // Shift+Enter into a bare Enter and fall through to
-                // the submit arm below.
+                // us when the terminal stack emits CSI-u format (e.g.
+                // `\e[13;2u`): native kitty protocol, fixterms, or
+                // tmux 3.5+ with `extended-keys-format csi-u`.
+                // Crossterm does NOT parse the xterm modifyOtherKeys
+                // CSI-27 form (`\e[27;2;13~`), so tmux configured
+                // with `extended-keys-format xterm` will swallow it.
+                // Alt+Enter is the universal fallback because every
+                // terminal sends `\e\r` for it regardless of protocol
+                // negotiation. Legacy terminals collapse Shift+Enter
+                // into a bare Enter and fall through to the submit
+                // arm below.
                 {
                     let mut st = self.state.lock().expect("term state mutex poisoned");
                     st.completion = None;

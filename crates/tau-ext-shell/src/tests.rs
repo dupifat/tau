@@ -858,6 +858,92 @@ fn is_grep_match_line_classifies_match_and_context_lines() {
     assert!(!is_grep_match_line(""));
 }
 
+fn grep_args(pattern: &str, path: &str, extra: Vec<(CborValue, CborValue)>) -> CborValue {
+    let mut entries = vec![
+        (
+            CborValue::Text("pattern".to_owned()),
+            CborValue::Text(pattern.to_owned()),
+        ),
+        (
+            CborValue::Text("path".to_owned()),
+            CborValue::Text(path.to_owned()),
+        ),
+    ];
+    entries.extend(extra);
+    CborValue::Map(entries)
+}
+
+#[test]
+fn run_grep_counts_matches_across_directory() {
+    let tempdir = TempDir::new().expect("tempdir");
+    fs::write(tempdir.path().join("a.txt"), "alpha\nbeta\nalpha\n").expect("write a");
+    fs::write(tempdir.path().join("b.txt"), "alpha\n").expect("write b");
+
+    let args = grep_args("alpha", &tempdir.path().display().to_string(), vec![]);
+    let result = run_grep(&args).expect("grep");
+
+    assert_eq!(cbor_int_field(&result, "matches"), Some(3));
+}
+
+#[test]
+fn run_grep_counts_matches_in_single_file() {
+    // Regression: when `path` is a single file, rg drops the
+    // `PATH:` prefix from each line. Without `--with-filename` the
+    // match-line classifier misses every match and `matches` falls
+    // back to 0 even though output clearly contains hits.
+    let tempdir = TempDir::new().expect("tempdir");
+    let file = tempdir.path().join("single.txt");
+    fs::write(&file, "alpha\nbeta\nalpha\ngamma\nalpha\n").expect("write");
+
+    let args = grep_args("alpha", &file.display().to_string(), vec![]);
+    let result = run_grep(&args).expect("grep");
+
+    assert_eq!(cbor_int_field(&result, "matches"), Some(3));
+    let output = cbor_map_text(&result, "output").expect("output");
+    assert!(
+        output.contains(&format!("{}:1:alpha", file.display())),
+        "expected PATH:LINE:CONTENT shape, got: {output}"
+    );
+}
+
+#[test]
+fn run_grep_with_context_counts_only_match_lines() {
+    // Context lines (`PATH-LINE-CONTENT`) must not be counted as
+    // matches. Search a single file so we also exercise the
+    // `--with-filename` path.
+    let tempdir = TempDir::new().expect("tempdir");
+    let file = tempdir.path().join("single.txt");
+    fs::write(
+        &file,
+        "filler 1\nfiller 2\nalpha\nfiller 3\nfiller 4\nalpha\nfiller 5\n",
+    )
+    .expect("write");
+
+    let args = grep_args(
+        "alpha",
+        &file.display().to_string(),
+        vec![(
+            CborValue::Text("context".to_owned()),
+            CborValue::Integer(1.into()),
+        )],
+    );
+    let result = run_grep(&args).expect("grep");
+
+    // Two matches; surrounding context lines are present in output
+    // but must not inflate the count.
+    assert_eq!(cbor_int_field(&result, "matches"), Some(2));
+    let output = cbor_map_text(&result, "output").expect("output");
+    assert!(output.contains(":3:alpha"), "first match missing: {output}");
+    assert!(
+        output.contains(":6:alpha"),
+        "second match missing: {output}"
+    );
+    assert!(
+        output.contains("-2-filler 2"),
+        "context line missing: {output}"
+    );
+}
+
 #[test]
 fn truncate_tail_short_input_unchanged() {
     let input = "line 1\nline 2\nline 3";

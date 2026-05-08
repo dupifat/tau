@@ -1211,11 +1211,16 @@ fn run_grep(arguments: &CborValue) -> Result<CborValue, String> {
 
     let search_path = path.as_deref().unwrap_or(".");
 
-    // Build ripgrep arguments.
+    // Build ripgrep arguments. `--with-filename` keeps the
+    // `PATH:LINE:CONTENT` shape uniform even when `path` is a single
+    // file — without it rg drops the path prefix in that case, and our
+    // `is_grep_match_line` classifier (which keys off `:LINE:` vs
+    // `-LINE-` brackets) miscounts every line as context.
     let mut args: Vec<String> = vec![
         "--line-number".to_owned(),
         "--color=never".to_owned(),
         "--hidden".to_owned(),
+        "--with-filename".to_owned(),
     ];
     if ignore_case {
         args.push("--ignore-case".to_owned());

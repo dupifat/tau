@@ -34,6 +34,8 @@
     "system.info":          { fg: "dark_grey" },
     "system.info.important": { fg: "red", bold: true },
     "system.disconnect":    { fg: "red", bold: true },
+    "system.path":          { fg: "blue" },
+    "system.status":        { },
 
     // -- Model status --
     "model.status":         { fg: "dark_grey" },
@@ -48,6 +50,11 @@
 
     // -- Banner --
     "banner.accent":        { fg: "yellow" },
+    "banner.logo":          { fg: "yellow" },
+    "banner.name":          { fg: "white", bold: true },
+    "banner.version":       { fg: "dark_grey" },
+    "banner.build":         { fg: "dark_grey" },
+    "banner.pun":           { fg: "dark_yellow" },
 
     // -- Diffs --
     // Plain `+`/`-` lines tint the whole row. `Modify` lines (single-

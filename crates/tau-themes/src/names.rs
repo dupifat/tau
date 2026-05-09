@@ -38,6 +38,8 @@ pub const EXTENSION_LIFECYCLE: &str = "extension.lifecycle";
 pub const SYSTEM_INFO: &str = "system.info";
 pub const SYSTEM_INFO_IMPORTANT: &str = "system.info.important";
 pub const SYSTEM_DISCONNECT: &str = "system.disconnect";
+pub const SYSTEM_PATH: &str = "system.path";
+pub const SYSTEM_STATUS: &str = "system.status";
 
 // -- Model status --
 pub const MODEL_STATUS: &str = "model.status";
@@ -52,6 +54,11 @@ pub const PROMPT_MARKER: &str = "prompt.marker";
 
 // -- Banner --
 pub const BANNER_ACCENT: &str = "banner.accent";
+pub const BANNER_LOGO: &str = "banner.logo";
+pub const BANNER_NAME: &str = "banner.name";
+pub const BANNER_VERSION: &str = "banner.version";
+pub const BANNER_BUILD: &str = "banner.build";
+pub const BANNER_PUN: &str = "banner.pun";
 
 // -- Diffs --
 //

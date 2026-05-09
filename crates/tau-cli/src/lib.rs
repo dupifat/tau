@@ -361,15 +361,30 @@ fn short_built_time(time: &str) -> Option<String> {
         .ok()
 }
 
-fn build_label() -> String {
-    match build_last_modified() {
-        Some(date) => format!(
-            "tau {} ({}, {})",
-            env!("CARGO_PKG_VERSION"),
-            build_revision(),
-            date
-        ),
-        None => format!("tau {} ({})", env!("CARGO_PKG_VERSION"), build_revision()),
+fn build_label_parts() -> (String, String) {
+    let version = format!("tau {}", env!("CARGO_PKG_VERSION"));
+    let build = match build_last_modified() {
+        Some(date) => format!("({}, {})", build_revision(), date),
+        None => format!("({})", build_revision()),
+    };
+    (version, build)
+}
+
+fn display_path(path: &Path) -> String {
+    let Ok(home) = std::env::var("HOME") else {
+        return path.display().to_string();
+    };
+    let home = Path::new(&home);
+    if home.as_os_str().is_empty() {
+        return path.display().to_string();
+    }
+    let Ok(suffix) = path.strip_prefix(home) else {
+        return path.display().to_string();
+    };
+    if suffix.as_os_str().is_empty() {
+        "~".to_owned()
+    } else {
+        format!("~/{}", suffix.display())
     }
 }
 
@@ -580,22 +595,33 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
 
     // Show logo if enabled.
     if settings.show_logo {
-        use tau_cli_term::{Span, StyledBlock, StyledText};
-        let accent = tau_cli_term::resolve::resolve(&theme, tau_themes::names::BANNER_ACCENT);
+        use tau_cli_term::{StyledBlock, StyledText};
+        use tau_themes::names;
+
+        let logo = tau_cli_term::resolve::resolve(&theme, names::BANNER_LOGO);
+        let name = tau_cli_term::resolve::resolve(&theme, names::BANNER_NAME);
+        let version_style = tau_cli_term::resolve::resolve(&theme, names::BANNER_VERSION);
+        let build_style = tau_cli_term::resolve::resolve(&theme, names::BANNER_BUILD);
+        let pun_style = tau_cli_term::resolve::resolve(&theme, names::BANNER_PUN);
         let pun = random_startup_pun();
+        let (version, build) = build_label_parts();
         let banner = StyledText::from(vec![
-            Span::new("▀█▀▀ ", accent),
-            Span::plain(build_label()),
-            Span::new("\n", Default::default()),
-            Span::new(" █▄▖ ", accent),
-            Span::plain(pun),
+            tau_cli_term::Span::new("▀█▀▀ ", logo),
+            tau_cli_term::Span::new("tau", name),
+            tau_cli_term::Span::new(version.trim_start_matches("tau"), version_style),
+            tau_cli_term::Span::new(" ", Default::default()),
+            tau_cli_term::Span::new(build, build_style),
+            tau_cli_term::Span::new("\n", Default::default()),
+            tau_cli_term::Span::new(" █▄▖ ", logo),
+            tau_cli_term::Span::new(pun, pun_style),
         ]);
         handle.print_output(StyledBlock::new(banner));
     }
-    handle.print_output(tau_cli_term::resolve::themed_block(
+    handle.print_output(system_path_block(
         &theme,
-        tau_themes::names::SYSTEM_INFO,
-        format!("ui dir: {}/", ui_logging.dir().display()),
+        "ui dir: ",
+        &ui_logging.dir(),
+        "/",
     ));
 
     handle.redraw();
@@ -1968,11 +1994,87 @@ fn render_harness_info(
     use tau_cli_term::resolve::themed_block;
     use tau_themes::names;
 
+    if info.level == tau_proto::HarnessInfoLevel::Normal {
+        if let Some(path) = info
+            .message
+            .strip_prefix("session dir: ")
+            .and_then(|path| path.strip_suffix('/'))
+        {
+            return system_path_block(theme, "session dir: ", Path::new(path), "/");
+        }
+    }
+
     let style_name = match info.level {
         tau_proto::HarnessInfoLevel::Normal => names::SYSTEM_INFO,
         tau_proto::HarnessInfoLevel::Important => names::SYSTEM_INFO_IMPORTANT,
     };
     themed_block(theme, style_name, &info.message)
+}
+
+fn system_path_block(
+    theme: &tau_themes::Theme,
+    prefix: &str,
+    path: &Path,
+    suffix: &str,
+) -> tau_cli_term::StyledBlock {
+    use tau_themes::{ThemedText, names};
+
+    let mut text = ThemedText::new();
+    let info = text.add_style(names::SYSTEM_INFO);
+    let path_style = text.add_style(names::SYSTEM_PATH);
+    text.push(info, prefix);
+    text.push(path_style, format!("{}{}", display_path(path), suffix));
+    tau_cli_term::StyledBlock::new(tau_cli_term::resolve::themed_text(theme, &text))
+}
+
+fn system_loaded_block(
+    theme: &tau_themes::Theme,
+    path: &Path,
+    content: &str,
+) -> tau_cli_term::StyledBlock {
+    use tau_themes::{ThemedText, names};
+
+    let mut text = ThemedText::new();
+    let info = text.add_style(names::SYSTEM_INFO);
+    let path_style = text.add_style(names::SYSTEM_PATH);
+    let stats_style = text.add_style(names::TOOL_STATUS_INFO);
+    text.push(info, "loaded: ");
+    text.push(path_style, display_path(path));
+    text.push(info, " ");
+    text.push(stats_style, output_stats_suffix(content).text);
+    tau_cli_term::StyledBlock::new(tau_cli_term::resolve::themed_text(theme, &text))
+}
+
+fn system_status_block(
+    theme: &tau_themes::Theme,
+    prefix: &str,
+    status: &str,
+) -> tau_cli_term::StyledBlock {
+    use tau_themes::{ThemedText, names};
+
+    let mut text = ThemedText::new();
+    let info = text.add_style(names::SYSTEM_INFO);
+    let status_style = text.add_style(names::SYSTEM_STATUS);
+    text.push(info, prefix);
+    text.push(status_style, status);
+    tau_cli_term::StyledBlock::new(tau_cli_term::resolve::themed_text(theme, &text))
+}
+
+fn extension_status_block(
+    theme: &tau_themes::Theme,
+    extension_name: &str,
+    status: &str,
+) -> tau_cli_term::StyledBlock {
+    use tau_themes::{ThemedText, names};
+
+    let mut text = ThemedText::new();
+    let lifecycle = text.add_style(names::EXTENSION_LIFECYCLE);
+    let status_style = text.add_style(names::SYSTEM_STATUS);
+    text.push(lifecycle, "extension ");
+    text.push(lifecycle, extension_name);
+    text.push(lifecycle, " ");
+    text.push(status_style, status);
+    tau_cli_term::StyledBlock::new(tau_cli_term::resolve::themed_text(theme, &text))
 }
 
 struct EventRenderer {
@@ -2750,11 +2852,8 @@ impl EventRenderer {
                 self.handle.print_output(block);
             }
             Event::ExtensionStarting(starting) => {
-                let block = themed_block(
-                    &self.theme,
-                    names::EXTENSION_LIFECYCLE,
-                    format!("extension {} starting", starting.extension_name),
-                );
+                let block =
+                    extension_status_block(&self.theme, &starting.extension_name, "starting");
                 let id = self.handle.new_block(block);
                 self.handle.push_above_active(id);
                 self.handle.redraw();
@@ -2764,38 +2863,34 @@ impl EventRenderer {
                 if let Some(bid) = self.extension_blocks.remove(&ready.instance_id) {
                     self.handle.remove_block(bid);
                 }
-                self.handle.print_output(themed_block(
+                self.handle.print_output(extension_status_block(
                     &self.theme,
-                    names::EXTENSION_LIFECYCLE,
-                    format!("extension {} ready", ready.extension_name),
+                    &ready.extension_name,
+                    "ready",
                 ));
             }
             Event::ExtensionExited(exited) => {
                 if let Some(bid) = self.extension_blocks.remove(&exited.instance_id) {
                     self.handle.remove_block(bid);
                 }
-                self.handle.print_output(themed_block(
+                self.handle.print_output(extension_status_block(
                     &self.theme,
-                    names::EXTENSION_LIFECYCLE,
-                    format!("extension {} exited", exited.extension_name),
+                    &exited.extension_name,
+                    "exited",
                 ));
             }
             Event::ExtAgentsMdAvailable(agents) => {
-                self.handle.print_output(themed_block(
+                self.handle.print_output(system_loaded_block(
                     &self.theme,
-                    names::SYSTEM_INFO,
-                    format!(
-                        "loaded: {} {}",
-                        agents.file_path.display(),
-                        output_stats_suffix(&agents.content).text
-                    ),
+                    &agents.file_path,
+                    &agents.content,
                 ));
             }
             Event::ExtensionContextReady(_) => {
-                self.handle.print_output(themed_block(
+                self.handle.print_output(system_status_block(
                     &self.theme,
-                    names::SYSTEM_INFO,
-                    "session context ready".to_owned(),
+                    "session context ",
+                    "ready",
                 ));
             }
             Event::HarnessInfo(info) => {

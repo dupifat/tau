@@ -29,6 +29,11 @@ This architecture has important benefits:
 [pi]: https://shittycodingagent.ai/
 
 
+## Features
+
+See [FEATURES.md](FEATURES.md) for a tour of the major features.
+
+
 ## Status: call for testing
 
 Tau is still young, but the core functionality is working and it is ready for testing.

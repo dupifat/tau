@@ -20,6 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         commands,
         tau_themes::Theme::builtin(),
         CursorShape::Bar,
+        std::iter::empty::<(String, String)>(),
     )?;
 
     // Header.

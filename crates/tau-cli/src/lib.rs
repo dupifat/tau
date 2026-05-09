@@ -15,7 +15,17 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use tau_config::settings::CliBindingAction;
 use tau_harness::runtime_dir;
+
+fn encode_binding_action(action: &CliBindingAction) -> String {
+    format!(
+        "{}:{}:{}",
+        action.action,
+        if action.trim { "trim" } else { "raw" },
+        action.command
+    )
+}
 
 mod built_info {
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
@@ -561,8 +571,12 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
     } else {
         tau_cli_term::CursorShape::Block
     };
+    let bindings = settings
+        .bind
+        .iter()
+        .map(|(key, action)| (key.clone(), encode_binding_action(action)));
     let (mut term, handle, completion_data) =
-        HighTerm::new(prompt, commands, theme.clone(), cursor_shape)?;
+        HighTerm::new(prompt, commands, theme.clone(), cursor_shape, bindings)?;
 
     // Show logo if enabled.
     if settings.show_logo {

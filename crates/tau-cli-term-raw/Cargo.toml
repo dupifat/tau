@@ -12,6 +12,7 @@ workspace = true
 bon.workspace = true
 crossterm.workspace = true
 tau-blocking-notify-channel.workspace = true
+tracing.workspace = true
 unicode-width.workspace = true
 
 [[bin]]

@@ -17,8 +17,13 @@ fn new_test_term_with_data(
         Box::new(std::io::sink()),
         CursorShape::Bar,
     );
-    let (term, completion_data) =
-        HighTerm::new_for_test(raw_term, handle.clone(), commands, Theme::builtin());
+    let (term, completion_data) = HighTerm::new_for_test(
+        raw_term,
+        handle.clone(),
+        commands,
+        Theme::builtin(),
+        std::iter::empty::<(String, String)>(),
+    );
     (term, handle, completion_data, input_tx)
 }
 

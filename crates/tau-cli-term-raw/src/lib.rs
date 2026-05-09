@@ -269,6 +269,35 @@ impl SharedState {
     }
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum KeyBinding {
+    Ctrl(char),
+}
+
+fn parse_key_binding(input: &str) -> Option<KeyBinding> {
+    let input = input.trim_matches('`');
+    let rest = input
+        .strip_prefix("C-")
+        .or_else(|| input.strip_prefix("c-"))?;
+    let mut chars = rest.chars();
+    let ch = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    Some(KeyBinding::Ctrl(ch.to_ascii_lowercase()))
+}
+
+fn key_binding_for_event(key: KeyEvent, ctrl: bool) -> Option<KeyBinding> {
+    match key.code {
+        KeyCode::Char(ch) if ctrl => Some(KeyBinding::Ctrl(ch.to_ascii_lowercase())),
+        KeyCode::Char(ch @ '\u{1}'..='\u{1a}') => {
+            let letter = (b'a' + ch as u8 - 1) as char;
+            Some(KeyBinding::Ctrl(letter))
+        }
+        _ => None,
+    }
+}
+
 /// High-level events surfaced to the downstream event loop.
 pub enum Event {
     /// The user submitted a line (pressed Enter outside the
@@ -292,6 +321,8 @@ pub enum Event {
     /// The user pressed Shift-Tab outside an open completion menu.
     /// Inside a menu it cycles backwards and is consumed internally.
     BackTab,
+    /// The user activated a configured key binding.
+    Binding(String),
     /// The user requested an external editor (Ctrl-O / Ctrl-G).
     /// Caller is expected to call [`Term::pause_for_external`], spawn
     /// `$VISUAL`/`$EDITOR`, and call [`Term::resume_after_external`].
@@ -578,6 +609,8 @@ pub struct Term {
     /// Plugged in by callers that want completion. When `None`, the
     /// completion menu never opens; Tab/Esc are no-ops.
     completion_source: Option<Box<dyn CompletionSource>>,
+    /// Plugged in by callers that want prompt key bindings.
+    bindings: HashMap<KeyBinding, String>,
 }
 
 impl Term {
@@ -662,6 +695,7 @@ impl Term {
                 owns_raw_mode: true,
                 cursor_shape,
                 completion_source: None,
+                bindings: HashMap::new(),
             },
             handle,
         ))
@@ -731,6 +765,7 @@ impl Term {
             owns_raw_mode: false,
             cursor_shape,
             completion_source: None,
+            bindings: HashMap::new(),
         };
 
         (term, handle, term_input_tx)
@@ -824,7 +859,9 @@ impl Term {
         if let Some(rx) = self.term_input_rx.as_ref() {
             return rx.recv().ok();
         }
-        match event::read().ok()? {
+        let raw = event::read().ok()?;
+        tracing::trace!(target: "tau_cli::input", ?raw, "terminal raw input event");
+        match raw {
             CtEvent::Key(key) => {
                 // The kitty protocol surfaces Press/Repeat/Release
                 // events; drop Release here so each keystroke fires
@@ -850,6 +887,24 @@ impl Term {
         self.completion_source = source;
         let mut st = self.state.lock().expect("term state mutex poisoned");
         st.completion = None;
+    }
+
+    /// Configures key bindings surfaced as [`Event::Binding`].
+    pub fn set_bindings(&mut self, bindings: impl IntoIterator<Item = (String, String)>) {
+        self.bindings = bindings
+            .into_iter()
+            .filter_map(|(raw_key, action)| {
+                let parsed = parse_key_binding(&raw_key);
+                tracing::trace!(
+                    target: "tau_cli::input",
+                    raw_key,
+                    ?parsed,
+                    action,
+                    "configured prompt binding"
+                );
+                parsed.map(|key| (key, action))
+            })
+            .collect();
     }
 
     /// Snapshot of the open completion menu, if any. Returns `None`
@@ -967,6 +1022,17 @@ impl Term {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let binding = key_binding_for_event(key, ctrl);
+        tracing::trace!(
+            target: "tau_cli::input",
+            ?key,
+            ctrl,
+            shift,
+            alt,
+            ?binding,
+            binding_count = self.bindings.len(),
+            "handling key event"
+        );
 
         match key.code {
             KeyCode::Enter if shift || alt => {
@@ -1089,8 +1155,27 @@ impl Term {
                 st.cursor = st.buffer.len();
             }
 
-            KeyCode::Char('o' | 'g') if ctrl => {
-                return Ok(Some(Event::ExternalEditor));
+            KeyCode::Char(_ch)
+                if binding
+                    .as_ref()
+                    .and_then(|key| self.bindings.get(key))
+                    .is_some() =>
+            {
+                let key = binding.expect("checked above");
+                let action = self.bindings.get(&key).expect("checked above").clone();
+                tracing::trace!(
+                    target: "tau_cli::input",
+                    ?key,
+                    action,
+                    "matched configured binding"
+                );
+                return Ok(Some(Event::Binding(action)));
+            }
+
+            KeyCode::Char(ch) if ctrl => {
+                if matches!(ch, 'o' | 'g') {
+                    return Ok(Some(Event::ExternalEditor));
+                }
             }
 
             KeyCode::Char(ch) => {

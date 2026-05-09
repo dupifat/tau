@@ -33,6 +33,71 @@ pub struct CliSettings {
     pub prompt_symbol: String,
     /// Symbol shown before submitted prompts in the transcript.
     pub submitted_prompt_symbol: String,
+    /// Key bindings for prompt-local shell actions.
+    pub bind: HashMap<String, CliBindingAction>,
+}
+
+/// Shell command configured for a CLI key binding.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum CliShellCommand {
+    Command(String),
+    Options { command: String, trim: bool },
+}
+
+impl CliShellCommand {
+    #[must_use]
+    pub fn new(command: impl Into<String>) -> Self {
+        Self::Options {
+            command: command.into(),
+            trim: false,
+        }
+    }
+
+    #[must_use]
+    pub fn new_trimmed(command: impl Into<String>) -> Self {
+        Self::Options {
+            command: command.into(),
+            trim: true,
+        }
+    }
+
+    #[must_use]
+    pub fn command(&self) -> &str {
+        match self {
+            Self::Command(command) | Self::Options { command, .. } => command,
+        }
+    }
+
+    #[must_use]
+    pub fn trim(&self) -> bool {
+        match self {
+            Self::Command(_) => false,
+            Self::Options { trim, .. } => *trim,
+        }
+    }
+}
+
+/// CLI key binding action.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct CliBindingAction {
+    /// Action name, e.g. `shell-prompt-insert` or `shell-prompt-edit`.
+    pub action: String,
+    /// Shell command to execute.
+    pub command: String,
+    /// Whether to trim command stdout before insertion.
+    pub trim: bool,
+}
+
+impl Default for CliBindingAction {
+    fn default() -> Self {
+        Self {
+            action: "shell-prompt-insert".to_owned(),
+            command: String::new(),
+            trim: false,
+        }
+    }
 }
 
 impl Default for CliSettings {
@@ -43,8 +108,38 @@ impl Default for CliSettings {
             bar_cursor: true,
             prompt_symbol: "◯".to_string(),
             submitted_prompt_symbol: "⬤".to_string(),
+            bind: default_cli_bindings(),
         }
     }
+}
+
+fn default_cli_bindings() -> HashMap<String, CliBindingAction> {
+    HashMap::from([
+        (
+            "C-f".to_owned(),
+            CliBindingAction {
+                action: "shell-prompt-insert".to_owned(),
+                command: "rg --files --hidden --glob '!.git' | fzf".to_owned(),
+                trim: true,
+            },
+        ),
+        (
+            "C-o".to_owned(),
+            CliBindingAction {
+                action: "shell-prompt-edit".to_owned(),
+                command: "${VISUAL:-${EDITOR:-}} \"$TAU_PROMPT_PATH\"".to_owned(),
+                trim: false,
+            },
+        ),
+        (
+            "C-g".to_owned(),
+            CliBindingAction {
+                action: "shell-prompt-edit".to_owned(),
+                command: "${VISUAL:-${EDITOR:-}} \"$TAU_PROMPT_PATH\"".to_owned(),
+                trim: false,
+            },
+        ),
+    ])
 }
 
 // ---------------------------------------------------------------------------
@@ -579,7 +674,15 @@ pub fn load_cli_settings_in(dirs: &TauDirs) -> Result<CliSettings, SettingsError
     let Some(ref dir) = dirs.config_dir else {
         return Ok(CliSettings::default());
     };
-    load_json5_layered(dir, "cli")
+    let mut settings = CliSettings::default();
+    let user_settings: CliSettings = load_json5_layered(dir, "cli")?;
+    settings.greeting = user_settings.greeting;
+    settings.show_logo = user_settings.show_logo;
+    settings.bar_cursor = user_settings.bar_cursor;
+    settings.prompt_symbol = user_settings.prompt_symbol;
+    settings.submitted_prompt_symbol = user_settings.submitted_prompt_symbol;
+    settings.bind.extend(user_settings.bind);
+    Ok(settings)
 }
 
 /// Loads harness settings from `harness.json5` with `harness.d/*.json5`

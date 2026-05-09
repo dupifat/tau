@@ -42,6 +42,64 @@ fn cli_settings_load_from_json5_file() {
     assert!(s.bar_cursor); // default
     assert_eq!(s.prompt_symbol, "◯"); // default
     assert_eq!(s.submitted_prompt_symbol, "⬤"); // default
+    assert_eq!(
+        s.bind.get("C-o"),
+        Some(&CliBindingAction {
+            action: "shell-prompt-edit".to_owned(),
+            command: "${VISUAL:-${EDITOR:-}} \"$TAU_PROMPT_PATH\"".to_owned(),
+            trim: false,
+        })
+    );
+}
+
+#[test]
+fn cli_settings_load_bindings() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("cli.json5"),
+        r#"{ bind: { "C-f": { action: "shell-prompt-insert", command: "fzf" } } }"#,
+    )
+    .expect("write");
+
+    let s: CliSettings = load_json5_layered(dir, "cli").expect("load");
+    assert_eq!(
+        s.bind.get("C-f"),
+        Some(&CliBindingAction {
+            action: "shell-prompt-insert".to_owned(),
+            command: "fzf".to_owned(),
+            trim: false,
+        })
+    );
+}
+
+#[test]
+fn load_cli_settings_merges_builtin_bindings_with_user_overrides() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("cli.json5"),
+        r#"{ bind: { "C-f": { action: "shell-prompt-edit", command: "pick", trim: true } } }"#,
+    )
+    .expect("write");
+    let dirs = TauDirs {
+        config_dir: Some(dir.to_owned()),
+        state_dir: None,
+    };
+
+    let s = load_cli_settings_in(&dirs).expect("load");
+    assert_eq!(
+        s.bind.get("C-f"),
+        Some(&CliBindingAction {
+            action: "shell-prompt-edit".to_owned(),
+            command: "pick".to_owned(),
+            trim: true,
+        })
+    );
+    assert_eq!(
+        s.bind.get("C-o").map(|binding| binding.action.as_str()),
+        Some("shell-prompt-edit")
+    );
 }
 
 #[test]

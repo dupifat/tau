@@ -1666,6 +1666,7 @@ dependencies = [
  "tau-cli-term-raw",
  "tau-themes",
  "tempfile",
+ "tracing",
 ]
 
 [[package]]
@@ -1675,6 +1676,7 @@ dependencies = [
  "bon",
  "crossterm 0.28.1",
  "tau-blocking-notify-channel",
+ "tracing",
  "unicode-width",
  "vt100",
 ]

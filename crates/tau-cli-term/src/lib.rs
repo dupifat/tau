@@ -64,8 +64,10 @@ impl HighTerm {
         commands: Vec<SlashCommand>,
         theme: Theme,
         cursor_shape: CursorShape,
+        bindings: impl IntoIterator<Item = (String, String)>,
     ) -> io::Result<(Self, TermHandle, CompletionData)> {
         let (mut term, handle) = tau_cli_term_raw::Term::new(left_prompt, cursor_shape)?;
+        term.set_bindings(bindings);
         let handle_clone = handle.clone();
         let data = CompletionData::new();
         let data_clone = data.clone();
@@ -88,10 +90,12 @@ impl HighTerm {
         handle: TermHandle,
         commands: Vec<SlashCommand>,
         theme: Theme,
+        bindings: impl IntoIterator<Item = (String, String)>,
     ) -> (Self, CompletionData) {
         let data = CompletionData::new();
         let data_clone = data.clone();
         term.set_completion_source(Some(make_completion_source(commands, data)));
+        term.set_bindings(bindings);
         (
             Self {
                 term,
@@ -166,6 +170,13 @@ impl HighTerm {
                     self.handle.redraw_sync();
                     return Ok(Event::BufferChanged);
                 }
+
+                RawEvent::Binding(action) => {
+                    self.sync_menu_block();
+                    self.run_binding(&action);
+                    self.handle.redraw_sync();
+                    return Ok(Event::BufferChanged);
+                }
             }
         }
     }
@@ -203,13 +214,43 @@ impl HighTerm {
     /// (no editor, spawn failure, non-zero exit) surface as a themed
     /// info line above the prompt.
     fn run_external_editor(&self) {
-        match try_run_external_editor(&self.term, &self.handle) {
-            Ok(Some(new_text)) => {
+        match run_prompt_shell_action(
+            &self.term,
+            &self.handle,
+            PromptShellAction::Edit(PromptShellCommand {
+                command: "${VISUAL:-${EDITOR:-}} \"$TAU_PROMPT_PATH\"".to_owned(),
+                trim: false,
+            }),
+        ) {
+            Ok(Some(PromptShellResult::Replace(new_text))) => {
                 let cursor = new_text.len();
                 self.handle.set_buffer(new_text, cursor);
             }
+            Ok(Some(PromptShellResult::Insert(_))) => {}
             Ok(None) => {} // editor exited non-zero or text unchanged.
             Err(msg) => self.print_local(&format!("external editor: {msg}")),
+        }
+    }
+
+    fn run_binding(&self, action: &str) {
+        tracing::trace!(target: "tau_cli::input", action, "running prompt binding");
+        let Some(action) = PromptShellAction::parse(action) else {
+            self.print_local(&format!("binding: unknown action `{action}`"));
+            return;
+        };
+        match run_prompt_shell_action(&self.term, &self.handle, action) {
+            Ok(Some(PromptShellResult::Replace(new_text))) => {
+                let cursor = new_text.len();
+                self.handle.set_buffer(new_text, cursor);
+            }
+            Ok(Some(PromptShellResult::Insert(text))) => {
+                let mut buffer = self.handle.get_buffer();
+                let cursor = self.handle.get_cursor();
+                buffer.insert_str(cursor, &text);
+                self.handle.set_buffer(buffer, cursor + text.len());
+            }
+            Ok(None) => {}
+            Err(msg) => self.print_local(&format!("binding: {msg}")),
         }
     }
 
@@ -233,30 +274,68 @@ fn make_completion_source(
     })
 }
 
-fn try_run_external_editor(
+struct PromptShellCommand {
+    command: String,
+    trim: bool,
+}
+
+enum PromptShellAction {
+    Insert(PromptShellCommand),
+    Edit(PromptShellCommand),
+}
+
+enum PromptShellResult {
+    Insert(String),
+    Replace(String),
+}
+
+impl PromptShellAction {
+    fn parse(action: &str) -> Option<Self> {
+        let mut parts = action.splitn(3, ':');
+        let name = parts.next()?;
+        let mode = parts.next()?;
+        let command = parts.next()?.to_owned();
+        let command = PromptShellCommand {
+            command,
+            trim: mode == "trim",
+        };
+        match name {
+            "shell-prompt-insert" => Some(Self::Insert(command)),
+            "shell-prompt-edit" => Some(Self::Edit(command)),
+            _ => None,
+        }
+    }
+}
+
+fn run_prompt_shell_action(
     term: &tau_cli_term_raw::Term,
     handle: &TermHandle,
-) -> Result<Option<String>, String> {
-    let editor_cmd = std::env::var("VISUAL")
-        .ok()
-        .or_else(|| std::env::var("EDITOR").ok())
-        .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| "no editor configured (\\$VISUAL / \\$EDITOR not set)".to_owned())?;
-
+    action: PromptShellAction,
+) -> Result<Option<PromptShellResult>, String> {
     let current = handle.get_buffer();
+    let cursor = handle.get_cursor();
     let tmp = tempfile::Builder::new()
-        .prefix("tau-edit-")
+        .prefix("tau-prompt-")
         .suffix(".tau.md")
         .tempfile()
         .map_err(|e| format!("could not create tempfile: {e}"))?;
     std::fs::write(tmp.path(), current.as_bytes())
         .map_err(|e| format!("could not write tempfile: {e}"))?;
 
-    let mut parts = editor_cmd.split_whitespace();
-    let editor = parts
-        .next()
-        .expect("split_whitespace yields at least one part");
-    let editor_args: Vec<&str> = parts.collect();
+    let shell = match &action {
+        PromptShellAction::Insert(shell) | PromptShellAction::Edit(shell) => shell,
+    };
+    let command = shell.command.as_str();
+    tracing::trace!(
+        target: "tau_cli::input",
+        command,
+        prompt_path = %tmp.path().display(),
+        cursor,
+        "spawning prompt shell action"
+    );
+    if command.trim().is_empty() {
+        return Err("empty shell command".to_owned());
+    }
 
     term.pause_for_external()
         .map_err(|e| format!("could not release terminal: {e}"))?;
@@ -269,16 +348,34 @@ fn try_run_external_editor(
     }
     let _guard = ResumeGuard(term);
 
-    let status = std::process::Command::new(editor)
-        .args(&editor_args)
-        .arg(tmp.path())
-        .status()
-        .map_err(|e| format!("could not spawn `{editor}`: {e}"))?;
-    if !status.success() {
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .env("TAU_PROMPT_PATH", tmp.path())
+        .env("TAU_PROMPT_COLUMN", (cursor + 1).to_string())
+        .env("TAU_PROMPT_ROW", "1")
+        .output()
+        .map_err(|e| format!("could not spawn shell: {e}"))?;
+    if !output.status.success() {
         return Ok(None);
     }
-    let new_text =
-        std::fs::read_to_string(tmp.path()).map_err(|e| format!("could not read tempfile: {e}"))?;
-    let new_text = new_text.strip_suffix('\n').unwrap_or(&new_text).to_owned();
-    Ok(Some(new_text))
+
+    match action {
+        PromptShellAction::Insert(_) => {
+            let text = String::from_utf8(output.stdout)
+                .map_err(|e| format!("command output was not utf-8: {e}"))?;
+            let text = if shell.trim {
+                text.trim().to_owned()
+            } else {
+                text
+            };
+            Ok(Some(PromptShellResult::Insert(text)))
+        }
+        PromptShellAction::Edit(_) => {
+            let new_text = std::fs::read_to_string(tmp.path())
+                .map_err(|e| format!("could not read tempfile: {e}"))?;
+            let new_text = new_text.strip_suffix('\n').unwrap_or(&new_text).to_owned();
+            Ok(Some(PromptShellResult::Replace(new_text)))
+        }
+    }
 }

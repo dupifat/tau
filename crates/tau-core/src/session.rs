@@ -231,93 +231,90 @@ impl SessionTree {
     ///   inheriting the tree's current cursor.
     /// * `Some(Some(id))` — fold under the given node.
     ///
-    /// Non-node-producing events (e.g. [`Event::UiNavigateTree`])
-    /// ignore the parent.
-    pub fn apply_event_at(&mut self, parent: Option<Option<NodeId>>, event: &Event) {
+    /// Returns the id of the node this event produced, or `None` for
+    /// events that don't fold (transient lifecycle chatter, an
+    /// `AgentResponseFinished` carrying only tool calls, a
+    /// `UiNavigateTree`, etc.). Callers tracking a per-conversation
+    /// branch cursor must advance it only when this returns `Some` —
+    /// `tree.head()` is the *global* write cursor, so syncing blindly
+    /// to it after a non-folding event would steal whichever other
+    /// conversation's node the cursor last visited.
+    pub fn apply_event_at(
+        &mut self,
+        parent: Option<Option<NodeId>>,
+        event: &Event,
+    ) -> Option<NodeId> {
         let parent = match parent {
             None => self.head,
             Some(explicit) => explicit,
         };
         match event {
-            Event::UiPromptSubmitted(prompt) => {
+            Event::UiPromptSubmitted(prompt) => Some(self.append_node_at(
+                parent,
+                SessionEntry::UserMessage {
+                    text: prompt.text.clone(),
+                },
+            )),
+            Event::SessionUserMessageInjected(injected) => Some(self.append_node_at(
+                parent,
+                SessionEntry::UserMessage {
+                    text: injected.text.clone(),
+                },
+            )),
+            Event::SessionPromptSteered(steered) => Some(self.append_node_at(
+                parent,
+                SessionEntry::UserMessage {
+                    text: steered.text.clone(),
+                },
+            )),
+            Event::AgentResponseFinished(response) => response.text.as_ref().map(|text| {
                 self.append_node_at(
                     parent,
-                    SessionEntry::UserMessage {
-                        text: prompt.text.clone(),
+                    SessionEntry::AgentMessage {
+                        text: text.clone(),
+                        thinking: response.thinking.clone(),
                     },
-                );
-            }
-            Event::SessionUserMessageInjected(injected) => {
-                self.append_node_at(
-                    parent,
-                    SessionEntry::UserMessage {
-                        text: injected.text.clone(),
+                )
+            }),
+            Event::ToolRequest(request) => Some(self.append_node_at(
+                parent,
+                SessionEntry::ToolActivity(ToolActivityRecord {
+                    call_id: request.call_id.clone(),
+                    tool_name: request.tool_name.clone(),
+                    outcome: ToolActivityOutcome::Requested {
+                        arguments: request.arguments.clone(),
                     },
-                );
-            }
-            Event::SessionPromptSteered(steered) => {
-                self.append_node_at(
-                    parent,
-                    SessionEntry::UserMessage {
-                        text: steered.text.clone(),
+                }),
+            )),
+            Event::ToolResult(result) => Some(self.append_node_at(
+                parent,
+                SessionEntry::ToolActivity(ToolActivityRecord {
+                    call_id: result.call_id.clone(),
+                    tool_name: result.tool_name.clone(),
+                    outcome: ToolActivityOutcome::Result {
+                        result: result.result.clone(),
                     },
-                );
-            }
-            Event::AgentResponseFinished(response) => {
-                if let Some(text) = response.text.as_ref() {
-                    self.append_node_at(
-                        parent,
-                        SessionEntry::AgentMessage {
-                            text: text.clone(),
-                            thinking: response.thinking.clone(),
-                        },
-                    );
-                }
-            }
-            Event::ToolRequest(request) => {
-                self.append_node_at(
-                    parent,
-                    SessionEntry::ToolActivity(ToolActivityRecord {
-                        call_id: request.call_id.clone(),
-                        tool_name: request.tool_name.clone(),
-                        outcome: ToolActivityOutcome::Requested {
-                            arguments: request.arguments.clone(),
-                        },
-                    }),
-                );
-            }
-            Event::ToolResult(result) => {
-                self.append_node_at(
-                    parent,
-                    SessionEntry::ToolActivity(ToolActivityRecord {
-                        call_id: result.call_id.clone(),
-                        tool_name: result.tool_name.clone(),
-                        outcome: ToolActivityOutcome::Result {
-                            result: result.result.clone(),
-                        },
-                    }),
-                );
-            }
-            Event::ToolError(error) => {
-                self.append_node_at(
-                    parent,
-                    SessionEntry::ToolActivity(ToolActivityRecord {
-                        call_id: error.call_id.clone(),
-                        tool_name: error.tool_name.clone(),
-                        outcome: ToolActivityOutcome::Error {
-                            message: error.message.clone(),
-                            details: error.details.clone(),
-                        },
-                    }),
-                );
-            }
+                }),
+            )),
+            Event::ToolError(error) => Some(self.append_node_at(
+                parent,
+                SessionEntry::ToolActivity(ToolActivityRecord {
+                    call_id: error.call_id.clone(),
+                    tool_name: error.tool_name.clone(),
+                    outcome: ToolActivityOutcome::Error {
+                        message: error.message.clone(),
+                        details: error.details.clone(),
+                    },
+                }),
+            )),
             Event::UiNavigateTree(req) => {
                 let target = NodeId(req.node_id);
                 if (target.0 as usize) < self.nodes.len() {
                     self.head = Some(target);
                 }
+                None
             }
-            _ => {}
+            _ => None,
         }
     }
 }

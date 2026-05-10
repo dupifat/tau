@@ -3895,6 +3895,174 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
     h.shutdown().expect("shutdown");
 }
 
+/// Regression: parallel side conversations must not steal each
+/// other's branch cursor. Before the per-event `folded_node_id`
+/// sync, `commit_event` synced `c.head` from the global
+/// `tree.head()`. A non-folding event on conv-A (e.g. an
+/// `AgentResponseFinished` carrying only tool calls) would overwrite
+/// `c.head[conv-A]` with whatever sibling conv-B last folded — so
+/// conv-A's next `ToolRequest` would graft onto conv-B's branch and
+/// the resulting prompt would walk through unrelated history,
+/// producing orphan ToolUse blocks the provider rejects with
+/// `No tool output found for function call …`.
+#[test]
+fn parallel_side_convs_do_not_share_branch_cursor() {
+    use tau_proto::ToolNameMaybe;
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    h.selected_model = "test/model".into();
+    let _ = connect_test_tool(&mut h, "conn-delegate");
+    h.registry.register(
+        "conn-delegate",
+        ToolSpec {
+            name: "delegate".into(),
+            description: None,
+            parameters: None,
+            side_effects: ToolSideEffects::Mutating,
+        },
+    );
+
+    let cid = h.default_conversation_id.clone();
+    let main_spid: SessionPromptId = "sp-main".into();
+    seed_agent_thinking(&mut h, &cid, "sp-main");
+    h.prompt_conversations
+        .insert(main_spid.clone(), cid.clone());
+    h.publish_for_conversation(
+        &cid,
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "go".to_owned(),
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        }),
+    );
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: main_spid,
+        text: None,
+        tool_calls: vec![
+            AgentToolCall {
+                id: "main-A".into(),
+                name: ToolNameMaybe::from_raw("delegate"),
+                arguments: CborValue::Map(Vec::new()),
+            },
+            AgentToolCall {
+                id: "main-B".into(),
+                name: ToolNameMaybe::from_raw("delegate"),
+                arguments: CborValue::Map(Vec::new()),
+            },
+        ],
+        input_tokens: None,
+        cached_tokens: None,
+        thinking: None,
+        originator: tau_proto::PromptOriginator::User,
+    })
+    .expect("main response");
+
+    h.handle_ext_agent_query(
+        "conn-delegate",
+        ExtAgentQuery {
+            query_id: "q-A".to_owned(),
+            instruction: "instr A".to_owned(),
+            tool_call_id: Some("main-A".into()),
+            task_name: Some("A".to_owned()),
+        },
+    )
+    .expect("query A");
+    h.handle_ext_agent_query(
+        "conn-delegate",
+        ExtAgentQuery {
+            query_id: "q-B".to_owned(),
+            instruction: "instr B".to_owned(),
+            tool_call_id: Some("main-B".into()),
+            task_name: Some("B".to_owned()),
+        },
+    )
+    .expect("query B");
+
+    let cid_a = h
+        .conversations
+        .iter()
+        .find_map(|(cid, conv)| {
+            matches!(
+                &conv.originator,
+                tau_proto::PromptOriginator::Extension { query_id, .. } if query_id == "q-A"
+            )
+            .then_some(cid.clone())
+        })
+        .expect("conv A");
+    let cid_b = h
+        .conversations
+        .iter()
+        .find_map(|(cid, conv)| {
+            matches!(
+                &conv.originator,
+                tau_proto::PromptOriginator::Extension { query_id, .. } if query_id == "q-B"
+            )
+            .then_some(cid.clone())
+        })
+        .expect("conv B");
+
+    let head_a_after_init = h.conversations.get(&cid_a).unwrap().head;
+    let head_b_after_init = h.conversations.get(&cid_b).unwrap().head;
+    assert!(head_a_after_init.is_some());
+    assert!(head_b_after_init.is_some());
+    assert_ne!(
+        head_a_after_init, head_b_after_init,
+        "the two side convs must point at distinct UserMessage nodes",
+    );
+
+    // Conv A's agent finishes with a tool call (no text → the
+    // AgentResponseFinished itself does NOT fold a tree node).
+    // After the response is processed, the harness emits a
+    // ToolRequest for `A-tool` on conv-A's branch. That request must
+    // be parented under conv-A's own `UserMessage` (head_a_after_init),
+    // not conv-B's last fold.
+    let spid_a = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| (prompt_cid == &cid_a).then_some(spid.clone()))
+        .expect("spid A");
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: spid_a,
+        text: None,
+        tool_calls: vec![AgentToolCall {
+            id: "A-tool".into(),
+            name: ToolNameMaybe::from_raw("delegate"),
+            arguments: CborValue::Map(Vec::new()),
+        }],
+        input_tokens: None,
+        cached_tokens: None,
+        thinking: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "core-delegate".into(),
+            query_id: "q-A".to_owned(),
+        },
+    })
+    .expect("A response");
+
+    let tree = h.store.session("s1").expect("session tree");
+    let a_tool_node = tree
+        .nodes()
+        .iter()
+        .find(|n| {
+            matches!(
+                &n.entry,
+                tau_core::SessionEntry::ToolActivity(rec)
+                    if rec.call_id.as_str() == "A-tool"
+            )
+        })
+        .expect("A-tool ToolActivity node");
+    assert_eq!(
+        a_tool_node.parent_id, head_a_after_init,
+        "conv A's ToolRequest must be parented under conv A's UserMessage; \
+         drift onto conv B would manifest here",
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Regression: when an interceptor is registered on
 /// `ui.prompt_submitted` (e.g. `tau-ext-test-dummy`'s tao→tau
 /// corrector), the side conversation's `UiPromptSubmitted` parks in

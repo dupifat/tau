@@ -280,6 +280,12 @@ pub(crate) struct DeferredPublish {
 #[derive(Clone)]
 pub(crate) struct ConversationHeadSync {
     pub(crate) cid: ConversationId,
+    /// Retained for back-compatibility with callers building a
+    /// [`ConversationHeadSync`] from a session id; the sync logic in
+    /// `commit_event` now reads the just-folded node id directly from
+    /// [`SessionStore::append_session_event_at`]'s outcome rather than
+    /// looking up the tree by session.
+    #[allow(dead_code)]
     pub(crate) session_id: SessionId,
 }
 
@@ -1053,15 +1059,20 @@ impl Harness {
                 .and_then(|s| self.conversations.get(&s.cid).and_then(|c| c.head))
                 .map(Some)
         };
-        self.persist_session_event(source, &event, transient, parent_for_fold);
-        if let Some(sync) = sync_head_for {
-            let new_head = self
-                .store
-                .session(sync.session_id.as_str())
-                .and_then(|t| t.head());
-            if let Some(c) = self.conversations.get_mut(&sync.cid) {
-                c.head = new_head;
-            }
+        let folded_node_id = self.persist_session_event(source, &event, transient, parent_for_fold);
+        if let Some(sync) = sync_head_for
+            && let Some(node_id) = folded_node_id
+            && let Some(c) = self.conversations.get_mut(&sync.cid)
+        {
+            // Only advance the conversation's own branch cursor when
+            // the event produced a tree node. `tree.head()` is the
+            // *global* write cursor and may sit on a sibling
+            // conversation's last fold; syncing to it after a
+            // non-folding event (e.g. `AgentResponseFinished` with
+            // only tool calls) would graft this conversation's next
+            // tool request onto the wrong branch and produce orphan
+            // ToolUse blocks downstream.
+            c.head = Some(node_id);
         }
         let seq = self
             .event_log
@@ -1238,26 +1249,30 @@ impl Harness {
         }
     }
 
+    /// Persists `event` to the durable per-session log and folds it
+    /// into the in-memory tree. Returns the id of the just-folded
+    /// node when the event produced one (e.g. `UserMessage`,
+    /// `ToolActivity`, an `AgentMessage` from a finished response
+    /// with text), or `None` for transient / non-folding events. The
+    /// caller uses the returned node id to sync a per-conversation
+    /// branch cursor without consulting the tree's *global* head,
+    /// which can be on a sibling conversation's branch.
     fn persist_session_event(
         &mut self,
         source: Option<&str>,
         event: &Event,
         transient: bool,
         parent_node_id: Option<Option<tau_proto::NodeId>>,
-    ) {
+    ) -> Option<tau_proto::NodeId> {
         if transient || event.is_transient() {
-            return;
+            return None;
         }
-        let Some(session_id) = self.session_id_for_event(event) else {
-            return;
-        };
+        let session_id = self.session_id_for_event(event)?;
         let source = source.map(tau_proto::ConnectionId::from);
-        let _ = self.store.append_session_event_at(
-            session_id.as_str(),
-            source,
-            parent_node_id,
-            event.clone(),
-        );
+        self.store
+            .append_session_event_at(session_id.as_str(), source, parent_node_id, event.clone())
+            .ok()
+            .and_then(|outcome| outcome.folded_node_id)
     }
 
     fn session_id_for_event(&self, event: &Event) -> Option<SessionId> {

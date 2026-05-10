@@ -144,6 +144,19 @@ impl Error for SessionStoreError {
 /// Flocks are still taken lazily on first write so read-only
 /// consumers (e.g. inspection commands) don't contend with a running
 /// daemon.
+/// Result of one [`SessionStore::append_session_event_at`] call:
+/// the durable event id and, when the event produced a tree node,
+/// that node's id. Callers maintaining a per-conversation branch
+/// cursor advance it from `folded_node_id` rather than from the
+/// global `tree.head()` so non-folding events (e.g. an
+/// `AgentResponseFinished` carrying only tool calls) don't sync
+/// the cursor onto a sibling conversation's last fold.
+#[derive(Clone, Debug)]
+pub struct AppendOutcome {
+    pub id: LogEventId,
+    pub folded_node_id: Option<NodeId>,
+}
+
 #[derive(Debug)]
 pub struct SessionStore {
     state_dir: PathBuf,
@@ -295,7 +308,7 @@ impl SessionStore {
         session_id: &str,
         source: Option<ConnectionId>,
         event: Event,
-    ) -> Result<LogEventId, SessionStoreError> {
+    ) -> Result<AppendOutcome, SessionStoreError> {
         self.append_session_event_at(session_id, source, None, event)
     }
 
@@ -316,7 +329,7 @@ impl SessionStore {
         source: Option<ConnectionId>,
         parent_node_id: Option<Option<NodeId>>,
         event: Event,
-    ) -> Result<LogEventId, SessionStoreError> {
+    ) -> Result<AppendOutcome, SessionStoreError> {
         self.ensure_locked(session_id)?;
         self.load_session_if_needed(session_id)?;
         let session_dir = self.session_dir(session_id);
@@ -345,9 +358,12 @@ impl SessionStore {
             .sessions
             .entry(sid.clone())
             .or_insert_with(|| SessionTree::from_events(sid, &[]));
-        tree.apply_event_at(parent_node_id, &event);
+        let folded_node_id = tree.apply_event_at(parent_node_id, &event);
 
-        Ok(next_id)
+        Ok(AppendOutcome {
+            id: next_id,
+            folded_node_id,
+        })
     }
 
     /// Loads durable per-session protocol events.

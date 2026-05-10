@@ -4,7 +4,8 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use dialoguer::{Confirm, Input, Select};
+use dialoguer::{Confirm, Input};
+use tau_cli_picker::{PickerItem, pick};
 
 use crate::oauth;
 use crate::storage::{self, Credentials, ProviderKind};
@@ -47,13 +48,12 @@ fn print_help() {
 fn cmd_add() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Pick provider kind.
     let kinds = ProviderKind::all();
-    let kind_names: Vec<&str> = kinds.iter().map(ProviderKind::display_name).collect();
+    let kind_names = kinds
+        .iter()
+        .map(|kind| PickerItem::enabled(kind.display_name()))
+        .collect::<Vec<_>>();
 
-    let selection = Select::new()
-        .with_prompt("Provider type")
-        .items(&kind_names)
-        .default(0)
-        .interact()?;
+    let selection = pick("Provider type", &kind_names)?;
     let kind = kinds[selection].clone();
 
     // 2. Pick a name for this instance.
@@ -147,11 +147,11 @@ fn cmd_remove(name_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> 
                 return Ok(());
             }
 
-            let sel = Select::new()
-                .with_prompt("Which provider to remove?")
-                .items(&names)
-                .default(0)
-                .interact()?;
+            let items = names
+                .iter()
+                .map(|name| PickerItem::enabled(*name))
+                .collect::<Vec<_>>();
+            let sel = pick("Which provider to remove?", &items)?;
             names[sel].to_string()
         }
     };
@@ -292,13 +292,12 @@ fn cmd_login(name_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
 
-            let items: Vec<&str> = oauth_names.iter().map(String::as_str).collect();
-            let sel = Select::new()
-                .with_prompt("Which provider to log in to?")
-                .items(&items)
-                .default(0)
-                .interact()?;
-            items[sel].to_string()
+            let items = oauth_names
+                .iter()
+                .map(|name| PickerItem::enabled(name.as_str()))
+                .collect::<Vec<_>>();
+            let sel = pick("Which provider to log in to?", &items)?;
+            oauth_names[sel].to_string()
         }
     };
 
@@ -357,11 +356,11 @@ fn cmd_list_models(name_arg: Option<&str>) -> Result<(), Box<dyn std::error::Err
                 eprintln!("No providers configured. Use `tau provider add` first.");
                 return Ok(());
             }
-            let sel = Select::new()
-                .with_prompt("Which provider?")
-                .items(&names)
-                .default(0)
-                .interact()?;
+            let items = names
+                .iter()
+                .map(|name| PickerItem::enabled(*name))
+                .collect::<Vec<_>>();
+            let sel = pick("Which provider?", &items)?;
             names[sel].to_string()
         }
     };

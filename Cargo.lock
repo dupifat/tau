@@ -1488,10 +1488,10 @@ dependencies = [
  "built",
  "ciborium",
  "clap",
- "console",
  "dirs",
  "rand",
  "tau-agent",
+ "tau-cli-picker",
  "tau-cli-term",
  "tau-cli-term-raw",
  "tau-config",
@@ -1509,6 +1509,13 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vt100",
+]
+
+[[package]]
+name = "tau-cli-picker"
+version = "0.1.0"
+dependencies = [
+ "console",
 ]
 
 [[package]]
@@ -1676,6 +1683,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tau-cli-picker",
  "tau-config",
  "tempfile",
  "ureq",

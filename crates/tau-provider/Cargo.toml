@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 base64.workspace = true
 dialoguer.workspace = true
+tau-cli-picker.workspace = true
 comfy-table.workspace = true
 dirs.workspace = true
 json5.workspace = true

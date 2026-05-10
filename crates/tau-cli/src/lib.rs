@@ -15,7 +15,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use console::{Key, Term};
+use tau_cli_picker::{PickerItem, pick};
 use tau_config::settings::CliBindingAction;
 use tau_harness::{SessionEntry, SessionLaunchStatus, SessionTree, runtime_dir};
 
@@ -376,58 +376,19 @@ fn pick_resume_session(cwd: &Path) -> Result<Option<String>, CliError> {
     if rows.iter().filter(|(_, _, locked)| !*locked).count() == 1 {
         return Ok(Some(rows[default].0.clone()));
     }
-    let items = rows.iter().map(|(_, item, _)| item).collect::<Vec<_>>();
-    let selection = interact_resume_picker(&items, &rows, default)?;
-    Ok(Some(rows[selection].0.clone()))
-}
-
-fn interact_resume_picker(
-    items: &[&String],
-    rows: &[(String, String, bool)],
-    mut selected: usize,
-) -> Result<usize, CliError> {
-    let term = Term::stderr();
-    term.write_line("? Resume session")?;
-    loop {
-        for (idx, item) in items.iter().enumerate() {
-            let marker = if rows[idx].2 {
-                "X"
-            } else if idx == selected {
-                ">"
+    let items = rows
+        .iter()
+        .map(|(_, item, locked)| {
+            if *locked {
+                PickerItem::disabled(item)
             } else {
-                " "
-            };
-            term.write_line(&format!("{marker} {item}"))?;
-        }
-        match term.read_key().map_err(io::Error::other)? {
-            Key::ArrowDown | Key::Tab | Key::Char('j') => {
-                selected = adjacent_unlocked_row(rows, selected, true);
+                PickerItem::enabled(item)
             }
-            Key::ArrowUp | Key::BackTab | Key::Char('k') => {
-                selected = adjacent_unlocked_row(rows, selected, false);
-            }
-            Key::Enter | Key::Char(' ') => {
-                term.clear_last_lines(items.len() + 1)?;
-                return Ok(selected);
-            }
-            _ => {}
-        }
-        term.clear_last_lines(items.len())?;
-    }
-}
-
-fn adjacent_unlocked_row(rows: &[(String, String, bool)], selected: usize, forward: bool) -> usize {
-    for offset in 1..rows.len() {
-        let idx = if forward {
-            (selected + offset) % rows.len()
-        } else {
-            (selected + rows.len() - offset) % rows.len()
-        };
-        if !rows[idx].2 {
-            return idx;
-        }
-    }
-    selected
+        })
+        .collect::<Vec<_>>();
+    let selection =
+        pick("Resume session", &items).map_err(|e| CliError::Participant(e.to_string()))?;
+    Ok(Some(rows[selection].0.clone()))
 }
 
 fn latest_user_prompt_preview(session: &SessionTree) -> Option<String> {

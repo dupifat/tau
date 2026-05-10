@@ -1390,7 +1390,7 @@ fn format_tool_call(tool_name: &str, arguments: &CborValue) -> ToolCallDisplay {
 
 /// Builds the running display for a `delegate` call once the harness
 /// has reported sub-agent state via `DelegateProgress`. Renders to:
-/// `delegate [task_name] ctx: 38%/200k tools: 1/3 …`.
+/// `delegate [task_name] ctx: 38%/200k tools: 2/3 …`.
 fn format_delegate_progress(
     args: String,
     progress: &tau_proto::DelegateProgress,
@@ -1402,9 +1402,12 @@ fn format_delegate_progress(
             progress.ctx_window,
         )));
     }
+    let tools_completed = progress
+        .tools_total
+        .saturating_sub(progress.tools_in_flight);
     suffixes.push(info_suffix(format!(
         "tools: {}/{}",
-        progress.tools_in_flight, progress.tools_total,
+        tools_completed, progress.tools_total,
     )));
     suffixes.push(running_suffix_after("x")); // non-empty so a leading space is preserved
     ToolCallDisplay {

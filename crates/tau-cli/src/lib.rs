@@ -969,6 +969,7 @@ fn terminal_input_loop(
                         session_id: session_id.as_str().into(),
                         text: text.to_owned(),
                         originator: tau_proto::PromptOriginator::User,
+                        ctx_id: None,
                     }),
                 )
                 .is_err()

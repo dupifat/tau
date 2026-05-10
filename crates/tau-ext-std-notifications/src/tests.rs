@@ -86,6 +86,7 @@ fn emits_start_and_end_user_var_in_order() {
             session_id: "s1".into(),
             text: "hello".into(),
             originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
         }))
         .expect("write");
     writer
@@ -145,6 +146,7 @@ fn mid_turn_finish_with_tool_calls_does_not_emit_end_sound() {
             session_id: "s1".into(),
             text: "hello".into(),
             originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
         }))
         .expect("write");
     // Mid-turn finish: text=None, tool_calls non-empty. No
@@ -703,6 +705,7 @@ fn user_prompt_during_idle_window_cancels_text_notification() {
             session_id: "s1".into(),
             text: "another question".into(),
             originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
         }))
         .expect("write");
     writer.flush().expect("flush");
@@ -752,6 +755,7 @@ fn sub_agent_prompts_and_responses_are_ignored() {
             session_id: "s1".into(),
             text: "delegate something".into(),
             originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
         }))
         .expect("write");
 
@@ -791,6 +795,7 @@ fn sub_agent_prompts_and_responses_are_ignored() {
                 name: "core-delegate".into(),
                 query_id: "q1".into(),
             },
+            ctx_id: None,
         }))
         .expect("write");
     writer
@@ -859,6 +864,7 @@ fn duplicate_ui_prompt_submitted_during_same_turn_emits_one_start_sound() {
             session_id: "s1".into(),
             text: "hello".into(),
             originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
         }))
         .expect("write");
     writer
@@ -866,6 +872,7 @@ fn duplicate_ui_prompt_submitted_during_same_turn_emits_one_start_sound() {
             session_id: "s1".into(),
             text: "internal replay".into(),
             originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
         }))
         .expect("write");
     writer

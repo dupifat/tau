@@ -50,6 +50,7 @@ fn append_user_message_via_event(h: &mut Harness, session_id: &str, text: &str) 
             session_id: session_id.into(),
             text: text.to_owned(),
             originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
         }),
     );
 }
@@ -235,34 +236,17 @@ fn daemon_mode_accepts_later_clients() {
 
     let r1 = send_daemon_message(&sock, "s1", "hello").expect("first");
     let r2 = send_daemon_message(&sock, "s1", "again").expect("second");
-    assert!(!r1.is_empty(), "response should not be empty");
-    assert!(!r2.is_empty(), "response should not be empty");
+    assert_eq!(r1, "hello", "first cycle should echo our submission");
+    assert_eq!(r2, "again", "second cycle should echo our submission");
 
     server.join().expect("join").expect("daemon clean exit");
     let store = open_session_store(&sp).expect("reopen");
     let branch = store.session("s1").expect("session").current_branch();
-    // The first prompt cycles fully through the echo agent; the second
-    // is racey against `send_daemon_message`'s lack of session-prompt-id
-    // filtering, so we only assert the first cycle landed and the
-    // second user prompt was at least accepted.
-    assert!(
-        branch
-            .iter()
-            .any(|e| matches!(e, SessionEntry::UserMessage { text } if text == "hello")),
-        "first user prompt should be persisted, got {branch:?}"
-    );
-    assert!(
-        branch
-            .iter()
-            .any(|e| matches!(e, SessionEntry::UserMessage { text } if text == "again")),
-        "second user prompt should be persisted, got {branch:?}"
-    );
-    assert!(
-        branch.iter().any(|e| matches!(
-            e,
-            SessionEntry::ToolActivity(rec) if rec.tool_name.as_str() == "echo"
-        )),
-        "first prompt should have produced an echo tool call, got {branch:?}"
+    // System AGENTS.md preamble + 2 × (user, tool.req, tool.res, agent).
+    assert_eq!(
+        branch.len(),
+        9,
+        "expected full two-cycle persistence, got {branch:?}"
     );
 }
 
@@ -964,6 +948,7 @@ fn empty_tool_name_does_not_panic_and_surfaces_error() {
             session_id: "s1".into(),
             text: "do it".to_owned(),
             originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
         }),
     );
 
@@ -1055,6 +1040,7 @@ fn empty_tool_call_id_is_normalized_to_synthetic_id() {
             session_id: "s1".into(),
             text: "do it".to_owned(),
             originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
         }),
     );
 
@@ -2725,6 +2711,7 @@ fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
             session_id: "s1".into(),
             text: "delegate something".to_owned(),
             originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
         }),
     );
 
@@ -2842,6 +2829,7 @@ fn ext_agent_query_during_tool_call_branches_off_unresolved_tool_use() {
             session_id: "s1".into(),
             text: "delegate something".to_owned(),
             originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
         }),
     );
 
@@ -2958,6 +2946,7 @@ fn side_conversation_pure_tool_dispatches_through_parent_mutating_delegate() {
             session_id: "s1".into(),
             text: "delegate something".to_owned(),
             originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
         }),
     );
     h.handle_agent_response_finished(AgentResponseFinished {
@@ -3072,6 +3061,7 @@ fn read_only_delegate_calls_dispatch_concurrently() {
             session_id: "s1".into(),
             text: "two read-only lookups".to_owned(),
             originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
         }),
     );
     let read_only_args = CborValue::Map(vec![(
@@ -3141,6 +3131,7 @@ fn read_only_delegate_calls_dispatch_concurrently() {
             session_id: "s1".into(),
             text: "two mutating delegations".to_owned(),
             originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
         }),
     );
     h2.handle_agent_response_finished(AgentResponseFinished {
@@ -3219,6 +3210,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
             session_id: "s1".into(),
             text: "delegate something".to_owned(),
             originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
         }),
     );
     h.handle_agent_response_finished(AgentResponseFinished {
@@ -3351,6 +3343,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
             session_id: "s1".into(),
             text: "delegate something".to_owned(),
             originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
         }),
     );
     h.handle_agent_response_finished(AgentResponseFinished {
@@ -3538,6 +3531,7 @@ fn nested_ext_agent_query_branches_from_tool_owner_conversation() {
             session_id: "s1".into(),
             text: "delegate something".to_owned(),
             originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
         }),
     );
     h.handle_agent_response_finished(AgentResponseFinished {
@@ -3659,6 +3653,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
             session_id: "s1".into(),
             text: "delegate something".to_owned(),
             originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
         }),
     );
     h.handle_agent_response_finished(AgentResponseFinished {
@@ -3768,6 +3763,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
             session_id: "s1".into(),
             text: "ROOT: ask top delegate to delegate again".to_owned(),
             originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
         }),
     );
     h.handle_agent_response_finished(AgentResponseFinished {
@@ -4366,6 +4362,7 @@ fn interception_drop_of_must_pass_event_is_overridden() {
         session_id: "s1".into(),
         text: "hello".to_owned(),
         originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
     });
     h.publish_event(None, prompt.clone());
     h.handle_extension_event(
@@ -4525,6 +4522,7 @@ fn interception_mutating_prompt_reaches_agent() {
         session_id: session_id.clone(),
         text: "I love Tau".to_owned(),
         originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
     });
     h.handle_extension_event(
         "interceptor",

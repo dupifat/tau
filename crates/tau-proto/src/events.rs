@@ -862,6 +862,14 @@ pub struct UiPromptSubmitted {
     pub text: String,
     #[serde(default)]
     pub originator: PromptOriginator,
+    /// Free-form correlation tag chosen by the submitter and copied
+    /// forward onto the first [`SessionPromptCreated`] the harness
+    /// emits for this prompt. Lets a client (notably the test helper
+    /// in `tau-harness::daemon`) match the response chain to the
+    /// submission it made, without relying on event ordering or
+    /// re-using a long-lived connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctx_id: Option<String>,
 }
 
 /// A trailing-edge debounced snapshot of the in-progress prompt the
@@ -1150,6 +1158,14 @@ pub struct SessionPromptCreated {
     /// for backward compatibility with old persisted events.
     #[serde(default)]
     pub originator: PromptOriginator,
+    /// Echo of [`UiPromptSubmitted::ctx_id`] when this prompt was
+    /// initiated by a UI submission. Tool-result follow-up
+    /// `SessionPromptCreated` events for the same chain do not
+    /// inherit it — only the first one does — so a correlator should
+    /// capture the resulting [`Self::session_prompt_id`] and track
+    /// the rest of the chain by spid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctx_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

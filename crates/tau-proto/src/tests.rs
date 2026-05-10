@@ -44,6 +44,7 @@ fn representative_events() -> Vec<Event> {
             session_id: "s1".into(),
             text: "hello".to_owned(),
             originator: PromptOriginator::User,
+            ctx_id: None,
         }),
         Event::SessionStarted(SessionStarted {
             session_id: "s1".into(),
@@ -68,6 +69,7 @@ fn representative_events() -> Vec<Event> {
             effort: Effort::Off,
             thinking_summary: ThinkingSummary::Off,
             originator: PromptOriginator::User,
+            ctx_id: None,
         }),
         Event::AgentResponseFinished(AgentResponseFinished {
             session_prompt_id: "sp-1".into(),

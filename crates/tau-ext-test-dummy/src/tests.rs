@@ -90,6 +90,7 @@ fn intercepted_prompt(text: &str) -> Frame {
             session_id: "s1".into(),
             text: text.to_owned(),
             originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
         })),
         transient: false,
     }))

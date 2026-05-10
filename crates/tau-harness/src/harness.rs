@@ -1875,6 +1875,15 @@ impl Harness {
                 Ok(true)
             }
             Event::UiPromptSubmitted(prompt) => {
+                // Stash the correlation tag on the default conversation
+                // before submission; `send_prompt_to_agent_for` will
+                // consume it when it constructs the matching
+                // `SessionPromptCreated`. Queued prompts drop the tag
+                // (the queue stores text only) — the daemon helper
+                // only exercises the synchronous-dispatch path.
+                if let Some(c) = self.conversations.get_mut(&self.default_conversation_id) {
+                    c.next_ctx_id = prompt.ctx_id.clone();
+                }
                 let submission =
                     self.submit_user_prompt(prompt.session_id.clone(), prompt.text.clone())?;
                 if matches!(submission, PromptSubmission::Queued) {
@@ -2419,6 +2428,7 @@ impl Harness {
                 session_id: session_id.clone(),
                 text,
                 originator,
+                ctx_id: None,
             }),
         );
         if self.pending_intercept.is_some() || !self.deferred_publishes.is_empty() {
@@ -2556,6 +2566,7 @@ impl Harness {
                         name: extension_name.clone().into(),
                         query_id: query.query_id.clone(),
                     },
+                    ctx_id: None,
                 }),
             );
             let instruction_content = query.instruction.clone();
@@ -2600,6 +2611,7 @@ impl Harness {
                         name: extension_name.into(),
                         query_id: query.query_id,
                     },
+                    ctx_id: None,
                 }),
             );
         } else {
@@ -2612,6 +2624,7 @@ impl Harness {
                         name: extension_name.into(),
                         query_id: query.query_id,
                     },
+                    ctx_id: None,
                 }),
             );
             self.send_prompt_to_agent_for(&cid);
@@ -3086,6 +3099,10 @@ impl Harness {
         self.next_session_prompt_id += 1;
         self.prompt_conversations
             .insert(session_prompt_id.clone(), cid.clone());
+        let ctx_id = self
+            .conversations
+            .get_mut(cid)
+            .and_then(|c| c.next_ctx_id.take());
         if let Some(c) = self.conversations.get_mut(cid) {
             c.in_flight_prompt = Some(session_prompt_id.clone());
             c.turn_state = ConversationTurnState::AgentThinking {
@@ -3109,6 +3126,7 @@ impl Harness {
             effort: self.selected_effort,
             thinking_summary: self.selected_thinking_summary,
             originator,
+            ctx_id,
         });
         self.publish_event(None, event);
 

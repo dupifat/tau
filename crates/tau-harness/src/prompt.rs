@@ -313,6 +313,7 @@ mod tests {
             text: "build firefox".to_owned(),
             session_id: "session-1".into(),
             originator: tau_proto::PromptOriginator::default(),
+            ctx_id: None,
         }));
         tree.apply_event(&Event::ToolRequest(ToolRequest {
             call_id: "call-1".into(),

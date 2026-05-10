@@ -97,6 +97,12 @@ pub(crate) struct Conversation {
     /// conversations dispatch independently; the agent extension
     /// serializes its own consumption of `SessionPromptCreated`.
     pub(crate) pending_prompts: VecDeque<String>,
+    /// Correlation tag carried in by a [`tau_proto::UiPromptSubmitted`]
+    /// and copied onto the next [`tau_proto::SessionPromptCreated`] this
+    /// conversation emits. Cleared once consumed. Currently only set
+    /// for the synchronous dispatch path; queued prompts drop the tag,
+    /// since the queue stores text only.
+    pub(crate) next_ctx_id: Option<String>,
     pub(crate) turn_state: ConversationTurnState,
     /// For side conversations spawned by a tool-implementing extension
     /// (currently just `delegate`): the parent agent's tool call id
@@ -139,6 +145,7 @@ impl Conversation {
             source_connection,
             in_flight_prompt: None,
             pending_prompts: VecDeque::new(),
+            next_ctx_id: None,
             turn_state: ConversationTurnState::Idle,
             parent_tool_call_id: None,
             task_name: None,

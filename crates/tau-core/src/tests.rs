@@ -38,6 +38,7 @@ fn store_user_message(store: &mut SessionStore, session_id: &str, text: &str) ->
                 session_id: session_id.into(),
                 text: text.to_owned(),
                 originator: tau_proto::PromptOriginator::User,
+                ctx_id: None,
             }),
         )
         .expect("append session event");
@@ -131,6 +132,7 @@ fn subscribed_clients_only_receive_matching_events() {
         session_id: "s1".into(),
         text: "hello".to_owned(),
         originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
     })));
 
     assert_eq!(report.delivered_to, vec![agent_id.clone()]);
@@ -417,6 +419,7 @@ fn explicit_parent_preserved_across_replay() {
             session_id: session_id.into(),
             text: text.to_owned(),
             originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
         })
     };
 
@@ -779,6 +782,7 @@ fn deterministic_agent_and_tool_complete_one_vertical_slice() {
         effort: tau_proto::Effort::Off,
         thinking_summary: tau_proto::ThinkingSummary::Off,
         originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
     };
     let _ = bus.send_to(
         &agent_id,

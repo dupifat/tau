@@ -242,6 +242,15 @@ pub fn run_daemon_with_config(
 
 /// Sends one user message to a running daemon and returns progress
 /// plus the final response.
+///
+/// Stamps the outgoing `UiPromptSubmitted` with a unique `ctx_id` and
+/// uses the matching `SessionPromptCreated` to capture the
+/// `session_prompt_id` the harness allocated for this submission.
+/// Without this, opening a fresh socket against a daemon that has
+/// served a previous prompt would replay that prompt's terminal
+/// `AgentResponseFinished` to the new subscriber and the helper
+/// would return the historical response instead of waiting for the
+/// live one.
 pub fn send_daemon_message_with_trace(
     socket_path: impl Into<PathBuf>,
     session_id: &str,
@@ -262,15 +271,22 @@ pub fn send_daemon_message_with_trace(
             EventSelector::Prefix("harness.".to_owned()),
         ],
     })))?;
+    let ctx_id = next_ctx_id();
     peer.send(&Frame::Event(Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: session_id.into(),
         text: message.to_owned(),
         originator: tau_proto::PromptOriginator::User,
+        ctx_id: Some(ctx_id.clone()),
     })))?;
 
     let started_at = Instant::now();
     let mut lifecycle_messages = Vec::new();
     let mut progress_messages = Vec::new();
+    // Counter parsed out of the `SessionPromptCreated` whose `ctx_id`
+    // matches our submit. The terminal `AgentResponseFinished` has a
+    // spid counter `>= our_spid_counter` (equal when no tool calls,
+    // higher when tool-result follow-ups bump the counter).
+    let mut our_spid_counter: Option<u64> = None;
     loop {
         if RESPONSE_TIMEOUT <= started_at.elapsed() {
             return Err(HarnessError::ResponseTimeout);
@@ -293,8 +309,17 @@ pub fn send_daemon_message_with_trace(
                 ) => {
                     lifecycle_messages.push(format_extension_event(event));
                 }
+                Frame::Event(Event::SessionPromptCreated(prompt))
+                    if prompt.ctx_id.as_deref() == Some(ctx_id.as_str()) =>
+                {
+                    our_spid_counter = parse_spid_counter(prompt.session_prompt_id.as_ref());
+                }
                 Frame::Event(Event::AgentResponseFinished(finished))
-                    if finished.tool_calls.is_empty() =>
+                    if finished.tool_calls.is_empty()
+                        && our_spid_counter.is_some_and(|ours| {
+                            parse_spid_counter(finished.session_prompt_id.as_ref())
+                                .is_some_and(|c| ours <= c)
+                        }) =>
                 {
                     peer.send(&Frame::Message(Message::Disconnect(Disconnect {
                         reason: Some("done".to_owned()),
@@ -314,6 +339,26 @@ pub fn send_daemon_message_with_trace(
             }
         }
     }
+}
+
+/// Generates a unique correlation id for one daemon-helper submission.
+/// The pid + atomic counter combination is unique within the test
+/// process; the bytes never need to be sortable or persisted.
+fn next_ctx_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "tau-daemon-helper-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// Parses the `sp-N` counter the harness assigns when allocating a
+/// new `SessionPromptId`. Returns `None` if the format ever changes —
+/// callers treat that as "can't correlate" rather than panicking.
+fn parse_spid_counter(spid: &str) -> Option<u64> {
+    spid.strip_prefix("sp-").and_then(|s| s.parse().ok())
 }
 
 /// Sends one user message to a running daemon and returns the final

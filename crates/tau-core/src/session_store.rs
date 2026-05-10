@@ -453,6 +453,23 @@ pub fn list_session_metas(state_dir: &Path) -> io::Result<Vec<(SessionId, Sessio
     Ok(out)
 }
 
+/// Best-effort check whether a session's lock is currently held.
+pub fn session_is_locked(state_dir: &Path, session_id: &str) -> io::Result<bool> {
+    let lock_path = state_dir.join(session_id).join("lock");
+    let file = match OpenOptions::new().read(true).write(true).open(&lock_path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    match FileExt::try_lock_exclusive(&file) {
+        Ok(()) => {
+            let _ = FileExt::unlock(&file);
+            Ok(false)
+        }
+        Err(_) => Ok(true),
+    }
+}
+
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

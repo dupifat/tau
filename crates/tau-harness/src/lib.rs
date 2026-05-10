@@ -34,7 +34,7 @@ pub fn dump_initial_prompt(
     harness::Harness::dump_initial_prompt(out_path, user_message)
 }
 
-pub use tau_core::{SessionMeta, list_session_metas};
+pub use tau_core::{SessionEntry, SessionMeta, SessionTree, list_session_metas, session_is_locked};
 
 pub use crate::daemon::{
     EmbeddedOptions, InteractionOutcome, ServeOptions, SessionLaunchStatus, run_component,

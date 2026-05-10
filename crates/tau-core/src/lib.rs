@@ -31,7 +31,9 @@ pub use session::{
     NodeId, PersistedSessionEvent, SessionEntry, SessionMeta, SessionNode, SessionTree,
     ToolActivityOutcome, ToolActivityRecord,
 };
-pub use session_store::{AppendOutcome, SessionStore, SessionStoreError, list_session_metas};
+pub use session_store::{
+    AppendOutcome, SessionStore, SessionStoreError, list_session_metas, session_is_locked,
+};
 pub use tool_registry::{
     RegisterToolReport, ToolProvider, ToolRegistry, ToolRegistryWarning, ToolRouteError,
     ToolRouteReport,

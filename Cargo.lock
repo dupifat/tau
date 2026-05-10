@@ -1488,6 +1488,7 @@ dependencies = [
  "built",
  "ciborium",
  "clap",
+ "console",
  "dirs",
  "rand",
  "tau-agent",

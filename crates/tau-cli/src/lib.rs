@@ -15,8 +15,11 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use console::{Key, Term};
 use tau_config::settings::CliBindingAction;
-use tau_harness::{SessionLaunchStatus, runtime_dir};
+use tau_harness::{SessionEntry, SessionLaunchStatus, SessionTree, runtime_dir};
+
+const RESUME_PICKER_LIMIT: usize = 10;
 
 fn encode_binding_action(action: &CliBindingAction) -> String {
     if action.command.is_empty() {
@@ -179,6 +182,7 @@ pub enum CliError {
     DaemonExited(String),
     NoRunningDaemon,
     Participant(String),
+    SessionNotFound(String),
 }
 
 impl fmt::Display for CliError {
@@ -196,6 +200,7 @@ impl fmt::Display for CliError {
                  drop `--attach` to spawn one",
             ),
             Self::Participant(msg) => write!(f, "participant error: {msg}"),
+            Self::SessionNotFound(id) => write!(f, "session not found: `{id}`"),
         }
     }
 }
@@ -285,19 +290,33 @@ impl Drop for DaemonHandle {
 /// Resolves the session id for one `tau` invocation.
 ///
 /// - `None` → mint `<basename(cwd)>-<rand6>`.
-/// - `Some("")` (bare `-r`) → resume the most recent session whose
+/// - `Some("")` (bare `-r`) → interactively pick among recent sessions whose
 ///   `meta.json.cwd` matches cwd; if none, mint fresh.
-/// - `Some(id)` → resume that explicit id.
+/// - `Some(id)` → resume that explicit id; error if it does not exist.
 fn resolve_run_session_id(resume: Option<&str>) -> Result<(String, SessionLaunchStatus), CliError> {
     let cwd = std::env::current_dir()?;
     match resume {
         None => Ok((mint_session_id(&cwd), SessionLaunchStatus::New)),
-        Some("") => match find_most_recent_session(&cwd) {
+        Some("") => match pick_resume_session(&cwd)? {
             Some(id) => Ok((id, SessionLaunchStatus::Resumed)),
             None => Ok((mint_session_id(&cwd), SessionLaunchStatus::New)),
         },
-        Some(id) => Ok((id.to_owned(), SessionLaunchStatus::Resumed)),
+        Some(id) => {
+            if session_exists(id)? {
+                Ok((id.to_owned(), SessionLaunchStatus::Resumed))
+            } else {
+                Err(CliError::SessionNotFound(id.to_owned()))
+            }
+        }
     }
+}
+
+fn session_exists(id: &str) -> Result<bool, CliError> {
+    let state_dir = tau_harness::default_state_dir();
+    let metas = tau_harness::list_session_metas(&state_dir)?;
+    Ok(metas
+        .into_iter()
+        .any(|(session_id, _)| session_id.as_str() == id))
 }
 
 fn mint_session_id(cwd: &Path) -> String {
@@ -319,14 +338,119 @@ fn mint_session_id(cwd: &Path) -> String {
     format!("{basename}-{suffix}")
 }
 
-fn find_most_recent_session(cwd: &Path) -> Option<String> {
+fn pick_resume_session(cwd: &Path) -> Result<Option<String>, CliError> {
     let state_dir = tau_harness::default_state_dir();
-    let metas = tau_harness::list_session_metas(&state_dir).ok()?;
-    metas
+    let mut metas = tau_harness::list_session_metas(&state_dir)?;
+    metas.retain(|(_, meta)| meta.cwd.as_deref() == Some(cwd));
+    metas.sort_by_key(|(_, meta)| std::cmp::Reverse(meta.last_touched));
+    metas.truncate(RESUME_PICKER_LIMIT);
+    if metas.is_empty() {
+        return Ok(None);
+    }
+    if metas.len() == 1 || !io::IsTerminal::is_terminal(&io::stdin()) {
+        return Ok(metas.first().map(|(sid, _)| sid.as_str().to_owned()));
+    }
+
+    let store = tau_harness::open_session_store(&state_dir)?;
+    let rows = metas
         .into_iter()
-        .filter(|(_, meta): &(_, tau_harness::SessionMeta)| meta.cwd.as_deref() == Some(cwd))
-        .max_by_key(|(_, meta)| meta.last_touched)
-        .map(|(sid, _)| sid.as_str().to_owned())
+        .map(|(sid, _meta)| {
+            let locked = tau_harness::session_is_locked(&state_dir, sid.as_str()).unwrap_or(false);
+            let preview = store
+                .session(sid.as_str())
+                .and_then(latest_user_prompt_preview)
+                .map(|p| format!(" — {p}"))
+                .unwrap_or_default();
+            let id = sid.as_str().to_owned();
+            let item = format!("{}{}", sid.as_str(), preview);
+            (id, item, locked)
+        })
+        .collect::<Vec<_>>();
+    if rows.iter().all(|(_, _, locked)| *locked) {
+        return Ok(None);
+    }
+    let default = rows
+        .iter()
+        .position(|(_, _, locked)| !*locked)
+        .unwrap_or_default();
+    if rows.iter().filter(|(_, _, locked)| !*locked).count() == 1 {
+        return Ok(Some(rows[default].0.clone()));
+    }
+    let items = rows.iter().map(|(_, item, _)| item).collect::<Vec<_>>();
+    let selection = interact_resume_picker(&items, &rows, default)?;
+    Ok(Some(rows[selection].0.clone()))
+}
+
+fn interact_resume_picker(
+    items: &[&String],
+    rows: &[(String, String, bool)],
+    mut selected: usize,
+) -> Result<usize, CliError> {
+    let term = Term::stderr();
+    term.write_line("? Resume session")?;
+    loop {
+        for (idx, item) in items.iter().enumerate() {
+            let marker = if rows[idx].2 {
+                "X"
+            } else if idx == selected {
+                ">"
+            } else {
+                " "
+            };
+            term.write_line(&format!("{marker} {item}"))?;
+        }
+        match term.read_key().map_err(io::Error::other)? {
+            Key::ArrowDown | Key::Tab | Key::Char('j') => {
+                selected = adjacent_unlocked_row(rows, selected, true);
+            }
+            Key::ArrowUp | Key::BackTab | Key::Char('k') => {
+                selected = adjacent_unlocked_row(rows, selected, false);
+            }
+            Key::Enter | Key::Char(' ') => {
+                term.clear_last_lines(items.len() + 1)?;
+                return Ok(selected);
+            }
+            _ => {}
+        }
+        term.clear_last_lines(items.len())?;
+    }
+}
+
+fn adjacent_unlocked_row(rows: &[(String, String, bool)], selected: usize, forward: bool) -> usize {
+    for offset in 1..rows.len() {
+        let idx = if forward {
+            (selected + offset) % rows.len()
+        } else {
+            (selected + rows.len() - offset) % rows.len()
+        };
+        if !rows[idx].2 {
+            return idx;
+        }
+    }
+    selected
+}
+
+fn latest_user_prompt_preview(session: &SessionTree) -> Option<String> {
+    session
+        .current_branch()
+        .into_iter()
+        .rev()
+        .find_map(|e| match e {
+            SessionEntry::UserMessage { text } => Some(preview_text(&text, 48)),
+            _ => None,
+        })
+}
+
+fn preview_text(text: &str, max: usize) -> String {
+    let single_line: String = text
+        .chars()
+        .map(|c| if c == '\n' { ' ' } else { c })
+        .collect();
+    if single_line.chars().count() < max + 1 {
+        single_line
+    } else {
+        format!("{}…", single_line.chars().take(max).collect::<String>())
+    }
 }
 
 struct DaemonOutput {

@@ -300,6 +300,71 @@ fn input_history_navigates_submitted_and_draft_entries() {
 }
 
 #[test]
+fn down_from_non_empty_draft_creates_fresh_prompt_and_history_entry() {
+    let buf = SharedBuffer::new();
+    let (term, handle, input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+
+    handle.set_buffer("draft".to_owned(), 5);
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )))
+        .expect("send down");
+    assert!(matches!(
+        term.get_next_event().expect("event"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "");
+    assert_eq!(handle.get_cursor(), 0);
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )))
+        .expect("send up");
+    assert!(matches!(
+        term.get_next_event().expect("event"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "draft");
+    assert_eq!(handle.get_cursor(), 5);
+}
+
+#[test]
+fn down_from_empty_prompt_does_not_create_history_entry() {
+    let buf = SharedBuffer::new();
+    let (term, handle, input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )))
+        .expect("send down");
+    assert!(matches!(
+        term.get_next_event().expect("event"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "");
+    assert_eq!(handle.get_cursor(), 0);
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )))
+        .expect("send up");
+    assert!(matches!(
+        term.get_next_event().expect("event"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "");
+    assert_eq!(handle.get_cursor(), 0);
+}
+
+#[test]
 fn vertical_motion_stays_within_multiline_buffer_before_history() {
     let buf = SharedBuffer::new();
     let (term, handle, input_tx) = Term::new_virtual(10, 5, "> ", Box::new(buf), CursorShape::Bar);

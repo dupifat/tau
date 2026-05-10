@@ -238,13 +238,21 @@ impl SharedState {
     }
 
     /// Steps history navigation by `delta`. Enters history-nav mode
-    /// from `Editing` if needed (delta == -1 and `input_history` is
-    /// non-empty). Returns `true` if the buffer changed.
+    /// from `Editing` when moving backward and history exists. Moving
+    /// forward from a non-empty editing buffer stores it as history
+    /// and opens a fresh empty prompt. Returns `true` if the buffer
+    /// changed.
     fn step_history(&mut self, delta: isize) -> bool {
         if self.history_nav.is_none() {
-            // Only entering on Up makes sense — Down from Editing has
-            // nowhere to go.
-            if delta >= 0 || self.input_history.is_empty() {
+            if 0 < delta {
+                if self.buffer.is_empty() {
+                    return false;
+                }
+                self.input_history.push(std::mem::take(&mut self.buffer));
+                self.cursor = 0;
+                return true;
+            }
+            if self.input_history.is_empty() {
                 return false;
             }
             let mut entries = self.input_history.clone();

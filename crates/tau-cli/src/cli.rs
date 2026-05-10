@@ -4,8 +4,16 @@ use clap::{Parser, Subcommand};
 use tau_harness::{default_session_id, default_state_dir};
 
 #[derive(Parser)]
-#[command(name = "tau", about = "Unix-native LLM agent harness")]
+#[command(
+    name = "tau",
+    about = "Unix-native LLM agent harness",
+    disable_version_flag = true
+)]
 pub struct Cli {
+    /// Print version, build revision, and build date.
+    #[arg(short = 'V', long = "version", global = true)]
+    pub version: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }

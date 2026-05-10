@@ -380,6 +380,11 @@ fn build_label_parts() -> (String, String) {
     (version, build)
 }
 
+fn version_label() -> String {
+    let (version, build) = build_label_parts();
+    format!("{version} {build}")
+}
+
 fn display_path(path: &Path) -> String {
     let Ok(home) = std::env::var("HOME") else {
         return path.display().to_string();
@@ -3094,6 +3099,10 @@ pub fn main_with_args() -> std::process::ExitCode {
 
     fn run() -> Result<(), CliError> {
         let parsed = cli::Cli::parse();
+        if parsed.version {
+            println!("{}", version_label());
+            return Ok(());
+        }
 
         let command = parsed.command.unwrap_or(cli::Command::Run {
             resume: None,

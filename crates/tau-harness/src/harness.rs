@@ -899,7 +899,7 @@ impl Harness {
     /// Publishes an event to both the event bus and the event log.
     /// Convenience wrapper that uses the event's default transience
     /// and never marks the publish as `must_pass`.
-    fn publish_event(&mut self, source: Option<&str>, event: Event) {
+    pub(crate) fn publish_event(&mut self, source: Option<&str>, event: Event) {
         let transient = event.defaults_to_transient();
         self.enqueue_publish(source, event, transient, false, None);
     }
@@ -2331,6 +2331,8 @@ impl Harness {
             let dominated = matches!(
                 entry.event,
                 Event::HarnessInfo(_)
+                    | Event::HarnessSessionDir(_)
+                    | Event::HarnessUiDir(_)
                     | Event::ExtensionStarting(_)
                     | Event::ExtensionReady(_)
                     | Event::ExtensionExited(_)
@@ -2850,15 +2852,19 @@ impl Harness {
         let _ = self.enable_debug_log(&self.dirs_state_dir().join(new_session_id.as_str()));
         self.start_session_init(new_session_id.clone(), reason);
         let session_status = match reason {
-            tau_proto::SessionStartReason::Initial | tau_proto::SessionStartReason::New => "new",
-            tau_proto::SessionStartReason::Resume => "resumed",
+            tau_proto::SessionStartReason::Initial | tau_proto::SessionStartReason::New => {
+                tau_proto::SessionDirStatus::New
+            }
+            tau_proto::SessionStartReason::Resume => tau_proto::SessionDirStatus::Resumed,
         };
-        self.emit_info(&format!(
-            "session dir: {}/ {session_status}",
-            self.dirs_state_dir()
-                .join(new_session_id.as_str())
-                .display()
-        ));
+        self.publish_event(
+            None,
+            Event::HarnessSessionDir(tau_proto::HarnessSessionDir {
+                session_id: new_session_id.clone(),
+                path: self.dirs_state_dir().join(new_session_id.as_str()),
+                status: session_status,
+            }),
+        );
         Ok(())
     }
 

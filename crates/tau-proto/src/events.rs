@@ -206,6 +206,8 @@ impl EventName {
         Self::from_static(EventCategory::Extension, "agent_query_result");
 
     pub const HARNESS_INFO: Self = Self::from_static(EventCategory::Harness, "info");
+    pub const HARNESS_SESSION_DIR: Self = Self::from_static(EventCategory::Harness, "session_dir");
+    pub const HARNESS_UI_DIR: Self = Self::from_static(EventCategory::Harness, "ui_dir");
     pub const HARNESS_MODELS_AVAILABLE: Self =
         Self::from_static(EventCategory::Harness, "models_available");
     pub const HARNESS_MODEL_SELECTED: Self =
@@ -391,6 +393,36 @@ pub struct HarnessInfo {
     pub message: String,
     #[serde(default)]
     pub level: HarnessInfoLevel,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionDirStatus {
+    #[default]
+    New,
+    Resumed,
+}
+
+impl SessionDirStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Resumed => "resumed",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HarnessSessionDir {
+    pub session_id: SessionId,
+    pub path: std::path::PathBuf,
+    pub status: SessionDirStatus,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HarnessUiDir {
+    pub path: std::path::PathBuf,
 }
 
 /// The harness announces all available models as `provider/model` strings.
@@ -1379,6 +1411,10 @@ pub enum Event {
     // Harness info
     #[serde(rename = "harness.info")]
     HarnessInfo(HarnessInfo),
+    #[serde(rename = "harness.session_dir")]
+    HarnessSessionDir(HarnessSessionDir),
+    #[serde(rename = "harness.ui_dir")]
+    HarnessUiDir(HarnessUiDir),
     #[serde(rename = "harness.models_available")]
     HarnessModelsAvailable(HarnessModelsAvailable),
     #[serde(rename = "harness.model_selected")]
@@ -1471,6 +1507,8 @@ impl Event {
             Self::ExtAgentQueryResult(_) => EventName::EXTENSION_AGENT_QUERY_RESULT,
             Self::ExtensionEvent(event) => event.name.clone(),
             Self::HarnessInfo(_) => EventName::HARNESS_INFO,
+            Self::HarnessSessionDir(_) => EventName::HARNESS_SESSION_DIR,
+            Self::HarnessUiDir(_) => EventName::HARNESS_UI_DIR,
             Self::HarnessModelsAvailable(_) => EventName::HARNESS_MODELS_AVAILABLE,
             Self::HarnessModelSelected(_) => EventName::HARNESS_MODEL_SELECTED,
             Self::HarnessContextUsageChanged(_) => EventName::HARNESS_CONTEXT_USAGE_CHANGED,

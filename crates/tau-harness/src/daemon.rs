@@ -37,6 +37,15 @@ impl SessionLaunchStatus {
     }
 }
 
+impl From<SessionLaunchStatus> for tau_proto::SessionDirStatus {
+    fn from(status: SessionLaunchStatus) -> Self {
+        match status {
+            SessionLaunchStatus::New => Self::New,
+            SessionLaunchStatus::Resumed => Self::Resumed,
+        }
+    }
+}
+
 /// Serve-loop options for daemon mode.
 #[derive(Clone, Debug, Eq, PartialEq, bon::Builder)]
 pub struct ServeOptions {
@@ -420,11 +429,14 @@ pub fn run_harness_daemon(
     tracing::debug!(target: "tau_harness::startup", state_dir = %state_dir.display(), elapsed_ms = startup_started_at.elapsed().as_millis(), "constructing harness");
     let mut harness = Harness::from_config(config, &state_dir, dirs, eager_session_id)?;
     tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "harness constructed");
-    harness.emit_info(&format!(
-        "session dir: {}/ {}",
-        state_dir.join(eager_session_id).display(),
-        options.session_status.as_str(),
-    ));
+    harness.publish_event(
+        None,
+        Event::HarnessSessionDir(tau_proto::HarnessSessionDir {
+            session_id: eager_session_id.to_owned().into(),
+            path: state_dir.join(eager_session_id),
+            status: options.session_status.into(),
+        }),
+    );
 
     // Write marker AFTER extensions are ready.
     tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "writing daemon ready markers");

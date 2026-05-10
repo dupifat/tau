@@ -685,7 +685,7 @@ fn run_chat(
         ]);
         handle.print_output(StyledBlock::new(banner));
     }
-    handle.print_output(system_path_block(&theme, "ui dir: ", ui_logging.dir(), "/"));
+    handle.print_output(ui_dir_block(&theme, ui_logging.dir()));
 
     handle.redraw();
 
@@ -2094,15 +2094,6 @@ fn render_harness_info(
     use tau_themes::names;
 
     if info.level == tau_proto::HarnessInfoLevel::Normal {
-        if let Some((path, status)) = info
-            .message
-            .strip_prefix("session dir: ")
-            .and_then(|rest| rest.strip_suffix('/'))
-            .and_then(|rest| rest.rsplit_once(' '))
-            && matches!(status, "new" | "resumed")
-        {
-            return session_status_block(theme, Path::new(path), "/", status);
-        }
         if let Some(path) = info
             .message
             .strip_prefix("session dir: ")
@@ -2117,6 +2108,10 @@ fn render_harness_info(
         tau_proto::HarnessInfoLevel::Important => names::SYSTEM_INFO_IMPORTANT,
     };
     themed_block(theme, style_name, &info.message)
+}
+
+fn ui_dir_block(theme: &tau_themes::Theme, path: &Path) -> tau_cli_term::StyledBlock {
+    system_path_block(theme, "ui dir: ", path, "/")
 }
 
 fn session_status_block(
@@ -3091,6 +3086,18 @@ impl EventRenderer {
             Event::HarnessInfo(info) => {
                 self.handle
                     .print_output(render_harness_info(&self.theme, info));
+            }
+            Event::HarnessSessionDir(session_dir) => {
+                self.handle.print_output(session_status_block(
+                    &self.theme,
+                    &session_dir.path,
+                    "/",
+                    session_dir.status.as_str(),
+                ));
+            }
+            Event::HarnessUiDir(ui_dir) => {
+                self.handle
+                    .print_output(ui_dir_block(&self.theme, &ui_dir.path));
             }
             Event::HarnessModelsAvailable(models) => {
                 let items: Vec<tau_cli_term::CompletionItem> = models

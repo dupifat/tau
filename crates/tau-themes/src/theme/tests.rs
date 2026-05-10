@@ -170,6 +170,12 @@ fn builtin_theme_parses() {
     let tool_ok = theme.resolve_style(&StyleName::new("tool.status.success"));
     assert_eq!(tool_ok.fg, Some(Color::Green));
 
+    let extension_status = theme.resolve_style(&StyleName::new("extension.status"));
+    assert_eq!(extension_status, ThemeStyle::default());
+
+    let session_status = theme.resolve_style(&StyleName::new("session.status"));
+    assert_eq!(session_status, ThemeStyle::default());
+
     let selected = theme.resolve_style(&StyleName::new("completion.selected"));
     assert!(selected.bold);
     assert_eq!(selected.fg, Some(Color::White));

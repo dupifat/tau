@@ -2736,10 +2736,10 @@ fn switch_session_rebinds_default_conversation() {
     let mut cursor = 0;
     while let Some(entry) = h.event_log.get_next_from(cursor) {
         cursor = entry.seq + 1;
-        if let Event::HarnessInfo(info) = &entry.event
-            && info.message.contains("/s2/")
-            && info.message.starts_with("session dir: ")
-            && info.message.ends_with(" new")
+        if let Event::HarnessSessionDir(session_dir) = &entry.event
+            && session_dir.session_id == "s2"
+            && session_dir.path.ends_with("s2")
+            && session_dir.status == tau_proto::SessionDirStatus::New
         {
             saw_session_dir = true;
         }

@@ -553,6 +553,303 @@ fn step_history_preserves_sticky_column_across_empty_entry() {
 }
 
 #[test]
+fn up_preserves_sticky_column_across_short_line_in_buffer() {
+    let buf = SharedBuffer::new();
+    let (term, handle, input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+
+    // Cursor at end of row 2 (visual col 6).
+    handle.set_buffer("abcdef\nx\nabcdef".to_owned(), 15);
+
+    // Up onto "x": truncated to byte 8 (after 'x').
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )))
+        .expect("up");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_cursor(), 8);
+
+    // Up again restores visual col 6 on row 0: byte 4 ("abcd|ef").
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )))
+        .expect("up");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_cursor(), 4);
+}
+
+#[test]
+fn sticky_column_carries_from_buffer_into_history() {
+    let buf = SharedBuffer::new();
+    let (term, handle, input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+
+    handle.set_buffer("pqrstuv".to_owned(), 7);
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )))
+        .expect("enter");
+    let _ = term.get_next_event().expect("event");
+
+    // 3-row buffer with empty middle row. Cursor at end (row 2 col 3).
+    handle.set_buffer("abcdef\n\nxyz".to_owned(), 11);
+
+    // Up → end of empty middle row at byte 7 (col 0).
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )))
+        .expect("up");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_cursor(), 7);
+
+    // Up → row 0 of current buffer. Sticky col 3 (set on first Up)
+    // is preserved through the empty row, so we land at byte 1
+    // ("a|bcdef") instead of the start.
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )))
+        .expect("up");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_cursor(), 1);
+
+    // Up → step_history into "pqrstuv". Sticky col 3 still in
+    // effect, so cursor lands at byte 1 of "pqrstuv" ("p|qrstuv").
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )))
+        .expect("up");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_buffer(), "pqrstuv");
+    assert_eq!(handle.get_cursor(), 1);
+}
+
+#[test]
+fn backspace_clears_sticky_column() {
+    let buf = SharedBuffer::new();
+    let (term, handle, input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+
+    handle.set_buffer("abcdef\nx\nabcdef".to_owned(), 4);
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )))
+        .expect("down");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_cursor(), 8);
+
+    // Backspace deletes 'x', clears sticky. Buffer becomes
+    // "abcdef\n\nabcdef", cursor=7 (start of empty middle row).
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Backspace,
+            KeyModifiers::NONE,
+        )))
+        .expect("backspace");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_buffer(), "abcdef\n\nabcdef");
+    assert_eq!(handle.get_cursor(), 7);
+
+    // Down uses current col (0) — not sticky 6. Lands at byte 8
+    // (start of row 2) instead of byte 14 (sticky-preserved col 6).
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )))
+        .expect("down");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_cursor(), 8);
+}
+
+#[test]
+fn left_clears_sticky_column() {
+    let buf = SharedBuffer::new();
+    let (term, handle, input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+
+    handle.set_buffer("abcdef\nx\nabcdef".to_owned(), 4);
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )))
+        .expect("down");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_cursor(), 8);
+
+    // Left clears sticky (no event), then Down uses recomputed col.
+    // Left moves cursor to byte 7 (start of "x", visual col 0). Down
+    // lands at byte 9 (start of row 2) instead of 15 (sticky col 6).
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Left,
+            KeyModifiers::NONE,
+        )))
+        .expect("left");
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )))
+        .expect("down");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_cursor(), 9);
+}
+
+#[test]
+fn home_clears_sticky_column() {
+    let buf = SharedBuffer::new();
+    let (term, handle, input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+
+    handle.set_buffer("abcdef\nx\nabcdef".to_owned(), 4);
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )))
+        .expect("down");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_cursor(), 8);
+
+    // Home → cursor=0 (visual col 2, prompt edge). Down then lands
+    // at byte 8 (after 'x' on row 1) — col 2 → truncated to last
+    // available position on the short row. Without clearing sticky,
+    // col 6 would have given the same byte 8 here, so step further
+    // and assert: another Down lands at byte 11 (visual col 2 on
+    // row 2 = "ab|cdef"), not byte 15 (col 6).
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Home,
+            KeyModifiers::NONE,
+        )))
+        .expect("home");
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )))
+        .expect("down");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_cursor(), 8);
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )))
+        .expect("down");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_cursor(), 11);
+}
+
+#[test]
+fn ctrl_up_jumps_to_history_with_column_preserved() {
+    let buf = SharedBuffer::new();
+    let (term, handle, input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+
+    handle.set_buffer("xyzw".to_owned(), 4);
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )))
+        .expect("enter");
+    let _ = term.get_next_event().expect("event");
+
+    // Cursor on row 1 of multi-line draft at visual col 4 (byte 10
+    // = "abcde\nfghi|j").
+    handle.set_buffer("abcde\nfghij".to_owned(), 10);
+
+    // Plain Up would move within the buffer. Ctrl-Up bypasses that
+    // and goes straight to history, preserving visual col 4 → byte 2
+    // of "xyzw" ("xy|zw").
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::CONTROL,
+        )))
+        .expect("ctrl-up");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_buffer(), "xyzw");
+    assert_eq!(handle.get_cursor(), 2);
+}
+
+#[test]
+fn ctrl_k_steps_history_back_with_column_preserved() {
+    let buf = SharedBuffer::new();
+    let (term, handle, input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+
+    handle.set_buffer("xyzw".to_owned(), 4);
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )))
+        .expect("enter");
+    let _ = term.get_next_event().expect("event");
+
+    handle.set_buffer("abc".to_owned(), 1);
+
+    // Ctrl-K → step_history(-1), preserving visual col 3.
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+        )))
+        .expect("ctrl-k");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_buffer(), "xyzw");
+    assert_eq!(handle.get_cursor(), 1);
+
+    // Ctrl-J → step_history(+1), preserving column. Lands back on
+    // the WIP draft "abc" at visual col 3 → byte 1 ("a|bc").
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('j'),
+            KeyModifiers::CONTROL,
+        )))
+        .expect("ctrl-j");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_buffer(), "abc");
+    assert_eq!(handle.get_cursor(), 1);
+}
+
+#[test]
+fn vertical_motion_uses_visual_column_in_wrapped_line() {
+    let buf = SharedBuffer::new();
+    let (term, handle, input_tx) = Term::new_virtual(10, 5, "> ", Box::new(buf), CursorShape::Bar);
+
+    // "abcdefghijkl" with width=10 and a 2-col left prompt wraps to:
+    //   row 0: "> abcdefgh"  (cols 2..10, h at col 9)
+    //   row 1: "ijkl"        (i at col 0, l at col 3)
+    // Cursor at end → visual position (1, 4).
+    handle.set_buffer("abcdefghijkl".to_owned(), 12);
+
+    // Up: target visual col 4 → row 0 col 4 → byte 2 ("ab|cdefghijkl").
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )))
+        .expect("up");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_cursor(), 2);
+}
+
+#[test]
 fn down_at_wip_slot_in_nav_mode_pushes_and_resets() {
     // Repro: after a Down has pushed once, navigating Up then
     // editing the WIP slot and pressing Down should push again.

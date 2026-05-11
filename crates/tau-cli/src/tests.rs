@@ -9,7 +9,12 @@ use tau_proto::{
     SessionStartReason, SessionStarted, ToolResult, UiPromptSubmitted,
 };
 
-use super::{DraftSlot, EventRenderer, should_send_draft_snapshot};
+use super::chat::{DraftSlot, should_send_draft_snapshot};
+use super::event_renderer::EventRenderer;
+use super::tool_render::{
+    ToolStatus, build_osc1337_set_user_var, cache_hit_percent, format_cache_hit_chip,
+    format_context_chip, format_tool_completion, format_turn_metrics_chip, streaming_block,
+};
 
 /// Writer that feeds bytes into a vt100::Parser. Bytes are
 /// buffered per-write and flushed atomically to the parser on
@@ -1014,15 +1019,12 @@ fn grep_completion_uses_output_stats_and_status_chip() {
             CborValue::Text("a\nb\n".into()),
         ),
     ]);
-    let grep = super::format_tool_completion("grep", &grep_details, None);
+    let grep = format_tool_completion("grep", &grep_details, None);
     assert_eq!(grep.suffixes.len(), 2);
     assert_eq!(grep.suffixes[0].text, "(0M, 2L, 4B)");
-    assert!(matches!(grep.suffixes[0].status, super::ToolStatus::Info));
+    assert!(matches!(grep.suffixes[0].status, ToolStatus::Info));
     assert_eq!(grep.suffixes[1].text, "ok: no matches");
-    assert!(matches!(
-        grep.suffixes[1].status,
-        super::ToolStatus::Success
-    ));
+    assert!(matches!(grep.suffixes[1].status, ToolStatus::Success));
 
     let grep_ok_details = CborValue::Map(vec![
         (
@@ -1043,12 +1045,9 @@ fn grep_completion_uses_output_stats_and_status_chip() {
             CborValue::Text("a\n".into()),
         ),
     ]);
-    let grep_ok = super::format_tool_completion("grep", &grep_ok_details, None);
+    let grep_ok = format_tool_completion("grep", &grep_ok_details, None);
     assert_eq!(grep_ok.suffixes[1].text, "ok");
-    assert!(matches!(
-        grep_ok.suffixes[1].status,
-        super::ToolStatus::Success
-    ));
+    assert!(matches!(grep_ok.suffixes[1].status, ToolStatus::Success));
 }
 
 #[test]
@@ -1071,34 +1070,28 @@ fn shell_completion_uses_output_stats_and_exit_color() {
             CborValue::Integer(7.into()),
         ),
     ]);
-    let shell = super::format_tool_completion("shell", &shell_details, None);
+    let shell = format_tool_completion("shell", &shell_details, None);
     assert_eq!(shell.suffixes.len(), 2);
     assert_eq!(shell.suffixes[0].text, "(1L, 3B)");
-    assert!(matches!(shell.suffixes[0].status, super::ToolStatus::Info));
+    assert!(matches!(shell.suffixes[0].status, ToolStatus::Info));
     assert_eq!(shell.suffixes[1].text, "err: 7");
-    assert!(matches!(shell.suffixes[1].status, super::ToolStatus::Error));
+    assert!(matches!(shell.suffixes[1].status, ToolStatus::Error));
 
-    let shell_error = super::format_tool_completion(
+    let shell_error = format_tool_completion(
         "shell",
         &shell_details,
         Some("command exited with status 7"),
     );
     assert_eq!(shell_error.suffixes.len(), 2);
     assert_eq!(shell_error.suffixes[0].text, "(1L, 3B)");
-    assert!(matches!(
-        shell_error.suffixes[0].status,
-        super::ToolStatus::Info
-    ));
+    assert!(matches!(shell_error.suffixes[0].status, ToolStatus::Info));
     assert_eq!(shell_error.suffixes[1].text, "err: 7");
-    assert!(matches!(
-        shell_error.suffixes[1].status,
-        super::ToolStatus::Error
-    ));
+    assert!(matches!(shell_error.suffixes[1].status, ToolStatus::Error));
 }
 
 #[test]
 fn edit_completion_uses_path_on_error() {
-    let edit_error = super::format_tool_completion(
+    let edit_error = format_tool_completion(
         "edit",
         &CborValue::Map(vec![(
             CborValue::Text("path".into()),
@@ -1109,17 +1102,14 @@ fn edit_completion_uses_path_on_error() {
     assert_eq!(edit_error.args, "tmp/test-files/test1.txt");
     assert_eq!(edit_error.suffixes.len(), 1);
     assert_eq!(edit_error.suffixes[0].text, "err: no match");
-    assert!(matches!(
-        edit_error.suffixes[0].status,
-        super::ToolStatus::Error
-    ));
+    assert!(matches!(edit_error.suffixes[0].status, ToolStatus::Error));
 }
 
 #[test]
 fn build_osc1337_set_user_var_encodes_value_and_respects_tmux() {
-    let plain = super::build_osc1337_set_user_var("user-notification", "hello", false);
+    let plain = build_osc1337_set_user_var("user-notification", "hello", false);
     assert_eq!(plain, "\x1b]1337;SetUserVar=user-notification=aGVsbG8=\x07");
-    let wrapped = super::build_osc1337_set_user_var("user-notification", "hello", true);
+    let wrapped = build_osc1337_set_user_var("user-notification", "hello", true);
     assert_eq!(
         wrapped,
         "\x1bPtmux;\x1b\x1b]1337;SetUserVar=user-notification=aGVsbG8=\x07\x1b\\",
@@ -1130,51 +1120,45 @@ fn build_osc1337_set_user_var_encodes_value_and_respects_tmux() {
 fn format_context_chip_picks_format_by_known_fields() {
     // Both window and percent known → percent/window chip.
     assert_eq!(
-        super::format_context_chip(Some(12_000), Some(6), Some(200_000)),
+        format_context_chip(Some(12_000), Some(6), Some(200_000)),
         " ctx:6%/200k",
     );
     // Window unknown, tokens reported → tokens/? fallback.
-    assert_eq!(
-        super::format_context_chip(Some(12_000), None, None),
-        " ctx:12k/?",
-    );
+    assert_eq!(format_context_chip(Some(12_000), None, None), " ctx:12k/?",);
     // Window known but no usage report yet still shows the percent
     // (which the harness initialized to 0 on model select).
     assert_eq!(
-        super::format_context_chip(None, Some(0), Some(200_000)),
+        format_context_chip(None, Some(0), Some(200_000)),
         " ctx:0%/200k",
     );
     // Nothing known → empty.
-    assert_eq!(super::format_context_chip(None, None, None), "");
+    assert_eq!(format_context_chip(None, None, None), "");
 }
 
 #[test]
 fn format_cache_hit_chip_matches_context_chip_shape() {
     assert_eq!(
-        super::format_cache_hit_chip(Some(12_000), Some(9_000)),
+        format_cache_hit_chip(Some(12_000), Some(9_000)),
         " hit:75%/12k",
     );
-    assert_eq!(super::format_cache_hit_chip(Some(12_000), None), "");
+    assert_eq!(format_cache_hit_chip(Some(12_000), None), "");
 }
 
 #[test]
 fn format_turn_metrics_chip_includes_latency() {
     assert_eq!(
-        super::format_turn_metrics_chip(Some(Duration::from_millis(1_240))),
+        format_turn_metrics_chip(Some(Duration::from_millis(1_240))),
         " resp:1.2s",
     );
-    assert_eq!(super::format_turn_metrics_chip(None), "");
+    assert_eq!(format_turn_metrics_chip(None), "");
 }
 
 #[test]
 fn cache_hit_percent_clamps_to_input_tokens() {
-    assert_eq!(super::cache_hit_percent(Some(2_000), Some(1_500)), Some(75));
-    assert_eq!(
-        super::cache_hit_percent(Some(2_000), Some(3_000)),
-        Some(100)
-    );
-    assert_eq!(super::cache_hit_percent(Some(0), Some(0)), Some(0));
-    assert_eq!(super::cache_hit_percent(Some(2_000), None), None);
+    assert_eq!(cache_hit_percent(Some(2_000), Some(1_500)), Some(75));
+    assert_eq!(cache_hit_percent(Some(2_000), Some(3_000)), Some(100));
+    assert_eq!(cache_hit_percent(Some(0), Some(0)), Some(0));
+    assert_eq!(cache_hit_percent(Some(2_000), None), None);
 }
 
 #[test]
@@ -1189,7 +1173,7 @@ fn streaming_block_handles_each_trailing_case() {
         ("line\n  ", "line\n  …"),
     ];
     for (input, expected) in cases {
-        let block = super::streaming_block(&theme, tau_themes::names::AGENT_RESPONSE, input);
+        let block = streaming_block(&theme, tau_themes::names::AGENT_RESPONSE, input);
         let actual: String = block
             .content
             .spans()
@@ -1221,33 +1205,24 @@ fn edit_completion_uses_diff_chip() {
             ]),
         ),
     ]);
-    let edit = super::format_tool_completion("edit", &edit_details, None);
+    let edit = format_tool_completion("edit", &edit_details, None);
     assert_eq!(edit.suffixes.len(), 6);
     assert_eq!(edit.suffixes[0].text, "(");
-    assert!(matches!(edit.suffixes[0].status, super::ToolStatus::Info));
+    assert!(matches!(edit.suffixes[0].status, ToolStatus::Info));
     assert_eq!(edit.suffixes[1].text, "+2");
-    assert!(matches!(
-        edit.suffixes[1].status,
-        super::ToolStatus::DiffAdded
-    ));
+    assert!(matches!(edit.suffixes[1].status, ToolStatus::DiffAdded));
     assert!(edit.suffixes[1].no_leading_space);
     assert_eq!(edit.suffixes[2].text, "/");
-    assert!(matches!(edit.suffixes[2].status, super::ToolStatus::Info));
+    assert!(matches!(edit.suffixes[2].status, ToolStatus::Info));
     assert!(edit.suffixes[2].no_leading_space);
     assert_eq!(edit.suffixes[3].text, "-1");
-    assert!(matches!(
-        edit.suffixes[3].status,
-        super::ToolStatus::DiffRemoved
-    ));
+    assert!(matches!(edit.suffixes[3].status, ToolStatus::DiffRemoved));
     assert!(edit.suffixes[3].no_leading_space);
     assert_eq!(edit.suffixes[4].text, ")");
-    assert!(matches!(edit.suffixes[4].status, super::ToolStatus::Info));
+    assert!(matches!(edit.suffixes[4].status, ToolStatus::Info));
     assert!(edit.suffixes[4].no_leading_space);
     assert_eq!(edit.suffixes[5].text, "ok");
-    assert!(matches!(
-        edit.suffixes[5].status,
-        super::ToolStatus::Success
-    ));
+    assert!(matches!(edit.suffixes[5].status, ToolStatus::Success));
 }
 
 /// A successful skill load shows the skill name and output stats;
@@ -1268,11 +1243,11 @@ fn skill_completion_renders_load_paths() {
             CborValue::Text("body".into()),
         ),
     ]);
-    let ok = super::format_tool_completion("skill", &load_ok, None);
+    let ok = format_tool_completion("skill", &load_ok, None);
     assert_eq!(ok.args, "my-skill");
     assert_eq!(ok.suffixes.len(), 2);
     assert_eq!(ok.suffixes[0].text, "(1L, 4B)");
-    assert!(matches!(ok.suffixes[0].status, super::ToolStatus::Info));
+    assert!(matches!(ok.suffixes[0].status, ToolStatus::Info));
     assert_eq!(ok.suffixes[1].text, "ok");
 
     // Failed load with split-name search suggestions.
@@ -1307,21 +1282,20 @@ fn skill_completion_renders_load_paths() {
             ]),
         ),
     ]);
-    let miss =
-        super::format_tool_completion("skill", &load_miss, Some("unknown skill: foo-bar-baz"));
+    let miss = format_tool_completion("skill", &load_miss, Some("unknown skill: foo-bar-baz"));
     assert_eq!(miss.args, "foo-bar-baz");
     assert_eq!(miss.suffixes.len(), 2);
     assert_eq!(miss.suffixes[0].text, "(2 suggestions)");
-    assert!(matches!(miss.suffixes[0].status, super::ToolStatus::Info));
+    assert!(matches!(miss.suffixes[0].status, ToolStatus::Info));
     assert!(miss.suffixes[1].text.contains("unknown skill"));
-    assert!(matches!(miss.suffixes[1].status, super::ToolStatus::Error));
+    assert!(matches!(miss.suffixes[1].status, ToolStatus::Error));
 
     // Plain load error without suggestions (e.g. missing argument)
     // still renders as a plain error.
     let plain_err = CborValue::Null;
-    let plain = super::format_tool_completion("skill", &plain_err, Some("missing argument"));
+    let plain = format_tool_completion("skill", &plain_err, Some("missing argument"));
     assert_eq!(plain.suffixes.len(), 1);
-    assert!(matches!(plain.suffixes[0].status, super::ToolStatus::Error));
+    assert!(matches!(plain.suffixes[0].status, ToolStatus::Error));
 }
 
 /// Reproduces the user-reported bug: send 3 prompts during the

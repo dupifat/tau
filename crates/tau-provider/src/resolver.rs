@@ -34,12 +34,14 @@ pub struct ResolvedResponses {
     pub prompt_cache_retention: Option<PromptCacheRetention>,
 }
 
-pub fn resolve(model: &str, models: &ModelRegistry) -> Option<ResolvedBackend> {
-    let mut auth_store = storage::load().unwrap_or_default();
-    resolve_with_auth_store(model, models, &mut auth_store)
-}
-
-pub fn resolve_with_auth_store(
+/// Resolve a `provider/model` string against the configured provider
+/// registry and the caller-supplied auth store.
+///
+/// The caller threads `auth_store` so that any OAuth refresh performed
+/// during resolution is observable on subsequent calls without a disk
+/// reload. Refreshes are also persisted to disk via
+/// [`storage::save_provider`].
+pub fn resolve(
     model: &str,
     models: &ModelRegistry,
     auth_store: &mut storage::AuthStore,

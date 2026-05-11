@@ -142,10 +142,11 @@ where
                 // Resolve backend from the model specified in the prompt.
                 // Reload auth on every prompt so `tau provider login` or
                 // `/provider-auth` takes effect without restarting Tau.
+                let mut auth_store = tau_provider::storage::load().unwrap_or_default();
                 let backend = prompt
                     .model
                     .as_deref()
-                    .and_then(|m| tau_provider::resolve(m, &model_registry))
+                    .and_then(|m| tau_provider::resolve(m, &model_registry, &mut auth_store))
                     .map(BackendConfig::from);
 
                 match backend {

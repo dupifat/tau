@@ -1,7 +1,9 @@
 use tau_config::settings::ModelRegistry;
+use tau_provider::storage::AuthStore;
 
 #[test]
 fn no_config_resolves_none() {
     let models = ModelRegistry::default();
-    assert!(tau_provider::resolve("fake/model", &models).is_none());
+    let mut auth = AuthStore::default();
+    assert!(tau_provider::resolve("fake/model", &models, &mut auth).is_none());
 }

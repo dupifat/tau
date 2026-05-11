@@ -1,69 +1,72 @@
-use std::{fmt, io};
+//! Synchronous, blocking, single-select terminal list picker.
+//!
+//! Three entry points are exposed:
+//!
+//! - [`pick`] — full convenience. Enables raw mode and writes to `stderr`. Must
+//!   not be called from inside a TUI that already owns raw mode.
+//! - [`pick_with_writer`] — enables raw mode but writes the picker frame to a
+//!   caller-provided writer.
+//! - [`pick_with_io`] — does *not* manage raw mode. Intended for tests or
+//!   non-terminal hosts that drive the picker via in-memory streams.
+
+mod error;
+mod item;
+mod key;
+mod raw_mode;
+
+#[cfg(test)]
+mod tests;
+
+use std::io;
 
 use tau_term_screen::screen::Screen;
 use tau_term_screen::style::StyledText;
 
-#[derive(Clone, Debug)]
-pub struct PickerItem {
-    pub label: String,
-    pub enabled: bool,
-}
+pub use crate::error::PickerError;
+pub use crate::item::PickerItem;
+use crate::key::{PickerKey, read_byte_key, read_terminal_key};
+use crate::raw_mode::RawModeGuard;
 
-impl PickerItem {
-    pub fn enabled(label: impl Into<String>) -> Self {
-        Self {
-            label: label.into(),
-            enabled: true,
-        }
-    }
-
-    pub fn disabled(label: impl Into<String>) -> Self {
-        Self {
-            label: label.into(),
-            enabled: false,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum PickerError {
-    Io(io::Error),
-    Empty,
-    NoEnabledItems,
-    Cancelled,
-}
-
-impl fmt::Display for PickerError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io(source) => write!(f, "I/O error: {source}"),
-            Self::Empty => f.write_str("picker has no items"),
-            Self::NoEnabledItems => f.write_str("picker has no enabled items"),
-            Self::Cancelled => f.write_str("picker cancelled"),
-        }
-    }
-}
-
-impl std::error::Error for PickerError {}
-
-impl From<io::Error> for PickerError {
-    fn from(source: io::Error) -> Self {
-        Self::Io(source)
-    }
-}
-
+/// Prompts the user to pick one of `items`, rendering to `stderr`.
+///
+/// Enables terminal raw mode for the duration of the call. The picker
+/// must therefore not be invoked while another component already owns
+/// raw mode — the inner [`Drop`] would silently restore cooked mode and
+/// strand the parent. Use [`pick_with_io`] if the caller manages raw
+/// mode itself.
+///
+/// The picker frame is written to `stderr` (fd 2) so that the typical
+/// `cli | tool` pipe shape leaves `stdout` untouched.
 pub fn pick(prompt: &str, items: &[PickerItem]) -> Result<usize, PickerError> {
     let _raw = RawModeGuard::enable()?;
     pick_with_key_reader(prompt, items, io::stderr(), read_terminal_key)
 }
 
+/// Like [`pick`], but writes the picker frame to `writer`.
+///
+/// Enables terminal raw mode for the duration of the call; the same
+/// caveat as [`pick`] applies.
+pub fn pick_with_writer(
+    prompt: &str,
+    items: &[PickerItem],
+    writer: impl io::Write,
+) -> Result<usize, PickerError> {
+    let _raw = RawModeGuard::enable()?;
+    pick_with_key_reader(prompt, items, writer, read_terminal_key)
+}
+
+/// Drives the picker against caller-provided IO.
+///
+/// Does **not** toggle terminal raw mode. Intended for tests and for
+/// hosts that already own the terminal. `reader` should produce key
+/// presses as bytes; see [`crate::key`] for the supported encoding.
 pub fn pick_with_io(
     prompt: &str,
     items: &[PickerItem],
     writer: impl io::Write,
     mut reader: impl io::Read,
 ) -> Result<usize, PickerError> {
-    pick_with_key_reader(prompt, items, writer, || read_key(&mut reader))
+    pick_with_key_reader(prompt, items, writer, || read_byte_key(&mut reader))
 }
 
 fn pick_with_key_reader(
@@ -79,9 +82,10 @@ fn pick_with_key_reader(
         .iter()
         .position(|item| item.enabled)
         .ok_or(PickerError::NoEnabledItems)?;
-    let mut screen = Screen::new(terminal_width());
+    let (mut width, mut height) = terminal_size();
+    let mut screen = Screen::new(width);
 
-    render(&mut screen, &mut writer, prompt, items, selected)?;
+    render(&mut screen, &mut writer, prompt, items, selected, height)?;
     loop {
         match read_key()? {
             PickerKey::Down => selected = adjacent_enabled_item(items, selected, true),
@@ -96,7 +100,14 @@ fn pick_with_key_reader(
             }
             PickerKey::Ignored => {}
         }
-        render(&mut screen, &mut writer, prompt, items, selected)?;
+        // Resample on each render so terminal resizes are honored.
+        let (new_width, new_height) = terminal_size();
+        if new_width != width {
+            screen.set_width(new_width);
+            width = new_width;
+        }
+        height = new_height;
+        render(&mut screen, &mut writer, prompt, items, selected, height)?;
     }
 }
 
@@ -106,10 +117,16 @@ fn render(
     prompt: &str,
     items: &[PickerItem],
     selected: usize,
+    terminal_height: usize,
 ) -> io::Result<()> {
-    let mut lines = Vec::with_capacity(items.len() + 1);
+    // Reserve one row for the prompt; leave at least one item visible
+    // even on absurdly short terminals.
+    let visible = terminal_height.saturating_sub(1).max(1);
+    let (start, end) = visible_window(items.len(), selected, visible);
+
+    let mut lines = Vec::with_capacity(end - start + 1);
     lines.push(StyledText::from(format!("? {prompt}")).to_cells());
-    for (idx, item) in items.iter().enumerate() {
+    for (idx, item) in items.iter().enumerate().take(end).skip(start) {
         let marker = if !item.enabled {
             'X'
         } else if idx == selected {
@@ -119,83 +136,22 @@ fn render(
         };
         lines.push(StyledText::from(format!("{marker} {}", item.label)).to_cells());
     }
-    screen.update(writer, &lines, (selected + 1, 0))
+    let cursor_row = selected - start + 1;
+    screen.update(writer, &lines, (cursor_row, 0))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PickerKey {
-    Up,
-    Down,
-    Enter,
-    Cancelled,
-    Ignored,
-}
-
-struct RawModeGuard;
-
-impl RawModeGuard {
-    fn enable() -> io::Result<Self> {
-        crossterm::terminal::enable_raw_mode()?;
-        Ok(Self)
+/// Returns `[start, end)` of the items to render, ensuring `selected`
+/// is within view.
+fn visible_window(total: usize, selected: usize, visible: usize) -> (usize, usize) {
+    if total <= visible {
+        return (0, total);
     }
-}
-
-impl Drop for RawModeGuard {
-    fn drop(&mut self) {
-        let _ = crossterm::terminal::disable_raw_mode();
+    let half = visible / 2;
+    let mut start = selected.saturating_sub(half);
+    if start + visible > total {
+        start = total - visible;
     }
-}
-
-fn read_terminal_key() -> io::Result<PickerKey> {
-    loop {
-        let event = crossterm::event::read()?;
-        let crossterm::event::Event::Key(key) = event else {
-            continue;
-        };
-        return Ok(match key.code {
-            crossterm::event::KeyCode::Up => PickerKey::Up,
-            crossterm::event::KeyCode::Down | crossterm::event::KeyCode::Tab => PickerKey::Down,
-            crossterm::event::KeyCode::BackTab => PickerKey::Up,
-            crossterm::event::KeyCode::Char('j') => PickerKey::Down,
-            crossterm::event::KeyCode::Char('k') => PickerKey::Up,
-            crossterm::event::KeyCode::Char('c')
-                if key
-                    .modifiers
-                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
-            {
-                PickerKey::Cancelled
-            }
-            crossterm::event::KeyCode::Char(' ') | crossterm::event::KeyCode::Enter => {
-                PickerKey::Enter
-            }
-            _ => PickerKey::Ignored,
-        });
-    }
-}
-
-fn read_key(reader: &mut impl io::Read) -> io::Result<PickerKey> {
-    let mut b = [0_u8; 1];
-    reader.read_exact(&mut b)?;
-    match b[0] {
-        0x03 => Ok(PickerKey::Cancelled),
-        b'\n' | b'\r' | b' ' => Ok(PickerKey::Enter),
-        b'j' | b'\t' => Ok(PickerKey::Down),
-        b'k' => Ok(PickerKey::Up),
-        0x1b => read_escape_key(reader),
-        _ => Ok(PickerKey::Ignored),
-    }
-}
-
-fn read_escape_key(reader: &mut impl io::Read) -> io::Result<PickerKey> {
-    let mut b = [0_u8; 2];
-    if reader.read_exact(&mut b).is_err() {
-        return Ok(PickerKey::Ignored);
-    }
-    match b {
-        [b'[', b'A'] => Ok(PickerKey::Up),
-        [b'[', b'B'] => Ok(PickerKey::Down),
-        _ => Ok(PickerKey::Ignored),
-    }
+    (start, start + visible)
 }
 
 fn adjacent_enabled_item(items: &[PickerItem], selected: usize, forward: bool) -> usize {
@@ -212,10 +168,6 @@ fn adjacent_enabled_item(items: &[PickerItem], selected: usize, forward: bool) -
     selected
 }
 
-fn terminal_width() -> usize {
-    crossterm_size().map_or(80, |(width, _)| width.into())
-}
-
-fn crossterm_size() -> io::Result<(u16, u16)> {
-    crossterm::terminal::size()
+fn terminal_size() -> (usize, usize) {
+    crossterm::terminal::size().map_or((80, 24), |(w, h)| (w.into(), h.into()))
 }

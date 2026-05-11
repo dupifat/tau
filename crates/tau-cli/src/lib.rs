@@ -332,7 +332,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             cli::Command::Init { force } => run_init(force),
 
             cli::Command::Provider { args } => {
-                tau_provider::run(&args).map_err(|e| CliError::Participant(e.to_string()))
+                tau_provider_cli::run(&args).map_err(|e| CliError::Participant(e.to_string()))
             }
 
             cli::Command::Dev { command } => match command {

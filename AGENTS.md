@@ -16,7 +16,8 @@
 - `crates/tau-ext-websearch-exa` — opt-in Exa web search extension
 - `crates/tau-extension` — extension-side protocol/runtime helpers
 - `crates/tau-harness` — harness daemon: extensions, bus, sessions, socket server
-- `crates/tau-provider` — provider credential/config support
+- `crates/tau-provider` — provider credential/config library (storage, OAuth helpers, resolver)
+- `crates/tau-provider-cli` — interactive `tau provider {add,remove,list,login,list-models}` subcommands
 - `crates/tau-proto` — shared protocol types and CBOR codec helpers
 - `crates/tau-skills` — skill discovery/loading support
 - `crates/tau-socket` — Unix socket transport glue

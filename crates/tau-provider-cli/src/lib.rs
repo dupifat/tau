@@ -6,9 +6,8 @@ use std::path::{Path, PathBuf};
 
 use dialoguer::{Confirm, Input};
 use tau_cli_picker::{PickerItem, pick};
-
-use crate::oauth;
-use crate::storage::{self, Credentials, ProviderKind};
+use tau_provider::oauth;
+use tau_provider::storage::{self, Credentials, ProviderKind};
 
 /// Run the provider CLI with the given subcommand arguments.
 pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -548,7 +547,7 @@ fn print_provider_entry(name: &str, entry: &serde_json::Value) {
 
 /// Read existing models.json5, insert the provider, and atomically
 /// replace the file via write-new + rename.
-pub(crate) fn write_provider_to_models_json5(
+fn write_provider_to_models_json5(
     path: &Path,
     name: &str,
     entry: &serde_json::Value,

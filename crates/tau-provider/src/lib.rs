@@ -7,7 +7,4 @@ pub mod oauth;
 pub mod resolver;
 pub mod storage;
 
-mod cli;
-
-pub use cli::run;
 pub use resolver::resolve;

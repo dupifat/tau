@@ -17,6 +17,7 @@ members = [
   "crates/tau-skills",
   "crates/tau-proto",
   "crates/tau-provider",
+  "crates/tau-provider-cli",
   "crates/tau-socket",
   "crates/tau-supervisor",
   "crates/tau-blocking-notify-channel",
@@ -71,6 +72,7 @@ tau-proto = { path = "crates/tau-proto" }
 tau-session-inspect = { path = "crates/tau-session-inspect" }
 tau-skills = { path = "crates/tau-skills" }
 tau-provider = { path = "crates/tau-provider" }
+tau-provider-cli = { path = "crates/tau-provider-cli" }
 tau-socket = { path = "crates/tau-socket" }
 tau-supervisor = { path = "crates/tau-supervisor" }
 tau-term-screen = { path = "crates/tau-term-screen" }

@@ -728,7 +728,7 @@ fn run_provider_auth(provider: &str, print_local: &impl Fn(&str)) {
     if !provider.is_empty() {
         args.push(provider.to_owned());
     }
-    match tau_provider::run(&args) {
+    match tau_provider_cli::run(&args) {
         Ok(()) => print_local("provider auth refreshed; new prompts will use updated credentials"),
         Err(error) => print_local(&format!("provider auth failed: {error}")),
     }

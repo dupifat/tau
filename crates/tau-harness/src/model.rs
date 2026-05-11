@@ -6,21 +6,28 @@ use tau_proto::ModelId;
 
 use crate::settings::{load_harness_settings_or_warn, load_models_or_warn};
 
+/// Loaded model list plus the inputs used to build it. The two
+/// `*_error` fields hold the parse error (if any) from the
+/// corresponding config file — the harness emits them as
+/// `Important` `HarnessInfo` once it can publish events, so a
+/// malformed config doesn't silently fall back to defaults.
+pub(crate) struct LoadedModelList {
+    pub available: Vec<ModelId>,
+    pub selected: ModelId,
+    pub model_registry: tau_config::settings::ModelRegistry,
+    pub harness_settings: tau_config::settings::HarnessSettings,
+    pub harness_settings_error: Option<tau_config::settings::SettingsError>,
+    pub models_error: Option<tau_config::settings::SettingsError>,
+}
+
 /// Load model registry and harness settings, build the flat model list
 /// and determine the initially selected model.
 ///
 /// Priority: default_model from harness.json5 → last used from state →
 /// first available → empty (no model).
-pub(crate) fn load_model_list(
-    dirs: &tau_config::settings::TauDirs,
-) -> (
-    Vec<ModelId>,
-    ModelId,
-    tau_config::settings::ModelRegistry,
-    tau_config::settings::HarnessSettings,
-) {
-    let model_registry = load_models_or_warn(dirs);
-    let harness_settings = load_harness_settings_or_warn(dirs);
+pub(crate) fn load_model_list(dirs: &tau_config::settings::TauDirs) -> LoadedModelList {
+    let (model_registry, models_error) = load_models_or_warn(dirs);
+    let (harness_settings, harness_settings_error) = load_harness_settings_or_warn(dirs);
     let mut available: Vec<ModelId> = Vec::new();
     for (provider_name, provider_cfg) in &model_registry.providers {
         for model in &provider_cfg.models {
@@ -40,7 +47,14 @@ pub(crate) fn load_model_list(
         })
         .or_else(|| available.first().cloned())
         .unwrap_or_default();
-    (available, selected, model_registry, harness_settings)
+    LoadedModelList {
+        available,
+        selected,
+        model_registry,
+        harness_settings,
+        harness_settings_error,
+        models_error,
+    }
 }
 
 /// Returns the efforts valid for `model` (a `provider/model_id`

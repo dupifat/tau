@@ -292,14 +292,12 @@ pub(crate) fn run_chat(
         ),
     ];
     let theme = tau_themes::Theme::builtin();
-    let settings = tau_config::settings::load_cli_settings().unwrap_or_else(|error| {
-        tracing::warn!(
-            target: "tau_cli::startup",
-            %error,
-            "failed to load cli settings; falling back to defaults"
-        );
-        Default::default()
-    });
+    // Fail fast on a malformed `cli.json5`. The fields here drive
+    // keybindings, prompt symbol, and cursor shape — silently falling
+    // back to defaults would leave the user with broken keybindings
+    // and no clue why. Refuse to start the TUI instead.
+    let settings = tau_config::settings::load_cli_settings()
+        .map_err(|error| CliError::Participant(format!("cli.json5 failed to parse:\n{error}")))?;
     let prompt_style = tau_cli_term::resolve::resolve(&theme, tau_themes::names::PROMPT_MARKER);
     let prompt = tau_cli_term::Span::new(format!("{} ", settings.prompt_symbol), prompt_style);
     let cursor_shape = if settings.bar_cursor {

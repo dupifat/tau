@@ -344,8 +344,14 @@ impl Harness {
             });
         }
 
-        let (available_models, selected_model, model_registry, harness_settings) =
-            load_model_list(&dirs);
+        let crate::model::LoadedModelList {
+            available: available_models,
+            selected: selected_model,
+            model_registry,
+            harness_settings,
+            harness_settings_error,
+            models_error,
+        } = load_model_list(&dirs);
         crate::session_cleanup::spawn_session_cleanup(
             state_dir.clone(),
             harness_settings.session_retention(),
@@ -450,8 +456,7 @@ impl Harness {
         harness.wait_for_extensions_ready()?;
         harness.register_harness_tools();
         harness.check_config_exists();
-        harness.check_config_parses();
-        harness.check_models_parses();
+        harness.emit_startup_settings_errors(harness_settings_error, models_error);
 
         // Eager session init for the default session. INTENTIONAL —
         // do NOT "simplify" this to lazy-on-first-prompt.
@@ -542,8 +547,14 @@ impl Harness {
         let agent_connection_id = agent_connection_id.ok_or(HarnessError::NoAgentConfigured)?;
 
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "loading model list");
-        let (available_models, selected_model, model_registry, harness_settings) =
-            load_model_list(&dirs);
+        let crate::model::LoadedModelList {
+            available: available_models,
+            selected: selected_model,
+            model_registry,
+            harness_settings,
+            harness_settings_error,
+            models_error,
+        } = load_model_list(&dirs);
         tracing::debug!(target: "tau_harness::startup", selected_model = %selected_model, elapsed_ms = startup_started_at.elapsed().as_millis(), "model list loaded");
         crate::session_cleanup::spawn_session_cleanup(
             state_dir.clone(),
@@ -650,8 +661,7 @@ impl Harness {
         harness.register_harness_tools();
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "harness tools registered");
         harness.check_config_exists();
-        harness.check_config_parses();
-        harness.check_models_parses();
+        harness.emit_startup_settings_errors(harness_settings_error, models_error);
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "config checks complete");
 
         harness.start_session_init(
@@ -1431,9 +1441,10 @@ impl Harness {
                 if self.available_models.contains(&select.model) {
                     let was_empty = self.selected_model.is_empty();
                     self.selected_model = select.model.clone();
+                    let (live_settings, _) = load_harness_settings_or_warn(&self.dirs);
                     self.selected_effort = selected_effort_for_model(
                         &self.dirs,
-                        &load_harness_settings_or_warn(&self.dirs),
+                        &live_settings,
                         &self.model_registry,
                         self.selected_model.as_str(),
                     );
@@ -1862,26 +1873,32 @@ impl Harness {
         }
     }
 
-    /// Re-parse `harness.json5`. If parsing fails the harness has
-    /// already fallen back to defaults (with a stderr warning), but
-    /// stderr is easy to miss when the TUI takes over the terminal
-    /// right after startup. Surface the error through `HarnessInfo`
-    /// so it shows up as a system info block inline in the UI.
-    fn check_config_parses(&mut self) {
-        if let Err(error) = tau_config::settings::load_harness_settings_in(&self.dirs) {
+    /// Surface settings-file parse errors captured during the initial
+    /// load as `Important` `HarnessInfo`. The loaders already fell
+    /// back to defaults and wrote a short stderr line, but stderr is
+    /// hidden once the TUI takes over the terminal — without this the
+    /// user's only symptom is "my extensions vanished" / "my provider
+    /// list is empty" with no clue why.
+    ///
+    /// Taking the errors as parameters (instead of re-parsing each
+    /// file here) keeps startup to a single parse per file and avoids
+    /// a race where the user fixes the file between the two reads.
+    ///
+    /// `cli.json5` is intentionally not handled here: the CLI fails
+    /// fast on a malformed `cli.json5` before the harness ever
+    /// spawns, so there's no "silently fell back to defaults" case
+    /// to surface.
+    fn emit_startup_settings_errors(
+        &mut self,
+        harness_settings_error: Option<tau_config::settings::SettingsError>,
+        models_error: Option<tau_config::settings::SettingsError>,
+    ) {
+        if let Some(error) = harness_settings_error {
             self.emit_info_important(&format!(
                 "harness.json5 failed to parse — ignored.\n{error}"
             ));
         }
-    }
-
-    /// Re-parse `models.json5`. Same rationale as
-    /// [`Self::check_config_parses`]: the load during startup already
-    /// fell back to an empty registry on error; this surfaces the
-    /// reason in the UI so the user isn't left wondering why their
-    /// provider list is empty.
-    fn check_models_parses(&mut self) {
-        if let Err(error) = tau_config::settings::load_models_in(&self.dirs) {
+        if let Some(error) = models_error {
             self.emit_info_important(&format!("models.json5 failed to parse — ignored.\n{error}"));
         }
     }

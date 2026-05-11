@@ -228,36 +228,41 @@ fn merge_json(base: serde_json::Value, over: serde_json::Value) -> serde_json::V
     }
 }
 
-/// Load `harness.json5` and fall back to defaults on parse error,
-/// after writing a warning to stderr. Without the warning a malformed
-/// file silently disables every user-configured extension and the
-/// only symptom is "my extension isn't running" with no clue why.
+/// Load `harness.json5`, falling back to defaults on parse error and
+/// writing a warning to stderr. Returns the parse error too so the
+/// harness can surface it in the UI without re-parsing the same file
+/// from scratch.
+///
+/// Without the warning a malformed file silently disables every
+/// user-configured extension and the only symptom is "my extension
+/// isn't running" with no clue why.
 pub(crate) fn load_harness_settings_or_warn(
     dirs: &tau_config::settings::TauDirs,
-) -> HarnessSettings {
+) -> (HarnessSettings, Option<tau_config::settings::SettingsError>) {
     match tau_config::settings::load_harness_settings_in(dirs) {
-        Ok(settings) => settings,
+        Ok(settings) => (settings, None),
         Err(error) => {
             eprintln!("tau: harness.json5 failed to parse — ignored.\n{error}");
-            HarnessSettings::default()
+            (HarnessSettings::default(), Some(error))
         }
     }
 }
 
-/// Load `models.json5` and fall back to an empty registry on parse
-/// error, after writing a warning to stderr. The harness re-runs the
-/// load later via `check_models_parses` so the same error also
-/// surfaces in the UI; the stderr line is there for users who started
-/// `tau` from a terminal and may still see it before the TUI takes
-/// over.
+/// Load `models.json5`, falling back to an empty registry on parse
+/// error and writing a warning to stderr. Returns the parse error too
+/// so the harness can surface it in the UI alongside the stderr line
+/// (which is hidden once the TUI takes over).
 pub(crate) fn load_models_or_warn(
     dirs: &tau_config::settings::TauDirs,
-) -> tau_config::settings::ModelRegistry {
+) -> (
+    tau_config::settings::ModelRegistry,
+    Option<tau_config::settings::SettingsError>,
+) {
     match tau_config::settings::load_models_in(dirs) {
-        Ok(registry) => registry,
+        Ok(registry) => (registry, None),
         Err(error) => {
             eprintln!("tau: models.json5 failed to parse — ignored.\n{error}");
-            tau_config::settings::ModelRegistry::default()
+            (tau_config::settings::ModelRegistry::default(), Some(error))
         }
     }
 }
@@ -364,7 +369,7 @@ pub(crate) fn resolve_config(
     // to defaults rather than failing the whole startup, but we warn
     // on stderr so the user can see why their config is being
     // ignored.
-    let settings = load_harness_settings_or_warn(&tau_config::settings::TauDirs::default());
+    let (settings, _) = load_harness_settings_or_warn(&tau_config::settings::TauDirs::default());
     let extensions = resolve_extensions(&settings, builtin_extensions())?;
     Ok(Config {
         core: CoreConfig {

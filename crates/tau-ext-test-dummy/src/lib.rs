@@ -6,8 +6,8 @@ use rand::Rng;
 use rand::{SeedableRng, rngs::StdRng};
 use tau_proto::{
     Emit, Event, EventSelector, Frame, FrameReader, FrameWriter, HarnessInfo, HarnessInfoLevel,
-    InterceptAction, InterceptReply, InterceptionPriority, Message, ToolError, ToolResult,
-    ToolSideEffects, ToolSpec, UiPromptSubmitted,
+    InterceptAction, InterceptReply, InterceptionPriority, Message, ToolError, ToolSideEffects,
+    ToolSpec, UiPromptSubmitted,
 };
 
 pub const RESTART_TEST_DUMMY_TOOL_NAME: &str = "restart_test_dummy";
@@ -18,9 +18,8 @@ pub const RESTART_TEST_DUMMY_TOOL_NAME: &str = "restart_test_dummy";
 /// no replacement happened so the caller can short-circuit and reply
 /// with `Pass(None)` rather than re-publish an identical event.
 ///
-/// "tao" is matched as a contiguous run of three ASCII letters, not
-/// as a free-floating substring — `tao` inside `chaotic` is left
-/// alone.
+/// "tao" is matched as a whole word, not as a free-floating
+/// substring — the `tao` inside `taoism` is left alone.
 fn correct_tao_to_tau(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
@@ -85,7 +84,6 @@ where
     let mut writer = FrameWriter::new(BufWriter::new(writer));
 
     tau_extension::Handshake::tool("tau-ext-test-dummy")
-        .subscribe([tau_proto::EventName::TOOL_INVOKE])
         .intercept(
             EventSelector::Exact(tau_proto::EventName::UI_PROMPT_SUBMITTED),
             InterceptionPriority(0),
@@ -130,7 +128,7 @@ where
                             message: "did you mean \"Tau\"? — corrected for you".to_owned(),
                             level: HarnessInfoLevel::Normal,
                         })),
-                        transient: false,
+                        transient: true,
                     })))?;
                 }
                 let action = match mutated {
@@ -154,15 +152,6 @@ where
                     tool_name: invoke.tool_name,
                     message: "restarting failed".to_owned(),
                     details: None,
-                    originator: tau_proto::PromptOriginator::User,
-                })))?;
-                writer.flush()?;
-            }
-            Frame::Event(Event::ToolInvoke(invoke)) => {
-                writer.write_frame(&Frame::Event(Event::ToolResult(ToolResult {
-                    call_id: invoke.call_id,
-                    tool_name: invoke.tool_name,
-                    result: tau_proto::CborValue::Map(Vec::new()),
                     originator: tau_proto::PromptOriginator::User,
                 })))?;
                 writer.flush()?;

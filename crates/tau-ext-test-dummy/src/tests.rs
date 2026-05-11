@@ -30,11 +30,6 @@ fn restart_tool_can_return_error() {
         .expect("read")
         .expect("hello should exist");
     assert!(matches!(hello, Frame::Message(Message::Hello(_))));
-    let subscribe = reader
-        .read_frame()
-        .expect("read")
-        .expect("subscribe should exist");
-    assert!(matches!(subscribe, Frame::Message(Message::Subscribe(_))));
     let intercept = reader
         .read_frame()
         .expect("read")
@@ -77,12 +72,21 @@ fn restart_tool_can_exit_without_reply() {
     while let Some(frame) = reader.read_frame().expect("read") {
         frames.push(frame);
     }
-    assert_eq!(frames.len(), 5);
+    assert_eq!(frames.len(), 4);
     assert!(matches!(frames[0], Frame::Message(Message::Hello(_))));
-    assert!(matches!(frames[1], Frame::Message(Message::Subscribe(_))));
-    assert!(matches!(frames[2], Frame::Message(Message::Intercept(_))));
-    assert!(matches!(frames[3], Frame::Event(Event::ToolRegister(_))));
-    assert!(matches!(frames[4], Frame::Message(Message::Ready(_))));
+    assert!(matches!(frames[1], Frame::Message(Message::Intercept(_))));
+    assert!(matches!(frames[2], Frame::Event(Event::ToolRegister(_))));
+    assert!(matches!(frames[3], Frame::Message(Message::Ready(_))));
+    // The restart-success branch must exit without emitting any
+    // reply frame for the invoke — guard against a future bug that
+    // re-introduces a stray ToolResult/ToolError before exit.
+    assert!(
+        frames.iter().all(|f| !matches!(
+            f,
+            Frame::Event(Event::ToolError(_)) | Frame::Event(Event::ToolResult(_))
+        )),
+        "no tool reply frame should appear in the restart-success branch"
+    );
 }
 
 fn intercepted_prompt(text: &str) -> Frame {

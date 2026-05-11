@@ -1,22 +1,19 @@
 //! Skill discovery and frontmatter parsing.
 //!
-//! ## Frontmatter parser limitations
+//! The frontmatter parser delegates to `serde_yaml_ng`, so the YAML inside
+//! `---` fences is the real thing: quoted strings, escapes, block scalars,
+//! flow style, comments, anchors. Two project-level conventions on top of
+//! that:
 //!
-//! The parser here handles a deliberately small subset of YAML — just enough
-//! for `key: value` lines with optional surrounding `"`/`'` quotes. It does
-//! **not** support:
-//!
-//! - multi-line values (block scalars, `|`/`>` indicators, line continuations);
-//! - lists, mappings, anchors, aliases, or any nested structure;
-//! - escape sequences inside quoted values (`"a \"quoted\" thing"` keeps the
-//!   backslashes literally).
-//!
-//! Lines starting with `#` and blank lines are treated as comments. If a
-//! second consumer ever wants real frontmatter, swap this module for
-//! `serde_yaml` / `serde_yml` rather than growing the handwritten parser.
+//! - Only top-level scalar values (string, bool, number) are exposed. Lists,
+//!   mappings and `null` are dropped silently.
+//! - All scalars are stringified before being returned. `BTreeMap<String,
+//!   String>` is the contract callers see.
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use serde_yaml_ng::Value as YamlValue;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -82,12 +79,14 @@ const SKILL_FILENAME: &str = "SKILL.md";
 // Frontmatter parsing
 // ---------------------------------------------------------------------------
 
-/// Parse YAML-style frontmatter delimited by `---` lines.
+/// Parse YAML frontmatter delimited by `---` lines.
 ///
 /// Returns a map of key→value pairs and the body (content after the closing
-/// `---`). If no frontmatter is present, returns an empty map and the full
-/// content as body. See the module-level docs for the parser's known
-/// limitations.
+/// `---`). If no frontmatter is present, or if the YAML inside the fence
+/// fails to parse, returns an empty map and the full content as body.
+///
+/// Top-level scalars are stringified; non-scalar values (lists, mappings)
+/// and `null` are dropped silently — see the module-level docs.
 pub fn parse_frontmatter(content: &str) -> (BTreeMap<String, String>, &str) {
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
 
@@ -108,16 +107,18 @@ pub fn parse_frontmatter(content: &str) -> (BTreeMap<String, String>, &str) {
     let yaml_block = &rest[..yaml_end];
     let body = &rest[body_start..];
 
-    let mut map = BTreeMap::new();
-    for line in yaml_block.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        if let Some((key, value)) = parse_frontmatter_line(trimmed) {
-            map.insert(key.to_owned(), value.to_owned());
-        }
-    }
+    let map = match serde_yaml_ng::from_str::<YamlValue>(yaml_block) {
+        Ok(YamlValue::Mapping(m)) => m
+            .into_iter()
+            .filter_map(|(k, v)| {
+                let YamlValue::String(key) = k else {
+                    return None;
+                };
+                Some((key, scalar_to_string(&v)?))
+            })
+            .collect(),
+        _ => BTreeMap::new(),
+    };
 
     (map, body)
 }
@@ -143,25 +144,17 @@ fn find_closing_fence(s: &str) -> Option<(usize, usize)> {
     None
 }
 
-fn parse_frontmatter_line(line: &str) -> Option<(&str, &str)> {
-    let colon = line.find(':')?;
-    let key = line[..colon].trim();
-    if key.is_empty() {
-        return None;
+/// Stringify a YAML scalar. Non-scalar values (lists, maps, null,
+/// tagged) return None and are dropped from the public map.
+fn scalar_to_string(v: &YamlValue) -> Option<String> {
+    match v {
+        YamlValue::String(s) => Some(s.clone()),
+        YamlValue::Bool(b) => Some(b.to_string()),
+        YamlValue::Number(n) => Some(n.to_string()),
+        YamlValue::Null | YamlValue::Sequence(_) | YamlValue::Mapping(_) | YamlValue::Tagged(_) => {
+            None
+        }
     }
-    let value = line[colon + 1..].trim();
-    Some((key, strip_quotes(value)))
-}
-
-/// Strip a single layer of matching `"` or `'` quotes. No unescaping is
-/// performed — `"a \"b\" c"` becomes `a \"b\" c` literally.
-fn strip_quotes(s: &str) -> &str {
-    if s.len() >= 2
-        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
-    {
-        return &s[1..s.len() - 1];
-    }
-    s
 }
 
 // ---------------------------------------------------------------------------
@@ -274,6 +267,10 @@ pub fn load_skill_from_content(
     file_path: &Path,
 ) -> (Option<Skill>, Vec<SkillDiagnostic>) {
     let mut diagnostics = Vec::new();
+    // The body is intentionally discarded here. Consumers re-read the
+    // file on demand via `Skill::file_path` so edits to a skill's
+    // instructions are picked up without a daemon restart; caching the
+    // body on `Skill` would freeze the contents at discovery time.
     let (fm, _body) = parse_frontmatter(content);
 
     let skill_dir = file_path.parent().unwrap_or(file_path);

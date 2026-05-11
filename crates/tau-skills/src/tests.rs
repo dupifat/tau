@@ -221,6 +221,55 @@ fn parse_frontmatter_crlf() {
 }
 
 #[test]
+fn parse_frontmatter_unescapes_double_quoted_strings() {
+    // serde_yaml_ng (real YAML) handles escapes inside double-quoted
+    // scalars; the previous handwritten parser kept the backslashes
+    // literal. This pins the new behavior.
+    let content = "---\nname: q\ndescription: \"a \\\"quoted\\\" thing\"\n---\n";
+    let (fm, _) = parse_frontmatter(content);
+    assert_eq!(
+        fm.get("description").map(String::as_str),
+        Some(r#"a "quoted" thing"#)
+    );
+}
+
+#[test]
+fn parse_frontmatter_multiline_block_scalar() {
+    // Block scalars (`>`) fold newlines into a single string. The
+    // contract is "stringified scalar", so this round-trips into the
+    // map without losing content.
+    let content = "---\nname: ml\ndescription: >\n  line one\n  line two\n---\nBody";
+    let (fm, body) = parse_frontmatter(content);
+    assert_eq!(
+        fm.get("description").map(String::as_str),
+        Some("line one line two\n")
+    );
+    assert_eq!(body, "Body");
+}
+
+#[test]
+fn parse_frontmatter_drops_non_scalar_values() {
+    // Lists / mappings / null don't fit the BTreeMap<String, String>
+    // contract; the parser silently drops them.
+    let content = "---\nname: x\ndescription: x\ntags:\n  - a\n  - b\nempty: null\n---\n";
+    let (fm, _) = parse_frontmatter(content);
+    assert!(fm.contains_key("name"));
+    assert!(fm.contains_key("description"));
+    assert!(!fm.contains_key("tags"), "lists are dropped");
+    assert!(!fm.contains_key("empty"), "null values are dropped");
+}
+
+#[test]
+fn parse_frontmatter_invalid_yaml_treats_as_no_frontmatter() {
+    // Garbage inside the fence shouldn't panic; it should just yield
+    // an empty map (and the body still flows through).
+    let content = "---\nname: x\n  bad: indent : here\n  more\n---\nBody";
+    let (fm, body) = parse_frontmatter(content);
+    assert!(fm.is_empty());
+    assert_eq!(body, "Body");
+}
+
+#[test]
 fn parse_frontmatter_crlf_mixed_with_multibyte() {
     // Regression for the off-by-one in find_closing_fence with CRLF: any
     // byte-level offset slip would land inside a UTF-8 multibyte char and

@@ -8,9 +8,19 @@
 //! A pending notification always takes priority over disconnection: the
 //! receiver will see `Ok(())` first and only get `Err(Disconnected)` on the
 //! next call.
+//!
+//! # Why a custom primitive
+//!
+//! `std::sync::mpsc::channel::<()>()` would require the receiver to drain the
+//! queue on each wakeup to preserve coalescing, and the queue would grow
+//! unboundedly under burst load. A `parking_lot::Condvar` would remove the
+//! poisoning boilerplate but is not currently a workspace dependency. This
+//! crate's contract — single coalesced bit, multi-producer, blocking receive,
+//! observable disconnect — is small enough that a direct `Mutex` + `Condvar`
+//! implementation is the simplest fit.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 /// Creates a new notify channel, returning `(Sender, Receiver)`.
 pub fn channel() -> (Sender, Receiver) {
@@ -54,6 +64,12 @@ struct Shared {
     sender_count: AtomicUsize,
 }
 
+impl Shared {
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().expect("notify channel mutex poisoned")
+    }
+}
+
 /// Sending half of a notify channel. Cloneable for multiple producers.
 pub struct Sender {
     shared: Arc<Shared>,
@@ -71,14 +87,18 @@ impl Clone for Sender {
 impl Drop for Sender {
     fn drop(&mut self) {
         if self.shared.sender_count.fetch_sub(1, Ordering::AcqRel) == 1 {
-            let mut state = self
-                .shared
-                .state
-                .lock()
-                .expect("notify channel mutex poisoned");
+            let mut state = self.shared.lock();
             state.disconnected = true;
+            // Wake a parked `recv()` that hasn't yet observed disconnect.
+            // Harmless if no waiter is parked.
             self.shared.condvar.notify_one();
         }
+    }
+}
+
+impl std::fmt::Debug for Sender {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sender").finish_non_exhaustive()
     }
 }
 
@@ -86,11 +106,10 @@ impl Sender {
     /// Signal the receiver. If the flag is already set, this is a no-op
     /// (coalescing).
     pub fn notify(&self) {
-        let mut state = self
-            .shared
-            .state
-            .lock()
-            .expect("notify channel mutex poisoned");
+        let mut state = self.shared.lock();
+        if state.notified {
+            return;
+        }
         state.notified = true;
         self.shared.condvar.notify_one();
     }
@@ -101,17 +120,19 @@ pub struct Receiver {
     shared: Arc<Shared>,
 }
 
+impl std::fmt::Debug for Receiver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Receiver").finish_non_exhaustive()
+    }
+}
+
 impl Receiver {
     /// Block until the flag is `true`, then atomically reset it to `false`.
     ///
     /// Returns `Err(Disconnected)` when all senders have been dropped **and**
     /// no pending notification remains.
     pub fn recv(&self) -> Result<(), Disconnected> {
-        let mut state = self
-            .shared
-            .state
-            .lock()
-            .expect("notify channel mutex poisoned");
+        let mut state = self.shared.lock();
         loop {
             if state.notified {
                 state.notified = false;
@@ -133,12 +154,9 @@ impl Receiver {
     /// Returns `Ok(true)` if a notification was pending (and resets it),
     /// `Ok(false)` if nothing was pending, or `Err(Disconnected)` when all
     /// senders have been dropped and no notification remains.
+    #[must_use = "discarding the result drops a pending notification"]
     pub fn try_recv(&self) -> Result<bool, Disconnected> {
-        let mut state = self
-            .shared
-            .state
-            .lock()
-            .expect("notify channel mutex poisoned");
+        let mut state = self.shared.lock();
         if state.notified {
             state.notified = false;
             return Ok(true);

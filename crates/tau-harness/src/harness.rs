@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
-use tau_config::Config;
 use tau_core::{
     Connection, ConnectionMetadata, ConnectionOrigin, DefaultSubscriptionPolicy, EventBus,
     EventLog, PolicyStore, RouteError, SessionStore, ToolRegistry, ToolRouteError,
@@ -43,7 +42,7 @@ use crate::prompt::{
     assemble_conversation_from, build_system_prompt, cbor_map_bool, cbor_map_text,
     render_agents_context_message,
 };
-use crate::settings::load_harness_settings_or_warn;
+use crate::settings::{Config, load_harness_settings_or_warn};
 use crate::turn::{PromptSubmission, TurnState};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(2);

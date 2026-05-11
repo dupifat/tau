@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use tau_config::Config;
 use tau_proto::{
     ClientKind, Disconnect, Event, EventSelector, Frame, Hello, Message, PROTOCOL_VERSION,
     Subscribe, UiPromptSubmitted,
@@ -20,7 +19,7 @@ use crate::event::HarnessEvent;
 use crate::format::{format_extension_event, format_tool_progress};
 use crate::harness::{Harness, default_agent_runner};
 use crate::runtime_dir;
-use crate::settings::resolve_config;
+use crate::settings::{Config, resolve_config};
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 

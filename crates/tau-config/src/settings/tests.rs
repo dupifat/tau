@@ -107,6 +107,32 @@ fn load_cli_settings_merges_builtin_bindings_with_user_overrides() {
 }
 
 #[test]
+fn load_cli_settings_in_surfaces_scalar_field_overrides() {
+    // Regression guard against re-introducing the manual field-by-field
+    // copy in `load_cli_settings_in`. Any field with `#[serde(default)]`
+    // on `CliSettings` should reach the caller without per-field
+    // plumbing.
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("cli.json5"),
+        r#"{ greeting: false, show_logo: false, bar_cursor: false, prompt_symbol: "λ", submitted_prompt_symbol: "✓" }"#,
+    )
+    .expect("write");
+    let dirs = TauDirs {
+        config_dir: Some(dir.to_owned()),
+        state_dir: None,
+    };
+
+    let s = load_cli_settings_in(&dirs).expect("load");
+    assert!(!s.greeting);
+    assert!(!s.show_logo);
+    assert!(!s.bar_cursor);
+    assert_eq!(s.prompt_symbol, "λ");
+    assert_eq!(s.submitted_prompt_symbol, "✓");
+}
+
+#[test]
 fn cli_state_defaults_when_file_missing() {
     let td = TempDir::new().expect("tempdir");
     let dirs = TauDirs {
@@ -194,184 +220,6 @@ fn harness_settings_load_from_json5_file() {
         Some(tau_proto::Effort::High)
     );
     assert_eq!(s.session_retention_days, 60);
-}
-
-fn builtins() -> Vec<BuiltinExtension> {
-    vec![
-        BuiltinExtension {
-            name: "core-agent",
-            command: vec!["tau".into(), "ext".into(), "agent".into()],
-            role: Some("agent"),
-            enable: true,
-            config: serde_json::json!({}),
-        },
-        BuiltinExtension {
-            name: "core-shell",
-            command: vec!["tau".into(), "ext".into(), "ext-shell".into()],
-            role: Some("tool"),
-            enable: true,
-            config: serde_json::json!({}),
-        },
-        BuiltinExtension {
-            name: "test-dummy",
-            command: vec!["tau".into(), "ext".into(), "ext-test-dummy".into()],
-            role: Some("tool"),
-            enable: false,
-            config: serde_json::json!({}),
-        },
-        BuiltinExtension {
-            name: "std-notifications",
-            command: vec!["tau".into(), "ext".into(), "ext-std-notifications".into()],
-            role: Some("tool"),
-            enable: true,
-            config: serde_json::json!({ "idle_seconds": 60 }),
-        },
-    ]
-}
-
-#[test]
-fn resolve_extensions_returns_builtins_when_user_config_empty() {
-    let s = HarnessSettings::default();
-    let resolved = s.resolve_extensions(builtins()).expect("resolve");
-    assert_eq!(resolved.len(), 3);
-    assert_eq!(resolved[0].name, "core-agent");
-    assert_eq!(resolved[0].command, "tau");
-    assert_eq!(resolved[0].args, vec!["ext", "agent"]);
-    assert_eq!(resolved[0].role.as_deref(), Some("agent"));
-    assert_eq!(resolved[1].name, "core-shell");
-    assert_eq!(resolved[2].name, "std-notifications");
-}
-
-#[test]
-fn resolve_extensions_builtin_can_start_disabled() {
-    let s = HarnessSettings::default();
-    let resolved = s.resolve_extensions(builtins()).expect("resolve");
-    assert!(resolved.iter().all(|e| e.name != "test-dummy"));
-}
-
-#[test]
-fn resolve_extensions_disable_drops_entry() {
-    let mut s = HarnessSettings::default();
-    s.extensions.insert(
-        "core-shell".into(),
-        ExtensionEntry {
-            enable: false,
-            ..Default::default()
-        },
-    );
-    let resolved = s.resolve_extensions(builtins()).expect("resolve");
-    assert_eq!(resolved.len(), 2);
-    assert_eq!(resolved[0].name, "core-agent");
-    assert_eq!(resolved[1].name, "std-notifications");
-}
-
-#[test]
-fn resolve_extensions_prefix_wraps_builtin_command() {
-    let mut s = HarnessSettings::default();
-    s.extensions.insert(
-        "core-agent".into(),
-        ExtensionEntry {
-            prefix: vec!["ssh".into(), "user@host".into()],
-            ..Default::default()
-        },
-    );
-    let resolved = s.resolve_extensions(builtins()).expect("resolve");
-    let agent = resolved
-        .iter()
-        .find(|e| e.name == "core-agent")
-        .expect("agent");
-    // argv[0] is the wrapper; original command moves into args.
-    assert_eq!(agent.command, "ssh");
-    assert_eq!(agent.args, vec!["user@host", "tau", "ext", "agent"]);
-}
-
-#[test]
-fn resolve_extensions_user_command_replaces_builtin_command() {
-    let mut s = HarnessSettings::default();
-    s.extensions.insert(
-        "core-agent".into(),
-        ExtensionEntry {
-            command: vec!["/usr/local/bin/my-agent".into(), "--flag".into()],
-            ..Default::default()
-        },
-    );
-    let resolved = s.resolve_extensions(builtins()).expect("resolve");
-    let agent = resolved
-        .iter()
-        .find(|e| e.name == "core-agent")
-        .expect("agent");
-    assert_eq!(agent.command, "/usr/local/bin/my-agent");
-    assert_eq!(agent.args, vec!["--flag"]);
-    // Role is preserved from the built-in default.
-    assert_eq!(agent.role.as_deref(), Some("agent"));
-}
-
-#[test]
-fn resolve_extensions_adds_user_extension_keys() {
-    let mut s = HarnessSettings::default();
-    s.extensions.insert(
-        "mything".into(),
-        ExtensionEntry {
-            command: vec!["/usr/local/bin/mything".into()],
-            ..Default::default()
-        },
-    );
-    let resolved = s.resolve_extensions(builtins()).expect("resolve");
-    assert_eq!(resolved.len(), 4);
-    let mything = resolved
-        .iter()
-        .find(|e| e.name == "mything")
-        .expect("mything");
-    assert_eq!(mything.command, "/usr/local/bin/mything");
-    assert!(mything.role.is_none());
-}
-
-#[test]
-fn resolve_extensions_user_extension_without_command_errors() {
-    let mut s = HarnessSettings::default();
-    s.extensions.insert(
-        "broken".into(),
-        ExtensionEntry {
-            ..Default::default()
-        },
-    );
-    let err = s.resolve_extensions(builtins()).expect_err("must err");
-    match err {
-        ResolveExtensionsError::EmptyCommand(name) => assert_eq!(name, "broken"),
-    }
-}
-
-#[test]
-fn resolve_extensions_loads_from_json5() {
-    // End-to-end: a realistic harness.json5 round-trips through
-    // load_json5_layered into the resolver.
-    let td = TempDir::new().expect("tempdir");
-    let dir = td.path();
-    std::fs::write(
-        dir.join("harness.json5"),
-        r#"{
-                extensions: {
-                    "core-shell": { enable: false },
-                    "test-dummy": { enable: true },
-                    "core-agent": { prefix: ["ssh", "host"] },
-                    mything: { command: ["/bin/foo"] },
-                },
-            }"#,
-    )
-    .expect("write");
-
-    let s: HarnessSettings = load_json5_layered(dir, "harness").expect("load");
-    let resolved = s.resolve_extensions(builtins()).expect("resolve");
-    let names: Vec<&str> = resolved.iter().map(|e| e.name.as_str()).collect();
-    // core-shell dropped (disable). test-dummy enabled. core-agent
-    // kept (prefix-wrapped). mything appended.
-    assert_eq!(
-        names,
-        vec!["core-agent", "test-dummy", "std-notifications", "mything"]
-    );
-    let agent = &resolved[0];
-    assert_eq!(agent.command, "ssh");
-    assert_eq!(agent.args, vec!["host", "tau", "ext", "agent"]);
 }
 
 #[test]

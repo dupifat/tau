@@ -7,7 +7,6 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::thread::{self, JoinHandle};
 
-use tau_config::ExtensionConfig;
 use tau_core::{Connection, ConnectionMetadata, ConnectionOrigin, EventBus};
 use tau_proto::ClientKind;
 
@@ -16,6 +15,7 @@ use crate::event::{
     ChannelSink, HarnessEvent, WriterShutdown, spawn_reader_thread, spawn_writer_thread,
 };
 use crate::prompt::chrono_free_date;
+use crate::settings::ExtensionConfig;
 
 /// Lifecycle phase of a configured extension. Drives the
 /// `extensions_all_ready()` gate that keeps user prompts queued until

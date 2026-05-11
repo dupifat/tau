@@ -229,18 +229,28 @@ impl CliState {
         serde_json::from_str(&text).unwrap_or_default()
     }
 
-    /// Persist current state. Best-effort: ignores write failures so
-    /// a slash command never fails because the user's state dir is
-    /// read-only.
+    /// Persist current state. Best-effort: a slash command never fails
+    /// because the user's state dir is read-only, but failures are
+    /// logged on stderr so a silently-resetting state dir is visible
+    /// to the user.
     pub fn save(&self, dirs: &TauDirs) {
         let Some(dir) = dirs.state_dir.as_ref() else {
             return;
         };
-        let _ = std::fs::create_dir_all(dir);
+        if let Err(error) = self.save_inner(dir) {
+            eprintln!(
+                "tau: failed to persist CLI state to {}: {error}",
+                dir.join("cli.json").display()
+            );
+        }
+    }
+
+    fn save_inner(&self, dir: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dir)?;
         let path = dir.join("cli.json");
-        let _ = serde_json::to_string_pretty(self)
-            .ok()
-            .and_then(|s| std::fs::write(&path, s).ok());
+        let text = serde_json::to_string_pretty(self)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
+        std::fs::write(path, text)
     }
 }
 
@@ -309,27 +319,30 @@ impl HarnessSettings {
 
 /// One entry in the harness's `extensions` map.
 ///
-/// All fields are optional in the on-disk form so users can override
-/// just the fields they care about for built-in extensions; the
-/// harness merges these with built-in defaults at startup.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+/// All fields are optional on the wire so users can override just the
+/// fields they care about for built-in extensions; the harness merges
+/// these with built-in defaults at startup. `None` on any field means
+/// "the user did not say anything" — distinct from an empty value the
+/// user set on purpose.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ExtensionEntry {
     /// argv prefix prepended before `command`. Useful for wrappers
     /// that don't change the inner command, e.g.
     /// `["ssh", "user@host"]` to run remotely or
     /// `["bwrap", "--ro-bind", "/", "/", "--"]` to sandbox.
-    pub prefix: Vec<String>,
+    pub prefix: Option<Vec<String>>,
 
     /// argv of the extension itself. `command[0]` is the executable;
     /// the rest are arguments. For built-in extensions this defaults
     /// to `[<current-exe>, "ext", <name>]`; for new entries
     /// this must be set explicitly.
-    pub command: Vec<String>,
+    pub command: Option<Vec<String>>,
 
-    /// Whether to run this extension. Defaults to `true`. Set to
-    /// `false` to keep the entry in config but skip spawning.
-    pub enable: bool,
+    /// Whether to run this extension. Defaults to the built-in's
+    /// `enable` (or `true` for user-added entries). Set to `false`
+    /// to keep the entry in config but skip spawning.
+    pub enable: Option<bool>,
 
     /// Role tag. Exactly one extension must have `role: "agent"`.
     /// Built-in `agent` defaults to that; everything else is treated
@@ -339,195 +352,10 @@ pub struct ExtensionEntry {
     /// Free-form configuration object handed to the extension at
     /// startup via `LifecycleConfigure`. The harness does not
     /// interpret it — the extension defines and validates its own
-    /// schema. Defaults to an empty object so extensions can rely
-    /// on always seeing a value.
-    pub config: serde_json::Value,
+    /// schema. Absent on the wire means "merge nothing in", so the
+    /// built-in's default config object is used unchanged.
+    pub config: Option<serde_json::Value>,
 }
-
-impl Default for ExtensionEntry {
-    fn default() -> Self {
-        // `enable: true` so a user writing
-        // `extensions: { foo: { command: [...] } }` doesn't need to
-        // also write `enable: true` for the entry to actually run.
-        Self {
-            prefix: Vec::new(),
-            command: Vec::new(),
-            enable: true,
-            role: None,
-            config: serde_json::Value::Object(serde_json::Map::new()),
-        }
-    }
-}
-
-/// Built-in extension shipped with `tau`. Used by
-/// [`HarnessSettings::resolve_extensions`] to seed the table before
-/// applying user overrides.
-pub struct BuiltinExtension {
-    pub name: &'static str,
-    pub command: Vec<String>,
-    pub role: Option<&'static str>,
-    pub enable: bool,
-    /// Built-in default config for this extension, merged below any
-    /// user-provided `config: { … }` object in `harness.json5`.
-    pub config: serde_json::Value,
-}
-
-impl HarnessSettings {
-    /// Merge user-provided `extensions` entries on top of the
-    /// supplied built-in extensions and produce a flat list of
-    /// [`crate::ExtensionConfig`]s ready for the harness to spawn.
-    ///
-    /// Per-key merging:
-    /// - Field-level overlay for built-in keys: any field the user set replaces
-    ///   the built-in's value; unset fields keep the built-in's defaults.
-    /// - User keys not in the built-in list are added as-is. They must specify
-    ///   a non-empty `command`.
-    /// - Entries with `enable: false` are dropped.
-    ///
-    /// Returns `Err` for entries that end up with an empty `command`
-    /// after the merge — only possible for user-added unknown keys.
-    pub fn resolve_extensions(
-        &self,
-        builtins: Vec<BuiltinExtension>,
-    ) -> Result<Vec<crate::ExtensionConfig>, ResolveExtensionsError> {
-        // Pass 1: seed an indexed map with built-ins, in order.
-        let mut order: Vec<String> = builtins.iter().map(|b| b.name.to_owned()).collect();
-        let mut entries: HashMap<String, ResolvedExtension> = builtins
-            .into_iter()
-            .map(|b| {
-                (
-                    b.name.to_owned(),
-                    ResolvedExtension {
-                        prefix: Vec::new(),
-                        command: b.command,
-                        enable: b.enable,
-                        role: b.role.map(str::to_owned),
-                        config: b.config,
-                    },
-                )
-            })
-            .collect();
-
-        // Pass 2: overlay user entries. Sort user keys deterministically.
-        let mut user_keys: Vec<&String> = self.extensions.keys().collect();
-        user_keys.sort();
-        for name in user_keys {
-            let user = &self.extensions[name];
-            match entries.get_mut(name) {
-                Some(existing) => {
-                    if !user.prefix.is_empty() {
-                        existing.prefix = user.prefix.clone();
-                    }
-                    if !user.command.is_empty() {
-                        existing.command = user.command.clone();
-                    }
-                    existing.enable = user.enable;
-                    if user.role.is_some() {
-                        existing.role = user.role.clone();
-                    }
-                    // Config: user object overlays builtin object
-                    // field-by-field; non-object user values replace
-                    // the builtin entirely. This lets a user override
-                    // `idle_seconds` without re-stating the rest of
-                    // the builtin defaults.
-                    existing.config = merge_json(existing.config.take(), user.config.clone());
-                }
-                None => {
-                    if user.command.is_empty() {
-                        return Err(ResolveExtensionsError::EmptyCommand(name.clone()));
-                    }
-                    order.push(name.clone());
-                    entries.insert(
-                        name.clone(),
-                        ResolvedExtension {
-                            prefix: user.prefix.clone(),
-                            command: user.command.clone(),
-                            enable: user.enable,
-                            role: user.role.clone(),
-                            config: user.config.clone(),
-                        },
-                    );
-                }
-            }
-        }
-
-        // Pass 3: produce ExtensionConfigs in declared order, dropping
-        // disabled entries. argv = prefix ++ command; argv[0] is the
-        // executable, rest are args.
-        let mut out = Vec::new();
-        for name in order {
-            let entry = entries.remove(&name).expect("seeded above");
-            if !entry.enable {
-                continue;
-            }
-            let mut argv = entry.prefix;
-            argv.extend(entry.command);
-            let (program, args) = match argv.split_first() {
-                Some((first, rest)) => (first.clone(), rest.to_vec()),
-                None => return Err(ResolveExtensionsError::EmptyCommand(name)),
-            };
-            out.push(crate::ExtensionConfig {
-                name,
-                command: program,
-                args,
-                role: entry.role,
-                config: entry.config,
-            });
-        }
-        Ok(out)
-    }
-}
-
-#[derive(Debug)]
-struct ResolvedExtension {
-    prefix: Vec<String>,
-    command: Vec<String>,
-    enable: bool,
-    role: Option<String>,
-    config: serde_json::Value,
-}
-
-/// Merge `over` on top of `base` for extension config objects.
-///
-/// When both are JSON objects, keys are merged shallowly:
-/// `over`'s keys win, `base`'s keys are kept where `over` doesn't
-/// mention them. For any other shape (one side isn't an object),
-/// `over` replaces `base` outright if it isn't `Null`. This is the
-/// minimum needed to let a user override one field of a builtin's
-/// config without restating the rest.
-fn merge_json(base: serde_json::Value, over: serde_json::Value) -> serde_json::Value {
-    match (base, over) {
-        (serde_json::Value::Object(mut b), serde_json::Value::Object(o)) => {
-            for (k, v) in o {
-                b.insert(k, v);
-            }
-            serde_json::Value::Object(b)
-        }
-        (base, serde_json::Value::Null) => base,
-        (_, over) => over,
-    }
-}
-
-/// Error returned by [`HarnessSettings::resolve_extensions`].
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ResolveExtensionsError {
-    /// A user-added extension entry has no `command` (and therefore
-    /// no executable to spawn).
-    EmptyCommand(String),
-}
-
-impl fmt::Display for ResolveExtensionsError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EmptyCommand(name) => write!(
-                f,
-                "extension {name:?} has no `command` set; user-added entries must specify the executable",
-            ),
-        }
-    }
-}
-
-impl std::error::Error for ResolveExtensionsError {}
 
 // ---------------------------------------------------------------------------
 // Model registry
@@ -543,10 +371,9 @@ pub struct ModelRegistry {
 
 /// One LLM provider configuration.
 #[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct ProviderConfig {
     /// Base URL for the API endpoint.
-    #[serde(rename = "baseUrl")]
     pub base_url: Option<String>,
     /// API protocol: "anthropic", "openai-completions", etc.
     pub api: Option<String>,
@@ -555,44 +382,33 @@ pub struct ProviderConfig {
     pub auth: Option<String>,
     /// API key or environment variable name. Prefix with `!` for
     /// shell command execution (Pi convention).
-    #[serde(rename = "apiKey")]
     pub api_key: Option<String>,
     /// Extra HTTP headers (key → value or env var name).
     pub headers: Option<HashMap<String, String>>,
     /// Optional provider-side prompt cache retention policy.
-    #[serde(rename = "promptCacheRetention")]
     pub prompt_cache_retention: Option<PromptCacheRetention>,
     /// Compatibility flags for non-standard providers.
-    #[serde(default)]
     pub compat: ProviderCompat,
     /// Models available from this provider.
-    #[serde(default)]
     pub models: Vec<ModelConfig>,
 }
 
 /// Compatibility flags for providers that don't support all features.
 #[derive(Clone, Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct ProviderCompat {
-    #[serde(rename = "supportsDeveloperRole")]
     pub supports_developer_role: bool,
-    #[serde(rename = "supportsReasoningEffort")]
     pub supports_reasoning_effort: bool,
-    #[serde(rename = "supportsPrefill")]
     pub supports_prefill: bool,
-    #[serde(rename = "supportsPromptCacheKey")]
     pub supports_prompt_cache_key: bool,
-    #[serde(rename = "supportsPromptCacheRetention")]
     pub supports_prompt_cache_retention: bool,
     /// llama.cpp-compatible Chat Completions extension: accepts
     /// `cache_prompt` requests and returns `tokens_cached` /
     /// `tokens_evaluated` response stats.
-    #[serde(rename = "supportsLlamaCppCache")]
     pub supports_llama_cpp_cache: bool,
     /// Provider's API accepts `reasoning.summary` and streams
     /// `response.reasoning_summary_text.*` events. Currently only
     /// the OpenAI Responses API surface.
-    #[serde(rename = "supportsReasoningSummary")]
     pub supports_reasoning_summary: bool,
 }
 
@@ -631,16 +447,15 @@ impl PromptCacheRetention {
 
 /// One model available from a provider.
 #[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelConfig {
     /// Model identifier (e.g. "claude-sonnet-4-20250514").
     pub id: String,
     /// Optional display name.
     pub name: Option<String>,
     /// Max output tokens override.
-    #[serde(rename = "maxOutputTokens")]
     pub max_output_tokens: Option<u64>,
     /// Total context window size, in tokens.
-    #[serde(rename = "contextWindow")]
     pub context_window: Option<u64>,
 }
 
@@ -716,18 +531,20 @@ pub fn load_cli_settings() -> Result<CliSettings, SettingsError> {
 }
 
 /// Like [`load_cli_settings`] but reads from an explicit directory layout.
+///
+/// Scalar fields follow `#[serde(default)]` on [`CliSettings`] — anything the
+/// user omits gets the built-in default automatically. The one special case
+/// is `bind`: when the user writes a `bind: { … }` table, the built-in
+/// key bindings are merged underneath so unmentioned keys stay bound to
+/// their defaults instead of being dropped.
 pub fn load_cli_settings_in(dirs: &TauDirs) -> Result<CliSettings, SettingsError> {
     let Some(ref dir) = dirs.config_dir else {
         return Ok(CliSettings::default());
     };
-    let mut settings = CliSettings::default();
-    let user_settings: CliSettings = load_json5_layered(dir, "cli")?;
-    settings.greeting = user_settings.greeting;
-    settings.show_logo = user_settings.show_logo;
-    settings.bar_cursor = user_settings.bar_cursor;
-    settings.prompt_symbol = user_settings.prompt_symbol;
-    settings.submitted_prompt_symbol = user_settings.submitted_prompt_symbol;
-    settings.bind.extend(user_settings.bind);
+    let mut settings: CliSettings = load_json5_layered(dir, "cli")?;
+    let mut bindings = default_cli_bindings();
+    bindings.extend(settings.bind);
+    settings.bind = bindings;
     Ok(settings)
 }
 
@@ -770,6 +587,7 @@ fn load_json5_layered<T: for<'de> Deserialize<'de> + Default>(
     let drop_dir = dir.join(format!("{name}.d"));
 
     let mut builder = config::Config::builder();
+    let mut any_source = false;
 
     // Base file is optional, but parse errors must surface.
     // We guard on exists() and use required(true) so a missing file
@@ -780,6 +598,7 @@ fn load_json5_layered<T: for<'de> Deserialize<'de> + Default>(
                 .format(config::FileFormat::Json5)
                 .required(true),
         );
+        any_source = true;
     }
 
     // Drop-in files: same — optional to have, but must parse.
@@ -797,16 +616,15 @@ fn load_json5_layered<T: for<'de> Deserialize<'de> + Default>(
                     .format(config::FileFormat::Json5)
                     .required(true),
             );
+            any_source = true;
         }
     }
 
-    let config = builder.build()?;
-
-    // If no sources were added, return default.
-    if config.cache.kind == config::ValueKind::Nil {
+    if !any_source {
         return Ok(T::default());
     }
 
+    let config = builder.build()?;
     config.try_deserialize().map_err(SettingsError::from)
 }
 

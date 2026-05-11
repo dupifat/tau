@@ -6,8 +6,8 @@ search requests to Exa's keyless free-tier hosted MCP at
 
 The free tier currently allows ~1000 requests/month per IP with no
 API key. If you need more, set `?exaApiKey=…` on the endpoint via the
-`config.endpoint` field (forthcoming) or run your own `exa-mcp-server`
-and point the extension at it.
+`config.endpoint` field (see [Configuration](#configuration)) or run
+your own `exa-mcp-server` and point the extension at it.
 
 ## What it does
 
@@ -62,9 +62,22 @@ make outbound HTTP calls:
 }
 ```
 
-There are no extension-level config fields today; richer settings
-(custom endpoint, API key, default `num_results`, additional Exa tools
-such as `web_fetch_exa`) can be added per-need.
+Override the upstream MCP endpoint via the `endpoint` field — useful
+for attaching a paid-tier `?exaApiKey=…` or pointing at a self-hosted
+`exa-mcp-server`:
+
+```json5
+{
+  extensions: {
+    "std-websearch-exa": {
+      config: { endpoint: "https://mcp.exa.ai/mcp?exaApiKey=sk-…" },
+    },
+  },
+}
+```
+
+Other settings (default `num_results`, additional Exa tools such as
+`web_fetch_exa`) can be added per-need.
 
 ## Tracing
 

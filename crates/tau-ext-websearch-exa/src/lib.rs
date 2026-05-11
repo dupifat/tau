@@ -13,13 +13,13 @@
 //! `web_fetch_exa`, API-key support, etc. can layer on later.
 
 use std::error::Error;
-use std::io::{BufRead, BufReader, BufWriter, Read, Write};
-use std::sync::{Arc, mpsc};
+use std::io::{BufReader, BufWriter, Read, Write};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Duration;
 
 use tau_proto::{
-    Ack, CborValue, Event, Frame, FrameReader, FrameWriter, LogEventId, Message, ToolError,
-    ToolInvoke, ToolResult, ToolSideEffects, ToolSpec,
+    Ack, CborValue, ConfigError, Event, Frame, FrameReader, FrameWriter, LogEventId, Message,
+    ToolError, ToolInvoke, ToolResult, ToolSideEffects, ToolSpec,
 };
 
 /// `tracing` target for events emitted from this extension.
@@ -58,6 +58,19 @@ const MAX_NUM_RESULTS: u32 = 100;
 /// is in play, but we'd rather fail fast than block the agent turn.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 
+/// Maximum number of HTTP searches in flight at once. Each invocation
+/// spawns a worker thread that holds a `REQUEST_TIMEOUT`-bounded
+/// request open against Exa; without a cap, a bursty agent could
+/// stack arbitrarily many native threads. 8 is well above the
+/// realistic concurrency for a single agent turn and well below any
+/// rate limit a free-tier IP would face.
+const MAX_IN_FLIGHT: usize = 8;
+
+/// Hard cap on the bytes of an Exa error response body that we paste
+/// into a `tool.error` message. Bounds memory and log noise if the
+/// upstream returns a large HTML page on failure.
+const ERROR_BODY_MAX_BYTES: usize = 64 * 1024;
+
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
     tau_extension::init_logging_for(LOG_TARGET);
     run(std::io::stdin(), std::io::stdout())
@@ -75,6 +88,25 @@ where
 /// call without spinning up a real HTTP server.
 pub trait Searcher: Send + Sync + 'static {
     fn search(&self, query: &str, num_results: u32) -> Result<String, String>;
+
+    /// Apply a runtime endpoint update from a harness `Configure`.
+    /// Default no-op for stubs that don't talk to a network.
+    fn set_endpoint(&self, _endpoint: String) {}
+}
+
+/// Extension-side config carried in `Message::Configure.config`.
+///
+/// All fields optional with `#[serde(default)]` so an empty or
+/// missing config object falls back to compiled-in defaults.
+/// `deny_unknown_fields` surfaces typos in `harness.json5` as
+/// actionable `ConfigError`s instead of silently ignoring them.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ExtConfig {
+    /// Override the Exa MCP endpoint. Use this to attach an
+    /// `?exaApiKey=…` query parameter for the paid tier, or point at
+    /// a self-hosted `exa-mcp-server`.
+    endpoint: Option<String>,
 }
 
 fn run_with_searcher<R, W>(
@@ -96,6 +128,7 @@ where
         .run(&mut writer)?;
 
     let (tx, rx) = mpsc::channel::<Frame>();
+    let sem = Arc::new(Semaphore::new(MAX_IN_FLIGHT));
 
     let writer_handle = std::thread::spawn(move || -> Result<(), Box<dyn Error + Send>> {
         for frame in rx {
@@ -115,10 +148,36 @@ where
         };
         let (log_id, inner) = frame.peel_log();
         match inner {
+            Frame::Message(Message::Configure(msg)) => {
+                match tau_extension::parse_config::<ExtConfig>(&msg.config) {
+                    Ok(cfg) => {
+                        if let Some(endpoint) = cfg.endpoint {
+                            tracing::info!(
+                                target: LOG_TARGET,
+                                endpoint = %endpoint,
+                                "applying endpoint override",
+                            );
+                            searcher.set_endpoint(endpoint);
+                        }
+                    }
+                    Err(message) => {
+                        tracing::warn!(target: LOG_TARGET, error = %message, "rejecting config");
+                        let _ = tx.send(Frame::Message(Message::ConfigError(ConfigError {
+                            message,
+                        })));
+                    }
+                }
+            }
             Frame::Event(Event::ToolInvoke(invoke)) => {
+                // Acquire before spawning so the in-flight cap bounds
+                // native thread count, not just concurrent execution.
+                let permit = sem.acquire();
                 let tx = tx.clone();
                 let searcher = Arc::clone(&searcher);
-                std::thread::spawn(move || dispatch_tool_invoke(invoke, searcher.as_ref(), &tx));
+                std::thread::spawn(move || {
+                    let _permit = permit;
+                    dispatch_tool_invoke(invoke, searcher.as_ref(), &tx);
+                });
             }
             Frame::Message(Message::Disconnect(_)) => break,
             _ => {}
@@ -131,7 +190,7 @@ where
     drop(tx);
     writer_handle
         .join()
-        .map_err(|_| "writer thread panicked")?
+        .map_err(|e| -> Box<dyn Error> { format!("writer thread panicked: {e:?}").into() })?
         .map_err(|e| -> Box<dyn Error> { e })?;
     Ok(())
 }
@@ -253,8 +312,16 @@ fn parse_args(arguments: &CborValue) -> Result<(String, u32), String> {
 }
 
 fn parse_num_results(value: &CborValue) -> Result<u32, String> {
+    // Some providers serialize integer-valued tool arguments as JSON
+    // floats (`5.0`); accept those if they're integer-valued.
     let raw: i128 = match value {
         CborValue::Integer(n) => (*n).into(),
+        CborValue::Float(f) => {
+            if !f.is_finite() || f.fract() != 0.0 {
+                return Err("`num_results` must be an integer".to_owned());
+            }
+            *f as i128
+        }
         _ => return Err("`num_results` must be an integer".to_owned()),
     };
     if raw < 1 {
@@ -271,7 +338,7 @@ fn parse_num_results(value: &CborValue) -> Result<u32, String> {
 // ---------------------------------------------------------------------------
 
 struct HttpSearcher {
-    endpoint: String,
+    endpoint: Mutex<String>,
     agent: ureq::Agent,
 }
 
@@ -284,12 +351,20 @@ impl Default for HttpSearcher {
 impl HttpSearcher {
     fn new(endpoint: String) -> Self {
         let agent = ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).build();
-        Self { endpoint, agent }
+        Self {
+            endpoint: Mutex::new(endpoint),
+            agent,
+        }
     }
 }
 
 impl Searcher for HttpSearcher {
     fn search(&self, query: &str, num_results: u32) -> Result<String, String> {
+        let endpoint = self
+            .endpoint
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -304,14 +379,14 @@ impl Searcher for HttpSearcher {
         });
         let response = self
             .agent
-            .post(&self.endpoint)
+            .post(&endpoint)
             .set("Content-Type", "application/json")
             .set("Accept", "application/json, text/event-stream")
             .set("MCP-Protocol-Version", MCP_PROTOCOL_VERSION)
             .send_string(&body.to_string())
             .map_err(|e| match e {
                 ureq::Error::Status(code, resp) => {
-                    let body = resp.into_string().unwrap_or_default();
+                    let body = read_capped(resp.into_reader());
                     format!("exa MCP returned HTTP {code}: {body}")
                 }
                 ureq::Error::Transport(err) => format!("exa MCP transport error: {err}"),
@@ -321,6 +396,29 @@ impl Searcher for HttpSearcher {
             .map_err(|e| format!("reading exa MCP response: {e}"))?;
         decode_mcp_text_result(&payload)
     }
+
+    fn set_endpoint(&self, endpoint: String) {
+        *self.endpoint.lock().unwrap_or_else(|e| e.into_inner()) = endpoint;
+    }
+}
+
+/// Read up to [`ERROR_BODY_MAX_BYTES`] from `reader` into a `String`,
+/// appending a marker if the body was truncated. Used to surface
+/// upstream error responses without unbounded memory or log noise.
+fn read_capped(reader: impl std::io::Read) -> String {
+    let mut buf = Vec::new();
+    let _ = reader
+        .take(ERROR_BODY_MAX_BYTES as u64 + 1)
+        .read_to_end(&mut buf);
+    let truncated = buf.len() > ERROR_BODY_MAX_BYTES;
+    if truncated {
+        buf.truncate(ERROR_BODY_MAX_BYTES);
+    }
+    let mut s = String::from_utf8_lossy(&buf).into_owned();
+    if truncated {
+        s.push_str("… (truncated)");
+    }
+    s
 }
 
 /// Pull the `result.content[*].text` blob out of an MCP JSON-RPC
@@ -361,7 +459,9 @@ fn decode_mcp_text_result(payload: &str) -> Result<String, String> {
 /// `text/event-stream` (the MCP Streamable-HTTP transport). For SSE we
 /// only look at `data:` lines — Exa sends a single `event: message`
 /// frame, but we tolerate multiple frames by taking the first
-/// well-formed one.
+/// well-formed one (terminated by a blank line). If the stream ends
+/// without a trailing blank line, the accumulated buffer is parsed as
+/// the final frame.
 fn parse_sse_or_json(payload: &str) -> Result<serde_json::Value, String> {
     let trimmed = payload.trim_start();
     if trimmed.starts_with('{') {
@@ -369,10 +469,7 @@ fn parse_sse_or_json(payload: &str) -> Result<serde_json::Value, String> {
             .map_err(|e| format!("invalid JSON from exa MCP: {e}"));
     }
     let mut buf = String::new();
-    let reader = std::io::Cursor::new(payload.as_bytes());
-    let reader = std::io::BufReader::new(reader);
-    for line in reader.lines() {
-        let line = line.map_err(|e| format!("reading SSE stream: {e}"))?;
+    for line in payload.lines() {
         if let Some(rest) = line.strip_prefix("data:") {
             buf.push_str(rest.trim_start());
             buf.push('\n');
@@ -386,6 +483,43 @@ fn parse_sse_or_json(payload: &str) -> Result<serde_json::Value, String> {
     }
     serde_json::from_str(buf.trim())
         .map_err(|e| format!("invalid JSON from exa MCP SSE frame: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// Counting semaphore with owned permits (private).
+// ---------------------------------------------------------------------------
+
+struct Semaphore {
+    state: Mutex<usize>,
+    cond: Condvar,
+}
+
+struct OwnedPermit(Arc<Semaphore>);
+
+impl Semaphore {
+    fn new(permits: usize) -> Self {
+        Self {
+            state: Mutex::new(permits),
+            cond: Condvar::new(),
+        }
+    }
+
+    fn acquire(self: &Arc<Self>) -> OwnedPermit {
+        let mut count = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        while *count == 0 {
+            count = self.cond.wait(count).unwrap_or_else(|e| e.into_inner());
+        }
+        *count -= 1;
+        OwnedPermit(Arc::clone(self))
+    }
+}
+
+impl Drop for OwnedPermit {
+    fn drop(&mut self) {
+        let mut count = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        *count += 1;
+        self.0.cond.notify_one();
+    }
 }
 
 #[cfg(test)]

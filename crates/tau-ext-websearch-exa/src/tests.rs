@@ -291,3 +291,29 @@ fn fails_when_response_has_no_text_content() {
     let err = decode_mcp_text_result(body).expect_err("should fail");
     assert!(err.contains("no text content"), "err: {err}");
 }
+
+#[test]
+fn first_wellformed_sse_frame_wins() {
+    // Two complete `message` frames, blank-line-terminated. The
+    // documented contract is "take the first well-formed one".
+    let body = "event: message\n\
+                data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"first\"}]}}\n\
+                \n\
+                event: message\n\
+                data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"second\"}]}}\n\
+                \n";
+    let text = decode_mcp_text_result(body).expect("decode");
+    assert_eq!(text, "first");
+}
+
+#[test]
+fn parse_num_results_accepts_integer_valued_float() {
+    let v = parse_num_results(&CborValue::Float(3.0)).expect("ok");
+    assert_eq!(v, 3);
+}
+
+#[test]
+fn parse_num_results_rejects_non_integer_float() {
+    let err = parse_num_results(&CborValue::Float(3.5)).expect_err("should fail");
+    assert!(err.contains("integer"), "err: {err}");
+}

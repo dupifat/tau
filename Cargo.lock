@@ -1617,6 +1617,7 @@ dependencies = [
 name = "tau-ext-websearch-exa"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
  "tau-extension",
  "tau-proto",

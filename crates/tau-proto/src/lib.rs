@@ -17,7 +17,7 @@ mod events;
 mod frame;
 mod messages;
 
-use std::io::{Cursor, Read, Write};
+use std::io::{BufReader, Cursor, Read, Write};
 
 pub use ciborium::value::Value as CborValue;
 pub use diff::{DiffHunk, DiffLine, DiffSegment, DiffSummary};
@@ -108,13 +108,21 @@ string_newtype!(/// Identifier correlating a user-initiated `!`/`!!` shell
 // ToolName (validated newtype)
 // ---------------------------------------------------------------------------
 
-/// Tool name: must be non-empty and contain only ASCII alphanumerics or
-/// underscores (`[a-zA-Z0-9_]+`).
+/// Tool name: must be non-empty, at most [`ToolName::MAX_LEN`] bytes,
+/// and contain only ASCII alphanumerics or underscores (`[a-zA-Z0-9_]+`).
+///
+/// The length cap matches every real provider — 256 bytes is more
+/// than enough for any well-formed tool identifier and stops a
+/// pathological model emission (e.g. a hundred-megabyte hallucinated
+/// name) from being faithfully round-tripped through the wire codec.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, serde::Serialize, Default)]
 #[serde(transparent)]
 pub struct ToolName(String);
 
 impl ToolName {
+    /// Maximum allowed length for a tool name, in bytes.
+    pub const MAX_LEN: usize = 256;
+
     /// Create a new `ToolName`, panicking if the name is invalid.
     pub fn new(s: impl Into<String>) -> Self {
         let s = s.into();
@@ -139,7 +147,9 @@ impl ToolName {
     }
 
     fn is_valid(s: &str) -> bool {
-        !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        !s.is_empty()
+            && s.len() <= Self::MAX_LEN
+            && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
     }
 }
 
@@ -153,18 +163,6 @@ impl std::ops::Deref for ToolName {
 impl std::fmt::Display for ToolName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
-    }
-}
-
-impl From<String> for ToolName {
-    fn from(s: String) -> Self {
-        Self::new(s)
-    }
-}
-
-impl From<&str> for ToolName {
-    fn from(s: &str) -> Self {
-        Self::new(s)
     }
 }
 
@@ -427,10 +425,11 @@ pub fn cbor_int_field(value: &CborValue, key: &str) -> Option<i128> {
 /// Convert a `serde_json::Value` into a [`CborValue`].
 ///
 /// Numbers are preserved as integers when possible, otherwise as
-/// floats. Anything that doesn't round-trip cleanly (e.g. an
-/// out-of-range number that's neither `i64` nor `f64`) becomes
-/// [`CborValue::Null`]. JSON's full type system is a strict subset
-/// of CBOR, so the conversion is otherwise lossless.
+/// floats. Anything that doesn't round-trip cleanly (e.g. a number
+/// that's neither `i64` nor `f64` — `u64` over `i64::MAX`, or
+/// arbitrary-precision input enabled via `serde_json/arbitrary_precision`)
+/// is logged via `tracing::warn!` and lowered to [`CborValue::Null`]
+/// rather than crashing the wire codec.
 #[must_use]
 pub fn json_to_cbor(v: &serde_json::Value) -> CborValue {
     match v {
@@ -442,6 +441,10 @@ pub fn json_to_cbor(v: &serde_json::Value) -> CborValue {
             } else if let Some(f) = n.as_f64() {
                 CborValue::Float(f)
             } else {
+                tracing::warn!(
+                    number = %n,
+                    "json_to_cbor: number is not representable as i64 or f64, dropping to Null"
+                );
                 CborValue::Null
             }
         }
@@ -491,43 +494,49 @@ where
 }
 
 /// Stateful reader for a stream of protocol frames.
+///
+/// Wraps the inner reader in a [`BufReader`] internally so per-byte
+/// decoding (which `ciborium` issues during deserialization) doesn't
+/// translate to per-byte syscalls on stdio or socket transports.
 #[derive(Debug)]
 pub struct FrameReader<R> {
-    inner: R,
-}
-
-impl<R> FrameReader<R> {
-    /// Wraps an arbitrary reader.
-    #[must_use]
-    pub fn new(inner: R) -> Self {
-        Self { inner }
-    }
-
-    /// Returns the wrapped reader.
-    #[must_use]
-    pub fn into_inner(self) -> R {
-        self.inner
-    }
+    inner: BufReader<R>,
 }
 
 impl<R> FrameReader<R>
 where
     R: Read,
 {
+    /// Wraps an arbitrary reader.
+    #[must_use]
+    pub fn new(inner: R) -> Self {
+        Self {
+            inner: BufReader::new(inner),
+        }
+    }
+
+    /// Returns the wrapped reader. Any data already buffered but not
+    /// yet consumed by a frame decode is discarded.
+    #[must_use]
+    pub fn into_inner(self) -> R {
+        self.inner.into_inner()
+    }
+
     /// Reads one protocol frame from the stream.
     ///
     /// Returns `Ok(None)` on clean end-of-stream (EOF at a message
     /// boundary). Returns `Err` only for actual corruption or
     /// truncated data.
     pub fn read_frame(&mut self) -> Result<Option<Frame>, DecodeError> {
-        let mut first = [0_u8; 1];
-        match self.inner.read_exact(&mut first) {
-            Ok(()) => {}
+        // Peek one byte to distinguish clean EOF from a real read; if
+        // none is available, the stream is at a message boundary.
+        match std::io::BufRead::fill_buf(&mut self.inner) {
+            Ok(b) if b.is_empty() => return Ok(None),
+            Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
             Err(e) => return Err(DecodeError::Io(e)),
         }
-        let chained = Cursor::new(first).chain(&mut self.inner);
-        ciborium::from_reader(chained).map(Some)
+        ciborium::from_reader(&mut self.inner).map(Some)
     }
 }
 

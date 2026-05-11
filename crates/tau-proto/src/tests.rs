@@ -4,7 +4,7 @@ fn representative_events() -> Vec<Event> {
     vec![
         Event::ToolRegister(ToolRegister {
             tool: ToolSpec {
-                name: "echo".into(),
+                name: ToolName::new("echo"),
                 description: Some("Echo a payload".to_owned()),
                 parameters: None,
                 side_effects: ToolSideEffects::Pure,
@@ -12,32 +12,32 @@ fn representative_events() -> Vec<Event> {
         }),
         Event::ToolRequest(ToolRequest {
             call_id: "call-1".into(),
-            tool_name: "echo".into(),
+            tool_name: ToolName::new("echo"),
             arguments: CborValue::Text("hello".to_owned()),
             originator: PromptOriginator::User,
         }),
         Event::ToolInvoke(ToolInvoke {
             call_id: "call-1".into(),
-            tool_name: "echo".into(),
+            tool_name: ToolName::new("echo"),
             arguments: CborValue::Text("hello".to_owned()),
             originator: PromptOriginator::User,
         }),
         Event::ToolResult(ToolResult {
             call_id: "call-1".into(),
-            tool_name: "echo".into(),
+            tool_name: ToolName::new("echo"),
             result: CborValue::Text("hello".to_owned()),
             originator: PromptOriginator::User,
         }),
         Event::ToolError(ToolError {
             call_id: "call-1".into(),
-            tool_name: "missing_tool".into(),
+            tool_name: ToolName::new("missing_tool"),
             message: "no live provider".to_owned(),
             details: None,
             originator: PromptOriginator::User,
         }),
         Event::ToolProgress(ToolProgress {
             call_id: "call-1".into(),
-            tool_name: "shell".into(),
+            tool_name: ToolName::new("shell"),
             message: Some("running".to_owned()),
             progress: Some(ProgressUpdate {
                 current: Some(1),
@@ -65,7 +65,7 @@ fn representative_events() -> Vec<Event> {
                 }],
             }],
             tools: vec![ToolDefinition {
-                name: "read".into(),
+                name: ToolName::new("read"),
                 description: Some("Read a file".to_owned()),
                 parameters: None,
             }],
@@ -144,7 +144,7 @@ fn representative_messages() -> Vec<Message> {
         }),
         Message::Intercept(Intercept {
             selectors: vec![EventSelector::Prefix("tool.".to_owned())],
-            priority: InterceptionPriority(0),
+            priority: InterceptionPriority::new(0),
         }),
         Message::Ready(Ready {
             message: Some("ready".to_owned()),
@@ -256,7 +256,7 @@ fn message_wire_form_uses_flat_message_tag() {
 fn event_wire_form_uses_dotted_event_tag() {
     let event = Event::ToolInvoke(ToolInvoke {
         call_id: "call-1".into(),
-        tool_name: "echo".into(),
+        tool_name: ToolName::new("echo"),
         arguments: CborValue::Text("hi".to_owned()),
         originator: PromptOriginator::User,
     });
@@ -302,6 +302,109 @@ fn tool_name_maybe_classifies_inputs() {
         ToolNameMaybe::from("fs.read"),
         ToolNameMaybe::Invalid(ref s) if s == "fs.read"
     ));
+}
+
+#[test]
+fn tool_name_rejects_overlong_input() {
+    // ASCII alphanumerics that exceed the cap must be rejected even
+    // though they pass the character-class check.
+    let long = "a".repeat(ToolName::MAX_LEN + 1);
+    assert!(ToolName::try_new(long).is_none());
+    let at_cap = "a".repeat(ToolName::MAX_LEN);
+    assert!(ToolName::try_new(at_cap).is_some());
+}
+
+#[test]
+fn frame_peel_log_extracts_log_event_id_and_inner_event() {
+    let inner = Event::SessionStarted(SessionStarted {
+        session_id: "s1".into(),
+        reason: SessionStartReason::Initial,
+    });
+    let frame = Frame::Message(Message::LogEvent(LogEvent {
+        id: LogEventId::new(7),
+        event: Box::new(inner.clone()),
+    }));
+
+    let (peeled_id, rest) = frame.peel_log();
+    assert_eq!(peeled_id, Some(LogEventId::new(7)));
+    assert_eq!(rest, Frame::Event(inner));
+}
+
+#[test]
+fn frame_peel_log_passes_non_log_frames_through_unchanged() {
+    // A bare event must not be mistaken for a log envelope, and the
+    // returned frame must be byte-for-byte the same value the caller
+    // handed in.
+    let event = Event::SessionStarted(SessionStarted {
+        session_id: "s1".into(),
+        reason: SessionStartReason::Initial,
+    });
+    let original = Frame::Event(event);
+    let (peeled_id, rest) = original.clone().peel_log();
+    assert_eq!(peeled_id, None);
+    assert_eq!(rest, original);
+
+    // Likewise for a non-LogEvent message.
+    let msg = Frame::Message(Message::Ready(Ready {
+        message: Some("ready".to_owned()),
+    }));
+    let (peeled_id, rest) = msg.clone().peel_log();
+    assert_eq!(peeled_id, None);
+    assert_eq!(rest, msg);
+}
+
+#[test]
+fn event_defaults_to_transient_marks_progress_kinds() {
+    // The set named by `defaults_to_transient` is the contract the
+    // harness relies on to decide which events skip the durable
+    // session event log when an extension publishes them without
+    // explicit transient metadata. Lock it down here so any future
+    // edit to the matcher is intentional.
+    let transient = [
+        Event::AgentResponseUpdated(AgentResponseUpdated {
+            session_prompt_id: "sp-1".into(),
+            text: "partial".to_owned(),
+            thinking: None,
+            originator: PromptOriginator::User,
+        }),
+        Event::ToolProgress(ToolProgress {
+            call_id: "call-1".into(),
+            tool_name: ToolName::new("shell"),
+            message: Some("running".to_owned()),
+            progress: None,
+        }),
+        Event::UiPromptDraft(UiPromptDraft {
+            session_id: "s1".into(),
+            text: "draft".to_owned(),
+        }),
+    ];
+    for event in &transient {
+        assert!(
+            event.defaults_to_transient(),
+            "{} should default to transient",
+            event.name()
+        );
+    }
+
+    let durable = [
+        Event::SessionStarted(SessionStarted {
+            session_id: "s1".into(),
+            reason: SessionStartReason::Initial,
+        }),
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "hi".to_owned(),
+            originator: PromptOriginator::User,
+            ctx_id: None,
+        }),
+    ];
+    for event in &durable {
+        assert!(
+            !event.defaults_to_transient(),
+            "{} should be durable",
+            event.name()
+        );
+    }
 }
 
 #[test]

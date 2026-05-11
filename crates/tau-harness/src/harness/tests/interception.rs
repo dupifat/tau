@@ -20,7 +20,7 @@ fn ext_agent_query_defers_dispatch_when_publish_is_intercepted() {
     h.registry.register(
         "conn-delegate",
         ToolSpec {
-            name: "delegate".into(),
+            name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
             side_effects: ToolSideEffects::Mutating,
@@ -36,7 +36,7 @@ fn ext_agent_query_defers_dispatch_when_publish_is_intercepted() {
         vec![EventSelector::Exact(
             tau_proto::EventName::UI_PROMPT_SUBMITTED,
         )],
-        InterceptionPriority(0),
+        InterceptionPriority::new(0),
     );
 
     // Drive the main agent into a delegate tool call. Reply Pass to
@@ -142,7 +142,7 @@ fn interception_exact_selector_intercepts_before_log() {
         "interceptor",
         Frame::Message(Message::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
-            priority: InterceptionPriority(0),
+            priority: InterceptionPriority::new(0),
         })),
     )
     .expect("intercept registration");
@@ -169,7 +169,7 @@ fn interception_drop_prevents_final_delivery() {
         "interceptor",
         Frame::Message(Message::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
-            priority: InterceptionPriority(0),
+            priority: InterceptionPriority::new(0),
         })),
     )
     .expect("intercept registration");
@@ -198,7 +198,7 @@ fn interception_pass_through_reaches_log_after_last_interceptor() {
         "interceptor",
         Frame::Message(Message::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
-            priority: InterceptionPriority(0),
+            priority: InterceptionPriority::new(0),
         })),
     )
     .expect("intercept registration");
@@ -229,7 +229,7 @@ fn interception_reply_can_modify_event() {
         "interceptor",
         Frame::Message(Message::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
-            priority: InterceptionPriority(0),
+            priority: InterceptionPriority::new(0),
         })),
     )
     .expect("intercept registration");
@@ -262,7 +262,7 @@ fn interception_priority_orders_lower_values_first() {
             name,
             Frame::Message(Message::Intercept(Intercept {
                 selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
-                priority: InterceptionPriority(priority),
+                priority: InterceptionPriority::new(priority),
             })),
         )
         .expect("intercept registration");
@@ -295,7 +295,7 @@ fn interception_same_priority_orders_by_component_name_and_redelivery_continues(
             name,
             Frame::Message(Message::Intercept(Intercept {
                 selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
-                priority: InterceptionPriority(0),
+                priority: InterceptionPriority::new(0),
             })),
         )
         .expect("intercept registration");
@@ -342,7 +342,7 @@ fn interception_exact_beats_prefix_even_with_lower_prefix_priority() {
         "prefix",
         Frame::Message(Message::Intercept(Intercept {
             selectors: vec![EventSelector::Prefix("ui".to_owned())],
-            priority: InterceptionPriority(-100),
+            priority: InterceptionPriority::new(-100),
         })),
     )
     .expect("prefix registration");
@@ -350,7 +350,7 @@ fn interception_exact_beats_prefix_even_with_lower_prefix_priority() {
         "exact",
         Frame::Message(Message::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
-            priority: InterceptionPriority(100),
+            priority: InterceptionPriority::new(100),
         })),
     )
     .expect("exact registration");
@@ -387,7 +387,7 @@ fn interception_pass_advances_past_responding_interceptor() {
         "interceptor",
         Frame::Message(Message::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
-            priority: InterceptionPriority(0),
+            priority: InterceptionPriority::new(0),
         })),
     )
     .expect("intercept registration");
@@ -425,7 +425,7 @@ fn interception_defers_subsequent_publishes_until_reply() {
         "interceptor",
         Frame::Message(Message::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
-            priority: InterceptionPriority(0),
+            priority: InterceptionPriority::new(0),
         })),
     )
     .expect("intercept registration");
@@ -484,7 +484,7 @@ fn interception_drop_of_must_pass_event_is_overridden() {
             selectors: vec![EventSelector::Exact(
                 tau_proto::EventName::UI_PROMPT_SUBMITTED,
             )],
-            priority: InterceptionPriority(0),
+            priority: InterceptionPriority::new(0),
         })),
     )
     .expect("intercept registration");
@@ -521,7 +521,7 @@ fn interception_disconnect_mid_reply_publishes_original() {
         "interceptor",
         Frame::Message(Message::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
-            priority: InterceptionPriority(0),
+            priority: InterceptionPriority::new(0),
         })),
     )
     .expect("intercept registration");
@@ -559,7 +559,7 @@ fn interception_user_prompt_dispatch_waits_for_commit() {
             selectors: vec![EventSelector::Exact(
                 tau_proto::EventName::UI_PROMPT_SUBMITTED,
             )],
-            priority: InterceptionPriority(0),
+            priority: InterceptionPriority::new(0),
         })),
     )
     .expect("intercept registration");
@@ -640,7 +640,7 @@ fn interception_mutating_prompt_reaches_agent() {
             selectors: vec![EventSelector::Exact(
                 tau_proto::EventName::UI_PROMPT_SUBMITTED,
             )],
-            priority: InterceptionPriority(0),
+            priority: InterceptionPriority::new(0),
         })),
     )
     .expect("intercept registration");
@@ -733,7 +733,7 @@ fn interception_disconnect_clears_registration() {
         "interceptor",
         Frame::Message(Message::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
-            priority: InterceptionPriority(0),
+            priority: InterceptionPriority::new(0),
         })),
     )
     .expect("intercept registration");

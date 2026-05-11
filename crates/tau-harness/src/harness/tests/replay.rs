@@ -23,7 +23,9 @@ fn late_joining_ui_client_receives_replayed_session_events() {
         "final agent response should be in durable session event log"
     );
     assert!(
-        events.iter().all(|entry| !entry.event.is_transient()),
+        events
+            .iter()
+            .all(|entry| !entry.event.defaults_to_transient()),
         "transient events must not be persisted"
     );
 

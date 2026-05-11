@@ -120,7 +120,7 @@ impl SessionTree {
     /// Returns a node by id.
     #[must_use]
     pub fn node(&self, id: NodeId) -> Option<&SessionNode> {
-        self.nodes.get(id.0 as usize)
+        self.nodes.get(id.get() as usize)
     }
 
     /// Returns all nodes.
@@ -147,7 +147,7 @@ impl SessionTree {
         let mut path = Vec::new();
         let mut current = head;
         while let Some(id) = current {
-            if let Some(node) = self.nodes.get(id.0 as usize) {
+            if let Some(node) = self.nodes.get(id.get() as usize) {
                 path.push(&node.entry);
                 current = node.parent_id;
             } else {
@@ -184,7 +184,7 @@ impl SessionTree {
     }
 
     fn append_node_at(&mut self, parent: Option<NodeId>, entry: SessionEntry) -> NodeId {
-        let id = NodeId(self.nodes.len() as u64);
+        let id = NodeId::new(self.nodes.len() as u64);
         self.nodes.push(SessionNode {
             id,
             parent_id: parent,
@@ -335,8 +335,8 @@ impl SessionTree {
                 }),
             )),
             Event::UiNavigateTree(req) => {
-                let target = NodeId(req.node_id);
-                if (target.0 as usize) < self.nodes.len() {
+                let target = NodeId::new(req.node_id);
+                if (target.get() as usize) < self.nodes.len() {
                     self.head = Some(target);
                 }
                 None

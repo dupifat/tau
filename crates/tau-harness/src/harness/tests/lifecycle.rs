@@ -31,7 +31,7 @@ fn disconnected_tool_completes_pending_call() {
         .expect("shell")
         .to_owned();
     let call_id: ToolCallId = "call-1".into();
-    let tool_name: ToolName = "shell".into();
+    let tool_name = ToolName::new("shell");
     let cid = h.default_conversation_id.clone();
     h.tool_conversations.insert(call_id.clone(), cid.clone());
     h.pending_tool_names
@@ -221,7 +221,7 @@ fn empty_tool_name_does_not_panic_and_surfaces_error() {
     h.registry.register(
         "conn-delegate",
         ToolSpec {
-            name: "delegate".into(),
+            name: ToolName::new("delegate"),
             description: None,
             parameters: None,
             side_effects: ToolSideEffects::Mutating,
@@ -313,7 +313,7 @@ fn empty_tool_call_id_is_normalized_to_synthetic_id() {
     h.registry.register(
         "conn-delegate",
         ToolSpec {
-            name: "delegate".into(),
+            name: ToolName::new("delegate"),
             description: None,
             parameters: None,
             side_effects: ToolSideEffects::Mutating,
@@ -474,7 +474,7 @@ fn duplicate_tool_result_is_discarded() {
         "fake-ext",
         Frame::Event(Event::ToolResult(ToolResult {
             call_id: "orphan-call".into(),
-            tool_name: "read".into(),
+            tool_name: ToolName::new("read"),
             result: tau_proto::CborValue::Text("stale data".to_owned()),
             originator: tau_proto::PromptOriginator::User,
         })),

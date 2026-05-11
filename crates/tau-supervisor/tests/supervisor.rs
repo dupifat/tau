@@ -79,7 +79,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
         register,
         Frame::Event(Event::ToolRegister(ToolRegister {
             tool: tau_proto::ToolSpec {
-                name: "echo".into(),
+                name: tau_proto::ToolName::new("echo"),
                 description: Some("Echo test payloads".to_owned()),
                 parameters: None,
                 side_effects: tau_proto::ToolSideEffects::Pure,
@@ -90,7 +90,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
     child
         .send(&Frame::Event(Event::ToolInvoke(ToolInvoke {
             call_id: "call-1".into(),
-            tool_name: "echo".into(),
+            tool_name: tau_proto::ToolName::new("echo"),
             arguments: CborValue::Text("hello".to_owned()),
             originator: tau_proto::PromptOriginator::User,
         })))
@@ -103,7 +103,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
         result,
         Frame::Event(Event::ToolResult(tau_proto::ToolResult {
             call_id: "call-1".into(),
-            tool_name: "echo".into(),
+            tool_name: tau_proto::ToolName::new("echo"),
             result: CborValue::Text("hello".to_owned()),
             originator: tau_proto::PromptOriginator::User,
         }))
@@ -178,7 +178,7 @@ fn disconnect_cleanup_removes_registered_tools_after_child_exit() {
 
     assert_eq!(
         cleanup.removed_tools,
-        vec![tau_proto::ToolName::from("echo")]
+        vec![tau_proto::ToolName::new("echo")]
     );
     assert!(registry.providers_for("echo").is_empty());
     assert_eq!(
@@ -240,7 +240,7 @@ fn restarted_child_can_reregister_after_disconnect_cleanup() {
         let cleanup = child.cleanup_disconnect(0.into(), None, &mut registry, connection_id, &exit);
         assert_eq!(
             cleanup.removed_tools,
-            vec![tau_proto::ToolName::from("echo")]
+            vec![tau_proto::ToolName::new("echo")]
         );
         assert!(registry.providers_for("echo").is_empty());
     }

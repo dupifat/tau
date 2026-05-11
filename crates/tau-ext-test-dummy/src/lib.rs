@@ -86,10 +86,10 @@ where
     tau_extension::Handshake::tool("tau-ext-test-dummy")
         .intercept(
             EventSelector::Exact(tau_proto::EventName::UI_PROMPT_SUBMITTED),
-            InterceptionPriority(0),
+            InterceptionPriority::new(0),
         )
         .register_tool(ToolSpec {
-            name: RESTART_TEST_DUMMY_TOOL_NAME.into(),
+            name: tau_proto::ToolName::new(RESTART_TEST_DUMMY_TOOL_NAME),
             description: Some(
                 "Test-only tool that randomly restarts the dummy extension or returns an error"
                     .to_owned(),

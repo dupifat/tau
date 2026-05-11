@@ -20,7 +20,7 @@ impl Harness {
         let _ = self.registry.register(
             HARNESS_CONNECTION_ID,
             tau_proto::ToolSpec {
-                name: "skill".into(),
+                name: ToolName::new("skill"),
                 description: Some(
                     "Discover and load skills — short, focused playbooks for \
                      specific tasks. The user has likely curated skills for \
@@ -79,7 +79,7 @@ impl Harness {
         call: &AgentToolCall,
     ) -> Result<(), HarnessError> {
         let call_id: ToolCallId = call.id.clone();
-        let tool_name: ToolName = "skill".into();
+        let tool_name = ToolName::new("skill");
 
         // Track the conversation mapping first so the published
         // request + result both attribute to this conversation's

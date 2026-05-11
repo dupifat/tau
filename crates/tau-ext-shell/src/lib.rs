@@ -64,7 +64,7 @@ where
 
     #[cfg(any(test, feature = "echo-agent"))]
     let echo_tool = Some(ToolSpec {
-        name: ECHO_TOOL_NAME.into(),
+        name: tau_proto::ToolName::new(ECHO_TOOL_NAME),
         description: Some("Echo the provided payload unchanged".to_owned()),
         parameters: None,
         side_effects: ToolSideEffects::Pure,
@@ -73,7 +73,7 @@ where
     let echo_tool: Option<ToolSpec> = None;
     let tools = echo_tool.into_iter().chain([
         ToolSpec {
-            name: READ_TOOL_NAME.into(),
+            name: tau_proto::ToolName::new(READ_TOOL_NAME),
             description: Some(
                 "Read the contents of a file. Supports optional line-based slicing via `start_line` and `line_count`. Returns the file path and text content."
                     .to_owned(),
@@ -99,7 +99,7 @@ where
             side_effects: ToolSideEffects::Pure,
         },
         ToolSpec {
-            name: WRITE_TOOL_NAME.into(),
+            name: tau_proto::ToolName::new(WRITE_TOOL_NAME),
             description: Some(
                 "Write content to a file, creating it if it does not exist. \
                  Returns the path, bytes written, and a `diff` object \
@@ -124,7 +124,7 @@ where
             side_effects: ToolSideEffects::Mutating,
         },
         ToolSpec {
-            name: EDIT_TOOL_NAME.into(),
+            name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
             description: Some(
                 "Edit a file using exact text replacement. Each edit's oldText must match \
                  a unique, non-overlapping region of the original file. All edits are matched \
@@ -169,7 +169,7 @@ where
             side_effects: ToolSideEffects::Mutating,
         },
         ToolSpec {
-            name: GREP_TOOL_NAME.into(),
+            name: tau_proto::ToolName::new(GREP_TOOL_NAME),
             description: Some(
                 "Search file contents for a pattern using ripgrep. Returns matching lines with \
                  file paths and line numbers. Respects .gitignore. Output is truncated at \
@@ -213,7 +213,7 @@ where
             side_effects: ToolSideEffects::Pure,
         },
         ToolSpec {
-            name: FIND_TOOL_NAME.into(),
+            name: tau_proto::ToolName::new(FIND_TOOL_NAME),
             description: Some(
                 "Search for files by glob pattern. Returns only file paths (directories are \
                  never included, even with '**/*') relative to the search directory. Respects \
@@ -242,7 +242,7 @@ where
             side_effects: ToolSideEffects::Pure,
         },
         ToolSpec {
-            name: LS_TOOL_NAME.into(),
+            name: tau_proto::ToolName::new(LS_TOOL_NAME),
             description: Some(
                 "List directory contents. Returns entries sorted alphabetically, with '/' suffix \
                  for directories. Includes dotfiles. Output is truncated at `limit` entries or 50KB."
@@ -264,7 +264,7 @@ where
             side_effects: ToolSideEffects::Pure,
         },
         ToolSpec {
-            name: SHELL_TOOL_NAME.into(),
+            name: tau_proto::ToolName::new(SHELL_TOOL_NAME),
             description: Some(
                 "Execute a shell command via `sh -c`. Returns stdout, stderr, \
                  and exit status. Prefer the dedicated `read`/`write`/`edit`/\

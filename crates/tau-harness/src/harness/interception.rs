@@ -275,7 +275,7 @@ impl Harness {
             tracing::debug!(
                 target: "tau_harness::interception",
                 event = %event.name(),
-                priority = interceptor.priority.0,
+                priority = interceptor.priority.get(),
                 component = %interceptor.component_name,
                 connection_id = %interceptor.connection_id,
                 "intercepting event emission"

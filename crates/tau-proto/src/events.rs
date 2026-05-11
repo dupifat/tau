@@ -350,28 +350,45 @@ pub enum EventSelector {
     Clone, Copy, Debug, Default, Eq, PartialEq, Hash, PartialOrd, Ord, Serialize, Deserialize,
 )]
 #[serde(transparent)]
-pub struct InterceptionPriority(pub i64);
+pub struct InterceptionPriority(i64);
+
+impl InterceptionPriority {
+    #[must_use]
+    pub const fn new(v: i64) -> Self {
+        Self(v)
+    }
+
+    #[must_use]
+    pub const fn get(self) -> i64 {
+        self.0
+    }
+}
 
 /// Identifier of a node in the per-session tree. Lives on the wire
 /// because tree-folding events stamp their `parent_node_id` so the
 /// fold doesn't have to consult a shared write cursor.
 ///
 /// Ids are valid only against the tree that produced them. The
-/// in-memory `SessionTree` uses `NodeId.0` as a positional index into
-/// its node vector and assigns ids by insertion order, so the same
-/// numeric id can refer to different nodes across different trees.
-/// Replaying the same persisted event log yields the same ids only
-/// because the fold is deterministic; an id that originated in one
-/// session (or in a sub-agent's tree) is meaningless in another.
+/// in-memory `SessionTree` uses the underlying `u64` as a positional
+/// index into its node vector and assigns ids by insertion order, so
+/// the same numeric id can refer to different nodes across different
+/// trees. Replaying the same persisted event log yields the same ids
+/// only because the fold is deterministic; an id that originated in
+/// one session (or in a sub-agent's tree) is meaningless in another.
 #[derive(
     Clone, Copy, Debug, Default, Eq, PartialEq, Hash, PartialOrd, Ord, Serialize, Deserialize,
 )]
 #[serde(transparent)]
-pub struct NodeId(pub u64);
+pub struct NodeId(u64);
 
 impl NodeId {
     #[must_use]
-    pub fn get(self) -> u64 {
+    pub const fn new(v: u64) -> Self {
+        Self(v)
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u64 {
         self.0
     }
 }
@@ -538,7 +555,7 @@ impl Effort {
 }
 
 impl std::str::FromStr for Effort {
-    type Err = String;
+    type Err = ParseEffortError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "off" => Ok(Self::Off),
@@ -547,12 +564,38 @@ impl std::str::FromStr for Effort {
             "medium" => Ok(Self::Medium),
             "high" => Ok(Self::High),
             "xhigh" => Ok(Self::XHigh),
-            other => Err(format!(
-                "unknown effort level `{other}`; expected off/minimal/low/medium/high/xhigh"
-            )),
+            other => Err(ParseEffortError {
+                input: other.to_owned(),
+            }),
         }
     }
 }
+
+/// Error returned when an effort string is not one of the well-known
+/// levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParseEffortError {
+    input: String,
+}
+
+impl ParseEffortError {
+    #[must_use]
+    pub fn input(&self) -> &str {
+        &self.input
+    }
+}
+
+impl fmt::Display for ParseEffortError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "unknown effort level `{}`; expected off/minimal/low/medium/high/xhigh",
+            self.input
+        )
+    }
+}
+
+impl std::error::Error for ParseEffortError {}
 
 impl std::fmt::Display for Effort {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1569,13 +1612,6 @@ impl Event {
             Self::AgentResponseUpdated(_) => EventName::AGENT_RESPONSE_UPDATED,
             Self::AgentResponseFinished(_) => EventName::AGENT_RESPONSE_FINISHED,
         }
-    }
-
-    /// Events received through [`crate::Emit`] with transient metadata
-    /// are not written to durable session event logs.
-    #[must_use]
-    pub const fn is_transient(&self) -> bool {
-        false
     }
 
     /// Returns true for protocol events that historically behaved as

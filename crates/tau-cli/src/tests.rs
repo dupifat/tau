@@ -165,7 +165,7 @@ fn new_session_clears_session_ui_state() {
     }));
     renderer.handle(&Event::ToolResult(ToolResult {
         call_id: "call-1".into(),
-        tool_name: "read".into(),
+        tool_name: tau_proto::ToolName::new("read"),
         result: CborValue::Map(vec![
             (
                 CborValue::Text("path".into()),
@@ -878,7 +878,7 @@ fn running_tool_call_shows_ellipsis_until_result() {
 
     renderer.handle(&Event::ToolResult(ToolResult {
         call_id: "call-1".into(),
-        tool_name: "read".into(),
+        tool_name: tau_proto::ToolName::new("read"),
         result: CborValue::Map(vec![
             (
                 CborValue::Text("path".into()),
@@ -907,7 +907,7 @@ fn websearch_tool_result_shows_result_count_and_size() {
 
     renderer.handle(&Event::ToolResult(ToolResult {
         call_id: "call-web".into(),
-        tool_name: "websearch_exa".into(),
+        tool_name: tau_proto::ToolName::new("websearch_exa"),
         result: CborValue::Text(
             "Title: One\nURL: https://one.example\n\nTitle: Two\nURL: https://two.example\n".into(),
         ),

@@ -297,7 +297,7 @@ mod tests {
         }));
         tree.apply_event(&Event::ToolRequest(ToolRequest {
             call_id: "call-1".into(),
-            tool_name: "shell".into(),
+            tool_name: tau_proto::ToolName::new("shell"),
             arguments: CborValue::Null,
             originator: tau_proto::PromptOriginator::User,
         }));
@@ -317,7 +317,7 @@ mod tests {
         ]);
         tree.apply_event(&Event::ToolError(ToolError {
             call_id: "call-1".into(),
-            tool_name: "shell".into(),
+            tool_name: tau_proto::ToolName::new("shell"),
             message: "command exited with status 1".to_owned(),
             details: Some(details),
             originator: tau_proto::PromptOriginator::User,

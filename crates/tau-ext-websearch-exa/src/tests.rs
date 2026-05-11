@@ -119,7 +119,7 @@ fn forwards_query_and_num_results_to_searcher_and_returns_text() {
     writer
         .write_event(&Event::ToolInvoke(ToolInvoke {
             call_id: "call-1".into(),
-            tool_name: TOOL_NAME.into(),
+            tool_name: tau_proto::ToolName::new(TOOL_NAME),
             arguments: CborValue::Map(vec![
                 (
                     CborValue::Text("query".to_owned()),
@@ -161,7 +161,7 @@ fn defaults_num_results_when_omitted() {
     writer
         .write_event(&Event::ToolInvoke(ToolInvoke {
             call_id: "call-2".into(),
-            tool_name: TOOL_NAME.into(),
+            tool_name: tau_proto::ToolName::new(TOOL_NAME),
             arguments: CborValue::Map(vec![(
                 CborValue::Text("query".to_owned()),
                 CborValue::Text("hello world".to_owned()),
@@ -188,7 +188,7 @@ fn missing_query_returns_tool_error() {
     writer
         .write_event(&Event::ToolInvoke(ToolInvoke {
             call_id: "call-3".into(),
-            tool_name: TOOL_NAME.into(),
+            tool_name: tau_proto::ToolName::new(TOOL_NAME),
             arguments: CborValue::Map(Vec::new()),
             originator: tau_proto::PromptOriginator::User,
         }))
@@ -211,7 +211,7 @@ fn searcher_error_surfaces_as_tool_error() {
     writer
         .write_event(&Event::ToolInvoke(ToolInvoke {
             call_id: "call-4".into(),
-            tool_name: TOOL_NAME.into(),
+            tool_name: tau_proto::ToolName::new(TOOL_NAME),
             arguments: CborValue::Map(vec![(
                 CborValue::Text("query".to_owned()),
                 CborValue::Text("anything".to_owned()),
@@ -237,7 +237,7 @@ fn rejects_num_results_out_of_range() {
     writer
         .write_event(&Event::ToolInvoke(ToolInvoke {
             call_id: "call-5".into(),
-            tool_name: TOOL_NAME.into(),
+            tool_name: tau_proto::ToolName::new(TOOL_NAME),
             arguments: CborValue::Map(vec![
                 (
                     CborValue::Text("query".to_owned()),

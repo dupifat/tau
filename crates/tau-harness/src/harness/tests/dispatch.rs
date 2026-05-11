@@ -565,7 +565,7 @@ fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
     h.registry.register(
         "conn-delegate",
         ToolSpec {
-            name: "delegate".into(),
+            name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
             side_effects: ToolSideEffects::Mutating,
@@ -682,7 +682,7 @@ fn ext_agent_query_during_tool_call_branches_off_unresolved_tool_use() {
     h.registry.register(
         "conn-delegate",
         ToolSpec {
-            name: "delegate".into(),
+            name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
             side_effects: ToolSideEffects::Mutating,
@@ -795,7 +795,7 @@ fn side_conversation_pure_tool_dispatches_through_parent_mutating_delegate() {
     h.registry.register(
         "conn-delegate",
         ToolSpec {
-            name: "delegate".into(),
+            name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
             side_effects: ToolSideEffects::Mutating,
@@ -805,7 +805,7 @@ fn side_conversation_pure_tool_dispatches_through_parent_mutating_delegate() {
     h.registry.register(
         "conn-websearch",
         ToolSpec {
-            name: "websearch".into(),
+            name: tau_proto::ToolName::new("websearch"),
             description: None,
             parameters: None,
             side_effects: ToolSideEffects::Pure,
@@ -922,7 +922,7 @@ fn read_only_delegate_calls_dispatch_concurrently() {
     h.registry.register(
         "conn-delegate",
         ToolSpec {
-            name: "delegate".into(),
+            name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
             side_effects: ToolSideEffects::Mutating,
@@ -994,7 +994,7 @@ fn read_only_delegate_calls_dispatch_concurrently() {
     h2.registry.register(
         "conn-delegate",
         ToolSpec {
-            name: "delegate".into(),
+            name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
             side_effects: ToolSideEffects::Mutating,
@@ -1061,7 +1061,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
     h.registry.register(
         "conn-delegate",
         ToolSpec {
-            name: "delegate".into(),
+            name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
             side_effects: ToolSideEffects::Mutating,
@@ -1071,7 +1071,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
     h.registry.register(
         "conn-websearch",
         ToolSpec {
-            name: "websearch".into(),
+            name: tau_proto::ToolName::new("websearch"),
             description: None,
             parameters: None,
             side_effects: ToolSideEffects::Pure,
@@ -1169,7 +1169,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
         "conn-websearch",
         Frame::Event(Event::ToolResult(ToolResult {
             call_id: "websearch-call".into(),
-            tool_name: "websearch".into(),
+            tool_name: tau_proto::ToolName::new("websearch"),
             result: CborValue::Text("fake result".to_owned()),
             originator: tau_proto::PromptOriginator::User,
         })),
@@ -1204,7 +1204,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
     h.registry.register(
         "conn-delegate",
         ToolSpec {
-            name: "delegate".into(),
+            name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
             side_effects: ToolSideEffects::Mutating,
@@ -1325,7 +1325,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         "conn-delegate",
         Frame::Event(Event::ToolResult(ToolResult {
             call_id: "nested-call".into(),
-            tool_name: "delegate".into(),
+            tool_name: tau_proto::ToolName::new("delegate"),
             result: CborValue::Text("nested answer".to_owned()),
             originator: tau_proto::PromptOriginator::User,
         })),
@@ -1394,7 +1394,7 @@ fn nested_ext_agent_query_branches_from_tool_owner_conversation() {
     h.registry.register(
         "conn-delegate",
         ToolSpec {
-            name: "delegate".into(),
+            name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
             side_effects: ToolSideEffects::Mutating,
@@ -1517,7 +1517,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
     h.registry.register(
         "conn-delegate",
         ToolSpec {
-            name: "delegate".into(),
+            name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
             side_effects: ToolSideEffects::Mutating,
@@ -1586,7 +1586,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         "conn-delegate",
         Frame::Event(Event::ToolResult(ToolResult {
             call_id: "outer-call".into(),
-            tool_name: "delegate".into(),
+            tool_name: tau_proto::ToolName::new("delegate"),
             result: CborValue::Text("outer answer".to_owned()),
             originator: tau_proto::PromptOriginator::User,
         })),
@@ -1627,7 +1627,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
     h.registry.register(
         "conn-delegate",
         ToolSpec {
-            name: "delegate".into(),
+            name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
             side_effects: ToolSideEffects::Mutating,
@@ -1785,7 +1785,7 @@ fn parallel_side_convs_do_not_share_branch_cursor() {
     h.registry.register(
         "conn-delegate",
         ToolSpec {
-            name: "delegate".into(),
+            name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
             side_effects: ToolSideEffects::Mutating,
@@ -1949,7 +1949,7 @@ fn tool_events_carry_owning_conversation_originator() {
     h.registry.register(
         "conn-delegate",
         ToolSpec {
-            name: "delegate".into(),
+            name: tau_proto::ToolName::new("delegate"),
             description: None,
             parameters: None,
             side_effects: ToolSideEffects::Mutating,

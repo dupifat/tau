@@ -4,7 +4,7 @@ use super::*;
 fn format_session_entry_tree_preview_hides_call_id_and_shows_skill_name() {
     let skill_request = SessionEntry::ToolActivity(ToolActivityRecord {
         call_id: "call_HC8dStLuLeEjHCxFZsBx6jfV".into(),
-        tool_name: "skill".into(),
+        tool_name: tau_proto::ToolName::new("skill"),
         outcome: ToolActivityOutcome::Requested {
             arguments: CborValue::Map(vec![
                 (
@@ -25,7 +25,7 @@ fn format_session_entry_tree_preview_hides_call_id_and_shows_skill_name() {
 
     let skill_search = SessionEntry::ToolActivity(ToolActivityRecord {
         call_id: "call_search".into(),
-        tool_name: "skill".into(),
+        tool_name: tau_proto::ToolName::new("skill"),
         outcome: ToolActivityOutcome::Requested {
             arguments: CborValue::Map(vec![
                 (
@@ -46,7 +46,7 @@ fn format_session_entry_tree_preview_hides_call_id_and_shows_skill_name() {
 
     let read_request = SessionEntry::ToolActivity(ToolActivityRecord {
         call_id: "call_ugly".into(),
-        tool_name: "read".into(),
+        tool_name: tau_proto::ToolName::new("read"),
         outcome: ToolActivityOutcome::Requested {
             arguments: CborValue::Map(vec![(
                 CborValue::Text("path".to_owned()),
@@ -58,7 +58,7 @@ fn format_session_entry_tree_preview_hides_call_id_and_shows_skill_name() {
 
     let result = SessionEntry::ToolActivity(ToolActivityRecord {
         call_id: "call_ugly".into(),
-        tool_name: "read".into(),
+        tool_name: tau_proto::ToolName::new("read"),
         outcome: ToolActivityOutcome::Result {
             result: CborValue::Text("hello".to_owned()),
         },

@@ -209,7 +209,7 @@ fn deterministic_agent_and_tool_complete_one_vertical_slice() {
             }],
         }],
         tools: vec![ToolDefinition {
-            name: "echo".into(),
+            name: tau_proto::ToolName::new("echo"),
             description: None,
             parameters: None,
         }],

@@ -134,7 +134,7 @@ fn directed_events_ignore_subscriptions_but_still_use_visibility_filters() {
             Some(&tool_id),
             Frame::Event(Event::ToolInvoke(tau_proto::ToolInvoke {
                 call_id: "call-1".into(),
-                tool_name: "echo".into(),
+                tool_name: tau_proto::ToolName::new("echo"),
                 arguments: CborValue::Null,
                 originator: tau_proto::PromptOriginator::User,
             })),
@@ -161,7 +161,7 @@ fn connection_abstraction_is_transport_independent_for_in_memory_clients() {
 
     let first_report = bus.publish(Frame::Event(Event::ToolResult(tau_proto::ToolResult {
         call_id: "call-1".into(),
-        tool_name: "echo".into(),
+        tool_name: tau_proto::ToolName::new("echo"),
         result: CborValue::Text("done".to_owned()),
         originator: tau_proto::PromptOriginator::User,
     })));
@@ -197,7 +197,7 @@ fn provider_can_register_tool_and_receive_invocations() {
     let register_report = registry.register(
         &tool_id,
         ToolSpec {
-            name: "echo".into(),
+            name: tau_proto::ToolName::new("echo"),
             description: Some("Echo a payload".to_owned()),
             parameters: None,
             side_effects: ToolSideEffects::Pure,
@@ -211,7 +211,7 @@ fn provider_can_register_tool_and_receive_invocations() {
             &agent_id,
             ToolRequest {
                 call_id: "call-1".into(),
-                tool_name: "echo".into(),
+                tool_name: tau_proto::ToolName::new("echo"),
                 arguments: CborValue::Text("hello".to_owned()),
                 originator: tau_proto::PromptOriginator::User,
             },
@@ -232,7 +232,7 @@ fn provider_can_register_tool_and_receive_invocations() {
         delivered_events[0].frame,
         Frame::Event(Event::ToolInvoke(tau_proto::ToolInvoke {
             call_id: "call-1".into(),
-            tool_name: "echo".into(),
+            tool_name: tau_proto::ToolName::new("echo"),
             arguments: CborValue::Text("hello".to_owned()),
             originator: tau_proto::PromptOriginator::User,
         }))
@@ -246,7 +246,7 @@ fn duplicate_tool_registrations_warn_but_remain_available() {
     let first_report = registry.register(
         "conn-a",
         ToolSpec {
-            name: "echo".into(),
+            name: tau_proto::ToolName::new("echo"),
             description: Some("Echo".to_owned()),
             parameters: None,
             side_effects: ToolSideEffects::Pure,
@@ -257,7 +257,7 @@ fn duplicate_tool_registrations_warn_but_remain_available() {
     let second_report = registry.register(
         "conn-b",
         ToolSpec {
-            name: "echo".into(),
+            name: tau_proto::ToolName::new("echo"),
             description: Some("Echo from another provider".to_owned()),
             parameters: None,
             side_effects: ToolSideEffects::Pure,
@@ -267,7 +267,7 @@ fn duplicate_tool_registrations_warn_but_remain_available() {
     assert_eq!(
         second_report.warnings[0],
         ToolRegistryWarning::DuplicateRegistration {
-            tool_name: "echo".into(),
+            tool_name: tau_proto::ToolName::new("echo"),
             existing_provider_ids: vec!["conn-a".into()],
         }
     );
@@ -291,7 +291,7 @@ fn disconnect_cleanup_removes_stale_tool_providers() {
     registry.register(
         &first_id,
         ToolSpec {
-            name: "echo".into(),
+            name: tau_proto::ToolName::new("echo"),
             description: None,
             parameters: None,
             side_effects: ToolSideEffects::Pure,
@@ -300,7 +300,7 @@ fn disconnect_cleanup_removes_stale_tool_providers() {
     registry.register(
         &second_id,
         ToolSpec {
-            name: "echo".into(),
+            name: tau_proto::ToolName::new("echo"),
             description: None,
             parameters: None,
             side_effects: ToolSideEffects::Pure,
@@ -309,7 +309,7 @@ fn disconnect_cleanup_removes_stale_tool_providers() {
     registry.register(
         &first_id,
         ToolSpec {
-            name: "demo_upper".into(),
+            name: tau_proto::ToolName::new("demo_upper"),
             description: None,
             parameters: None,
             side_effects: ToolSideEffects::Pure,
@@ -341,7 +341,7 @@ fn register_events_map_cleanly_to_registry_state() {
         "conn-tool",
         ToolRegister {
             tool: ToolSpec {
-                name: "echo".into(),
+                name: tau_proto::ToolName::new("echo"),
                 description: Some("Echo".to_owned()),
                 parameters: None,
                 side_effects: ToolSideEffects::Pure,
@@ -379,7 +379,7 @@ fn explicit_parent_preserved_across_replay() {
 
     {
         let mut store = SessionStore::open(&store_path).expect("open");
-        // Three siblings: each one parents off the root (NodeId(0))
+        // Three siblings: each one parents off the root (NodeId::new(0))
         // by passing the parent explicitly. There are no
         // `UiNavigateTree` events in between.
         store
@@ -389,7 +389,7 @@ fn explicit_parent_preserved_across_replay() {
             .append_session_event_at(
                 session_id,
                 None,
-                Some(Some(NodeId(0))),
+                Some(Some(NodeId::new(0))),
                 user_event("branch-a"),
             )
             .expect("branch-a");
@@ -397,7 +397,7 @@ fn explicit_parent_preserved_across_replay() {
             .append_session_event_at(
                 session_id,
                 None,
-                Some(Some(NodeId(0))),
+                Some(Some(NodeId::new(0))),
                 user_event("branch-b"),
             )
             .expect("branch-b");
@@ -406,22 +406,25 @@ fn explicit_parent_preserved_across_replay() {
     let reopened = SessionStore::open(&store_path).expect("reopen");
     let tree = reopened.session(session_id).expect("session reload");
 
-    // Three nodes, all parented off NodeId(0).
+    // Three nodes, all parented off NodeId::new(0).
     assert_eq!(tree.nodes().len(), 3);
-    assert_eq!(tree.node(NodeId(0)).expect("root node").parent_id, None,);
     assert_eq!(
-        tree.node(NodeId(1)).expect("branch-a node").parent_id,
-        Some(NodeId(0)),
+        tree.node(NodeId::new(0)).expect("root node").parent_id,
+        None,
     );
     assert_eq!(
-        tree.node(NodeId(2)).expect("branch-b node").parent_id,
-        Some(NodeId(0)),
+        tree.node(NodeId::new(1)).expect("branch-a node").parent_id,
+        Some(NodeId::new(0)),
+    );
+    assert_eq!(
+        tree.node(NodeId::new(2)).expect("branch-b node").parent_id,
+        Some(NodeId::new(0)),
     );
 
-    // The branching is preserved: NodeId(0) has two children.
-    let mut children: Vec<_> = tree.children(NodeId(0));
-    children.sort_by_key(|n| n.0);
-    assert_eq!(children, vec![NodeId(1), NodeId(2)]);
+    // The branching is preserved: NodeId::new(0) has two children.
+    let mut children: Vec<_> = tree.children(NodeId::new(0));
+    children.sort_by_key(|n| n.get());
+    assert_eq!(children, vec![NodeId::new(1), NodeId::new(2)]);
 }
 
 #[test]
@@ -486,14 +489,14 @@ fn session_tree_persists_across_reopen() {
     let id0 = store_user_message(&mut store, "session-1", "hello");
     let id1 = store_agent_message(&mut store, "session-1", "hi there");
 
-    assert_eq!(id0, NodeId(0));
-    assert_eq!(id1, NodeId(1));
+    assert_eq!(id0, NodeId::new(0));
+    assert_eq!(id1, NodeId::new(1));
 
     let reopened = SessionStore::open(&store_path).expect("store should reopen");
     let tree = reopened
         .session("session-1")
         .expect("session should reload");
-    assert_eq!(tree.head(), Some(NodeId(1)));
+    assert_eq!(tree.head(), Some(NodeId::new(1)));
     assert_eq!(
         tree.current_branch(),
         vec![
@@ -507,10 +510,15 @@ fn session_tree_persists_across_reopen() {
         ]
     );
     // Verify tree structure.
-    assert!(tree.node(NodeId(0)).expect("node 0").parent_id.is_none());
+    assert!(
+        tree.node(NodeId::new(0))
+            .expect("node 0")
+            .parent_id
+            .is_none()
+    );
     assert_eq!(
-        tree.node(NodeId(1)).expect("node 1").parent_id,
-        Some(NodeId(0))
+        tree.node(NodeId::new(1)).expect("node 1").parent_id,
+        Some(NodeId::new(0))
     );
 }
 
@@ -538,7 +546,7 @@ fn session_tree_supports_branching() {
     let _ = store_user_message(&mut store, "s1", "goodbye");
 
     let tree = store.session("s1").expect("session should exist");
-    assert_eq!(tree.head(), Some(NodeId(2)));
+    assert_eq!(tree.head(), Some(NodeId::new(2)));
     // Current branch: hello → goodbye (skipping "hi").
     assert_eq!(
         tree.current_branch(),
@@ -552,14 +560,14 @@ fn session_tree_supports_branching() {
         ]
     );
     // Node 0 has two children (branching point).
-    let mut children = tree.children(NodeId(0));
-    children.sort_by_key(|id| id.0);
-    assert_eq!(children, vec![NodeId(1), NodeId(2)]);
+    let mut children = tree.children(NodeId::new(0));
+    children.sort_by_key(|id| id.get());
+    assert_eq!(children, vec![NodeId::new(1), NodeId::new(2)]);
 
     // Verify persistence across reopen.
     let reopened = SessionStore::open(&store_path).expect("reopen");
     let tree2 = reopened.session("s1").expect("session");
-    assert_eq!(tree2.head(), Some(NodeId(2)));
+    assert_eq!(tree2.head(), Some(NodeId::new(2)));
     assert_eq!(tree2.current_branch().len(), 2);
 }
 
@@ -576,7 +584,7 @@ fn session_tree_associates_tool_activity() {
             None,
             Event::ToolResult(ToolResult {
                 call_id: "call-1".into(),
-                tool_name: "read".into(),
+                tool_name: tau_proto::ToolName::new("read"),
                 result: CborValue::Text("README".to_owned()),
                 originator: tau_proto::PromptOriginator::User,
             }),
@@ -593,7 +601,7 @@ fn session_tree_associates_tool_activity() {
         *branch[1],
         SessionEntry::ToolActivity(ToolActivityRecord {
             call_id: "call-1".into(),
-            tool_name: "read".into(),
+            tool_name: tau_proto::ToolName::new("read"),
             outcome: ToolActivityOutcome::Result {
                 result: CborValue::Text("README".to_owned()),
             },

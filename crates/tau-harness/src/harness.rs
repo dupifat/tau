@@ -871,7 +871,7 @@ impl Harness {
         transient: bool,
         parent_node_id: Option<Option<tau_proto::NodeId>>,
     ) -> Option<tau_proto::NodeId> {
-        if transient || event.is_transient() {
+        if transient {
             return None;
         }
         let session_id = self.session_id_for_event(event)?;
@@ -1173,8 +1173,7 @@ impl Harness {
                 self.try_advance_queue();
             }
             Message::Emit(emit) => {
-                let transient = emit.transient || emit.event.is_transient();
-                self.enqueue_publish(Some(source_id), *emit.event, transient, false, None);
+                self.enqueue_publish(Some(source_id), *emit.event, emit.transient, false, None);
             }
             Message::InterceptReply(reply) => {
                 self.handle_intercept_reply(source_id, reply);
@@ -1646,7 +1645,7 @@ impl Harness {
                 .pending_tool_names
                 .get(&call_id)
                 .cloned()
-                .unwrap_or_else(|| ToolName::from("unknown_tool"));
+                .unwrap_or_else(|| ToolName::new("unknown_tool"));
             let error = ToolError {
                 call_id: call_id.clone(),
                 tool_name,
@@ -2109,7 +2108,7 @@ impl Harness {
                 None,
                 Event::UiNavigateTree(tau_proto::UiNavigateTree {
                     session_id,
-                    node_id: target.0,
+                    node_id: target.get(),
                 }),
             );
         }
@@ -2179,10 +2178,16 @@ impl Harness {
                         let marker = if Some(node.id) == head { '*' } else { ' ' };
                         let parent = node
                             .parent_id
-                            .map(|p| format!("<- {}", p.0))
+                            .map(|p| format!("<- {}", p.get()))
                             .unwrap_or_else(|| "(root)".to_owned());
                         let preview = render_entry_preview(&node.entry);
-                        format!("  {:>3} {} {:>8}  {}", node.id.0, marker, parent, preview)
+                        format!(
+                            "  {:>3} {} {:>8}  {}",
+                            node.id.get(),
+                            marker,
+                            parent,
+                            preview
+                        )
                     })
                     .collect()
             }
@@ -2216,7 +2221,7 @@ impl Harness {
         let valid = self
             .store
             .session(session_id.as_str())
-            .and_then(|t| t.node(tau_core::NodeId(node_id)))
+            .and_then(|t| t.node(tau_core::NodeId::new(node_id)))
             .is_some();
         if !valid {
             self.emit_info(&format!("no node `{node_id}` in session"));
@@ -3151,7 +3156,7 @@ impl Harness {
         arguments: &CborValue,
         message: String,
     ) -> Result<(), HarnessError> {
-        let placeholder: ToolName = "invalid_tool".into();
+        let placeholder = ToolName::new("invalid_tool");
         let call_id_owned: ToolCallId = call_id.to_owned().into();
         // Seed the conversation mapping so `session_id_for_event`
         // attributes both the synthetic request and the synthetic

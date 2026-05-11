@@ -1667,6 +1667,7 @@ dependencies = [
  "ciborium",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]

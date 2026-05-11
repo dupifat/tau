@@ -93,7 +93,7 @@ pub struct ConfigError {
     Clone, Copy, Debug, Default, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize,
 )]
 #[serde(transparent)]
-pub struct LogEventId(pub u64);
+pub struct LogEventId(u64);
 
 impl LogEventId {
     #[must_use]

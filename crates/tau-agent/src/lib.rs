@@ -182,6 +182,7 @@ where
                                 tool_calls: Vec::new(),
                                 input_tokens: None,
                                 cached_tokens: None,
+                                output_tokens: None,
                                 thinking: None,
                                 token_usage: None,
                                 originator: prompt.originator.clone(),
@@ -643,11 +644,14 @@ fn finish_stream<W: Write>(
             tool_calls,
             input_tokens,
             cached_tokens,
+            output_tokens,
             thinking,
-            token_usage: Some(tau_proto::AgentTokenUsage {
-                response_received_tokens: output_tokens.unwrap_or(0),
-                ..tau_proto::AgentTokenUsage::default()
-            }),
+            // Built by the harness on the way out — see
+            // handle_agent_response_finished. Agents have no view of
+            // the qualified provider/model id or the running session
+            // totals, so leaving this None on the wire avoids a
+            // half-built struct that downstream consumers might trust.
+            token_usage: None,
             originator: originator.clone(),
             backend: Some(backend.clone()),
             response_id,
@@ -672,6 +676,7 @@ fn finish_error<W: Write>(
             tool_calls: Vec::new(),
             input_tokens: None,
             cached_tokens: None,
+            output_tokens: None,
             thinking: None,
             token_usage: None,
             originator: originator.clone(),
@@ -759,6 +764,7 @@ where
                             tool_calls: Vec::new(),
                             input_tokens: None,
                             cached_tokens: None,
+                            output_tokens: None,
                             thinking: None,
                             token_usage: None,
                             originator: prompt.originator.clone(),
@@ -822,6 +828,7 @@ where
                             tool_calls: vec![tool_call],
                             input_tokens: None,
                             cached_tokens: None,
+                            output_tokens: None,
                             thinking: None,
                             token_usage: None,
                             originator: prompt.originator.clone(),

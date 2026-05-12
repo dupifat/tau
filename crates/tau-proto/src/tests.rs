@@ -84,6 +84,7 @@ fn representative_events() -> Vec<Event> {
             tool_calls: Vec::new(),
             input_tokens: None,
             cached_tokens: None,
+            output_tokens: None,
             thinking: None,
             token_usage: None,
             originator: PromptOriginator::User,

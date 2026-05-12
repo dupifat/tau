@@ -942,9 +942,20 @@ impl Harness {
         // the wire `LogEvent` envelope. Sampling the clock three
         // separate times would let timing analyses disagree with what
         // live subscribers saw.
-        let (seq, recorded_at) = self
-            .event_log
-            .append(source.map(tau_proto::ConnectionId::from), event.clone());
+        let source_id = source.map(tau_proto::ConnectionId::from);
+        let (seq, recorded_at) = self.event_log.append(source_id.clone(), event.clone());
+        // Mirror every committed event into the JSONL debug log as a
+        // `published` line. The inbound `from_connection` lines carry
+        // the raw frame the agent sent us, but for events that the
+        // harness enriches (notably `AgentResponseFinished`, where
+        // `token_usage` is built here from session-wide state the
+        // agent never sees), the enriched payload only exists on the
+        // outbound copy. Offline cache/cost analysis tools that read
+        // `events.jsonl` would otherwise see zeros where the running
+        // session totals belong.
+        if let Some(log) = &mut self.debug_log {
+            log.log_published_event(source_id.as_ref(), &event, recorded_at);
+        }
         let folded_node_id =
             self.persist_session_event(source, &event, transient, parent_for_fold, recorded_at);
         if let Some(sync) = sync_head_for
@@ -2997,10 +3008,7 @@ impl Harness {
         if let Some(ref model) = turn_model {
             let sent_tokens = response.input_tokens.unwrap_or(0);
             let cached_tokens = response.cached_tokens.unwrap_or(0);
-            let received_tokens = response
-                .token_usage
-                .as_ref()
-                .map_or(0, |usage| usage.response_received_tokens);
+            let received_tokens = response.output_tokens.unwrap_or(0);
             self.token_usage.add_sent(model, sent_tokens, cached_tokens);
             self.token_usage.add_received(model, received_tokens);
             response.token_usage = Some(AgentTokenUsage {

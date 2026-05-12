@@ -403,6 +403,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: None,
                 cached_tokens: None,
+                output_tokens: None,
                 thinking: None,
                 token_usage: None,
                 originator: tau_proto::PromptOriginator::User,

@@ -1831,7 +1831,7 @@ pub struct AgentToolCall {
 }
 
 /// The agent finished processing a prompt.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentResponseFinished {
     pub session_prompt_id: SessionPromptId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1851,12 +1851,22 @@ pub struct AgentResponseFinished {
     /// provider reported them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<u64>,
+    /// Output tokens produced by the final request, if the provider
+    /// reported them. Includes reasoning tokens on backends that
+    /// generate hidden chain-of-thought (o-series, GPT-5), which both
+    /// the OpenAI Responses and Chat Completions APIs roll into the
+    /// top-level output count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
     /// Final accumulated provider-supplied reasoning summary, if the
     /// provider exposed one. Persisted with the assistant turn but
     /// never replayed into later prompts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<String>,
-    /// Session token usage snapshot after this response completed.
+    /// Session-scoped token usage snapshot after this response
+    /// completed. Filled in by the harness (which knows the qualified
+    /// `provider/model` id and the running session totals) before the
+    /// event is re-published; agents emit `None` here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_usage: Option<AgentTokenUsage>,
     /// Which LLM backend handled this turn. Recorded once per turn

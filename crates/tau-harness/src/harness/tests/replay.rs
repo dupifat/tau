@@ -134,6 +134,7 @@ fn late_joining_ui_client_replays_only_final_session_events() {
             originator: Default::default(),
             input_tokens: None,
             cached_tokens: None,
+            output_tokens: None,
             thinking: None,
             token_usage: None,
 
@@ -346,6 +347,7 @@ fn resumed_harness_replays_persisted_session_history() {
             tool_calls: Vec::new(),
             input_tokens: None,
             cached_tokens: None,
+            output_tokens: None,
             thinking: None,
             token_usage: None,
             originator: tau_proto::PromptOriginator::User,
@@ -410,6 +412,7 @@ fn thinking_is_persisted_but_excluded_from_prompt_replay() {
         tool_calls: Vec::new(),
         input_tokens: None,
         cached_tokens: None,
+        output_tokens: None,
         thinking: Some("The user is asking ...".to_owned()),
         token_usage: None,
         originator: tau_proto::PromptOriginator::User,

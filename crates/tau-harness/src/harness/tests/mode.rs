@@ -15,6 +15,35 @@ fn embedded_mode_returns_agent_response_and_persists_history() {
         "should have user msg + agent response, got {}",
         branch.len()
     );
+
+    // Debug-log mirror: every turn that goes through the harness
+    // should produce both an inbound `from_connection` line capturing
+    // the raw agent frame, and a `published` line capturing the
+    // enriched copy the harness committed. This is what
+    // cache/cost-analysis tooling reads.
+    let jsonl = std::fs::read_to_string(sp.join("s1").join("events.jsonl"))
+        .expect("events.jsonl should exist for session s1");
+    let parsed: Vec<serde_json::Value> = jsonl
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str(l).expect("valid jsonl"))
+        .collect();
+    let from_connection_finished = parsed
+        .iter()
+        .filter(|e| e["type"] == "from_connection" && e["event_name"] == "agent.response_finished")
+        .count();
+    let published_finished = parsed
+        .iter()
+        .filter(|e| e["type"] == "published" && e["event_name"] == "agent.response_finished")
+        .count();
+    assert!(
+        from_connection_finished >= 1,
+        "expected ≥1 inbound agent.response_finished line, got {from_connection_finished}",
+    );
+    assert!(
+        published_finished >= 1,
+        "expected ≥1 published agent.response_finished line, got {published_finished}",
+    );
 }
 
 #[test]

@@ -74,6 +74,7 @@ fn ext_agent_query_defers_dispatch_when_publish_is_intercepted() {
         }],
         input_tokens: None,
         cached_tokens: None,
+        output_tokens: None,
         thinking: None,
         token_usage: None,
         originator: tau_proto::PromptOriginator::User,

@@ -43,7 +43,7 @@ fn cli_settings_user_binding_keeps_built_in_chords() {
     // User-overridden key reflects the user's value...
     let cf = s.bind.get("C-f").expect("C-f");
     assert_eq!(cf.action, "shell-prompt-edit");
-    assert_eq!(cf.command, "pick");
+    assert_eq!(cf.command.as_deref(), Some("pick"));
     // ...and other built-in chords survive the merge.
     assert!(s.bind.contains_key("C-r"));
     assert!(s.bind.contains_key("C-o"));

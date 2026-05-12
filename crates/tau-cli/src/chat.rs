@@ -115,14 +115,14 @@ pub(crate) fn should_send_draft_snapshot(handle: &(Mutex<DraftSlot>, Condvar), e
 }
 
 fn encode_binding_action(action: &CliBindingAction) -> String {
-    if action.command.is_empty() {
+    let Some(command) = action.command.as_deref().filter(|c| !c.is_empty()) else {
         return action.action.clone();
-    }
+    };
     format!(
         "{}:{}:{}",
         action.action,
         if action.trim { "trim" } else { "raw" },
-        action.command
+        command,
     )
 }
 

@@ -1,5 +1,8 @@
 // Built-in CLI key bindings. Merged underneath user bindings in
 // `cli.json5` so unmentioned keys stay bound to these defaults.
+//
+// `command` is optional — navigation actions like `prompt-previous`
+// and `prompt-next` don't shell out, so they omit it entirely.
 {
     "C-f": {
         action: "shell-prompt-insert",
@@ -11,34 +14,16 @@
         command: "RG_PREFIX='rg --line-number --column --no-heading --color=always --smart-case'; fzf --height=100% --ansi --disabled --bind \"change:reload:$RG_PREFIX {q} || true\" --delimiter : --preview 'bat --color=always --style=numbers --highlight-line {2} -- {1} 2>/dev/null || awk -v line={2} '\\''line - 4 <= NR && NR <= line + 4 { printf \"%6d  %s\\n\", NR, $0 }'\\'' -- {1}' --preview-window '+{2}/2' | cut -d: -f1",
         trim: true,
     },
-    "C-k": {
-        action: "prompt-previous",
-        command: "",
-        trim: false,
-    },
-    "C-Up": {
-        action: "prompt-previous",
-        command: "",
-        trim: false,
-    },
-    "C-j": {
-        action: "prompt-next",
-        command: "",
-        trim: false,
-    },
-    "C-Down": {
-        action: "prompt-next",
-        command: "",
-        trim: false,
-    },
+    "C-k":    { action: "prompt-previous" },
+    "C-Up":   { action: "prompt-previous" },
+    "C-j":    { action: "prompt-next" },
+    "C-Down": { action: "prompt-next" },
     "C-o": {
         action: "shell-prompt-edit",
         command: "$TAU_EDITOR \"$TAU_PROMPT_PATH\"",
-        trim: false,
     },
     "C-g": {
         action: "shell-prompt-edit",
         command: "$TAU_EDITOR \"$TAU_PROMPT_PATH\"",
-        trim: false,
     },
 }

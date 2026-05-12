@@ -124,8 +124,9 @@ impl CliShellCommand {
 pub struct CliBindingAction {
     /// Action name, e.g. `shell-prompt-insert` or `shell-prompt-edit`.
     pub action: String,
-    /// Shell command to execute.
-    pub command: String,
+    /// Shell command to execute. `None` for actions that don't shell
+    /// out (e.g. `prompt-previous`, `prompt-next`).
+    pub command: Option<String>,
     /// Whether to trim command stdout before insertion.
     pub trim: bool,
 }
@@ -134,7 +135,7 @@ impl Default for CliBindingAction {
     fn default() -> Self {
         Self {
             action: "shell-prompt-insert".to_owned(),
-            command: String::new(),
+            command: None,
             trim: false,
         }
     }

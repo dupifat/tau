@@ -149,6 +149,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
   "std",
 ] }
 vt100 = { version = "0.16", default-features = false }
+which = { version = "8", default-features = false, features = ["real-sys"] }
 
 [profile.ci]
 debug = "line-tables-only"

@@ -51,6 +51,10 @@ pub struct HighTerm {
     handle: TermHandle,
     theme: Theme,
     editor_context: Arc<Mutex<EditorContext>>,
+    /// Editor command resolved once at startup: `$EDITOR`, else
+    /// `$VISUAL`, else the first of `vim`/`vi`/`nano` found on
+    /// `$PATH`. Passed to shell actions as `$TAU_EDITOR`.
+    external_editor: Option<String>,
     /// Block id for the completion menu, allocated lazily on first
     /// open. Reused across opens; content swapped to empty when the
     /// menu is hidden.
@@ -76,12 +80,14 @@ impl HighTerm {
         let data = CompletionData::new();
         let data_clone = data.clone();
         term.set_completion_source(Some(make_completion_source(commands, data)));
+        let external_editor = resolve_external_editor();
         Ok((
             Self {
                 term,
                 handle,
                 theme,
                 editor_context: Arc::new(Mutex::new(EditorContext::default())),
+                external_editor,
                 menu_block_id: None,
             },
             handle_clone,
@@ -107,6 +113,7 @@ impl HighTerm {
                 handle,
                 theme,
                 editor_context: Arc::new(Mutex::new(EditorContext::default())),
+                external_editor: None,
                 menu_block_id: None,
             },
             data_clone,
@@ -183,7 +190,7 @@ impl HighTerm {
                 RawEvent::ExternalEditor => {
                     self.sync_menu_block();
                     self.run_prompt_action(PromptShellAction::Edit(PromptShellCommand {
-                        command: "${VISUAL:-${EDITOR:-}} \"$TAU_PROMPT_PATH\"".to_owned(),
+                        command: "$TAU_EDITOR \"$TAU_PROMPT_PATH\"".to_owned(),
                         trim: false,
                     }));
                     self.handle.redraw_sync();
@@ -244,6 +251,7 @@ impl HighTerm {
             &self.term,
             &self.handle,
             self.editor_context.clone(),
+            self.external_editor.as_deref(),
             action,
         ) {
             Ok(Some(PromptShellResult::Replace(new_text))) => {
@@ -336,6 +344,7 @@ fn run_prompt_shell_action(
     term: &tau_cli_term_raw::Term,
     handle: &TermHandle,
     editor_context: Arc<Mutex<EditorContext>>,
+    external_editor: Option<&str>,
     action: PromptShellAction,
 ) -> Result<Option<PromptShellResult>, String> {
     let shell = match &action {
@@ -387,6 +396,7 @@ fn run_prompt_shell_action(
         .env("TAU_PROMPT_PATH", tmp.path())
         .env("TAU_PROMPT_COLUMN", (cursor + 1).to_string())
         .env("TAU_PROMPT_ROW", "1")
+        .env("TAU_EDITOR", external_editor.unwrap_or(""))
         .output()
         .map_err(|e| format!("could not spawn shell: {e}"))?;
     if !output.status.success() {
@@ -470,4 +480,22 @@ fn push_markdown_quote(out: &mut String, text: &str) {
         out.push_str(line);
         out.push('\n');
     }
+}
+
+/// Resolves the external editor once at startup: `$EDITOR`, then
+/// `$VISUAL`, then the first of `vim`/`vi`/`nano` found on `$PATH`.
+fn resolve_external_editor() -> Option<String> {
+    for var in ["EDITOR", "VISUAL"] {
+        if let Some(val) = std::env::var_os(var) {
+            let s = val.to_string_lossy();
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_owned());
+            }
+        }
+    }
+    ["hx", "vim", "vi", "nano"]
+        .into_iter()
+        .find(|cand| which::which(cand).is_ok())
+        .map(str::to_owned)
 }

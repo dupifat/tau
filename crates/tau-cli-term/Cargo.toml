@@ -20,6 +20,7 @@ tau-themes.workspace = true
 tempfile.workspace = true
 tracing.workspace = true
 unicode-width.workspace = true
+which.workspace = true
 
 [dev-dependencies]
 crossterm.workspace = true

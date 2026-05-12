@@ -167,7 +167,7 @@ fn default_cli_bindings() -> HashMap<String, CliBindingAction> {
             "C-o".to_owned(),
             CliBindingAction {
                 action: "shell-prompt-edit".to_owned(),
-                command: "${VISUAL:-${EDITOR:-}} \"$TAU_PROMPT_PATH\"".to_owned(),
+                command: "$TAU_EDITOR \"$TAU_PROMPT_PATH\"".to_owned(),
                 trim: false,
             },
         ),
@@ -175,7 +175,7 @@ fn default_cli_bindings() -> HashMap<String, CliBindingAction> {
             "C-g".to_owned(),
             CliBindingAction {
                 action: "shell-prompt-edit".to_owned(),
-                command: "${VISUAL:-${EDITOR:-}} \"$TAU_PROMPT_PATH\"".to_owned(),
+                command: "$TAU_EDITOR \"$TAU_PROMPT_PATH\"".to_owned(),
                 trim: false,
             },
         ),

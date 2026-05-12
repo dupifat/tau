@@ -46,7 +46,7 @@ fn cli_settings_load_from_json5_file() {
         s.bind.get("C-o"),
         Some(&CliBindingAction {
             action: "shell-prompt-edit".to_owned(),
-            command: "${VISUAL:-${EDITOR:-}} \"$TAU_PROMPT_PATH\"".to_owned(),
+            command: "$TAU_EDITOR \"$TAU_PROMPT_PATH\"".to_owned(),
             trim: false,
         })
     );

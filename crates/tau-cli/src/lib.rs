@@ -6,6 +6,7 @@ pub mod cli;
 mod chat;
 mod daemon;
 mod event_renderer;
+mod settings_registry;
 mod tool_render;
 mod ui_logging;
 

@@ -414,7 +414,7 @@ fn thinking_renders_as_separate_block_above_response() {
 }
 
 #[test]
-fn toggle_thinking_visible_round_trip_restores_history() {
+fn set_show_thinking_round_trip_restores_history() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -463,7 +463,7 @@ fn toggle_thinking_visible_round_trip_restores_history() {
         .into_iter()
         .filter(|l| !l.trim().is_empty())
         .count();
-    renderer.toggle_thinking_visible();
+    renderer.apply_setting("show-thinking", "false");
     sync(&handle);
     assert!(!vt.screen_contains(80, "the_thinking_text"));
     assert!(!vt.screen_contains(80, "thinking hidden"));
@@ -479,7 +479,7 @@ fn toggle_thinking_visible_round_trip_restores_history() {
 
     // Back on — original thinking text returns in its original
     // position above the response.
-    renderer.toggle_thinking_visible();
+    renderer.apply_setting("show-thinking", "true");
     sync(&handle);
     let lines = vt.screen_text(80);
     let thinking_row = lines
@@ -505,7 +505,7 @@ fn thinking_created_while_off_stays_invisible_after_toggle_on() {
         tau_cli_term::CompletionData::new(),
         tau_themes::Theme::builtin(),
     );
-    renderer.toggle_thinking_visible(); // off
+    renderer.apply_setting("show-thinking", "false");
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
@@ -539,7 +539,7 @@ fn thinking_created_while_off_stays_invisible_after_toggle_on() {
     assert!(vt.screen_contains(80, "answer"));
     assert!(!vt.screen_contains(80, "hidden reasoning"));
 
-    renderer.toggle_thinking_visible(); // on
+    renderer.apply_setting("show-thinking", "true");
     sync(&handle);
     assert!(
         !vt.screen_contains(80, "hidden reasoning"),

@@ -584,6 +584,86 @@ mod filesystem_token {
     }
 }
 
+mod multi_arg_completion {
+    use std::sync::Arc;
+
+    use crate::completion::{
+        ArgCompleter, CommandName, CompletionData, CompletionItem, SlashCommand, build_candidates,
+    };
+
+    /// Build a completer that returns its first/second-arg menus
+    /// verbatim, ignoring filtering. Lets the test focus on the
+    /// argument-parsing + replacement-prefix logic in
+    /// `build_arg_candidates`, not the ranking inside completers.
+    fn make_completer() -> ArgCompleter {
+        Arc::new(|args: &[&str]| match args.len() {
+            1 => vec![
+                CompletionItem::new("show-diff", "[false] diffs"),
+                CompletionItem::new("show-thinking", "[true] reasoning"),
+            ],
+            2 => match args[0] {
+                "show-diff" => vec![
+                    CompletionItem::new("true", "enabled"),
+                    CompletionItem::new("false", "disabled"),
+                ],
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        })
+    }
+
+    #[test]
+    fn first_arg_completion_lists_names_with_descriptions() {
+        let data = CompletionData::new();
+        data.set_arg_completer(CommandName::new("/set"), make_completer());
+        let buf = "/set ";
+        let cands = build_candidates(
+            &[SlashCommand::new("/set", "set a UI setting")],
+            &data,
+            buf,
+            buf.len(),
+        );
+        assert_eq!(cands.len(), 2);
+        assert_eq!(cands[0].label, "show-diff");
+        assert_eq!(cands[0].description, "[false] diffs");
+        assert_eq!(cands[0].replacement, "/set show-diff");
+    }
+
+    #[test]
+    fn second_arg_completion_keeps_first_arg_in_replacement() {
+        let data = CompletionData::new();
+        data.set_arg_completer(CommandName::new("/set"), make_completer());
+        let buf = "/set show-diff ";
+        let cands = build_candidates(
+            &[SlashCommand::new("/set", "set a UI setting")],
+            &data,
+            buf,
+            buf.len(),
+        );
+        assert_eq!(cands.len(), 2);
+        assert_eq!(cands[0].label, "true");
+        // The first arg must be preserved in the replacement so
+        // accepting a value completes the full `/set <name> <value>`
+        // form rather than dropping the name.
+        assert_eq!(cands[0].replacement, "/set show-diff true");
+        assert_eq!(cands[1].replacement, "/set show-diff false");
+    }
+
+    #[test]
+    fn third_arg_returns_no_candidates() {
+        let data = CompletionData::new();
+        data.set_arg_completer(CommandName::new("/set"), make_completer());
+        let buf = "/set show-diff true ";
+        let cands = build_candidates(
+            &[SlashCommand::new("/set", "set a UI setting")],
+            &data,
+            buf,
+            buf.len(),
+        );
+        assert!(cands.is_empty());
+    }
+}
+
 mod prompt_action_parse {
     use crate::PromptShellAction;
 

@@ -156,23 +156,24 @@ pub(crate) fn default_cli_bindings() -> HashMap<String, CliBindingAction> {
 
 /// Mutable CLI state persisted across runs at
 /// `<state_dir>/cli.json`. Distinct from `CliSettings` (config) —
-/// this file is written by the CLI itself in response to slash
-/// commands like `/show-diff`, `/show-thinking`, and
-/// `/show-cache-stats`.
+/// this file is written by the CLI itself in response to
+/// `/set <name> <value>` commands.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct CliState {
     /// Whether to render file-mutation diffs in their full expanded
-    /// form (vs the compact `+N/-M` chip). Toggled by `/show-diff`.
+    /// form (vs the compact `+N/-M` chip). Controlled by
+    /// `/set show-diff <true|false>`.
     pub show_diff: bool,
     /// Whether to render the agent's reasoning summary (the
-    /// `agent.thinking` block). Toggled by `/show-thinking`.
+    /// `agent.thinking` block). Controlled by
+    /// `/set show-thinking <true|false>`.
     pub show_thinking: bool,
     /// Whether to render provider prompt-cache hit stats in the model
-    /// status bar. Toggled by `/show-cache-stats`.
+    /// status bar. Controlled by `/set show-cache-stats <true|false>`.
     pub show_cache_stats: bool,
     /// Whether to render per-turn token usage stats below agent
-    /// responses. Toggled by `/show-token-stats`.
+    /// responses. Controlled by `/set show-token-stats <true|false>`.
     pub show_token_stats: bool,
 }
 

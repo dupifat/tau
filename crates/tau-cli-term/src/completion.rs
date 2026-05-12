@@ -82,14 +82,15 @@ impl CompletionItem {
     }
 }
 
-/// A [`CompletionItem`] paired with a precomputed lowercased copy of
-/// its `value`, so the per-keystroke match loop doesn't reallocate
-/// the haystack on every call.
-#[derive(Clone)]
-struct IndexedItem {
-    item: CompletionItem,
-    value_lower: String,
-}
+/// Closure that produces argument completions for a slash command,
+/// given the already-typed args (the last element is the partial arg
+/// being completed; may be empty for "just typed a space").
+///
+/// The closure is responsible for filtering and ranking — callers do
+/// no further processing. For the common flat-list case use
+/// [`CompletionData::set_arg_completions`], which builds an appropriate
+/// closure internally.
+pub type ArgCompleter = Arc<dyn Fn(&[&str]) -> Vec<CompletionItem> + Send + Sync>;
 
 /// Thread-safe storage for dynamic argument completions.
 ///
@@ -98,7 +99,7 @@ struct IndexedItem {
 /// list).
 #[derive(Clone, Default)]
 pub struct CompletionData {
-    inner: Arc<Mutex<HashMap<CommandName, Vec<IndexedItem>>>>,
+    inner: Arc<Mutex<HashMap<CommandName, ArgCompleter>>>,
 }
 
 impl CompletionData {
@@ -106,22 +107,59 @@ impl CompletionData {
         Self::default()
     }
 
-    /// Sets the argument completions for a slash command.
+    /// Sets a flat, single-arg completion list for a slash command.
+    /// Items are ranked prefix-match-first, substring-match-second
+    /// (case-insensitive). For commands that take more than one arg
+    /// or need to react to prior args, use
+    /// [`CompletionData::set_arg_completer`].
     pub fn set_arg_completions(&self, command: CommandName, items: Vec<CompletionItem>) {
-        let indexed = items
-            .into_iter()
-            .map(|item| IndexedItem {
-                value_lower: item.value.to_lowercase(),
-                item,
-            })
-            .collect();
+        // Precompute lowercased haystacks once at insertion time so
+        // the per-keystroke match loop doesn't reallocate.
+        let indexed: Arc<Vec<(CompletionItem, String)>> = Arc::new(
+            items
+                .into_iter()
+                .map(|item| {
+                    let lower = item.value.to_lowercase();
+                    (item, lower)
+                })
+                .collect(),
+        );
+        let completer: ArgCompleter = Arc::new(move |args: &[&str]| {
+            // Single-arg completion only — multi-arg buffers fall
+            // through to no candidates.
+            if args.len() != 1 {
+                return Vec::new();
+            }
+            let needle = args[0].to_lowercase();
+            let mut prefix_matches = Vec::new();
+            let mut substr_matches = Vec::new();
+            for (item, value_lower) in indexed.iter() {
+                if needle.is_empty() || value_lower.starts_with(&needle) {
+                    prefix_matches.push(item.clone());
+                } else if value_lower.contains(&needle) {
+                    substr_matches.push(item.clone());
+                }
+            }
+            prefix_matches.extend(substr_matches);
+            prefix_matches
+        });
         self.inner
             .lock()
             .expect("completion data lock")
-            .insert(command, indexed);
+            .insert(command, completer);
     }
 
-    fn get_arg_completions(&self, command: &CommandName) -> Option<Vec<IndexedItem>> {
+    /// Registers a custom argument completer for a slash command.
+    /// The closure receives the args typed so far (with the partial
+    /// last element being completed) and returns ranked candidates.
+    pub fn set_arg_completer(&self, command: CommandName, completer: ArgCompleter) {
+        self.inner
+            .lock()
+            .expect("completion data lock")
+            .insert(command, completer);
+    }
+
+    fn get_arg_completer(&self, command: &CommandName) -> Option<ArgCompleter> {
         self.inner
             .lock()
             .expect("completion data lock")
@@ -155,8 +193,8 @@ pub fn build_candidates(
 
     if let Some(space_pos) = buffer.find(' ') {
         let cmd = &buffer[..space_pos];
-        let arg_prefix = &buffer[space_pos + 1..];
-        build_arg_candidates(data, cmd, arg_prefix)
+        let rest = &buffer[space_pos + 1..];
+        build_arg_candidates(data, cmd, rest)
     } else {
         build_cmd_candidates(commands, buffer)
     }
@@ -256,34 +294,43 @@ fn build_filesystem_candidates(path_token: &PathToken<'_>) -> Vec<Candidate> {
     candidates
 }
 
-fn build_arg_candidates(data: &CompletionData, cmd: &str, arg_prefix: &str) -> Vec<Candidate> {
+fn build_arg_candidates(data: &CompletionData, cmd: &str, rest: &str) -> Vec<Candidate> {
     let cmd_name = CommandName::new(cmd);
-    let Some(items) = data.get_arg_completions(&cmd_name) else {
+    let Some(completer) = data.get_arg_completer(&cmd_name) else {
         return Vec::new();
     };
 
-    let needle = arg_prefix.to_lowercase();
-    let mut prefix_matches = Vec::new();
-    let mut substr_matches = Vec::new();
+    // Split args on whitespace, but preserve a trailing empty arg
+    // when the buffer ends in a space — that's the position the user
+    // is currently completing (e.g. "/set show-diff " → args
+    // ["show-diff", ""]).
+    let args: Vec<&str> = if rest.is_empty() {
+        vec![""]
+    } else if rest.ends_with(' ') {
+        let mut v: Vec<&str> = rest.split_whitespace().collect();
+        v.push("");
+        v
+    } else {
+        rest.split_whitespace().collect()
+    };
 
-    for IndexedItem { item, value_lower } in &items {
-        if needle.is_empty() || value_lower.starts_with(&needle) {
-            prefix_matches.push(Candidate {
-                label: item.value.clone(),
-                description: item.description.clone(),
-                replacement: format!("{cmd} {}", item.value),
-            });
-        } else if value_lower.contains(&needle) {
-            substr_matches.push(Candidate {
-                label: item.value.clone(),
-                description: item.description.clone(),
-                replacement: format!("{cmd} {}", item.value),
-            });
-        }
-    }
+    // Everything up to and including the last *completed* token is
+    // preserved as the replacement prefix — completion replaces the
+    // final, partial token.
+    let prefix = if args.len() <= 1 {
+        cmd.to_owned()
+    } else {
+        format!("{cmd} {}", args[..args.len() - 1].join(" "))
+    };
 
-    prefix_matches.extend(substr_matches);
-    prefix_matches
+    completer(&args)
+        .into_iter()
+        .map(|item| Candidate {
+            label: item.value.clone(),
+            description: item.description.clone(),
+            replacement: format!("{prefix} {}", item.value),
+        })
+        .collect()
 }
 
 /// Renders the completion menu as a [`StyledBlock`]: each candidate

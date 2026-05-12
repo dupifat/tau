@@ -54,18 +54,18 @@ pub(crate) struct EventRenderer {
     /// Persistent status bar block showing the current model + effort.
     model_status_block: Option<tau_cli_term::BlockId>,
     /// Live history of completed write/edit blocks plus the data
-    /// needed to re-render them. `/diff` flips `diffs_expanded` and
-    /// walks this list calling `set_block` so the entire transcript
-    /// switches mode at once.
+    /// needed to re-render them. `/set show-diff` flips
+    /// `diffs_expanded` and walks this list calling `set_block` so
+    /// the entire transcript switches mode at once.
     diff_blocks: Vec<DiffBlockEntry>,
     /// Global expand-diffs toggle.
     diffs_expanded: bool,
     /// Global show-thinking toggle. When false, agent reasoning
-    /// summaries are not rendered (live or in history). Toggled by
-    /// `/show-thinking`; persisted in `<state_dir>/cli.json`.
+    /// summaries are not rendered (live or in history). Controlled
+    /// by `/set show-thinking`; persisted in `<state_dir>/cli.json`.
     show_thinking: bool,
     /// Persisted thinking blocks (one per finished assistant turn).
-    /// When `/show-thinking` flips, every entry is re-rendered as
+    /// When `show-thinking` flips, every entry is re-rendered as
     /// either the full text or removed, so the toggle takes effect
     /// retroactively across the visible transcript.
     thinking_history: Vec<ThinkingBlockEntry>,
@@ -97,6 +97,12 @@ pub(crate) struct EventRenderer {
     /// Whether to render per-turn token usage stats below completed
     /// agent responses.
     show_token_stats: bool,
+    /// Snapshot of persisted CLI settings, kept in sync with the four
+    /// `show_*` fields above by [`Self::save_cli_state`]. The input
+    /// loop captures this handle in the `/set` name-completion
+    /// closure so the menu can show each setting's current value
+    /// without snooping on renderer-thread fields directly.
+    cli_state_mirror: std::sync::Arc<std::sync::Mutex<tau_config::settings::CliState>>,
     /// End-to-end latency of the most recently completed prompt.
     last_turn_latency: Option<Duration>,
     /// Shared effort mirror for the input thread.
@@ -117,7 +123,7 @@ pub(crate) struct EventRenderer {
     submitted_prompt_symbol: String,
 }
 
-/// One completed file-mutation tool block. Held so `/diff` can
+/// One completed file-mutation tool block. Held so `/set show-diff` can
 /// re-render every diff in the chat history when the global
 /// expand toggle flips.
 struct DiffBlockEntry {
@@ -126,7 +132,7 @@ struct DiffBlockEntry {
     diff: tau_proto::DiffSummary,
 }
 
-/// One finished thinking block. Held so `/show-thinking` can swap
+/// One finished thinking block. Held so `/set show-thinking` can swap
 /// its content between the original reasoning text (visible) and
 /// empty content (hidden) without losing the block's position in
 /// the transcript.
@@ -242,6 +248,7 @@ impl EventRenderer {
         state_dirs: tau_config::settings::TauDirs,
         submitted_prompt_symbol: String,
     ) -> Self {
+        let cli_state_mirror = std::sync::Arc::new(std::sync::Mutex::new(state.clone()));
         Self {
             handle,
             completion_data,
@@ -259,6 +266,7 @@ impl EventRenderer {
             show_thinking: state.show_thinking,
             show_cache_stats: state.show_cache_stats,
             show_token_stats: state.show_token_stats,
+            cli_state_mirror,
             thinking_history: Vec::new(),
             token_stats_history: Vec::new(),
             state_dirs,
@@ -287,13 +295,27 @@ impl EventRenderer {
     }
 
     fn save_cli_state(&self) {
-        tau_config::settings::CliState {
+        let state = tau_config::settings::CliState {
             show_diff: self.diffs_expanded,
             show_thinking: self.show_thinking,
             show_cache_stats: self.show_cache_stats,
             show_token_stats: self.show_token_stats,
+        };
+        if let Ok(mut mirror) = self.cli_state_mirror.lock() {
+            *mirror = state.clone();
         }
-        .save(&self.state_dirs);
+        state.save(&self.state_dirs);
+    }
+
+    /// Shared snapshot of the persisted CLI settings, updated in sync
+    /// with every successful `/set` (i.e. on every
+    /// [`Self::save_cli_state`] call). Cloned by the input loop so the
+    /// `/set` name-completion menu can show each setting's current
+    /// value without touching renderer-thread fields directly.
+    pub(crate) fn cli_state_mirror(
+        &self,
+    ) -> std::sync::Arc<std::sync::Mutex<tau_config::settings::CliState>> {
+        self.cli_state_mirror.clone()
     }
 
     pub(crate) fn editor_context(
@@ -317,11 +339,28 @@ impl EventRenderer {
         self.efforts_available.clone()
     }
 
-    /// Flip the global expand-diffs flag and re-render every diff
+    /// Apply a `/set <name> <value>` change. The caller (input loop)
+    /// has already validated `name` and `value` against the
+    /// [`crate::settings_registry`] table.
+    pub(crate) fn apply_setting(&mut self, name: &str, value: &str) {
+        let on = value == "true";
+        match name {
+            "show-diff" => self.set_diffs_expanded(on),
+            "show-thinking" => self.set_show_thinking(on),
+            "show-cache-stats" => self.set_show_cache_stats(on),
+            "show-token-stats" => self.set_show_token_stats(on),
+            _ => {}
+        }
+    }
+
+    /// Set the global expand-diffs flag and re-render every diff
     /// block in the chat history so the entire transcript switches
-    /// mode at once.
-    pub(crate) fn toggle_diffs_expanded(&mut self) {
-        self.diffs_expanded = !self.diffs_expanded;
+    /// mode at once. No-op if already in the requested state.
+    fn set_diffs_expanded(&mut self, on: bool) {
+        if self.diffs_expanded == on {
+            return;
+        }
+        self.diffs_expanded = on;
         for entry in &self.diff_blocks {
             let block = render_diff_tool_block(
                 &self.theme,
@@ -335,19 +374,22 @@ impl EventRenderer {
         self.save_cli_state();
     }
 
-    /// Flip the global show-thinking flag and re-render every prior
-    /// thinking block in the transcript so the toggle takes effect
+    /// Set the global show-thinking flag and re-render every prior
+    /// thinking block in the transcript so the change takes effect
     /// retroactively (full text when on, empty content when off).
     /// Live in-flight thinking blocks are also flipped. New turns
     /// continue to be gated by the same flag.
     ///
     /// Empty content is used instead of `remove_block` so the
-    /// block's position in the transcript is preserved; toggling
+    /// block's position in the transcript is preserved; turning
     /// back on restores the original reasoning text in place.
-    pub(crate) fn toggle_thinking_visible(&mut self) {
+    fn set_show_thinking(&mut self, on: bool) {
         use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
-        self.show_thinking = !self.show_thinking;
+        if self.show_thinking == on {
+            return;
+        }
+        self.show_thinking = on;
         for entry in &self.thinking_history {
             let display = if self.show_thinking {
                 entry.text.as_str()
@@ -377,25 +419,31 @@ impl EventRenderer {
         self.save_cli_state();
     }
 
-    /// Force a full repaint after a `/show-...` toggle. Edited blocks
+    /// Force a full repaint after a `/set show-*` change. Edited blocks
     /// from earlier in the transcript may already have scrolled out of
     /// the visible window, so the renderer needs to redraw from scratch
-    /// for the toggle to take effect retroactively across scrollback.
+    /// for the change to take effect retroactively across scrollback.
     fn invalidate_for_retroactive_toggle(&mut self) {
         self.handle.invalidate_screen();
     }
 
-    /// Flip provider prompt-cache hit stats in the status bar.
-    pub(crate) fn toggle_cache_stats_visible(&mut self) {
-        self.show_cache_stats = !self.show_cache_stats;
+    /// Set provider prompt-cache hit stats visibility in the status bar.
+    fn set_show_cache_stats(&mut self, on: bool) {
+        if self.show_cache_stats == on {
+            return;
+        }
+        self.show_cache_stats = on;
         self.render_model_status();
         self.save_cli_state();
     }
 
-    pub(crate) fn toggle_token_stats_visible(&mut self) {
+    fn set_show_token_stats(&mut self, on: bool) {
         use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
-        self.show_token_stats = !self.show_token_stats;
+        if self.show_token_stats == on {
+            return;
+        }
+        self.show_token_stats = on;
         for entry in &self.token_stats_history {
             let text = if self.show_token_stats {
                 format_token_stats_line(&entry.usage)
@@ -412,8 +460,8 @@ impl EventRenderer {
     }
 
     /// Clears all session-scoped UI state and re-renders an empty
-    /// transcript. Persistent user preferences such as `/show-diff`
-    /// and `/show-thinking` are intentionally preserved.
+    /// transcript. Persistent user preferences such as `show-diff`
+    /// and `show-thinking` are intentionally preserved.
     fn clear_for_new_session(&mut self) {
         self.prompts.clear();
         self.last_user_block = None;

@@ -117,7 +117,7 @@ keys (derived from base URL, model id, and session cwd) so cache hits survive
 restarts and parallel sessions, and sets `prompt_cache_retention` where
 available. Provider compatibility flags live next to the model entry
 (`supports_prompt_cache_key`, `supports_prompt_cache_retention`). Toggle the
-status-bar hit-rate readout with `/show-cache-stats`.
+status-bar hit-rate readout with `/set show-cache-stats <true|false>`.
 
 ### Policy / approvals
 
@@ -222,11 +222,15 @@ Type `/` for menu autocompletion. The built-in set:
 | `/model <id>`       | Switch model (Tab completes from provider list)      |
 | `/effort <level>`   | Set reasoning effort (`Shift+Tab` cycles)            |
 | `/tree [id]`        | Print session tree; with `id`, rewind head           |
-| `/show-diff`        | Toggle expanded diffs vs. compact `+N/-M` chip       |
-| `/show-thinking`    | Toggle agent reasoning summaries                     |
-| `/show-cache-stats` | Toggle prompt-cache hit stats in the status bar      |
+| `/set <name> <val>` | Set a UI setting (Tab cycles names + values)         |
 
-Toggle state is persisted to `<state_dir>/cli.json`.
+Available `/set` names: `show-diff` (expanded vs. compact diffs),
+`show-thinking` (agent reasoning summaries), `show-cache-stats`
+(prompt-cache hit stats in status bar), `show-token-stats` (per-turn
+token usage below responses). All take `true` / `false`. The first-arg
+completion menu shows each setting's current value; the second-arg
+menu shows the meaning of each allowed value. State is persisted to
+`<state_dir>/cli.json`.
 
 ### Path autocompletion
 
@@ -361,15 +365,15 @@ a custom script, or whatever fits your workflow.
 ### Thinking / reasoning rendering
 
 When the model emits reasoning blocks, the UI renders them inline above the
-final answer, styled distinctly from the response. `/show-thinking` toggles
-visibility globally; past blocks re-render in place when the toggle flips, so
+final answer, styled distinctly from the response. `/set show-thinking <true|false>`
+toggles visibility globally; past blocks re-render in place when the flag flips, so
 you can hide them after the fact. Reasoning blocks are not replayed back to
 the provider as input — they remain provider-side context.
 
 ### Diff rendering
 
 File mutations made by `write` and `edit` render as inline diffs. By default
-they collapse to a compact `+N/-M` chip; `/show-diff` expands them to the
+they collapse to a compact `+N/-M` chip; `/set show-diff true` expands them to the
 full unified hunk view. The terminal renderer uses cell-level differential
 updates to avoid full repaints on each token.
 

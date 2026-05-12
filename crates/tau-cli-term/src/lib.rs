@@ -16,7 +16,7 @@ mod tests;
 use std::io;
 use std::sync::{Arc, Mutex};
 
-pub use completion::{CommandName, CompletionData, CompletionItem, SlashCommand};
+pub use completion::{ArgCompleter, CommandName, CompletionData, CompletionItem, SlashCommand};
 #[cfg(test)]
 pub(crate) use tau_cli_term_raw::RawEvent as TestRawEvent;
 pub use tau_cli_term_raw::{

@@ -529,8 +529,8 @@ impl TermHandle {
     /// naturally into the (now-empty) scrollback.
     ///
     /// Use this when a mutation affects rows that may already be in
-    /// terminal scrollback — e.g. toggling visibility of a block
-    /// from a past turn (`/show-diff`, `/show-thinking`). The
+    /// terminal scrollback — e.g. toggling visibility of a block from
+    /// a past turn (`/set show-diff`, `/set show-thinking`). The
     /// differential renderer only repaints the visible window, so
     /// without invalidation those scrolled-out rows would remain as
     /// stale fossils that disagree with current state. See

@@ -215,7 +215,7 @@ pub(crate) fn run_chat(
 
     // Background socket reader — decodes events and sends them to
     // a channel as `RendererCmd::Remote`. The input thread pushes
-    // `RendererCmd::Local` variants (e.g. `/diff` toggles) into the
+    // `RendererCmd::Set` variants (e.g. `/set show-diff true`) into the
     // same channel so the renderer thread sees a single ordered
     // stream and never needs to share state with the input thread.
     let (event_tx, event_rx) = mpsc::channel::<RendererCmd>();
@@ -271,24 +271,12 @@ pub(crate) fn run_chat(
             "Set reasoning effort: off, minimal, low, medium, high, xhigh (Shift+Tab to cycle)",
         ),
         SlashCommand::new(
-            "/show-diff",
-            "Toggle expanded vs compact display of file edit diffs",
+            "/set",
+            "Set a UI setting (e.g. /set show-diff true); Tab cycles names + values",
         ),
         SlashCommand::new(
             "/provider-auth",
             "Refresh OAuth for a provider (runs `tau provider login [name]`)",
-        ),
-        SlashCommand::new(
-            "/show-cache-stats",
-            "Toggle provider prompt-cache hit stats in the status bar",
-        ),
-        SlashCommand::new(
-            "/show-token-stats",
-            "Toggle token usage stats below agent responses",
-        ),
-        SlashCommand::new(
-            "/show-thinking",
-            "Toggle visibility of the agent's reasoning summary blocks",
         ),
     ];
     let theme = tau_themes::Theme::builtin();
@@ -344,20 +332,27 @@ pub(crate) fn run_chat(
     // the thread-safe TermHandle.
     let renderer_handle = handle.clone();
     let renderer_rx = event_rx;
-    let renderer_completion_data = completion_data;
     // Pre-build the renderer so we can grab its `effort_state`
     // handle for the input loop's Shift+Tab cycle. Load the
-    // persisted `cli.json` state so toggles like `/show-diff`,
-    // `/show-thinking`, and `/show-cache-stats` survive restarts.
+    // persisted `cli.json` state so `/set show-*` toggles survive
+    // restarts.
     let dirs = tau_config::settings::TauDirs::default();
     let cli_state = tau_config::settings::CliState::load(&dirs);
     let renderer = EventRenderer::new_with_state(
         renderer_handle,
-        renderer_completion_data,
+        completion_data.clone(),
         theme.clone(),
         cli_state,
         dirs,
         settings.submitted_prompt_symbol,
+    );
+    // Register `/set`'s context-aware arg completer. The first-arg
+    // menu shows each setting's *current* value (read through the
+    // renderer's shared mirror), and the second-arg menu shows
+    // value-with-meaning for the selected setting.
+    completion_data.set_arg_completer(
+        tau_cli_term::CommandName::new("/set"),
+        build_set_arg_completer(renderer.cli_state_mirror()),
     );
     let effort_state = renderer.effort_state();
     let efforts_available = renderer.efforts_available();
@@ -369,10 +364,7 @@ pub(crate) fn run_chat(
             match cmd {
                 RendererCmd::Remote(event) => renderer.handle(&event),
                 RendererCmd::RemoteDisconnect(reason) => renderer.handle_disconnect(reason),
-                RendererCmd::ToggleDiffs => renderer.toggle_diffs_expanded(),
-                RendererCmd::ToggleThinking => renderer.toggle_thinking_visible(),
-                RendererCmd::ToggleCacheStats => renderer.toggle_cache_stats_visible(),
-                RendererCmd::ToggleTokenStats => renderer.toggle_token_stats_visible(),
+                RendererCmd::Set { name, value } => renderer.apply_setting(&name, &value),
             }
         }
     });
@@ -465,17 +457,17 @@ enum InputLoopExit {
 
 /// Commands the renderer thread drains from a single ordered channel.
 /// The socket reader pushes `Remote(event)`; the input loop pushes
-/// local UI commands like `ToggleDiffs`. Keeping it one channel
+/// local UI commands like `Set`. Keeping it one channel
 /// removes the need for shared state between the two threads.
 enum RendererCmd {
-    /// `/show-thinking` toggle.
-    ToggleThinking,
-    ToggleCacheStats,
-    ToggleTokenStats,
+    /// `/set <name> <value>` — validated by the input loop before send.
+    Set {
+        name: String,
+        value: String,
+    },
     Remote(Event),
     /// The harness sent a `Disconnect` message over the wire.
     RemoteDisconnect(Option<String>),
-    ToggleDiffs,
 }
 
 struct TerminalInputLoopCtx {
@@ -613,20 +605,8 @@ fn terminal_input_loop(
                     run_provider_auth("", &print_local);
                     continue;
                 }
-                if text == "/show-diff" {
-                    let _ = ctx.renderer_tx.send(RendererCmd::ToggleDiffs);
-                    continue;
-                }
-                if text == "/show-thinking" {
-                    let _ = ctx.renderer_tx.send(RendererCmd::ToggleThinking);
-                    continue;
-                }
-                if text == "/show-cache-stats" {
-                    let _ = ctx.renderer_tx.send(RendererCmd::ToggleCacheStats);
-                    continue;
-                }
-                if text == "/show-token-stats" || text == "/show-tokens-stats" {
-                    let _ = ctx.renderer_tx.send(RendererCmd::ToggleTokenStats);
+                if text == "/set" || text.starts_with("/set ") {
+                    handle_set_command(text, &ctx.renderer_tx, &print_local);
                     continue;
                 }
                 if let Some(model) = text.strip_prefix("/model ") {
@@ -752,6 +732,109 @@ fn terminal_input_loop(
             }
         }
     }
+}
+
+/// Build the `/set` argument completer. The first arg is a setting
+/// name (description = current value); the second arg is one of that
+/// setting's allowed values (description = value meaning). Returns
+/// no candidates from the third arg onward.
+fn build_set_arg_completer(
+    cli_state: Arc<Mutex<tau_config::settings::CliState>>,
+) -> tau_cli_term::ArgCompleter {
+    use tau_cli_term::CompletionItem;
+
+    use crate::settings_registry;
+
+    Arc::new(move |args: &[&str]| match args.len() {
+        1 => {
+            // Snapshot the current state once so every name's
+            // description sees a consistent view.
+            let snapshot = cli_state.lock().ok().map(|g| g.clone());
+            let needle = args[0].to_lowercase();
+            let mut prefix_matches = Vec::new();
+            let mut substr_matches = Vec::new();
+            for def in settings_registry::SETTINGS {
+                let lower = def.name.to_lowercase();
+                let current = snapshot.as_ref().map(|s| (def.get)(s)).unwrap_or("?");
+                let description = format!("[{current}] {}", def.description);
+                let item = CompletionItem::new(def.name, description);
+                if needle.is_empty() || lower.starts_with(&needle) {
+                    prefix_matches.push(item);
+                } else if lower.contains(&needle) {
+                    substr_matches.push(item);
+                }
+            }
+            prefix_matches.extend(substr_matches);
+            prefix_matches
+        }
+        2 => {
+            let Some(def) = settings_registry::find(args[0]) else {
+                return Vec::new();
+            };
+            let needle = args[1].to_lowercase();
+            let mut prefix_matches = Vec::new();
+            let mut substr_matches = Vec::new();
+            for v in def.values {
+                let lower = v.value.to_lowercase();
+                let item = CompletionItem::new(v.value, v.description);
+                if needle.is_empty() || lower.starts_with(&needle) {
+                    prefix_matches.push(item);
+                } else if lower.contains(&needle) {
+                    substr_matches.push(item);
+                }
+            }
+            prefix_matches.extend(substr_matches);
+            prefix_matches
+        }
+        _ => Vec::new(),
+    })
+}
+
+/// Parse and dispatch `/set <name> <value>`. Validation lives here
+/// (input-loop thread) so the renderer can trust `RendererCmd::Set`
+/// to always be a known name and an allowed value.
+fn handle_set_command(
+    text: &str,
+    renderer_tx: &mpsc::Sender<RendererCmd>,
+    print_local: &impl Fn(&str),
+) {
+    use crate::settings_registry;
+
+    let rest = text.strip_prefix("/set").unwrap_or("").trim();
+    let mut parts = rest.split_whitespace();
+    let name = parts.next();
+    let value = parts.next();
+    let extra = parts.next();
+
+    let usage = || {
+        let names: Vec<&str> = settings_registry::SETTINGS.iter().map(|s| s.name).collect();
+        print_local(&format!("/set <name> <value>; names: {}", names.join(", ")));
+    };
+
+    let (Some(name), Some(value)) = (name, value) else {
+        usage();
+        return;
+    };
+    if extra.is_some() {
+        print_local("/set: too many arguments");
+        return;
+    }
+    let Some(def) = settings_registry::find(name) else {
+        print_local(&format!("/set: unknown setting `{name}`"));
+        return;
+    };
+    if !def.values.iter().any(|v| v.value == value) {
+        let allowed: Vec<&str> = def.values.iter().map(|v| v.value).collect();
+        print_local(&format!(
+            "/set {name}: invalid value `{value}` (allowed: {})",
+            allowed.join(", "),
+        ));
+        return;
+    }
+    let _ = renderer_tx.send(RendererCmd::Set {
+        name: name.to_owned(),
+        value: value.to_owned(),
+    });
 }
 
 fn run_provider_auth(provider: &str, print_local: &impl Fn(&str)) {

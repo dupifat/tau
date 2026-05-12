@@ -76,7 +76,14 @@ where
         ToolSpec {
             name: tau_proto::ToolName::new(READ_TOOL_NAME),
             description: Some(
-                "Read the contents of a file. Supports optional line-based slicing via `start_line` and `line_count`. Returns the file path and text content."
+                "Reads a file. Defaults to reading the whole file in one call — \
+                 output is capped at 2000 lines / 50 KB, and if the cap is hit \
+                 the result is truncated and includes a continuation hint. \
+                 Prefer one full read. Pass `start_line`/`line_count` only to \
+                 resume past a previous truncation, or to fetch a specific \
+                 known slice of a file you already know is large. The result \
+                 returns `path`, `content`, the `start_line` and `line_count` \
+                 actually read, and the file's `total_lines`."
                     .to_owned(),
             ),
             parameters: Some(serde_json::json!({
@@ -88,11 +95,11 @@ where
                     },
                     "start_line": {
                         "type": "integer",
-                        "description": "1-based first line to read. If omitted, starts at line 1."
+                        "description": "Optional, 1-based. Omit to start at line 1 (the default)."
                     },
                     "line_count": {
                         "type": "integer",
-                        "description": "Maximum number of lines to return. If omitted, reads through end of file."
+                        "description": "Optional. Omit to read to end of file (the default and preferred mode). Set this only to continue past a previous truncation, or to fetch a known specific slice of a large file — do NOT pre-slice an ordinary file you haven't already established is large."
                     }
                 },
                 "required": ["path"]

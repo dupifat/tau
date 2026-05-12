@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tau_proto::{ConnectionId, Event, LogEventId, SessionId, ToolCallId, ToolName};
+use tau_proto::{ConnectionId, Event, LogEventId, SessionId, ToolCallId, ToolName, UnixMicros};
 
 /// Default starting `LogEventId` for a tree with no events.
 const FIRST_EVENT_ID: u64 = 0;
@@ -376,6 +376,16 @@ pub struct PersistedSessionEvent {
     pub event: Event,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_node_id: Option<NodeId>,
+    /// Wall-clock micros since UNIX epoch when the event was
+    /// appended, matching the value carried on the wire `LogEvent`
+    /// envelope and stamped in
+    /// [`crate::SessionStore::append_session_event_at`]. `UnixMicros(0)` on
+    /// records written before this field existed (deserialized via
+    /// `#[serde(default)]`). Used for offline inspection — inter-turn
+    /// timing, RPM bursts, cache-miss correlation — never for replay
+    /// semantics.
+    #[serde(default)]
+    pub recorded_at: UnixMicros,
 }
 
 /// Per-session sidecar metadata at `<state_dir>/<session_id>/meta.json`.

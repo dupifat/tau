@@ -820,7 +820,16 @@ impl Harness {
                 .and_then(|s| self.conversations.get(&s.cid).and_then(|c| c.head))
                 .map(Some)
         };
-        let folded_node_id = self.persist_session_event(source, &event, transient, parent_for_fold);
+        // Stamp once and share with every downstream observer: the
+        // durable record on disk, the in-memory event log entry, and
+        // the wire `LogEvent` envelope. Sampling the clock three
+        // separate times would let timing analyses disagree with what
+        // live subscribers saw.
+        let (seq, recorded_at) = self
+            .event_log
+            .append(source.map(tau_proto::ConnectionId::from), event.clone());
+        let folded_node_id =
+            self.persist_session_event(source, &event, transient, parent_for_fold, recorded_at);
         if let Some(sync) = sync_head_for
             && let Some(node_id) = folded_node_id
             && let Some(c) = self.conversations.get_mut(&sync.cid)
@@ -835,14 +844,12 @@ impl Harness {
             // ToolUse blocks downstream.
             c.head = Some(node_id);
         }
-        let seq = self
-            .event_log
-            .append(source.map(tau_proto::ConnectionId::from), event.clone());
         // Wrap in a `LogEvent` message envelope so subscribers get the
         // id and can ack after processing. Receivers that don't care
         // (UIs) call `Frame::peel_log()` and discard the id.
         let log_frame = Frame::Message(Message::LogEvent(tau_proto::LogEvent {
             id: tau_proto::LogEventId::new(seq),
+            recorded_at,
             event: Box::new(event.clone()),
         }));
         let _ = self.bus.publish_from(source, log_frame);
@@ -890,6 +897,7 @@ impl Harness {
         event: &Event,
         transient: bool,
         parent_node_id: Option<Option<tau_proto::NodeId>>,
+        recorded_at: tau_proto::UnixMicros,
     ) -> Option<tau_proto::NodeId> {
         if transient {
             return None;
@@ -897,7 +905,13 @@ impl Harness {
         let session_id = self.session_id_for_event(event)?;
         let source = source.map(tau_proto::ConnectionId::from);
         self.store
-            .append_session_event_at(session_id.as_str(), source, parent_node_id, event.clone())
+            .append_session_event_at(
+                session_id.as_str(),
+                source,
+                parent_node_id,
+                event.clone(),
+                recorded_at,
+            )
             .ok()
             .and_then(|outcome| outcome.folded_node_id)
     }

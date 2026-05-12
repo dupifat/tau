@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use tau_proto::{ConnectionId, Event, LogEventId, NodeId, SessionId};
+use tau_proto::{ConnectionId, Event, LogEventId, NodeId, SessionId, UnixMicros};
 
 use crate::session::{PersistedSessionEvent, SessionMeta, SessionTree};
 
@@ -322,7 +322,7 @@ impl SessionStore {
         source: Option<ConnectionId>,
         event: Event,
     ) -> Result<AppendOutcome, SessionStoreError> {
-        self.append_session_event_at(session_id, source, None, event)
+        self.append_session_event_at(session_id, source, None, event, UnixMicros::now())
     }
 
     /// Like [`SessionStore::append_session_event`] but folds the
@@ -342,6 +342,7 @@ impl SessionStore {
         source: Option<ConnectionId>,
         parent_node_id: Option<Option<NodeId>>,
         event: Event,
+        recorded_at: UnixMicros,
     ) -> Result<AppendOutcome, SessionStoreError> {
         self.ensure_locked(session_id)?;
         self.load_session_if_needed(session_id)?;
@@ -372,6 +373,7 @@ impl SessionStore {
             // explicit-root (`Some(None)`) and inherit-head (`None`)
             // collapse to `None` on the wire. See `from_events`.
             parent_node_id: parent_node_id.flatten(),
+            recorded_at,
         };
         append_cbor_record(&events_path, &record)?;
         touch_meta_for_event(&session_dir.join("meta.json"), &event)?;

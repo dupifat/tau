@@ -31,6 +31,7 @@ impl Harness {
             {
                 let frame = Frame::Message(Message::LogEvent(tau_proto::LogEvent {
                     id: entry.id,
+                    recorded_at: entry.recorded_at,
                     event: Box::new(entry.event),
                 }));
                 let _ = self.bus.send_to(client_id, entry.source.as_deref(), frame);

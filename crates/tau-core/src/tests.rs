@@ -386,7 +386,13 @@ fn explicit_parent_preserved_across_replay() {
         // by passing the parent explicitly. There are no
         // `UiNavigateTree` events in between.
         store
-            .append_session_event_at(session_id, None, None, user_event("root"))
+            .append_session_event_at(
+                session_id,
+                None,
+                None,
+                user_event("root"),
+                tau_proto::UnixMicros::now(),
+            )
             .expect("root");
         store
             .append_session_event_at(
@@ -394,6 +400,7 @@ fn explicit_parent_preserved_across_replay() {
                 None,
                 Some(Some(NodeId::new(0))),
                 user_event("branch-a"),
+                tau_proto::UnixMicros::now(),
             )
             .expect("branch-a");
         store
@@ -402,6 +409,7 @@ fn explicit_parent_preserved_across_replay() {
                 None,
                 Some(Some(NodeId::new(0))),
                 user_event("branch-b"),
+                tau_proto::UnixMicros::now(),
             )
             .expect("branch-b");
     }

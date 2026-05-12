@@ -113,6 +113,63 @@ impl std::fmt::Display for LogEventId {
     }
 }
 
+/// Wall-clock timestamp as microseconds since the UNIX epoch.
+///
+/// Stamped onto persisted session events and the JSONL debug log so
+/// offline inspection can compute inter-event gaps, RPM bursts, and
+/// correlations with provider-side cache misses. `u64` µs covers
+/// ~584,000 years past 1970, so saturation is not a concern in
+/// practice — callers still saturate on bogus clocks rather than
+/// panic, keeping the persistence path infallible. A zero value
+/// marks records written before this field existed
+/// (`#[serde(default)]` on the carrying struct).
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Eq,
+    PartialEq,
+    Ord,
+    PartialOrd,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct UnixMicros(u64);
+
+impl UnixMicros {
+    #[must_use]
+    pub fn new(v: u64) -> Self {
+        Self(v)
+    }
+
+    #[must_use]
+    pub fn get(self) -> u64 {
+        self.0
+    }
+
+    /// Reads the current wall clock and returns a `UnixMicros`.
+    /// Saturates on bogus clocks (pre-1970 or post-2554) instead of
+    /// panicking, so callers on the durable-write path can stay
+    /// infallible.
+    #[must_use]
+    pub fn now() -> Self {
+        let micros = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
+            .unwrap_or(0);
+        Self(micros)
+    }
+}
+
+impl std::fmt::Display for UnixMicros {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// A bus event delivered through the harness's event log. Receivers
 /// must process the inner event and then send an [`Ack`] referencing
 /// `id` (or any later id, since acks are cumulative).
@@ -120,9 +177,17 @@ impl std::fmt::Display for LogEventId {
 /// `event` is boxed because the inner value is the (potentially
 /// large) bus fact. It is never another `LogEvent` or `Ack` — only
 /// "real" payload events (e.g., `SessionStarted`, `ExtensionReady`).
+///
+/// `recorded_at` is stamped by the harness at the moment the event
+/// is appended to the in-memory event log. Subscribers receive the
+/// same value the persisted record carries, so offline timing
+/// analyses agree with what live consumers saw. Older peers send
+/// records without the field; they deserialize as `UnixMicros(0)`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LogEvent {
     pub id: LogEventId,
+    #[serde(default)]
+    pub recorded_at: UnixMicros,
     pub event: Box<Event>,
 }
 

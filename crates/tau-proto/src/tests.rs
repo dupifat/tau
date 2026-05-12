@@ -179,6 +179,7 @@ fn representative_messages() -> Vec<Message> {
         }),
         Message::LogEvent(LogEvent {
             id: LogEventId::new(42),
+            recorded_at: UnixMicros::new(1_700_000_000_000_000),
             event: Box::new(Event::SessionStarted(SessionStarted {
                 session_id: "s1".into(),
                 reason: SessionStartReason::Initial,
@@ -323,6 +324,7 @@ fn frame_peel_log_extracts_log_event_id_and_inner_event() {
     });
     let frame = Frame::Message(Message::LogEvent(LogEvent {
         id: LogEventId::new(7),
+        recorded_at: UnixMicros::new(1_700_000_000_000_000),
         event: Box::new(inner.clone()),
     }));
 

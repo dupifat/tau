@@ -83,16 +83,55 @@
 
             nativeBuildInputs = [ pkgs.bbe ];
 
+            # `bbe` itself silently no-ops when its pattern isn't found,
+            # which is exactly how the previous LTO-eats-the-placeholder
+            # bug shipped. Track per-placeholder hit counts and require
+            # at least one substitution across all executables; also
+            # assert no placeholder bytes remain after patching.
             installPhase = ''
               cp -a ${package} $out
               chmod -R u+w $out
+              revision_hits=0
+              date_hits=0
               for path in $(${pkgs.findutils}/bin/find $out -type f -executable); do
+                had_revision=0
+                had_date=0
+                if grep -aqF '${tauBuildRevisionPlaceholder}' "$path"; then
+                  had_revision=1
+                fi
+                if grep -aqF '${tauBuildDatePlaceholder}' "$path"; then
+                  had_date=1
+                fi
                 ${pkgs.bbe}/bin/bbe \
                   -e 's/${tauBuildRevisionPlaceholder}/${tauBuildRevision}/' \
                   -e 's/${tauBuildDatePlaceholder}/${tauBuildDate}/' \
                   "$path" -o ./tmp
                 cat ./tmp > "$path"
+                if [ "$had_revision" = 1 ]; then
+                  if grep -aqF '${tauBuildRevisionPlaceholder}' "$path"; then
+                    echo "error: revision placeholder still present in $path after bbe" >&2
+                    exit 1
+                  fi
+                  revision_hits=$((revision_hits + 1))
+                fi
+                if [ "$had_date" = 1 ]; then
+                  if grep -aqF '${tauBuildDatePlaceholder}' "$path"; then
+                    echo "error: date placeholder still present in $path after bbe" >&2
+                    exit 1
+                  fi
+                  date_hits=$((date_hits + 1))
+                fi
               done
+              if [ "$revision_hits" = 0 ]; then
+                echo "error: revision placeholder '${tauBuildRevisionPlaceholder}' not found in any executable under $out" >&2
+                echo "       (likely the compiler optimized it out — check crates/tau-harness/src/version.rs)" >&2
+                exit 1
+              fi
+              if [ "$date_hits" = 0 ]; then
+                echo "error: date placeholder '${tauBuildDatePlaceholder}' not found in any executable under $out" >&2
+                echo "       (likely the compiler optimized it out — check crates/tau-harness/src/version.rs)" >&2
+                exit 1
+              fi
             '';
           };
 

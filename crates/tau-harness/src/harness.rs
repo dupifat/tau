@@ -15,9 +15,9 @@ use tau_core::{
 use tau_proto::{
     AgentResponseFinished, AgentTokenUsage, AgentToolCall, CborValue, ClientKind, Disconnect,
     Event, EventSelector, ExtensionName, Frame, HarnessContextUsageChanged, HarnessModelSelected,
-    Message, ModelId, PromptMessagePrefix, SessionId, SessionPromptCreated, SessionPromptId,
-    SessionPromptPrewarmRequested, SessionPromptQueued, TokenUsageStats, ToolCallId,
-    ToolDefinition, ToolError, ToolName, ToolRegister, ToolRequest, UiCancelPrompt,
+    Message, ModelId, PromptMessagePrefix, PromptToolsRef, SessionId, SessionPromptCreated,
+    SessionPromptId, SessionPromptPrewarmRequested, SessionPromptQueued, TokenUsageStats,
+    ToolCallId, ToolDefinition, ToolError, ToolName, ToolRegister, ToolRequest, UiCancelPrompt,
 };
 
 use crate::conversation::{Conversation, ConversationId, ConversationTurnState};
@@ -940,18 +940,24 @@ impl Harness {
         &self,
         prompt: &SessionPromptCreated,
     ) -> Option<SessionPromptCreated> {
-        let Some(prefix) = &prompt.message_prefix else {
-            return Some(prompt.clone());
-        };
-        let base = self.prompt_snapshots.get(&prefix.base_session_prompt_id)?;
-        if base.messages.len() < prefix.message_count {
-            return None;
-        }
         let mut materialized = prompt.clone();
-        let mut messages = base.messages[..prefix.message_count].to_vec();
-        messages.extend(prompt.messages.clone());
-        materialized.messages = messages;
-        materialized.message_prefix = None;
+        if let Some(prefix) = &prompt.message_prefix {
+            let base = self.prompt_snapshots.get(&prefix.base_session_prompt_id)?;
+            if base.messages.len() < prefix.message_count {
+                return None;
+            }
+            let mut messages = base.messages[..prefix.message_count].to_vec();
+            messages.extend(prompt.messages.clone());
+            materialized.messages = messages;
+            materialized.message_prefix = None;
+        }
+        if let Some(tools_ref) = &prompt.tools_ref {
+            let base = self
+                .prompt_snapshots
+                .get(&tools_ref.base_session_prompt_id)?;
+            materialized.tools = base.tools.clone();
+            materialized.tools_ref = None;
+        }
         Some(materialized)
     }
 
@@ -3290,7 +3296,7 @@ impl Harness {
         // racing the response.
         self.prompt_fingerprints
             .insert(session_prompt_id.clone(), request_fingerprint);
-        let (messages, message_prefix) = self
+        let base_prompt = self
             .conversations
             .get(cid)
             .and_then(|c| c.last_prompt_id.as_ref())
@@ -3298,20 +3304,35 @@ impl Harness {
                 self.prompt_snapshots
                     .get(base_id)
                     .map(|base| (base_id, base))
-            })
+            });
+        let (messages, message_prefix) = base_prompt
+            .as_ref()
             .and_then(|(base_id, base)| {
                 messages.starts_with(&base.messages).then(|| {
                     let prefix_len = base.messages.len();
                     (
                         messages[prefix_len..].to_vec(),
                         Some(PromptMessagePrefix {
-                            base_session_prompt_id: base_id.clone(),
+                            base_session_prompt_id: (*base_id).clone(),
                             message_count: prefix_len,
                         }),
                     )
                 })
             })
             .unwrap_or((messages, None));
+        let (tools, tools_ref) = base_prompt
+            .as_ref()
+            .and_then(|(base_id, base)| {
+                (tools == base.tools).then(|| {
+                    (
+                        Vec::new(),
+                        Some(PromptToolsRef {
+                            base_session_prompt_id: (*base_id).clone(),
+                        }),
+                    )
+                })
+            })
+            .unwrap_or((tools, None));
         let event = Event::SessionPromptCreated(SessionPromptCreated {
             session_prompt_id: session_prompt_id.clone(),
             session_id,
@@ -3319,6 +3340,7 @@ impl Harness {
             messages,
             message_prefix,
             tools,
+            tools_ref,
             model,
             model_params: self.selected_params,
             tool_choice,
@@ -4191,30 +4213,32 @@ impl Harness {
             })?;
             cursor = entry.seq + 1;
             if let Event::SessionPromptCreated(prompt) = entry.event {
-                let materialized = match &prompt.message_prefix {
-                    Some(prefix) => {
-                        let base =
-                            snapshots
-                                .get(&prefix.base_session_prompt_id)
-                                .ok_or_else(|| {
-                                    HarnessError::Participant(
-                                        "prompt prefix base missing".to_owned(),
-                                    )
-                                })?;
-                        if base.messages.len() < prefix.message_count {
-                            return Err(HarnessError::Participant(
-                                "prompt prefix base too short".to_owned(),
-                            ));
-                        }
-                        let mut materialized = prompt.clone();
-                        let mut messages = base.messages[..prefix.message_count].to_vec();
-                        messages.extend(prompt.messages.clone());
-                        materialized.messages = messages;
-                        materialized.message_prefix = None;
-                        materialized
+                let mut materialized = prompt.clone();
+                if let Some(prefix) = &prompt.message_prefix {
+                    let base = snapshots
+                        .get(&prefix.base_session_prompt_id)
+                        .ok_or_else(|| {
+                            HarnessError::Participant("prompt prefix base missing".to_owned())
+                        })?;
+                    if base.messages.len() < prefix.message_count {
+                        return Err(HarnessError::Participant(
+                            "prompt prefix base too short".to_owned(),
+                        ));
                     }
-                    None => prompt.clone(),
-                };
+                    let mut messages = base.messages[..prefix.message_count].to_vec();
+                    messages.extend(prompt.messages.clone());
+                    materialized.messages = messages;
+                    materialized.message_prefix = None;
+                }
+                if let Some(tools_ref) = &prompt.tools_ref {
+                    let base = snapshots
+                        .get(&tools_ref.base_session_prompt_id)
+                        .ok_or_else(|| {
+                            HarnessError::Participant("prompt tools base missing".to_owned())
+                        })?;
+                    materialized.tools = base.tools.clone();
+                    materialized.tools_ref = None;
+                }
                 snapshots.insert(materialized.session_prompt_id.clone(), materialized.clone());
                 if &materialized.session_prompt_id == prompt_id {
                     return Ok(materialized);

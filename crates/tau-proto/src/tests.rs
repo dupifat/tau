@@ -73,6 +73,7 @@ fn representative_events() -> Vec<Event> {
                 description: Some("Read a file".to_owned()),
                 parameters: None,
             }],
+            tools_ref: None,
             model: None,
             model_params: ModelParams::default(),
             tool_choice: ToolChoice::default(),

@@ -425,7 +425,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
 }
 
 #[test]
-fn session_prompt_created_uses_message_prefix_for_linear_extension() {
+fn session_prompt_created_uses_refs_for_linear_extension() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -458,10 +458,14 @@ fn session_prompt_created_uses_message_prefix_for_linear_extension() {
     let raw2 = read_raw_prompt_created(&h, &spid2);
     let prompt2 = read_prompt_created(&h, &spid2);
     let prefix = raw2.message_prefix.expect("prefix reference");
+    let tools_ref = raw2.tools_ref.expect("tools reference");
 
     assert_eq!(prefix.base_session_prompt_id, spid1);
     assert_eq!(prefix.message_count, prompt1.messages.len());
     assert_eq!(raw2.messages, prompt2.messages[prompt1.messages.len()..]);
+    assert_eq!(tools_ref.base_session_prompt_id, spid1);
+    assert!(raw2.tools.is_empty());
+    assert_eq!(prompt2.tools, prompt1.tools);
 
     h.shutdown().expect("shutdown");
 }

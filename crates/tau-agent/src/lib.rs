@@ -32,30 +32,41 @@ fn materialize_prompt(
     prompt: &tau_proto::SessionPromptCreated,
     snapshots: &HashMap<tau_proto::SessionPromptId, tau_proto::SessionPromptCreated>,
 ) -> Result<tau_proto::SessionPromptCreated, String> {
-    let Some(prefix) = &prompt.message_prefix else {
-        return Ok(prompt.clone());
-    };
-    let base = snapshots
-        .get(&prefix.base_session_prompt_id)
-        .ok_or_else(|| {
-            format!(
-                "missing prompt prefix base {}",
-                prefix.base_session_prompt_id
-            )
-        })?;
-    if base.messages.len() < prefix.message_count {
-        return Err(format!(
-            "prompt prefix base {} has only {} messages, need {}",
-            prefix.base_session_prompt_id,
-            base.messages.len(),
-            prefix.message_count
-        ));
-    }
     let mut materialized = prompt.clone();
-    let mut messages = base.messages[..prefix.message_count].to_vec();
-    messages.extend(prompt.messages.clone());
-    materialized.messages = messages;
-    materialized.message_prefix = None;
+    if let Some(prefix) = &prompt.message_prefix {
+        let base = snapshots
+            .get(&prefix.base_session_prompt_id)
+            .ok_or_else(|| {
+                format!(
+                    "missing prompt prefix base {}",
+                    prefix.base_session_prompt_id
+                )
+            })?;
+        if base.messages.len() < prefix.message_count {
+            return Err(format!(
+                "prompt prefix base {} has only {} messages, need {}",
+                prefix.base_session_prompt_id,
+                base.messages.len(),
+                prefix.message_count
+            ));
+        }
+        let mut messages = base.messages[..prefix.message_count].to_vec();
+        messages.extend(prompt.messages.clone());
+        materialized.messages = messages;
+        materialized.message_prefix = None;
+    }
+    if let Some(tools_ref) = &prompt.tools_ref {
+        let base = snapshots
+            .get(&tools_ref.base_session_prompt_id)
+            .ok_or_else(|| {
+                format!(
+                    "missing prompt tools base {}",
+                    tools_ref.base_session_prompt_id
+                )
+            })?;
+        materialized.tools = base.tools.clone();
+        materialized.tools_ref = None;
+    }
     Ok(materialized)
 }
 

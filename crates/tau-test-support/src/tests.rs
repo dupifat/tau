@@ -215,6 +215,7 @@ fn deterministic_agent_and_tool_complete_one_vertical_slice() {
             description: None,
             parameters: None,
         }],
+        tools_ref: None,
         model: None,
         model_params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),

@@ -60,7 +60,9 @@ tree and the prompt lifecycle.
   setting, and originator. This is the input handed to the agent.
   `message_prefix`, when present, means `messages` is only the suffix;
   prepend `base.messages[..message_count]` from the referenced prompt
-  to materialize the full history.
+  to materialize the full history. `tools_ref`, when present, means
+  `tools` is empty; copy full tool definitions from the referenced
+  prompt.
 - **`session.user_message_injected`** — A synthetic user message
   inserted by the harness (e.g. `!`-shell command output, AGENTS.md
   preamble). Folds into the session tree like a real user prompt.

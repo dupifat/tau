@@ -1826,6 +1826,13 @@ pub struct PromptMessagePrefix {
     pub message_count: usize,
 }
 
+/// Reference to tool definitions carried by an earlier prompt.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PromptToolsRef {
+    /// Prompt whose materialized tools contain the full tool list.
+    pub base_session_prompt_id: SessionPromptId,
+}
+
 /// The harness persisted a user prompt and assigned it an ID.
 /// Also carries the assembled conversation context for the agent.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1841,7 +1848,11 @@ pub struct SessionPromptCreated {
     /// `base.messages[..message_count] + messages`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_prefix: Option<PromptMessagePrefix>,
+    /// Tool definitions, or empty when [`Self::tools_ref`] is set.
     pub tools: Vec<ToolDefinition>,
+    /// Optional reference to full tool definitions from an earlier prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools_ref: Option<PromptToolsRef>,
     /// Currently selected model as `"provider/model_id"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelId>,

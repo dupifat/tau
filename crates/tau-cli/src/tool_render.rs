@@ -75,10 +75,10 @@ pub(crate) fn format_token_stats_line(
         format_token_count(usage.stats.total.received_tokens),
     ));
     if let Some(latency) = turn_latency {
-        line.push_str(&format!(" Δt{}ms", latency.as_millis()));
+        line.push_str(&format!(" Δ{}ms", latency.as_millis()));
     }
     if let Some(latency) = total_latency {
-        line.push_str(&format!(" Σt{}ms", latency.as_millis()));
+        line.push_str(&format!(" Σ{}ms", latency.as_millis()));
     }
     line
 }

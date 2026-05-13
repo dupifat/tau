@@ -1283,7 +1283,7 @@ fn format_token_stats_line_appends_hit_percent_when_cache_hits() {
     assert!(line.contains(" ↑ΔH97%"), "{line}");
     assert!(line.contains(" ↑ΣH50%"), "{line}");
     assert!(line.contains("↑Δ445/17.3k"), "{line}");
-    assert!(line.contains(" Δt1240ms Σt4560ms"), "{line}");
+    assert!(line.contains(" Δ1240ms Σ4560ms"), "{line}");
 }
 
 #[test]

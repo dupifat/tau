@@ -26,15 +26,11 @@ pub(crate) fn format_context_chip(
     }
 }
 
-pub(crate) fn format_turn_metrics_chip(latency: Option<Duration>) -> String {
-    let mut chip = String::new();
-    if let Some(latency) = latency {
-        chip.push_str(&format!(" resp:{}", format_latency(latency)));
-    }
-    chip
-}
-
-pub(crate) fn format_token_stats_line(usage: &tau_proto::AgentTokenUsage) -> String {
+pub(crate) fn format_token_stats_line(
+    usage: &tau_proto::AgentTokenUsage,
+    turn_latency: Option<Duration>,
+    total_latency: Option<Duration>,
+) -> String {
     let prompt_uncached_tokens = usage
         .prompt_sent_tokens
         .saturating_sub(usage.prompt_cached_tokens);
@@ -54,7 +50,7 @@ pub(crate) fn format_token_stats_line(usage: &tau_proto::AgentTokenUsage) -> Str
     if let Some(percent) = cache_hit_percent(
         Some(usage.prompt_sent_tokens),
         Some(usage.prompt_cached_tokens),
-    ) && usage.prompt_sent_tokens > 0
+    ) && 0 < usage.prompt_sent_tokens
     {
         line.push_str(&format!(" ↑ΔH{percent}%"));
     }
@@ -69,7 +65,7 @@ pub(crate) fn format_token_stats_line(usage: &tau_proto::AgentTokenUsage) -> Str
     if let Some(percent) = cache_hit_percent(
         Some(usage.stats.total.sent_tokens),
         Some(usage.stats.total.cached_tokens),
-    ) && usage.stats.total.sent_tokens > 0
+    ) && 0 < usage.stats.total.sent_tokens
     {
         line.push_str(&format!(" ↑ΣH{percent}%"));
     }
@@ -78,20 +74,13 @@ pub(crate) fn format_token_stats_line(usage: &tau_proto::AgentTokenUsage) -> Str
         format_token_count(usage.response_received_tokens),
         format_token_count(usage.stats.total.received_tokens),
     ));
+    if let Some(latency) = turn_latency {
+        line.push_str(&format!(" Δt{}ms", latency.as_millis()));
+    }
+    if let Some(latency) = total_latency {
+        line.push_str(&format!(" Σt{}ms", latency.as_millis()));
+    }
     line
-}
-
-fn format_latency(latency: Duration) -> String {
-    if latency < Duration::from_secs(1) {
-        return format!("{}ms", latency.as_millis());
-    }
-    if latency < Duration::from_secs(10) {
-        let tenths = latency.as_millis() / 100;
-        let whole = tenths / 10;
-        let fractional = tenths % 10;
-        return format!("{whole}.{fractional}s");
-    }
-    format!("{}s", latency.as_secs())
 }
 
 pub(crate) fn cache_hit_percent(

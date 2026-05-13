@@ -13,8 +13,7 @@ use super::chat::{DraftSlot, should_send_draft_snapshot};
 use super::event_renderer::EventRenderer;
 use super::tool_render::{
     ToolStatus, build_osc1337_set_user_var, cache_hit_percent, format_context_chip,
-    format_token_stats_line, format_turn_metrics_chip, render_tool_display, streaming_block,
-    synthesize_fallback_display,
+    format_token_stats_line, render_tool_display, streaming_block, synthesize_fallback_display,
 };
 
 /// Writer that feeds bytes into a vt100::Parser. Bytes are
@@ -1248,15 +1247,6 @@ fn format_context_chip_picks_format_by_known_fields() {
 }
 
 #[test]
-fn format_turn_metrics_chip_includes_latency() {
-    assert_eq!(
-        format_turn_metrics_chip(Some(Duration::from_millis(1_240))),
-        " resp:1.2s",
-    );
-    assert_eq!(format_turn_metrics_chip(None), "");
-}
-
-#[test]
 fn format_token_stats_line_appends_hit_percent_when_cache_hits() {
     let usage = tau_proto::AgentTokenUsage {
         prompt_sent_tokens: 17_341,
@@ -1272,17 +1262,22 @@ fn format_token_stats_line_appends_hit_percent_when_cache_hits() {
         },
         ..Default::default()
     };
-    let line = format_token_stats_line(&usage);
+    let line = format_token_stats_line(
+        &usage,
+        Some(Duration::from_millis(1_240)),
+        Some(Duration::from_millis(4_560)),
+    );
 
     assert!(line.contains(" ↑ΔH97%"), "{line}");
     assert!(line.contains(" ↑ΣH50%"), "{line}");
     assert!(line.contains("↑Δ445/17.3k"), "{line}");
+    assert!(line.contains(" Δt1240ms Σt4560ms"), "{line}");
 }
 
 #[test]
 fn format_token_stats_line_omits_hit_chip_when_no_prompt_sent() {
     let usage = tau_proto::AgentTokenUsage::default();
-    let line = format_token_stats_line(&usage);
+    let line = format_token_stats_line(&usage, None, None);
 
     assert!(!line.contains('H'), "{line}");
 }

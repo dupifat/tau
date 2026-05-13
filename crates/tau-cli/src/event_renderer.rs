@@ -11,10 +11,9 @@ use crate::build_banner;
 use crate::tool_render::{
     ToolCallDisplay, build_delegate_completion_display, build_osc1337_set_user_var,
     extension_status_block, extract_diff, format_context_chip, format_token_stats_line,
-    format_tool_call, format_turn_metrics_chip, render_diff_tool_block, render_harness_info,
-    render_shell_block, render_tool_block, render_tool_display, session_status_block,
-    streaming_block, synthesize_fallback_display, system_loaded_block, system_status_block,
-    ui_dir_block,
+    format_tool_call, render_diff_tool_block, render_harness_info, render_shell_block,
+    render_tool_block, render_tool_display, session_status_block, streaming_block,
+    synthesize_fallback_display, system_loaded_block, system_status_block, ui_dir_block,
 };
 
 pub(crate) struct EventRenderer {
@@ -100,8 +99,8 @@ pub(crate) struct EventRenderer {
     /// closure so the menu can show each setting's current value
     /// without snooping on renderer-thread fields directly.
     cli_state_mirror: std::sync::Arc<std::sync::Mutex<tau_config::settings::CliState>>,
-    /// End-to-end latency of the most recently completed prompt.
-    last_turn_latency: Option<Duration>,
+    /// Cumulative end-to-end time spent waiting for agent responses.
+    cumulative_agent_latency: Duration,
     /// Shared effort mirror for the input thread.
     effort_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
     /// Shared set of currently-available effort levels, mirrored
@@ -157,6 +156,8 @@ struct ThinkingBlockEntry {
 struct TokenStatsBlockEntry {
     block_id: tau_cli_term::BlockId,
     usage: tau_proto::AgentTokenUsage,
+    turn_latency: Option<Duration>,
+    total_latency: Option<Duration>,
 }
 
 /// Per-prompt UI state held by [`EventRenderer`]. Lives from the first
@@ -282,7 +283,7 @@ impl EventRenderer {
             current_context_percent: None,
             current_context_input_tokens: None,
             current_context_window: None,
-            last_turn_latency: None,
+            cumulative_agent_latency: Duration::ZERO,
             effort_state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
                 tau_proto::Effort::Off.as_u8(),
             )),
@@ -452,7 +453,7 @@ impl EventRenderer {
         self.show_token_stats = on;
         for entry in &self.token_stats_history {
             let text = if self.show_token_stats {
-                format_token_stats_line(&entry.usage)
+                format_token_stats_line(&entry.usage, entry.turn_latency, entry.total_latency)
             } else {
                 String::new()
             };
@@ -486,7 +487,7 @@ impl EventRenderer {
         // can be recreated after clearing the terminal output.
         self.current_context_percent = None;
         self.current_context_input_tokens = None;
-        self.last_turn_latency = None;
+        self.cumulative_agent_latency = Duration::ZERO;
         self.handle.clear_output();
         self.render_session_preamble();
         if self.current_model.is_some() {
@@ -529,8 +530,7 @@ impl EventRenderer {
                     self.current_context_percent,
                     self.current_context_window,
                 );
-                let turn_metrics = format_turn_metrics_chip(self.last_turn_latency);
-                format!("{model} ({params}){context}{turn_metrics}")
+                format!("{model} ({params}){context}")
             }
         };
         if let Some(session_id) = &self.current_session_id {
@@ -767,9 +767,12 @@ impl EventRenderer {
                 // Drain the whole per-prompt state in one shot — every
                 // field tracked through the stream is consumed here.
                 let prompt_state = self.prompts.remove(spid).unwrap_or_default();
-                self.last_turn_latency = prompt_state
+                let turn_latency = prompt_state
                     .started_at
                     .map(|started_at| started_at.elapsed());
+                if let Some(latency) = turn_latency {
+                    self.cumulative_agent_latency += latency;
+                }
 
                 // Finalize the thinking block above the response.
                 // Prefer the finished event's payload if it carries
@@ -812,7 +815,11 @@ impl EventRenderer {
                 }
                 if let Some(usage) = finished.token_usage.clone() {
                     let display = if self.show_token_stats {
-                        format_token_stats_line(&usage)
+                        format_token_stats_line(
+                            &usage,
+                            turn_latency,
+                            Some(self.cumulative_agent_latency),
+                        )
                     } else {
                         String::new()
                     };
@@ -824,6 +831,8 @@ impl EventRenderer {
                     self.token_stats_history.push(TokenStatsBlockEntry {
                         block_id: bid,
                         usage,
+                        turn_latency,
+                        total_latency: Some(self.cumulative_agent_latency),
                     });
                 }
 
@@ -1110,7 +1119,6 @@ impl EventRenderer {
             Event::HarnessModelSelected(selected) => {
                 self.current_model = selected.model.clone();
                 self.current_context_window = selected.context_window;
-                self.last_turn_latency = None;
                 self.render_model_status();
             }
             Event::HarnessContextUsageChanged(changed) => {

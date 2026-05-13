@@ -81,6 +81,41 @@ fn server_error_uses_backoff_retry() {
     assert_eq!(error.retry_after(), Some(std::time::Duration::ZERO));
 }
 
+/// Regression for the `tau-agent-bsjr7t` stall: an account-cap
+/// surfaced through the WS path as `stream error: ... (type=...)`
+/// must NOT be retried. Before this fix, the body was treated as a
+/// generic transient stream hiccup and the agent burned 8 backoff
+/// retries (~6 minutes) blocking the user's next prompt.
+#[test]
+fn ws_stream_error_with_usage_limit_type_is_not_retryable() {
+    let error = LlmError::HttpStatus(
+        0,
+        "stream error: The usage limit has been reached (type=usage_limit_reached)".to_owned(),
+    );
+    assert_eq!(error.retry_after(), None);
+}
+
+#[test]
+fn ws_stream_error_with_rate_limit_type_is_not_retryable() {
+    let error = LlmError::HttpStatus(
+        0,
+        "stream error: rate limit (type=rate_limit_exceeded)".to_owned(),
+    );
+    assert_eq!(error.retry_after(), None);
+}
+
+/// Backward-compat baseline: a `stream error:` body with no
+/// `(type=…)` suffix (transport hiccup, upstream timeout) must keep
+/// retrying. Only the typed account-cap variants short-circuit.
+#[test]
+fn ws_stream_error_without_type_suffix_is_retryable() {
+    let error = LlmError::HttpStatus(
+        0,
+        "stream error: ws closed mid-stream (code=1011 reason=keepalive ping timeout)".to_owned(),
+    );
+    assert_eq!(error.retry_after(), Some(std::time::Duration::ZERO));
+}
+
 /// `None` base in → `None` out, regardless of originator. The resolver
 /// already decided this provider doesn't get a key; the agent must not
 /// resurrect one.

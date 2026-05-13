@@ -379,7 +379,20 @@ pub(crate) fn apply_event(
                 .as_str()
                 .or_else(|| event["message"].as_str())
                 .unwrap_or("unknown error");
-            return Err(LlmError::HttpStatus(0, format!("stream error: {detail}")));
+            // Preserve the error type alongside the message so the
+            // retry classifier can distinguish a transient transport
+            // hiccup from an account-level cap (usage limit, rate
+            // limit, quota) — the latter must not be retried. The
+            // `(type=...)` suffix is a stable substring contract
+            // matched by `LlmError::retry_after` and
+            // `pool::is_recoverable_ws_error`.
+            let body = match event["error"]["type"].as_str() {
+                Some(error_type) => {
+                    format!("stream error: {detail} (type={error_type})")
+                }
+                None => format!("stream error: {detail}"),
+            };
+            return Err(LlmError::HttpStatus(0, body));
         }
         _ => {}
     }

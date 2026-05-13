@@ -1567,6 +1567,74 @@ fn delegate_ext_agent_query_keeps_tool_choice_auto() {
     h.shutdown().expect("shutdown");
 }
 
+/// Regression for the `tau-agent-bsjr7t` stall: an in-flight
+/// non-tool extension side conversation (idle-summary stuck on a
+/// usage-limit retry) must be preempted as soon as the user submits
+/// a fresh prompt. Otherwise the agent's single prompt slot keeps
+/// burning backoff retries on the side conv while the user waits.
+#[test]
+fn user_prompt_preempts_in_flight_non_tool_ext_side_conversation() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    // Seed an in-flight idle-summary side conv with a previously
+    // dispatched spid that's notionally still being retried by the
+    // agent.
+    h.handle_ext_agent_query(
+        "conn-notifications",
+        ExtAgentQuery {
+            query_id: "idle-0".to_owned(),
+            instruction: "Summarize in one sentence.".to_owned(),
+            tool_call_id: None,
+            task_name: None,
+        },
+    )
+    .expect("ext query");
+
+    let (side_cid, side_spid) = h
+        .prompt_conversations
+        .iter()
+        .find(|(_, prompt_cid)| prompt_cid.as_str() != "default")
+        .map(|(spid, cid)| (cid.clone(), spid.clone()))
+        .expect("side conv must exist");
+    let side_conv = h.conversations.get(&side_cid).expect("side conv present");
+    assert_eq!(
+        side_conv.in_flight_prompt.as_ref(),
+        Some(&side_spid),
+        "sanity: side conv is mid-flight before user submits",
+    );
+
+    // User submits a real prompt — the harness must preempt the
+    // side conv (cancel it, free the agent slot) before queueing or
+    // dispatching the user's turn.
+    h.submit_user_prompt("s1".into(), "interrupting prompt".to_owned())
+        .expect("submit user");
+
+    let side_conv = h
+        .conversations
+        .get(&side_cid)
+        .expect("side conv still tracked");
+    assert!(
+        side_conv.in_flight_prompt.is_none(),
+        "user prompt must clear the side conv's in-flight spid so the agent's \
+         prompt slot is free; still set to {:?}",
+        side_conv.in_flight_prompt,
+    );
+    assert!(
+        h.canceled_prompts.contains(&side_spid),
+        "side conv's spid must be marked canceled so a late response is dropped",
+    );
+    assert!(
+        !h.prompt_conversations.contains_key(&side_spid),
+        "side conv's spid must be unrouted so the agent's eventual abort \
+         doesn't try to publish a finished event into a stale slot",
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Regression: a sub-agent's `Pure` tool call must not be gated by the
 /// parent's still-in-flight `Mutating` `delegate` call. The parent's
 /// delegate only resolves once the sub-agent's tools have run, so a

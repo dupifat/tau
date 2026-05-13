@@ -356,15 +356,30 @@ impl From<tau_provider::resolver::ResolvedBackend> for BackendConfig {
 /// (min 10s), this caps total wait time at roughly 9 minutes.
 const LLM_MAX_RETRIES: usize = 8;
 
+/// Tighter cap for extension-originated turns (delegate sub-agents,
+/// `std-notifications`' idle-summary, etc.). These are best-effort
+/// from the user's perspective — burning a 9-minute retry budget on
+/// one of them blocks the agent's single-threaded prompt slot and
+/// stalls the next user prompt. Pegged at 2 retries (~30 s total)
+/// so a genuine transient hiccup still gets a fair shake.
+const LLM_MAX_RETRIES_EXTENSION: usize = 2;
+
+fn max_retries_for(originator: &tau_proto::PromptOriginator) -> usize {
+    match originator {
+        tau_proto::PromptOriginator::User => LLM_MAX_RETRIES,
+        tau_proto::PromptOriginator::Extension { .. } => LLM_MAX_RETRIES_EXTENSION,
+    }
+}
+
 /// Build a fibonacci backoff schedule for retrying transient LLM
 /// errors. Roughly: 10s, 10s, 20s, 30s, 50s, 80s, 130s, 210s — eight
 /// retries, ~9 minutes total wait before we give up. Jittered to
 /// avoid lockstep retries from many agents hitting a recovering
 /// upstream simultaneously.
-fn llm_retry_schedule() -> backon::FibonacciBackoff {
+fn llm_retry_schedule(max_attempts: usize) -> backon::FibonacciBackoff {
     backon::FibonacciBuilder::default()
         .with_min_delay(Duration::from_secs(10))
-        .with_max_times(LLM_MAX_RETRIES)
+        .with_max_times(max_attempts)
         .with_jitter()
         .build()
 }
@@ -393,8 +408,8 @@ fn with_llm_retry<F, W: Write>(
 where
     F: FnMut(&mut FrameWriter<BufWriter<W>>) -> Result<common::StreamState, common::LlmError>,
 {
-    let mut backoff = llm_retry_schedule();
-    let max_attempts = LLM_MAX_RETRIES;
+    let max_attempts = max_retries_for(originator);
+    let mut backoff = llm_retry_schedule(max_attempts);
     let mut attempt = 0_usize;
     loop {
         let error = match call(writer) {

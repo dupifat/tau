@@ -2541,6 +2541,14 @@ impl Harness {
             return Ok(PromptSubmission::Rejected { reason });
         }
 
+        // A user prompt outranks any best-effort side conversation
+        // (idle-summary etc.). The agent processes prompts on a
+        // single thread, so an in-flight side query stuck in a
+        // retry backoff would otherwise stall the user's turn for
+        // up to the side conv's full retry budget. Abort first;
+        // dispatch second.
+        self.preempt_blocking_ext_side_conversations(&session_id);
+
         let cid = self.default_conversation_id.clone();
         if self.dispatch_blocked_for(&cid) || !self.session_initialized(&session_id) {
             self.conversations
@@ -2554,6 +2562,69 @@ impl Harness {
 
         self.dispatch_user_prompt(session_id, text)?;
         Ok(PromptSubmission::Dispatched)
+    }
+
+    /// Cancel every in-flight non-tool extension side conversation
+    /// (idle-summary and friends) so the agent's single prompt slot
+    /// is free for the incoming user turn. Delegate sub-agents are
+    /// left alone — they're part of an active user turn already and
+    /// cancelling them would orphan the parent's tool call.
+    ///
+    /// Side effects per matching conversation: clear in-flight
+    /// state, drop the spid from `prompt_conversations`, mark it
+    /// canceled. A single `UiCancelPrompt` event is then published
+    /// so the agent's retry-sleep wakes and aborts whatever it's
+    /// currently processing.
+    fn preempt_blocking_ext_side_conversations(&mut self, session_id: &SessionId) {
+        let to_cancel: Vec<(ConversationId, SessionPromptId)> = self
+            .conversations
+            .iter()
+            .filter_map(|(cid, conv)| {
+                if cid == &self.default_conversation_id {
+                    return None;
+                }
+                if conv.parent_tool_call_id.is_some() {
+                    return None;
+                }
+                if !matches!(
+                    conv.originator,
+                    tau_proto::PromptOriginator::Extension { .. }
+                ) {
+                    return None;
+                }
+                let in_flight = conv.in_flight_prompt.clone()?;
+                Some((cid.clone(), in_flight))
+            })
+            .collect();
+
+        if to_cancel.is_empty() {
+            return;
+        }
+
+        for (cid, spid) in &to_cancel {
+            self.canceled_prompts.insert(spid.clone());
+            self.prompt_conversations.remove(spid);
+            if let Some(conv) = self.conversations.get_mut(cid) {
+                conv.in_flight_prompt = None;
+                conv.turn_state = ConversationTurnState::Idle;
+                conv.pending_prompts.clear();
+            }
+            self.emit_info(&format!(
+                "preempting side conv `{cid}` ({spid}) for incoming user prompt",
+            ));
+        }
+
+        // One cancel event is enough: the agent processes prompts
+        // serially, so at most one of the preempted spids is the
+        // one the agent is actually mid-flight on. The agent's
+        // retry-loop `sleep_or_abort` doesn't filter by spid — any
+        // `UiCancelPrompt` aborts the current attempt.
+        self.publish_event(
+            None,
+            Event::UiCancelPrompt(UiCancelPrompt {
+                session_id: session_id.clone(),
+            }),
+        );
     }
 
     /// Broadcasts `SessionStarted` for `session_id` and enters

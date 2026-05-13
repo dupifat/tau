@@ -105,12 +105,40 @@ impl LlmError {
                 // overload, upstream timeout, gateway reset),
                 // "response failed:" (deterministic model error),
                 // or "response incomplete:" (request-level cap).
-                // Only the first class is worth retrying.
-                0 if body.starts_with("stream error:") => Some(Duration::ZERO),
+                // Only the first class is worth retrying — and even
+                // then, account-level caps (usage_limit_reached,
+                // rate_limit_exceeded, quota_exceeded) arrive
+                // through this path as "stream error: …" and are
+                // *not* transient. The error type is tagged in the
+                // body suffix by `responses::apply_event`.
+                0 if body.starts_with("stream error:") => {
+                    if is_account_limit_body(body) {
+                        None
+                    } else {
+                        Some(Duration::ZERO)
+                    }
+                }
                 _ => None,
             },
         }
     }
+}
+
+/// Account-level limits that won't clear with any reasonable backoff —
+/// matched against the `(type=…)` suffix that
+/// `responses::apply_event` attaches to a `stream error: …` body. New
+/// upstream error types can be added here as we encounter them;
+/// false negatives just mean we burn a few retries before failing.
+///
+/// Exposed for the WS pool's `is_recoverable_ws_error` carve-out so
+/// the pool doesn't reopen a socket just to hit the same cap on the
+/// fresh one.
+pub fn is_account_limit_body(body: &str) -> bool {
+    body.contains("(type=usage_limit_reached)")
+        || body.contains("(type=rate_limit_exceeded)")
+        || body.contains("(type=quota_exceeded)")
+        || body.contains("(type=billing_hard_limit_reached)")
+        || body.contains("(type=insufficient_quota)")
 }
 
 fn usage_limit_retry_after(body: &str) -> Option<Duration> {

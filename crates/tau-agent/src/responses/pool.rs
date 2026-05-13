@@ -376,11 +376,22 @@ pub(crate) fn run_prewarm_through_pool(
 /// outer retry loop, which burns a backoff sleep on the same dead
 /// socket. Other `LlmError` variants and non-stream-prefixed bodies
 /// fall through unchanged.
+///
+/// The one carve-out: account-level caps (usage_limit_reached, rate
+/// limit, quota) reach us with the same prefix because they ride the
+/// same `error` event, but the connection is fine — reopening just
+/// burns a fresh upgrade against an upstream that's about to reject
+/// every request the same way. Defer those to the outer classifier
+/// (`LlmError::retry_after`), which returns `None` and surfaces the
+/// error immediately.
 fn is_recoverable_ws_error(err: &LlmError) -> bool {
     let LlmError::HttpStatus(0, body) = err else {
         return false;
     };
-    body.starts_with("stream error:")
+    if !body.starts_with("stream error:") {
+        return false;
+    }
+    !crate::common::is_account_limit_body(body)
 }
 
 /// Borrow `request` but blank out its `previous_response`. Used on
@@ -755,6 +766,27 @@ mod tests {
             assert!(
                 !is_recoverable_ws_error(&err),
                 "expected NOT recoverable: {err:?}"
+            );
+        }
+    }
+
+    /// Account-level caps (usage_limit_reached etc.) ride the same
+    /// `stream error: …` envelope as transport hiccups but are NOT
+    /// fixable by reopening the socket. The pool must surface them
+    /// up to `LlmError::retry_after` (which also returns `None` for
+    /// these) instead of burning a fresh upgrade.
+    #[test]
+    fn account_limit_stream_errors_are_not_silent_reconnects() {
+        let cases = [
+            "stream error: usage limit (type=usage_limit_reached)",
+            "stream error: rate limit (type=rate_limit_exceeded)",
+            "stream error: quota (type=quota_exceeded)",
+        ];
+        for body in cases {
+            let err = LlmError::HttpStatus(0, body.to_owned());
+            assert!(
+                !is_recoverable_ws_error(&err),
+                "account cap must short-circuit, not silent-reconnect: {body}",
             );
         }
     }

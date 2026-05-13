@@ -262,6 +262,7 @@ fn new_session_preserves_model_status() {
     sync(&handle);
 
     assert!(vt.screen_contains(80, "test/model"));
+    assert!(vt.screen_contains(80, "| s2"));
     assert!(!vt.screen_contains(80, "no model selected"));
 }
 

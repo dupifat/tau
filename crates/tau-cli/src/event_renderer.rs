@@ -53,6 +53,8 @@ pub(crate) struct EventRenderer {
     ready_extensions: HashSet<String>,
     /// Persistent status bar block showing the current model + effort.
     model_status_block: Option<tau_cli_term::BlockId>,
+    /// Current session id, rendered as the last status-bar element.
+    current_session_id: Option<tau_proto::SessionId>,
     /// Live history of completed write/edit blocks plus the data
     /// needed to re-render them. `/set show-diff` flips
     /// `diffs_expanded` and walks this list calling `set_block` so
@@ -266,6 +268,7 @@ impl EventRenderer {
             extension_blocks: HashMap::new(),
             ready_extensions: HashSet::new(),
             model_status_block: None,
+            current_session_id: None,
             diff_blocks: Vec::new(),
             diffs_expanded: state.show_diff,
             show_thinking: state.show_thinking,
@@ -505,7 +508,7 @@ impl EventRenderer {
     fn render_model_status(&mut self) {
         use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
-        let label = match self.current_model.as_ref() {
+        let mut label = match self.current_model.as_ref() {
             None => "no model selected".to_string(),
             Some(model) => {
                 let mut params = if matches!(self.current_params.effort, tau_proto::Effort::Off) {
@@ -530,6 +533,9 @@ impl EventRenderer {
                 format!("{model} ({params}){context}{turn_metrics}")
             }
         };
+        if let Some(session_id) = &self.current_session_id {
+            label.push_str(&format!(" | {session_id}"));
+        }
         let block = themed_block(&self.theme, names::MODEL_STATUS, label);
         match self.model_status_block {
             Some(bid) => {
@@ -594,7 +600,14 @@ impl EventRenderer {
             Event::SessionStarted(started)
                 if matches!(started.reason, tau_proto::SessionStartReason::New) =>
             {
+                self.current_session_id = Some(started.session_id.clone());
                 self.clear_for_new_session();
+            }
+            Event::SessionStarted(started) => {
+                self.current_session_id = Some(started.session_id.clone());
+                if self.model_status_block.is_some() || self.current_model.is_some() {
+                    self.render_model_status();
+                }
             }
             Event::UiPromptSubmitted(prompt) => {
                 let block = themed_block(

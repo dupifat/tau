@@ -169,6 +169,29 @@ fn version_label() -> String {
     format!("{version} {build}")
 }
 
+/// Build the two-line startup banner: logo + name/version/build on the
+/// first line, logo continuation + random pun on the second.
+pub(crate) fn build_banner(theme: &tau_themes::Theme) -> tau_cli_term::StyledText {
+    use tau_themes::names;
+    let logo = tau_cli_term::resolve::resolve(theme, names::BANNER_LOGO);
+    let name = tau_cli_term::resolve::resolve(theme, names::BANNER_NAME);
+    let version_style = tau_cli_term::resolve::resolve(theme, names::BANNER_VERSION);
+    let build_style = tau_cli_term::resolve::resolve(theme, names::BANNER_BUILD);
+    let pun_style = tau_cli_term::resolve::resolve(theme, names::BANNER_PUN);
+    let pun = random_startup_pun();
+    let (version, build) = build_label_parts();
+    tau_cli_term::StyledText::from(vec![
+        tau_cli_term::Span::new("▀█▀▘ ", logo),
+        tau_cli_term::Span::new("tau", name),
+        tau_cli_term::Span::new(version.trim_start_matches("tau"), version_style),
+        tau_cli_term::Span::new(" ", Default::default()),
+        tau_cli_term::Span::new(build, build_style),
+        tau_cli_term::Span::new("\n", Default::default()),
+        tau_cli_term::Span::new(" █▄  ", logo),
+        tau_cli_term::Span::new(pun, pun_style),
+    ])
+}
+
 // ---------------------------------------------------------------------------
 // Short-id minting (used for both session ids and per-UI log dir ids)
 // ---------------------------------------------------------------------------

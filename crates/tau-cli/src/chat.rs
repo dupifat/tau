@@ -18,7 +18,7 @@ use tau_proto::{
 use crate::daemon::{DaemonOutput, resolve_daemon};
 use crate::event_renderer::EventRenderer;
 use crate::tool_render::ui_dir_block;
-use crate::{CliError, MUTEX_POISONED, build_label_parts, locked, random_startup_pun, ui_logging};
+use crate::{CliError, MUTEX_POISONED, build_banner, locked, ui_logging};
 
 /// Shared writer handle: the input loop and the prompt-draft debounce
 /// thread both need to send events on the same socket. Stream
@@ -310,27 +310,7 @@ pub(crate) fn run_chat(
 
     // Show logo if enabled.
     if settings.show_logo {
-        use tau_cli_term::{StyledBlock, StyledText};
-        use tau_themes::names;
-
-        let logo = tau_cli_term::resolve::resolve(&theme, names::BANNER_LOGO);
-        let name = tau_cli_term::resolve::resolve(&theme, names::BANNER_NAME);
-        let version_style = tau_cli_term::resolve::resolve(&theme, names::BANNER_VERSION);
-        let build_style = tau_cli_term::resolve::resolve(&theme, names::BANNER_BUILD);
-        let pun_style = tau_cli_term::resolve::resolve(&theme, names::BANNER_PUN);
-        let pun = random_startup_pun();
-        let (version, build) = build_label_parts();
-        let banner = StyledText::from(vec![
-            tau_cli_term::Span::new("▀█▀▘ ", logo),
-            tau_cli_term::Span::new("tau", name),
-            tau_cli_term::Span::new(version.trim_start_matches("tau"), version_style),
-            tau_cli_term::Span::new(" ", Default::default()),
-            tau_cli_term::Span::new(build, build_style),
-            tau_cli_term::Span::new("\n", Default::default()),
-            tau_cli_term::Span::new(" █▄  ", logo),
-            tau_cli_term::Span::new(pun, pun_style),
-        ]);
-        handle.print_output(StyledBlock::new(banner));
+        handle.print_output(tau_cli_term::StyledBlock::new(build_banner(&theme)));
     }
     handle.print_output(ui_dir_block(&theme, ui_logging.dir()));
 

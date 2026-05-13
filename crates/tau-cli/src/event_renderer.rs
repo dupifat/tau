@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use tau_proto::{CborValue, Event};
 
+use crate::build_banner;
 use crate::tool_render::{
     ToolCallDisplay, build_delegate_completion_display, build_osc1337_set_user_var,
     extension_status_block, extract_diff, format_cache_hit_chip, format_context_chip,
@@ -15,7 +16,6 @@ use crate::tool_render::{
     session_status_block, streaming_block, synthesize_fallback_display, system_loaded_block,
     system_status_block, ui_dir_block,
 };
-use crate::{build_label_parts, random_startup_pun};
 
 pub(crate) struct EventRenderer {
     handle: tau_cli_term::TermHandle,
@@ -513,27 +513,8 @@ impl EventRenderer {
     }
 
     fn render_session_preamble(&mut self) {
-        use tau_cli_term::{StyledBlock, StyledText};
-        use tau_themes::names;
-
-        let logo = tau_cli_term::resolve::resolve(&self.theme, names::BANNER_LOGO);
-        let name = tau_cli_term::resolve::resolve(&self.theme, names::BANNER_NAME);
-        let version_style = tau_cli_term::resolve::resolve(&self.theme, names::BANNER_VERSION);
-        let build_style = tau_cli_term::resolve::resolve(&self.theme, names::BANNER_BUILD);
-        let pun_style = tau_cli_term::resolve::resolve(&self.theme, names::BANNER_PUN);
-        let pun = random_startup_pun();
-        let (version, build) = build_label_parts();
-        let banner = StyledText::from(vec![
-            tau_cli_term::Span::new("▀█▀▘ ", logo),
-            tau_cli_term::Span::new("tau", name),
-            tau_cli_term::Span::new(version.trim_start_matches("tau"), version_style),
-            tau_cli_term::Span::new(" ", Default::default()),
-            tau_cli_term::Span::new(build, build_style),
-            tau_cli_term::Span::new("\n", Default::default()),
-            tau_cli_term::Span::new(" █▄  ", logo),
-            tau_cli_term::Span::new(pun, pun_style),
-        ]);
-        self.handle.print_output(StyledBlock::new(banner));
+        self.handle
+            .print_output(tau_cli_term::StyledBlock::new(build_banner(&self.theme)));
         let mut extensions: Vec<_> = self.ready_extensions.iter().collect();
         extensions.sort();
         for extension_name in extensions {

@@ -18,6 +18,7 @@ fn build_request_includes_prompt_cache_fields_when_configured() {
         supports_websocket: false,
         prompt_cache_key: Some("tau:seed".into()),
         prompt_cache_retention: Some(PromptCacheRetention::InMemory),
+        supports_encrypted_reasoning: false,
     };
     let request = PromptPayload {
         system_prompt: "system",
@@ -51,6 +52,7 @@ fn build_request_omits_prompt_cache_fields_without_seed_or_retention() {
         supports_websocket: false,
         prompt_cache_key: None,
         prompt_cache_retention: None,
+        supports_encrypted_reasoning: false,
     };
     let request = PromptPayload {
         system_prompt: "system",
@@ -343,12 +345,20 @@ fn chain_test_config() -> ResponsesConfig {
         supports_websocket: false,
         prompt_cache_key: None,
         prompt_cache_retention: None,
+        supports_encrypted_reasoning: false,
     }
 }
 
 fn phase_test_config() -> ResponsesConfig {
     ResponsesConfig {
         supports_phase: true,
+        ..chain_test_config()
+    }
+}
+
+fn encrypted_reasoning_test_config() -> ResponsesConfig {
+    ResponsesConfig {
+        supports_encrypted_reasoning: true,
         ..chain_test_config()
     }
 }
@@ -550,6 +560,161 @@ fn parse_phase_from_item_recognizes_wire_strings() {
         None,
         "non-message items must not have their `phase` field harvested"
     );
+}
+
+// -----------------------------------------------------------------------
+// Encrypted reasoning replay
+// -----------------------------------------------------------------------
+
+/// `supports_encrypted_reasoning: true` must put
+/// `include: ["reasoning.encrypted_content"]` on the request body.
+/// Without this opt-in the model returns `reasoning` items but with
+/// no replayable content — we'd persist empty husks and lose the
+/// continuity the whole feature buys.
+#[test]
+fn build_request_emits_include_when_encrypted_reasoning_supported() {
+    let config = encrypted_reasoning_test_config();
+    let request = PromptPayload {
+        system_prompt: "sys",
+        messages: &[],
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        previous_response: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &tau_proto::SessionId::new("test-session"),
+    };
+    let body = serde_json::to_value(build_request(&config, &request)).expect("serialize");
+    let include = body["include"].as_array().expect("include array");
+    assert_eq!(include.len(), 1);
+    assert_eq!(include[0], "reasoning.encrypted_content");
+}
+
+/// `supports_encrypted_reasoning: false` keeps the `include` field
+/// out of the request entirely — older endpoints (and the public
+/// Responses API) reject unknown opt-ins, so we don't even want an
+/// empty `include: []` on the wire.
+#[test]
+fn build_request_omits_include_when_encrypted_reasoning_unsupported() {
+    let config = chain_test_config();
+    let request = PromptPayload {
+        system_prompt: "sys",
+        messages: &[],
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        previous_response: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &tau_proto::SessionId::new("test-session"),
+    };
+    let body = serde_json::to_value(build_request(&config, &request)).expect("serialize");
+    assert!(
+        body.as_object().unwrap().get("include").is_none(),
+        "include must be omitted when the provider doesn't advertise support"
+    );
+}
+
+/// A `ContentBlock::Reasoning` on an assistant message must be
+/// emitted as its own top-level `input[]` item — same structural
+/// slot as `message` and `function_call`, NEVER nested inside the
+/// assistant message. Locks in the Pi-compatible replay shape; if
+/// this regresses, the model loses reasoning continuity across a
+/// broken chain.
+#[test]
+fn build_request_replays_reasoning_item_as_top_level_input() {
+    let config = encrypted_reasoning_test_config();
+    let reasoning_blob = serde_json::json!({
+        "type": "reasoning",
+        "id": "rs_abc123",
+        "summary": [],
+        "encrypted_content": "OPAQUE-BLOB"
+    })
+    .to_string();
+    let messages = vec![ConversationMessage {
+        role: ConversationRole::Assistant,
+        content: vec![
+            ContentBlock::Reasoning {
+                item: reasoning_blob,
+            },
+            ContentBlock::Text {
+                text: "here's the answer".into(),
+            },
+        ],
+        phase: None,
+    }];
+    let request = PromptPayload {
+        system_prompt: "sys",
+        messages: &messages,
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        previous_response: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &tau_proto::SessionId::new("test-session"),
+    };
+    let body = serde_json::to_value(build_request(&config, &request)).expect("serialize");
+    let input = body["input"].as_array().expect("input");
+    let reasoning_idx = input
+        .iter()
+        .position(|item| item["type"].as_str() == Some("reasoning"))
+        .expect("reasoning input item");
+    let message_idx = input
+        .iter()
+        .position(|item| item["role"].as_str() == Some("assistant"))
+        .expect("assistant message item");
+    assert!(
+        reasoning_idx < message_idx,
+        "reasoning must precede the assistant message it relates to (Pi-compatible order); \
+         reasoning_idx={reasoning_idx}, message_idx={message_idx}"
+    );
+    let reasoning = &input[reasoning_idx];
+    assert_eq!(reasoning["id"], "rs_abc123");
+    assert_eq!(
+        reasoning["encrypted_content"], "OPAQUE-BLOB",
+        "the opaque blob must round-trip verbatim — the harness must not parse fields out"
+    );
+}
+
+/// On the Codex Responses stream, `response.output_item.done` is the
+/// canonical place to capture a `reasoning` item: it's the only
+/// event that carries the final `encrypted_content`. The `added`
+/// counterpart fires before any content streams in, so capturing
+/// from `added` would persist empty husks. Pin the boundary here so
+/// a future refactor of the SSE/WS parser can't silently swap which
+/// event we read.
+#[test]
+fn apply_event_captures_reasoning_only_on_output_item_done() {
+    use crate::common::StreamState;
+    let mut state = StreamState::new();
+    let added = serde_json::json!({
+        "type": "response.output_item.added",
+        "output_index": 0,
+        "item": {
+            "type": "reasoning",
+            "id": "rs_pending",
+            "summary": [],
+        }
+    });
+    apply_event(&mut state, &added, &mut |_, _| {}).expect("added");
+    assert!(
+        state.reasoning_items.is_empty(),
+        "`added` carries no encrypted_content — capturing here would persist an empty husk"
+    );
+    let done = serde_json::json!({
+        "type": "response.output_item.done",
+        "output_index": 0,
+        "item": {
+            "type": "reasoning",
+            "id": "rs_done",
+            "summary": [{"type": "summary_text", "text": "thought"}],
+            "encrypted_content": "SEALED",
+        }
+    });
+    apply_event(&mut state, &done, &mut |_, _| {}).expect("done");
+    assert_eq!(state.reasoning_items.len(), 1);
+    let parsed: serde_json::Value = serde_json::from_str(&state.reasoning_items[0]).expect("json");
+    assert_eq!(parsed["id"], "rs_done");
+    assert_eq!(parsed["encrypted_content"], "SEALED");
 }
 
 // -----------------------------------------------------------------------

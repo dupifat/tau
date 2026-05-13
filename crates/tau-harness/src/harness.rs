@@ -208,6 +208,13 @@ pub(crate) struct Harness {
     /// attribute the corresponding finished response even if the user
     /// switches models while it is in flight.
     pub(crate) prompt_models: std::collections::HashMap<SessionPromptId, ModelId>,
+    /// Per-prompt fingerprint of `(system_prompt, tools, model_params,
+    /// tool_choice)` as observed on the outbound request. Read at
+    /// response time to stamp `ChainAnchor::request_fingerprint`, so
+    /// the anchor records what was *actually sent* even if the user
+    /// flipped a setting between send and receive. See
+    /// [`crate::conversation::compute_chain_fingerprint`].
+    pub(crate) prompt_fingerprints: std::collections::HashMap<SessionPromptId, [u8; 32]>,
     /// Provider/model registry, kept for runtime lookups (e.g.
     /// computing available efforts per current model).
     pub(crate) model_registry: tau_config::settings::ModelRegistry,
@@ -428,6 +435,7 @@ impl Harness {
             context_percent_used: None,
             token_usage: TokenUsageStats::default(),
             prompt_models: std::collections::HashMap::new(),
+            prompt_fingerprints: std::collections::HashMap::new(),
             model_registry,
             discovered_skills: std::collections::HashMap::new(),
             discovered_agents_files: Vec::new(),
@@ -630,6 +638,7 @@ impl Harness {
             context_percent_used: None,
             token_usage: TokenUsageStats::default(),
             prompt_models: std::collections::HashMap::new(),
+            prompt_fingerprints: std::collections::HashMap::new(),
             model_registry,
             discovered_skills: std::collections::HashMap::new(),
             discovered_agents_files: Vec::new(),
@@ -2910,11 +2919,29 @@ impl Harness {
         let messages = tree
             .map(|t| assemble_conversation_from(t, head))
             .unwrap_or_default();
+        let tools = self.gather_tool_definitions();
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "(unknown)".to_owned());
+        let system_prompt = build_system_prompt(&self.discovered_skills, &cwd);
+        // Fingerprint the non-input fields of the impending request.
+        // Used to (a) drop the chain anchor when any of those fields
+        // drifted since the anchor was minted (matches Pi's
+        // `requestBodiesMatchExceptInput` check, catches divergence
+        // before the round-trip), and (b) stamp the next anchor at
+        // response time so a future send can repeat the comparison.
+        let request_fingerprint = crate::conversation::compute_chain_fingerprint(
+            &system_prompt,
+            &tools,
+            &self.selected_params,
+            tool_choice,
+        );
         // Stateful-chain hint: if the prior turn for this conversation
         // produced a `response_id` AND the anchor is still consistent
         // (same model selected, anchor node still on the path to
         // current head, message_count not larger than the assembled
-        // count) we let the next turn run as a delta call. Otherwise
+        // count, and the request body's non-input fields haven't
+        // drifted) we let the next turn run as a delta call. Otherwise
         // drop the anchor — the chain is busted and full replay is
         // the safe fallback. We resolve this BEFORE moving on so we
         // can clear an invalidated anchor in the same pass.
@@ -2928,7 +2955,8 @@ impl Harness {
                 let model_ok = self.selected_model.as_ref() == Some(&a.model);
                 let count_ok = a.message_count <= messages.len();
                 let tree_ok = tree.is_some_and(|t| anchor_is_ancestor(t, a.head, conv.head));
-                model_ok && count_ok && tree_ok
+                let fingerprint_ok = a.request_fingerprint == request_fingerprint;
+                model_ok && count_ok && tree_ok && fingerprint_ok
             });
             if valid {
                 anchor.map(|a| tau_proto::PreviousResponseRef {
@@ -2945,10 +2973,6 @@ impl Harness {
                 conv.chain_anchor = None;
             }
         }
-        let tools = self.gather_tool_definitions();
-        let cwd = std::env::current_dir()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| "(unknown)".to_owned());
         let session_prompt_id: SessionPromptId =
             format!("sp-{}", self.next_session_prompt_id).into();
         self.next_session_prompt_id += 1;
@@ -2972,10 +2996,16 @@ impl Harness {
             self.prompt_models
                 .insert(session_prompt_id.clone(), model.clone());
         }
+        // Stash the fingerprint of what we're about to send so the
+        // chain anchor we mint at response time records the body that
+        // was actually on the wire — defends against a setting flip
+        // racing the response.
+        self.prompt_fingerprints
+            .insert(session_prompt_id.clone(), request_fingerprint);
         let event = Event::SessionPromptCreated(SessionPromptCreated {
             session_prompt_id: session_prompt_id.clone(),
             session_id,
-            system_prompt: build_system_prompt(&self.discovered_skills, &cwd),
+            system_prompt,
             messages,
             tools,
             model,
@@ -3010,6 +3040,7 @@ impl Harness {
             self.prompt_conversations
                 .remove(response.session_prompt_id.as_str());
             self.prompt_models.remove(&response.session_prompt_id);
+            self.prompt_fingerprints.remove(&response.session_prompt_id);
             return Ok(());
         }
         if response.input_tokens.is_some() || response.cached_tokens.is_some() {
@@ -3042,6 +3073,7 @@ impl Harness {
         // `selected_model` later would lie if the user switched
         // models mid-turn.
         let turn_model = self.prompt_models.remove(&response.session_prompt_id);
+        let turn_fingerprint = self.prompt_fingerprints.remove(&response.session_prompt_id);
         if let Some(ref model) = turn_model {
             let sent_tokens = response.input_tokens.unwrap_or(0);
             let cached_tokens = response.cached_tokens.unwrap_or(0);
@@ -3084,7 +3116,9 @@ impl Harness {
         // pins this conversation's current head + assembled message
         // count so the next `send_prompt_to_agent_for` can send a
         // delta instead of replaying the full transcript.
-        if let (Some(response_id), Some(model)) = (response.response_id.clone(), turn_model) {
+        if let (Some(response_id), Some(model), Some(request_fingerprint)) =
+            (response.response_id.clone(), turn_model, turn_fingerprint)
+        {
             let (conv_head, conv_session) = self
                 .conversations
                 .get(&cid)
@@ -3101,6 +3135,7 @@ impl Harness {
                     head: conv_head.flatten(),
                     model,
                     message_count,
+                    request_fingerprint,
                 });
             }
         }

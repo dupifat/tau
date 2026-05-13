@@ -153,7 +153,15 @@ pub fn policy_lines(path: impl AsRef<Path>) -> Result<Vec<String>, InspectError>
 pub fn format_session_entry(entry: &SessionEntry) -> String {
     match entry {
         SessionEntry::UserMessage { text } => format!("user: {text}"),
-        SessionEntry::AgentMessage { text, .. } => format!("agent: {text}"),
+        SessionEntry::AgentMessage { text, .. } => {
+            // `text` is now Option<String> — tool-only turns with
+            // reasoning persist as an AgentMessage with text=None.
+            // Render the empty case as "agent: (no text)" so a session
+            // inspector still surfaces the entry rather than a phantom
+            // blank line.
+            let body = text.as_deref().unwrap_or("(no text)");
+            format!("agent: {body}")
+        }
         SessionEntry::ToolActivity(a) => match &a.outcome {
             ToolActivityOutcome::Requested { arguments } => {
                 if a.tool_name.as_str() == "skill" {
@@ -204,7 +212,7 @@ pub fn latest_agent_preview(session: &SessionTree) -> Option<String> {
         .into_iter()
         .rev()
         .find_map(|e| match e {
-            SessionEntry::AgentMessage { text, .. } => Some(text.clone()),
+            SessionEntry::AgentMessage { text, .. } => text.clone(),
             _ => None,
         })
 }

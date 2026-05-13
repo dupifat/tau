@@ -93,6 +93,7 @@ fn representative_events() -> Vec<Event> {
             backend: None,
             response_id: None,
             phase: None,
+            reasoning_items: Vec::new(),
         }),
         Event::ExtensionStarting(ExtensionStarting {
             instance_id: 1.into(),

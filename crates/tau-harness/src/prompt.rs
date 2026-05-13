@@ -159,11 +159,21 @@ pub(crate) fn assemble_conversation_from(
                 text,
                 thinking: _,
                 phase,
+                reasoning_items,
             } => {
                 // `thinking` is intentionally NOT replayed: provider
                 // reasoning summaries are for human inspection only,
                 // never fed back into later turns as plain assistant
                 // text. See `TAU_VISIBLE_THINKING_IMPLEMENTATION_PLAN.md`.
+                //
+                // `reasoning_items` *are* replayed — they're the
+                // backend's opaque `reasoning` output items (id +
+                // `encrypted_content`) that preserve the model's
+                // reasoning continuity across a broken chain. Each
+                // becomes a `ContentBlock::Reasoning` block on this
+                // assistant message; the responses backend emits
+                // them as top-level `input[]` items before the
+                // message/function_call items from the same turn.
                 //
                 // `phase` *is* replayed — the Codex deployment
                 // checklist warns that omitting it on history causes
@@ -171,9 +181,16 @@ pub(crate) fn assemble_conversation_from(
                 // Responses backend echoes it (or defaults to
                 // `final_answer`) when its `supports_phase` flag is
                 // on.
+                let mut content: Vec<ContentBlock> = reasoning_items
+                    .iter()
+                    .map(|item| ContentBlock::Reasoning { item: item.clone() })
+                    .collect();
+                if let Some(text) = text {
+                    content.push(ContentBlock::Text { text: text.clone() });
+                }
                 messages.push(ConversationMessage {
                     role: ConversationRole::Assistant,
-                    content: vec![ContentBlock::Text { text: text.clone() }],
+                    content,
                     phase: *phase,
                 });
             }
@@ -410,6 +427,7 @@ mod tests {
                 backend: None,
                 response_id: None,
                 phase: Some(tau_proto::MessagePhase::Commentary),
+                reasoning_items: Vec::new(),
             },
         ));
 
@@ -419,5 +437,118 @@ mod tests {
             .find(|m| matches!(m.role, tau_proto::ConversationRole::Assistant))
             .expect("assistant message");
         assert_eq!(assistant.phase, Some(tau_proto::MessagePhase::Commentary));
+    }
+
+    /// Encrypted-reasoning replay: when `AgentResponseFinished` carries
+    /// `reasoning_items`, the next assembled prompt's assistant
+    /// message must front-load them as `ContentBlock::Reasoning` blocks
+    /// before any text. The responses backend then emits them as
+    /// top-level `input[]` items (covered by
+    /// `build_request_replays_reasoning_item_as_top_level_input`);
+    /// this test pins the persistence half of that pipeline so a
+    /// future fold refactor can't silently drop them on the floor.
+    #[test]
+    fn assemble_conversation_replays_reasoning_items_before_text() {
+        let mut tree = tau_core::SessionTree::from_events("session-1".into(), &[]);
+        tree.apply_event(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
+            text: "hi".to_owned(),
+            session_id: "session-1".into(),
+            originator: tau_proto::PromptOriginator::default(),
+            ctx_id: None,
+        }));
+        let blob = serde_json::json!({
+            "type": "reasoning",
+            "id": "rs_xyz",
+            "encrypted_content": "OPAQUE",
+        })
+        .to_string();
+        tree.apply_event(&Event::AgentResponseFinished(
+            tau_proto::AgentResponseFinished {
+                session_prompt_id: "sp-1".into(),
+                text: Some("here's what I found".to_owned()),
+                tool_calls: Vec::new(),
+                input_tokens: None,
+                cached_tokens: None,
+                output_tokens: None,
+                thinking: None,
+                token_usage: None,
+                originator: tau_proto::PromptOriginator::User,
+                backend: None,
+                response_id: None,
+                phase: None,
+                reasoning_items: vec![blob.clone()],
+            },
+        ));
+
+        let messages = assemble_conversation_from(&tree, tree.head());
+        let assistant = messages
+            .iter()
+            .find(|m| matches!(m.role, tau_proto::ConversationRole::Assistant))
+            .expect("assistant message");
+        assert_eq!(
+            assistant.content.len(),
+            2,
+            "expected reasoning + text on the assembled assistant message"
+        );
+        match &assistant.content[0] {
+            ContentBlock::Reasoning { item } => assert_eq!(item, &blob),
+            other => panic!("expected Reasoning block first, got {other:?}"),
+        }
+        match &assistant.content[1] {
+            ContentBlock::Text { text } => assert_eq!(text, "here's what I found"),
+            other => panic!("expected Text block after Reasoning, got {other:?}"),
+        }
+    }
+
+    /// Tool-only turn (no message text) with reasoning_items must
+    /// still persist as an `AgentMessage` entry — otherwise the
+    /// reasoning blob would be lost and reasoning continuity breaks
+    /// on any subsequent full-transcript replay. The assembled
+    /// assistant message has no Text block but does have the
+    /// Reasoning block, ready for the responses backend to emit it
+    /// before any function_call items that follow.
+    #[test]
+    fn assemble_conversation_persists_reasoning_on_tool_only_turn() {
+        let mut tree = tau_core::SessionTree::from_events("session-1".into(), &[]);
+        tree.apply_event(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
+            text: "go".to_owned(),
+            session_id: "session-1".into(),
+            originator: tau_proto::PromptOriginator::default(),
+            ctx_id: None,
+        }));
+        let blob = serde_json::json!({
+            "type": "reasoning",
+            "id": "rs_tool_turn",
+            "encrypted_content": "OPAQUE",
+        })
+        .to_string();
+        tree.apply_event(&Event::AgentResponseFinished(
+            tau_proto::AgentResponseFinished {
+                session_prompt_id: "sp-1".into(),
+                text: None,
+                tool_calls: Vec::new(),
+                input_tokens: None,
+                cached_tokens: None,
+                output_tokens: None,
+                thinking: None,
+                token_usage: None,
+                originator: tau_proto::PromptOriginator::User,
+                backend: None,
+                response_id: None,
+                phase: None,
+                reasoning_items: vec![blob.clone()],
+            },
+        ));
+
+        let messages = assemble_conversation_from(&tree, tree.head());
+        let assistant = messages
+            .iter()
+            .find(|m| matches!(m.role, tau_proto::ConversationRole::Assistant))
+            .expect("assistant message");
+        assert_eq!(assistant.content.len(), 1);
+        assert!(
+            matches!(&assistant.content[0], ContentBlock::Reasoning { item } if item == &blob),
+            "tool-only turn must still surface reasoning on replay"
+        );
     }
 }

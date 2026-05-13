@@ -474,6 +474,19 @@ pub struct ProviderCompat {
     /// Responses endpoint auto-enables this at resolver time, so
     /// users don't need to flip it on for the built-in OAuth flow.
     pub supports_phase: bool,
+    /// Provider returns `reasoning` output items with a replayable
+    /// `encrypted_content` field when the request body asks for
+    /// `include: ["reasoning.encrypted_content"]`. Currently OpenAI
+    /// Codex on `gpt-5.3-codex` and later. Off by default — emitting
+    /// the `include` opt-in to a provider that rejects unknown
+    /// arguments breaks the call. The Codex Responses endpoint
+    /// auto-enables this at resolver time so users don't need to
+    /// flip it on for the built-in OAuth flow. Companion to
+    /// [`Self::supports_phase`]: both gate on the same model
+    /// generation, but they're tracked separately because users may
+    /// run private deployments where one is plumbed and the other
+    /// isn't.
+    pub supports_encrypted_reasoning: bool,
     /// Provider exposes the Responses API over a persistent
     /// WebSocket transport instead of (or in addition to) HTTP+SSE.
     /// When on, the agent caches per-conversation WS connections
@@ -498,6 +511,7 @@ impl Default for ProviderCompat {
             supports_reasoning_summary: false,
             supports_verbosity: false,
             supports_phase: false,
+            supports_encrypted_reasoning: false,
             supports_websocket: false,
         }
     }

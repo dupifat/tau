@@ -142,6 +142,7 @@ fn late_joining_ui_client_replays_only_final_session_events() {
             backend: None,
             response_id: None,
             phase: None,
+            reasoning_items: Vec::new(),
         }),
     );
 
@@ -356,6 +357,7 @@ fn resumed_harness_replays_persisted_session_history() {
             backend: None,
             response_id: None,
             phase: None,
+            reasoning_items: Vec::new(),
         })
         .expect("persist agent response");
 
@@ -421,6 +423,7 @@ fn thinking_is_persisted_but_excluded_from_prompt_replay() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("persist agent response");
 

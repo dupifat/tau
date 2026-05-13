@@ -23,7 +23,13 @@ pub enum SessionEntry {
         text: String,
     },
     AgentMessage {
-        text: String,
+        /// Visible message text. `None` for tool-only turns where the
+        /// model emitted nothing but `function_call` items — those
+        /// turns still warrant an entry whenever `reasoning_items`
+        /// are present, so the assembler can re-attach the reasoning
+        /// to the next request.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
         /// Provider-supplied reasoning summary captured during the
         /// turn, if any. Persisted alongside the response so resume
         /// can re-render it; intentionally excluded from prompt
@@ -40,6 +46,16 @@ pub enum SessionEntry {
         /// Responses backend.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         phase: Option<tau_proto::MessagePhase>,
+        /// Provider-supplied reasoning output items (raw JSON
+        /// blobs), captured when the backend ran with
+        /// `include: ["reasoning.encrypted_content"]` (Codex
+        /// `gpt-5.3-codex+`). The harness replays these verbatim
+        /// before the next turn's message/function_call items so the
+        /// model's reasoning continuity survives a broken chain —
+        /// same role as Pi's `thinkingSignature` blob, persisted on
+        /// disk so a resume after restart still recovers it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        reasoning_items: Vec<String>,
     },
     ToolActivity(ToolActivityRecord),
 }
@@ -304,16 +320,29 @@ impl SessionTree {
                     text: steered.text.clone(),
                 },
             )),
-            Event::AgentResponseFinished(response) => response.text.as_ref().map(|text| {
-                self.append_node_at(
-                    parent,
-                    SessionEntry::AgentMessage {
-                        text: text.clone(),
-                        thinking: response.thinking.clone(),
-                        phase: response.phase,
-                    },
-                )
-            }),
+            Event::AgentResponseFinished(response) => {
+                // An entry is warranted whenever the turn produced
+                // *some* assistant output that isn't already
+                // captured elsewhere on the tree: visible text or
+                // reasoning items. Tool calls land on
+                // `SessionEntry::ToolActivity` via downstream
+                // `ToolRequest` events, so a pure tool-only turn
+                // with no reasoning still produces no `AgentMessage`
+                // — same shape as before this field existed.
+                if response.text.is_some() || !response.reasoning_items.is_empty() {
+                    Some(self.append_node_at(
+                        parent,
+                        SessionEntry::AgentMessage {
+                            text: response.text.clone(),
+                            thinking: response.thinking.clone(),
+                            phase: response.phase,
+                            reasoning_items: response.reasoning_items.clone(),
+                        },
+                    ))
+                } else {
+                    None
+                }
+            }
             Event::ToolRequest(request) => Some(self.append_node_at(
                 parent,
                 SessionEntry::ToolActivity(ToolActivityRecord {

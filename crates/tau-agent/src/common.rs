@@ -147,6 +147,15 @@ pub struct StreamState {
     /// [`tau_proto::AgentResponseFinished`] so the harness persists
     /// it for later replay.
     pub phase: Option<tau_proto::MessagePhase>,
+    /// Raw JSON of each `reasoning` output item observed on this
+    /// stream, in arrival order. Captured from `response.output_item.done`
+    /// events when the request body asked for
+    /// `include: ["reasoning.encrypted_content"]` (currently the
+    /// Codex Responses backend's `supports_encrypted_reasoning` path).
+    /// The strings are stored verbatim — backends don't parse fields
+    /// out of them — and are surfaced on `AgentResponseFinished` so
+    /// the harness can replay them on subsequent turns.
+    pub reasoning_items: Vec<String>,
 }
 
 /// Accumulates one tool call across streaming chunks.
@@ -167,6 +176,7 @@ impl StreamState {
             thinking: None,
             response_id: None,
             phase: None,
+            reasoning_items: Vec::new(),
         }
     }
 

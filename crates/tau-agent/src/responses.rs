@@ -50,6 +50,23 @@ pub struct ResponsesConfig {
     ///    the harness can persist it.
     /// When off, no `phase` field is sent or parsed.
     pub supports_phase: bool,
+    /// Whether the provider returns `reasoning` output items with a
+    /// replayable `encrypted_content` field when the request body
+    /// asks for `include: ["reasoning.encrypted_content"]`. Currently
+    /// the Codex Responses backend on `gpt-5.3-codex+`. When on:
+    /// 1. The request body sets `include: ["reasoning.encrypted_content"]` so
+    ///    the model's reasoning output items carry the encrypted blob the
+    ///    harness can replay verbatim.
+    /// 2. The SSE/WS parser captures each `reasoning` output item's full JSON
+    ///    on `response.output_item.done` and forwards it on
+    ///    [`tau_proto::AgentResponseFinished::reasoning_items`].
+    ///
+    /// When off, no `include` field is sent and reasoning items are
+    /// not captured. Pi calls this "encrypted reasoning replay"; it's
+    /// what keeps the model's reasoning continuity intact across a
+    /// broken chain (reconnect, fork, fingerprint mismatch) without
+    /// having to actually re-derive it from the visible transcript.
+    pub supports_encrypted_reasoning: bool,
     /// Whether to attempt a persistent WebSocket transport for this
     /// provider instead of one-shot HTTP+SSE. See
     /// [`tau_config::settings::ProviderCompat::supports_websocket`].
@@ -256,6 +273,22 @@ pub(crate) fn apply_event(
                         state.tool_calls[output_index].name = name.to_owned();
                     }
                 }
+                // Capture reasoning items only on `output_item.done`,
+                // not on `added` — the `added` event arrives before
+                // any summary parts/encrypted content stream in, so
+                // its payload is just a stub. `done` carries the full
+                // item (id + encrypted_content + summary) the harness
+                // needs to replay verbatim on the next turn.
+                //
+                // The whole item is stashed as opaque JSON so a future
+                // wire-format change (extra fields, schema rev) round-
+                // trips without code changes — same Pi-style blob the
+                // harness re-emits on full-transcript replay.
+                if event_type == "response.output_item.done"
+                    && item["type"].as_str() == Some("reasoning")
+                {
+                    state.reasoning_items.push(item.to_string());
+                }
                 if state.phase.is_none() {
                     state.phase = parse_phase_from_item(item);
                 }
@@ -374,6 +407,14 @@ struct ResponsesRequest {
     /// endpoints don't trip on an unknown field.
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<TextRequest>,
+    /// Optional opt-ins for richer response payloads. Currently only
+    /// used to flip on `"reasoning.encrypted_content"`, which makes
+    /// the model return an opaque per-`reasoning`-item blob the
+    /// harness persists and replays on later turns. Omitted entirely
+    /// when nothing's asked for so older endpoints don't trip on an
+    /// unknown field.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    include: Vec<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -491,6 +532,11 @@ fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> Respo
     let prompt_cache_retention = config
         .prompt_cache_retention
         .map(tau_config::settings::PromptCacheRetention::as_wire);
+    let include: Vec<&'static str> = if config.supports_encrypted_reasoning {
+        vec!["reasoning.encrypted_content"]
+    } else {
+        Vec::new()
+    };
 
     ResponsesRequest {
         model: config.model_id.clone(),
@@ -514,6 +560,7 @@ fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> Respo
         tool_choice,
         reasoning,
         text,
+        include,
         prompt_cache_key,
         prompt_cache_retention,
         previous_response_id,
@@ -635,6 +682,11 @@ fn convert_message(
                         }));
                     }
                     ContentBlock::ToolUse { .. } => {}
+                    // Reasoning items are assistant-role artifacts and
+                    // never appear on user messages in practice; emit
+                    // nothing on this match for forward-compatibility
+                    // with a malformed/legacy persisted message.
+                    ContentBlock::Reasoning { .. } => {}
                 }
             }
             if !text_items.is_empty() {
@@ -706,6 +758,40 @@ fn convert_message(
                         }));
                     }
                     ContentBlock::ToolResult { .. } => {}
+                    ContentBlock::Reasoning { item } => {
+                        // Reasoning items are top-level `input[]`
+                        // entries on the Codex Responses API — same
+                        // structural slot as `message` and
+                        // `function_call`, never nested inside an
+                        // assistant message. Flush any accumulated
+                        // text first so the message item lands after
+                        // the reasoning, matching the order the
+                        // server emitted them; then re-emit the raw
+                        // JSON the agent captured (id + encrypted
+                        // content + summary) verbatim. A parse
+                        // failure silently drops the item — same
+                        // outcome as the chain breaking, no harm
+                        // beyond losing reasoning continuity.
+                        if !text_parts.is_empty() {
+                            let mut flushed = serde_json::json!({
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{
+                                    "type": "output_text",
+                                    "text": text_parts.join("\n"),
+                                    "annotations": [],
+                                }],
+                            });
+                            if let Some(phase) = phase_wire {
+                                flushed["phase"] = serde_json::Value::String(phase.to_owned());
+                            }
+                            out.push(flushed);
+                            text_parts.clear();
+                        }
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(item) {
+                            out.push(value);
+                        }
+                    }
                 }
             }
             if !text_parts.is_empty() {

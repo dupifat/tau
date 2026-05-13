@@ -190,6 +190,7 @@ where
                                 backend: None,
                                 response_id: None,
                                 phase: None,
+                                reasoning_items: Vec::new(),
                             },
                         )))?;
                         writer.flush()?;
@@ -331,6 +332,7 @@ impl From<tau_provider::resolver::ResolvedBackend> for BackendConfig {
                     supports_reasoning_summary: cfg.supports_reasoning_summary,
                     supports_verbosity: cfg.supports_verbosity,
                     supports_phase: cfg.supports_phase,
+                    supports_encrypted_reasoning: cfg.supports_encrypted_reasoning,
                     supports_websocket: cfg.supports_websocket,
                     prompt_cache_key: cfg.prompt_cache_key,
                     prompt_cache_retention: cfg.prompt_cache_retention,
@@ -628,6 +630,8 @@ fn finish_stream<W: Write>(
     let thinking = state.thinking.clone();
     let response_id = state.response_id.clone();
     let phase = state.phase;
+    let mut state = state;
+    let reasoning_items = std::mem::take(&mut state.reasoning_items);
     let tool_calls = state.into_tool_calls();
     let text = if text_empty {
         if tool_calls.is_empty() {
@@ -657,6 +661,7 @@ fn finish_stream<W: Write>(
             backend: Some(backend.clone()),
             response_id,
             phase,
+            reasoning_items,
         },
     )))?;
     writer.flush()?;
@@ -684,6 +689,7 @@ fn finish_error<W: Write>(
             backend: Some(backend.clone()),
             response_id: None,
             phase: None,
+            reasoning_items: Vec::new(),
         },
     )))?;
     writer.flush()?;
@@ -773,6 +779,7 @@ where
                             backend: None,
                             response_id: None,
                             phase: None,
+                            reasoning_items: Vec::new(),
                         },
                     )))?;
                 } else {
@@ -837,6 +844,7 @@ where
                             backend: None,
                             response_id: None,
                             phase: None,
+                            reasoning_items: Vec::new(),
                         },
                     )))?;
                 }

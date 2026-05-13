@@ -102,6 +102,7 @@ fn pure_mutating_pure_serializes_through_dispatch_state_machine() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     };
 
     h.handle_agent_response_finished(response)
@@ -206,6 +207,7 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     };
     h.handle_agent_response_finished(response)
         .expect("finished");
@@ -231,6 +233,7 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
                     tool_result_ids.push(tool_use_id.to_string());
                 }
                 tau_proto::ContentBlock::Text { .. } => {}
+                tau_proto::ContentBlock::Reasoning { .. } => {}
             }
         }
     }
@@ -296,6 +299,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("agent response with tool call");
 
@@ -443,6 +447,7 @@ fn linear_session_prompts_strictly_extend_previous_messages() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("persist first agent response");
 
@@ -502,6 +507,7 @@ fn response_id_anchors_next_prompt_with_previous_response() {
         backend: None,
         response_id: Some("resp_abc".to_owned()),
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("finish first");
 
@@ -550,6 +556,7 @@ fn model_switch_invalidates_chain_anchor() {
         backend: None,
         response_id: Some("resp_abc".to_owned()),
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("finish first");
 
@@ -567,6 +574,165 @@ fn model_switch_invalidates_chain_anchor() {
     );
 
     h.shutdown().expect("shutdown");
+}
+
+/// Changing `selected_params` mid-conversation must bust the chain.
+/// The Codex Responses upstream stored its reasoning state against
+/// the *previous* turn's effort/verbosity/thinking-summary; sending
+/// a `previous_response_id` from a request whose non-input fields
+/// drifted would silently decohere the model's reasoning. The
+/// fingerprint check catches this before the round-trip — mirrors
+/// Pi's `requestBodiesMatchExceptInput`.
+#[test]
+fn params_drift_invalidates_chain_anchor() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    h.selected_params = tau_proto::ModelParams {
+        effort: tau_proto::Effort::Low,
+        ..Default::default()
+    };
+
+    h.submit_user_prompt("s1".into(), "first".to_owned())
+        .expect("submit first");
+    let spid1: SessionPromptId = "sp-0".into();
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: spid1,
+        text: Some("first answer".to_owned()),
+        tool_calls: Vec::new(),
+        input_tokens: None,
+        cached_tokens: None,
+        output_tokens: None,
+        thinking: None,
+        token_usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        response_id: Some("resp_abc".to_owned()),
+        phase: None,
+        reasoning_items: Vec::new(),
+    })
+    .expect("finish first");
+
+    // User dials effort up between turns.
+    h.selected_params.effort = tau_proto::Effort::High;
+
+    h.submit_user_prompt("s1".into(), "second".to_owned())
+        .expect("submit second");
+    let spid2: SessionPromptId = "sp-1".into();
+    let prompt2 = read_prompt_created(&h, &spid2);
+
+    assert!(
+        prompt2.previous_response.is_none(),
+        "params drift must clear the previous-response anchor"
+    );
+}
+
+/// A skill loading mid-conversation (and surfacing into the system
+/// prompt) must also bust the chain — the upstream stored its
+/// reasoning state against the *previous* system prompt, and
+/// chaining a request whose `instructions` field has new content
+/// would silently mix the skill's guidance with reasoning that
+/// never saw it. This is the more likely real-world trigger for a
+/// fingerprint miss than a manual `selected_params` flip: skills
+/// auto-load as the agent works.
+#[test]
+fn system_prompt_drift_invalidates_chain_anchor() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    h.submit_user_prompt("s1".into(), "first".to_owned())
+        .expect("submit first");
+    let spid1: SessionPromptId = "sp-0".into();
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: spid1,
+        text: Some("first answer".to_owned()),
+        tool_calls: Vec::new(),
+        input_tokens: None,
+        cached_tokens: None,
+        output_tokens: None,
+        thinking: None,
+        token_usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        response_id: Some("resp_skills".to_owned()),
+        phase: None,
+        reasoning_items: Vec::new(),
+    })
+    .expect("finish first");
+
+    // Simulate a skill becoming visible in the system prompt between
+    // turns. `build_system_prompt` renders any `add_to_prompt: true`
+    // skill into the prompt body, so inserting one here is the
+    // narrowest way to make the system_prompt string drift without
+    // touching unrelated state.
+    h.discovered_skills.insert(
+        tau_proto::SkillName::new("late-loaded"),
+        crate::discovery::DiscoveredSkill {
+            source_id: tau_proto::ConnectionId::from("test-ext"),
+            description: "appears between turns".to_owned(),
+            file_path: std::path::PathBuf::from("/tmp/late-loaded.md"),
+            add_to_prompt: true,
+        },
+    );
+
+    h.submit_user_prompt("s1".into(), "second".to_owned())
+        .expect("submit second");
+    let spid2: SessionPromptId = "sp-1".into();
+    let prompt2 = read_prompt_created(&h, &spid2);
+
+    assert!(
+        prompt2.previous_response.is_none(),
+        "system-prompt drift (skill became visible) must clear the chain anchor"
+    );
+}
+
+/// Counterpart: when the per-request fingerprint inputs *don't*
+/// change between turns, the chain anchor must remain valid. Locks
+/// in the "compute fingerprint over (system_prompt, tools, params,
+/// tool_choice)" surface — if a future change quietly mixes in some
+/// other input that drifts across turns (e.g. cwd, current date,
+/// session id), this test starts failing.
+#[test]
+fn stable_params_preserve_chain_anchor() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    h.selected_params = tau_proto::ModelParams::default();
+
+    h.submit_user_prompt("s1".into(), "first".to_owned())
+        .expect("submit first");
+    let spid1: SessionPromptId = "sp-0".into();
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: spid1,
+        text: Some("first answer".to_owned()),
+        tool_calls: Vec::new(),
+        input_tokens: None,
+        cached_tokens: None,
+        output_tokens: None,
+        thinking: None,
+        token_usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        response_id: Some("resp_xyz".to_owned()),
+        phase: None,
+        reasoning_items: Vec::new(),
+    })
+    .expect("finish first");
+
+    h.submit_user_prompt("s1".into(), "second".to_owned())
+        .expect("submit second");
+    let spid2: SessionPromptId = "sp-1".into();
+    let prompt2 = read_prompt_created(&h, &spid2);
+
+    let prev = prompt2
+        .previous_response
+        .as_ref()
+        .expect("chain should survive when no inputs drifted");
+    assert_eq!(prev.id, "resp_xyz");
 }
 
 /// A turn that didn't yield a `response_id` (Chat Completions
@@ -597,6 +763,7 @@ fn missing_response_id_leaves_chain_unset() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("finish first");
 
@@ -646,6 +813,7 @@ fn queued_prompt_extends_completed_first_prompt() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("finish first");
 
@@ -792,6 +960,7 @@ fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("tool response");
 
@@ -846,6 +1015,7 @@ fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("side finished");
 
@@ -934,6 +1104,7 @@ fn ext_agent_query_during_tool_call_branches_off_unresolved_tool_use() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("tool response");
 
@@ -1052,6 +1223,7 @@ fn non_tool_ext_agent_query_inherits_parent_branch() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("main response");
     let parent_head_before = h.conversations.get(&cid).expect("default conv").head;
@@ -1208,6 +1380,7 @@ fn delegate_ext_agent_query_keeps_tool_choice_auto() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("main response");
 
@@ -1305,6 +1478,7 @@ fn side_conversation_pure_tool_dispatches_through_parent_mutating_delegate() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("main response");
 
@@ -1351,6 +1525,7 @@ fn side_conversation_pure_tool_dispatches_through_parent_mutating_delegate() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("side response");
 
@@ -1446,6 +1621,7 @@ fn read_only_delegate_calls_dispatch_concurrently() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("main response");
 
@@ -1520,6 +1696,7 @@ fn read_only_delegate_calls_dispatch_concurrently() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("main response");
     assert_eq!(
@@ -1599,6 +1776,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("main response");
 
@@ -1649,6 +1827,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("side response");
 
@@ -1748,6 +1927,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("main response");
 
@@ -1795,6 +1975,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("outer response");
     h.handle_ext_agent_query(
@@ -1839,6 +2020,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("nested final");
 
@@ -1958,6 +2140,7 @@ fn nested_ext_agent_query_branches_from_tool_owner_conversation() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("main response");
 
@@ -1999,6 +2182,7 @@ fn nested_ext_agent_query_branches_from_tool_owner_conversation() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("outer response");
 
@@ -2094,6 +2278,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("main response");
 
@@ -2130,6 +2315,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("side final");
 
@@ -2219,6 +2405,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("main response");
 
@@ -2260,6 +2447,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("top response");
 
@@ -2399,6 +2587,7 @@ fn parallel_side_convs_do_not_share_branch_cursor() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("main response");
 
@@ -2488,6 +2677,7 @@ fn parallel_side_convs_do_not_share_branch_cursor() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("A response");
 
@@ -2582,6 +2772,7 @@ fn tool_events_carry_owning_conversation_originator() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("main response");
 
@@ -2623,6 +2814,7 @@ fn tool_events_carry_owning_conversation_originator() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     })
     .expect("sub response");
 

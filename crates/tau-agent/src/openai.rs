@@ -367,6 +367,13 @@ fn convert_message(msg: &ConversationMessage, out: &mut Vec<ApiMessage>) {
                         });
                     }
                     ContentBlock::ToolUse { .. } => {}
+                    // Reasoning items are Codex-Responses specific. The
+                    // Chat Completions API has no slot for them, so they
+                    // get dropped on conversion. A cross-backend session
+                    // (e.g. user mid-flight switches to a Chat
+                    // Completions model) silently loses reasoning
+                    // continuity — same outcome as the chain breaking.
+                    ContentBlock::Reasoning { .. } => {}
                 }
             }
         }
@@ -397,6 +404,11 @@ fn convert_message(msg: &ConversationMessage, out: &mut Vec<ApiMessage>) {
                         });
                     }
                     ContentBlock::ToolResult { .. } => {}
+                    // Reasoning items are Codex-Responses specific; the
+                    // Chat Completions wire has no equivalent slot. See
+                    // user-role match above for the cross-backend
+                    // tradeoff this implies.
+                    ContentBlock::Reasoning { .. } => {}
                 }
             }
 

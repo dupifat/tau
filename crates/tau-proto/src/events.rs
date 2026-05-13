@@ -1934,6 +1934,17 @@ pub struct AgentResponseFinished {
     /// warns about.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<MessagePhase>,
+    /// Provider-supplied reasoning output items, in stream order. Each
+    /// entry is the raw JSON of one `reasoning` item — including its
+    /// `id` and `encrypted_content` — captured when the backend ran
+    /// with `include: ["reasoning.encrypted_content"]` on the request
+    /// (currently the Codex Responses backend, gated on its
+    /// `supports_encrypted_reasoning` flag). The harness persists
+    /// these blobs and replays them verbatim on later full-transcript
+    /// turns so the model's reasoning continuity survives a broken
+    /// chain — same role as Pi's `thinkingSignature` blob.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_items: Vec<String>,
 }
 
 /// Identifies the LLM backend that handled an
@@ -2011,6 +2022,24 @@ pub enum ContentBlock {
         content: String,
         #[serde(default)]
         is_error: bool,
+    },
+    /// One provider-supplied reasoning output item, stored as the raw
+    /// JSON the API emitted (item id + `encrypted_content` + optional
+    /// summary). The harness treats the payload as opaque and replays
+    /// it verbatim as a top-level `input` item on later turns, which
+    /// is how Codex `gpt-5.3-codex+` preserves model reasoning state
+    /// across requests when the chain is broken (reconnect, fork,
+    /// fingerprint mismatch). Same shape as Pi's `thinkingSignature`
+    /// — opaque blob, forward-compatible against schema drift.
+    ///
+    /// Assistant role only; appears before any `Text`/`ToolUse` blocks
+    /// from the same response.
+    Reasoning {
+        /// Raw JSON of the provider's `reasoning` output item. Tau
+        /// never parses fields out of this — backends that don't
+        /// understand the source provider's schema (e.g. Chat
+        /// Completions replaying Codex history) simply drop it.
+        item: String,
     },
 }
 

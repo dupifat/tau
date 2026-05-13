@@ -171,6 +171,7 @@ fn new_session_clears_session_ui_state() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     }));
     renderer.handle(&Event::ToolResult(ToolResult {
         call_id: "call-1".into(),
@@ -325,6 +326,7 @@ fn single_prompt_response_cycle() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     }));
     sync(&handle);
     assert!(
@@ -423,6 +425,7 @@ fn thinking_renders_as_separate_block_above_response() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     }));
     sync(&handle);
     // Thinking should appear above the response in the history.
@@ -486,6 +489,7 @@ fn set_show_thinking_round_trip_restores_history() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     }));
     sync(&handle);
     assert!(vt.screen_contains(80, "the_thinking_text"));
@@ -580,6 +584,7 @@ fn thinking_created_while_off_stays_invisible_after_toggle_on() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     }));
     sync(&handle);
     assert!(vt.screen_contains(80, "answer"));
@@ -641,6 +646,7 @@ fn no_thinking_block_when_summary_absent() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     }));
     sync(&handle);
     // Just make sure we didn't crash and the response is visible.
@@ -710,6 +716,7 @@ fn queued_prompt_renders_after_first_completes() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     }));
     sync(&handle);
     assert!(vt.screen_contains(80, "response one"));
@@ -768,6 +775,7 @@ fn queued_prompt_renders_after_first_completes() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     }));
     sync(&handle);
     assert!(
@@ -860,6 +868,7 @@ fn three_queued_prompts_render_sequentially() {
             backend: None,
             response_id: None,
             phase: None,
+            reasoning_items: Vec::new(),
         }));
         sync(&handle);
     }
@@ -930,6 +939,7 @@ fn streaming_indicator_appends_during_updates() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     }));
     sync(&handle);
     assert!(vt.screen_contains(80, "Hello"));
@@ -972,6 +982,7 @@ fn running_tool_call_shows_ellipsis_until_result() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     }));
     sync(&handle);
     assert!(vt.screen_contains(80, "read src/main.rs …"));
@@ -1083,6 +1094,7 @@ fn streaming_block_does_not_duplicate_on_finish() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     }));
     sync(&handle);
 
@@ -1398,6 +1410,7 @@ fn three_prompts_during_streaming_all_render_correctly() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     }));
     sync(&handle);
     assert!(
@@ -1440,6 +1453,7 @@ fn three_prompts_during_streaming_all_render_correctly() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     }));
     sync(&handle);
     assert!(
@@ -1482,6 +1496,7 @@ fn three_prompts_during_streaming_all_render_correctly() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     }));
     sync(&handle);
 
@@ -1572,6 +1587,7 @@ fn emoji_in_response_renders_correctly() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     }));
     sync(&handle);
 
@@ -1644,6 +1660,7 @@ fn multiple_emoji_no_column_drift() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     }));
     sync(&handle);
 
@@ -1717,6 +1734,7 @@ fn overflowing_stream_replaced_cleanly_on_finish() {
         backend: None,
         response_id: None,
         phase: None,
+        reasoning_items: Vec::new(),
     }));
     sync(&handle);
 

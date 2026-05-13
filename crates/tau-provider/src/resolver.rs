@@ -38,6 +38,10 @@ pub struct ResolvedResponses {
     /// Provider accepts (and the model emits) the Codex assistant
     /// `phase` field. See [`ProviderCompat::supports_phase`].
     pub supports_phase: bool,
+    /// Provider returns replayable `reasoning` output items when the
+    /// request body sets `include: ["reasoning.encrypted_content"]`.
+    /// See [`ProviderCompat::supports_encrypted_reasoning`].
+    pub supports_encrypted_reasoning: bool,
     /// Provider exposes the Responses API over a persistent
     /// WebSocket. See [`ProviderCompat::supports_websocket`].
     pub supports_websocket: bool,
@@ -133,6 +137,7 @@ fn responses_backend(
         supports_reasoning_summary: supports_reasoning_summary(provider, base_url),
         supports_verbosity: provider.compat.supports_verbosity,
         supports_phase: supports_phase(provider, base_url, model_id),
+        supports_encrypted_reasoning: supports_encrypted_reasoning(provider, base_url, model_id),
         supports_websocket: supports_websocket(provider, base_url),
         prompt_cache_key: prompt_cache_key(provider, base_url, model_id),
         prompt_cache_retention: prompt_cache_retention(provider, base_url, model_id),
@@ -293,6 +298,21 @@ fn supports_reasoning_summary(provider: &ProviderConfig, base_url: &str) -> bool
 /// recognize.
 fn supports_phase(provider: &ProviderConfig, base_url: &str, model_id: &str) -> bool {
     if provider.compat.supports_phase {
+        return true;
+    }
+    is_builtin_openai_codex_endpoint(base_url) && is_known_phase_capable_model_id(model_id)
+}
+
+/// Effective `supports_encrypted_reasoning` for a resolved Responses
+/// backend. Same shape as [`supports_phase`]: explicit provider opt-in
+/// wins, and as a convenience the flag auto-enables for the built-in
+/// ChatGPT Codex endpoint on the same model-id whitelist
+/// (`gpt-5.3-codex` and later) — both features were introduced in the
+/// same Codex generation and live or die together in practice, but
+/// they're resolved independently so a future custom deployment can
+/// expose only one.
+fn supports_encrypted_reasoning(provider: &ProviderConfig, base_url: &str, model_id: &str) -> bool {
+    if provider.compat.supports_encrypted_reasoning {
         return true;
     }
     is_builtin_openai_codex_endpoint(base_url) && is_known_phase_capable_model_id(model_id)

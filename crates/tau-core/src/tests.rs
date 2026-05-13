@@ -58,6 +58,7 @@ fn store_agent_message(store: &mut SessionStore, session_id: &str, text: &str) -
                 backend: None,
                 response_id: None,
                 phase: None,
+                reasoning_items: Vec::new(),
             }),
         )
         .expect("append session event");
@@ -134,6 +135,7 @@ fn directed_events_ignore_subscriptions_but_still_use_visibility_filters() {
                 backend: None,
                 response_id: None,
                 phase: None,
+                reasoning_items: Vec::new(),
             })),
         )
         .expect("directed route should succeed");
@@ -195,6 +197,7 @@ fn connection_abstraction_is_transport_independent_for_in_memory_clients() {
             backend: None,
             response_id: None,
             phase: None,
+            reasoning_items: Vec::new(),
         },
     )));
     assert_eq!(second_report.delivered_to, vec![agent_id.clone()]);
@@ -537,6 +540,7 @@ fn session_tree_captures_phase_from_agent_response_finished() {
         backend: None,
         response_id: None,
         phase: Some(MessagePhase::Commentary),
+        reasoning_items: Vec::new(),
     }));
 
     let last = tree
@@ -546,7 +550,7 @@ fn session_tree_captures_phase_from_agent_response_finished() {
         .expect("at least one entry");
     match last {
         SessionEntry::AgentMessage { phase, text, .. } => {
-            assert_eq!(text, "draft response");
+            assert_eq!(text.as_deref(), Some("draft response"));
             assert_eq!(*phase, Some(MessagePhase::Commentary));
         }
         other => panic!("expected AgentMessage, got {other:?}"),
@@ -577,9 +581,10 @@ fn session_tree_persists_across_reopen() {
                 text: "hello".to_owned(),
             },
             &SessionEntry::AgentMessage {
-                text: "hi there".to_owned(),
+                text: Some("hi there".to_owned()),
                 thinking: None,
                 phase: None,
+                reasoning_items: Vec::new(),
             },
         ]
     );

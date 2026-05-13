@@ -19,9 +19,42 @@
 use std::collections::VecDeque;
 
 use tau_core::NodeId;
-use tau_proto::{ConnectionId, ModelId, PromptOriginator, SessionId, SessionPromptId, ToolCallId};
+use tau_proto::{
+    ConnectionId, ModelId, ModelParams, PromptOriginator, SessionId, SessionPromptId, ToolCallId,
+    ToolChoice, ToolDefinition,
+};
 
 use crate::dedup::ResultDedupMap;
+
+/// Hash the per-request inputs whose drift would invalidate a Codex
+/// chain (`previous_response_id`). System prompt, tool list, model
+/// params, and tool_choice each appear on the wire on every turn; if
+/// they differ from the prior turn the server's reasoning continuity
+/// can decohere silently. Used by both [`ChainAnchor::request_fingerprint`]
+/// (set when the anchor is minted) and the anchor-validity check before
+/// sending the next prompt.
+///
+/// Domain-separated by a NUL byte between fields so e.g. a system
+/// prompt ending in `"]"` can't be confused with the start of the
+/// tools JSON. Field serialization failures (impossibly rare on these
+/// types) collapse to empty bytes, which just means a mismatch and a
+/// safe full-replay fallback.
+pub(crate) fn compute_chain_fingerprint(
+    system_prompt: &str,
+    tools: &[ToolDefinition],
+    model_params: &ModelParams,
+    tool_choice: ToolChoice,
+) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(system_prompt.as_bytes());
+    hasher.update(b"\0tools:");
+    hasher.update(&serde_json::to_vec(tools).unwrap_or_default());
+    hasher.update(b"\0params:");
+    hasher.update(&serde_json::to_vec(model_params).unwrap_or_default());
+    hasher.update(b"\0tool_choice:");
+    hasher.update(&serde_json::to_vec(&tool_choice).unwrap_or_default());
+    *hasher.finalize().as_bytes()
+}
 
 /// Opaque per-process conversation identifier. Not on the wire — the
 /// harness mints these locally and uses them as routing keys.
@@ -171,6 +204,14 @@ pub(crate) struct ChainAnchor {
     /// `messages[message_count..]` to get the new content the upstream
     /// API hasn't seen yet.
     pub(crate) message_count: usize,
+    /// Blake3 fingerprint of `(system_prompt, tools, model_params,
+    /// tool_choice)` as observed when the anchor was minted. Codex
+    /// rejects (or silently misinterprets) a chained request whose
+    /// non-input fields drift from the prior turn, so the next send
+    /// re-hashes the same inputs and drops the anchor on mismatch —
+    /// catching the divergence before the round-trip rather than
+    /// after. Matches Pi's `requestBodiesMatchExceptInput` check.
+    pub(crate) request_fingerprint: [u8; 32],
 }
 
 impl Conversation {

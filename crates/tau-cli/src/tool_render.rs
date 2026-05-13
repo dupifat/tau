@@ -58,6 +58,9 @@ pub(crate) fn render_token_stats_block(
     tau_cli_term::StyledBlock::new(themed_text(theme, &themed))
 }
 
+const CACHE_HIT_WARNING_PERCENT: u8 = 95;
+const CACHE_HIT_WARNING_MIN_TOKENS: u64 = 1024;
+
 struct TokenStatsPart {
     text: String,
     style_name: &'static str,
@@ -87,19 +90,22 @@ fn token_stats_parts(
         .total
         .sent_tokens
         .saturating_sub(usage.stats.total.cached_tokens);
+    let turn_cache_possible = turn_cache_possible_tokens(usage);
+    let total_cache_possible = total_cache_possible_tokens(usage);
     let mut parts = Vec::new();
 
     parts.push(TokenStatsPart::new("Δ", names::TOKEN_STATS_DELTA));
     // Per-turn cache-hit %. Lets the user spot a regression (e.g. tool
     // reordering breaking the prefix) directly on the offending turn.
-    if let Some(percent) = cache_hit_percent(
-        Some(usage.prompt_sent_tokens),
-        Some(usage.prompt_cached_tokens),
-    ) && 0 < usage.prompt_sent_tokens
+    // The denominator is only the already-sent prefix, not new input
+    // from this turn, because new data cannot realistically be cached.
+    if let Some(percent) =
+        cache_hit_percent(Some(turn_cache_possible), Some(usage.prompt_cached_tokens))
+        && 0 < turn_cache_possible
     {
         parts.push(TokenStatsPart::new(
             format!("{percent}%"),
-            names::TOKEN_STATS_CACHE_HIT,
+            cache_hit_style_name(percent, turn_cache_possible),
         ));
     }
     parts.push(TokenStatsPart::new(" ↑", names::TOKEN_STATS_UP));
@@ -126,15 +132,17 @@ fn token_stats_parts(
     parts.push(TokenStatsPart::new(" Σ", names::TOKEN_STATS_SIGMA));
     // Session-cumulative cache-hit %. Smooths out per-turn noise and
     // surfaces sessions that are thrashing cache overall even when no
-    // single turn looks bad.
+    // single turn looks bad. The cumulative denominator is the sum of
+    // previous prompt sizes for all completed requests, i.e. total sent
+    // tokens minus the current request's prompt tokens.
     if let Some(percent) = cache_hit_percent(
-        Some(usage.stats.total.sent_tokens),
+        Some(total_cache_possible),
         Some(usage.stats.total.cached_tokens),
-    ) && 0 < usage.stats.total.sent_tokens
+    ) && 0 < total_cache_possible
     {
         parts.push(TokenStatsPart::new(
             format!("{percent}%"),
-            names::TOKEN_STATS_CACHE_HIT,
+            cache_hit_style_name(percent, total_cache_possible),
         ));
     }
     parts.push(TokenStatsPart::new(" ↑", names::TOKEN_STATS_UP));
@@ -161,17 +169,44 @@ fn token_stats_parts(
     parts
 }
 
+fn turn_cache_possible_tokens(usage: &tau_proto::AgentTokenUsage) -> u64 {
+    let previously_sent_tokens = usage
+        .stats
+        .total
+        .sent_tokens
+        .saturating_sub(usage.prompt_sent_tokens);
+    usage.prompt_sent_tokens.min(previously_sent_tokens)
+}
+
+fn total_cache_possible_tokens(usage: &tau_proto::AgentTokenUsage) -> u64 {
+    usage
+        .stats
+        .total
+        .sent_tokens
+        .saturating_sub(usage.prompt_sent_tokens)
+}
+
+fn cache_hit_style_name(percent: u8, possible_tokens: u64) -> &'static str {
+    use tau_themes::names;
+
+    if percent < CACHE_HIT_WARNING_PERCENT && CACHE_HIT_WARNING_MIN_TOKENS < possible_tokens {
+        names::TOKEN_STATS_CACHE_MISS
+    } else {
+        names::TOKEN_STATS_CACHE_HIT
+    }
+}
+
 pub(crate) fn cache_hit_percent(
-    input_tokens: Option<u64>,
+    possible_cached_tokens: Option<u64>,
     cached_tokens: Option<u64>,
 ) -> Option<u8> {
-    let input_tokens = input_tokens?;
+    let possible_cached_tokens = possible_cached_tokens?;
     let cached_tokens = cached_tokens?;
-    if input_tokens == 0 {
+    if possible_cached_tokens == 0 {
         return Some(0);
     }
-    let clamped_cached_tokens = cached_tokens.min(input_tokens);
-    let percent = clamped_cached_tokens.saturating_mul(100) / input_tokens;
+    let clamped_cached_tokens = cached_tokens.min(possible_cached_tokens);
+    let percent = clamped_cached_tokens.saturating_mul(100) / possible_cached_tokens;
     Some(percent.min(100) as u8)
 }
 

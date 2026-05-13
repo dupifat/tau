@@ -51,6 +51,7 @@
     "token.stats.symbol.up":        { },
     "token.stats.symbol.down":      { },
     "token.stats.metric.cache_hit": { },
+    "token.stats.metric.cache_miss": { fg: "red" },
     "token.stats.metric.input":     { },
     "token.stats.metric.output":    { },
     "token.stats.metric.latency":   { },

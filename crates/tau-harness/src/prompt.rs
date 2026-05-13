@@ -5,6 +5,7 @@
 use tau_core::{SessionEntry, ToolActivityOutcome};
 use tau_proto::{CborValue, ContentBlock, ConversationMessage, ConversationRole};
 
+use crate::dedup::DEDUP_MARKER;
 use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill};
 
 /// Builds the system prompt from available tools, skills, and cwd.
@@ -22,7 +23,7 @@ pub(crate) fn build_system_prompt(
 ) -> String {
     // Tool definitions are delivered out-of-band via the provider's
     // tool-use channel, so we don't restate them here.
-    let mut prompt = String::from(
+    let mut prompt = format!(
         "You are an expert coding assistant operating inside Tau, \
          a coding agent harness. You help users by reading files, executing commands, \
          editing code, and writing new files.\n\n\
@@ -33,7 +34,9 @@ pub(crate) fn build_system_prompt(
          However, if some tool calls depend on previous calls to inform dependent values, \
          do NOT call these tools in parallel and instead call them sequentially. \
          For instance, if one operation must complete before another starts, \
-         run these operations sequentially instead.\n\n",
+         run these operations sequentially instead.\n\n\
+         Tau deduplicates tool result outputs. `{DEDUP_MARKER}` results are \
+         not errors, but an optimization pointing at an earlier identical result.\n\n",
     );
 
     // Available skills section.

@@ -70,6 +70,7 @@ fn cli_state_round_trip_through_save_and_load() {
         show_diff: true,
         show_thinking: false,
         show_token_stats: true,
+        show_tools: crate::settings::ShowTools::Collapse,
     };
     original.save(&dirs);
     assert!(td.path().join("cli.json").exists());

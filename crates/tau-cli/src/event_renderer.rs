@@ -9,11 +9,12 @@ use tau_proto::{CborValue, Event};
 
 use crate::build_banner;
 use crate::tool_render::{
-    ToolCallDisplay, build_delegate_completion_display, build_osc1337_set_user_var,
-    extension_status_block, extract_diff, format_context_chip, format_token_stats_line,
-    format_tool_call, render_diff_tool_block, render_harness_info, render_shell_block,
-    render_tool_block, render_tool_display, session_status_block, streaming_block,
-    synthesize_fallback_display, system_loaded_block, system_status_block, ui_dir_block,
+    ToolCallDisplay, ToolSummaryDisplay, build_delegate_completion_display,
+    build_osc1337_set_user_var, build_tool_summary_display, extension_status_block, extract_diff,
+    format_context_chip, format_token_stats_line, format_tool_call, render_diff_tool_block,
+    render_harness_info, render_shell_block, render_tool_block, render_tool_display,
+    session_status_block, streaming_block, synthesize_fallback_display, system_loaded_block,
+    system_status_block, ui_dir_block,
 };
 
 pub(crate) struct EventRenderer {
@@ -71,8 +72,9 @@ pub(crate) struct EventRenderer {
     /// retroactively across the visible transcript.
     thinking_history: Vec<ThinkingBlockEntry>,
     token_stats_history: Vec<TokenStatsBlockEntry>,
+    tool_history: Vec<ToolBlockEntry>,
     /// Where to persist `show_diff` / `show_thinking` /
-    /// `show_token_stats` toggles.
+    /// `show_token_stats` / `show_tools` toggles.
     state_dirs: tau_config::settings::TauDirs,
     /// Current model id (cached so we can re-render the status bar
     /// when the effort changes, and vice versa). `None` until the
@@ -93,6 +95,11 @@ pub(crate) struct EventRenderer {
     /// Whether to render per-turn token usage stats below completed
     /// agent responses.
     show_token_stats: bool,
+    /// Tool block visibility mode.
+    show_tools: tau_config::settings::ShowTools,
+    /// One summary block per assistant tool batch. Hidden when
+    /// `show_tools` is `On`, rendered when it is `Collapse`.
+    tool_summaries: HashMap<tau_cli_term::BlockId, ToolSummaryDisplay>,
     /// Snapshot of persisted CLI settings, kept in sync with the four
     /// `show_*` fields above by [`Self::save_cli_state`]. The input
     /// loop captures this handle in the `/set` name-completion
@@ -144,6 +151,11 @@ struct DiffBlockEntry {
     diff: tau_proto::DiffSummary,
 }
 
+struct ToolBlockEntry {
+    block_id: tau_cli_term::BlockId,
+    display: ToolCallDisplay,
+}
+
 /// One finished thinking block. Held so `/set show-thinking` can swap
 /// its content between the original reasoning text (visible) and
 /// empty content (hidden) without losing the block's position in
@@ -191,6 +203,13 @@ struct ToolCallState {
     /// is suppressed (their progress is rolled up into the parent
     /// `delegate` block via `DelegateProgress` instead).
     block_id: Option<tau_cli_term::BlockId>,
+    /// Latest live display for the block, used when `/set show-tools`
+    /// flips while the call is still running.
+    live_display: Option<ToolCallDisplay>,
+    /// Summary block for the assistant tool batch this call belongs
+    /// to. `None` for stray events without a preceding tool-call
+    /// announcement.
+    summary_block_id: Option<tau_cli_term::BlockId>,
     /// Most recent `DelegateProgress` snapshot. On `ToolResult` we
     /// render the completion line with the final `ctx: …` / `tools: …`
     /// chips so the user sees the delegation cost alongside the
@@ -274,9 +293,12 @@ impl EventRenderer {
             diffs_expanded: state.show_diff,
             show_thinking: state.show_thinking,
             show_token_stats: state.show_token_stats,
+            show_tools: state.show_tools,
+            tool_summaries: HashMap::new(),
             cli_state_mirror,
             thinking_history: Vec::new(),
             token_stats_history: Vec::new(),
+            tool_history: Vec::new(),
             state_dirs,
             current_model: None,
             current_params: tau_proto::ModelParams::default(),
@@ -318,6 +340,7 @@ impl EventRenderer {
             show_diff: self.diffs_expanded,
             show_thinking: self.show_thinking,
             show_token_stats: self.show_token_stats,
+            show_tools: self.show_tools,
         };
         if let Ok(mut mirror) = self.cli_state_mirror.lock() {
             *mirror = state.clone();
@@ -366,6 +389,11 @@ impl EventRenderer {
             "show-diff" => self.set_diffs_expanded(on),
             "show-thinking" => self.set_show_thinking(on),
             "show-token-stats" => self.set_show_token_stats(on),
+            "show-tools" => {
+                if let Some(show_tools) = tau_config::settings::ShowTools::parse(value) {
+                    self.set_show_tools(show_tools);
+                }
+            }
             _ => {}
         }
     }
@@ -379,12 +407,16 @@ impl EventRenderer {
         }
         self.diffs_expanded = on;
         for entry in &self.diff_blocks {
-            let block = render_diff_tool_block(
-                &self.theme,
-                &entry.display,
-                &entry.diff,
-                self.diffs_expanded,
-            );
+            let block = if matches!(self.show_tools, tau_config::settings::ShowTools::On) {
+                render_diff_tool_block(
+                    &self.theme,
+                    &entry.display,
+                    &entry.diff,
+                    self.diffs_expanded,
+                )
+            } else {
+                Self::empty_block()
+            };
             self.handle.set_block(entry.block_id, block);
         }
         self.invalidate_for_retroactive_toggle();
@@ -466,6 +498,132 @@ impl EventRenderer {
         self.save_cli_state();
     }
 
+    fn empty_block() -> tau_cli_term::StyledBlock {
+        tau_cli_term::StyledBlock::new(tau_cli_term::StyledText::from(String::new()))
+    }
+
+    fn render_tool_history_block(&self, display: &ToolCallDisplay) -> tau_cli_term::StyledBlock {
+        if matches!(self.show_tools, tau_config::settings::ShowTools::On) {
+            render_tool_block(&self.theme, display)
+        } else {
+            Self::empty_block()
+        }
+    }
+
+    fn render_diff_history_block(
+        &self,
+        display: &ToolCallDisplay,
+        diff: &tau_proto::DiffSummary,
+    ) -> tau_cli_term::StyledBlock {
+        if matches!(self.show_tools, tau_config::settings::ShowTools::On) {
+            render_diff_tool_block(&self.theme, display, diff, self.diffs_expanded)
+        } else {
+            Self::empty_block()
+        }
+    }
+
+    fn render_summary_block(&self, summary: &ToolSummaryDisplay) -> tau_cli_term::StyledBlock {
+        if matches!(self.show_tools, tau_config::settings::ShowTools::Collapse) {
+            render_tool_block(&self.theme, &build_tool_summary_display(summary))
+        } else {
+            Self::empty_block()
+        }
+    }
+
+    fn update_tool_summary_block(&mut self, block_id: tau_cli_term::BlockId) {
+        let Some(summary) = self.tool_summaries.get(&block_id) else {
+            return;
+        };
+        self.handle
+            .set_block(block_id, self.render_summary_block(summary));
+    }
+
+    fn record_tool_summary_result(
+        &mut self,
+        block_id: Option<tau_cli_term::BlockId>,
+        display: Option<&tau_proto::ToolDisplay>,
+        diff: Option<&tau_proto::DiffSummary>,
+        is_error: bool,
+    ) {
+        let Some(block_id) = block_id else {
+            return;
+        };
+        if let Some(summary) = self.tool_summaries.get_mut(&block_id) {
+            summary.completed += 1;
+            if is_error {
+                summary.err += 1;
+            } else {
+                summary.ok += 1;
+            }
+            if let Some(display) = display {
+                summary.matches += display.stats.matches.unwrap_or(0);
+                summary.lines += display.stats.lines.unwrap_or(0);
+                summary.bytes += display.stats.bytes.unwrap_or(0);
+            }
+            if let Some(diff) = diff {
+                summary.added += u64::from(diff.added);
+                summary.removed += u64::from(diff.removed);
+            }
+        }
+        let finished = self
+            .tool_summaries
+            .get(&block_id)
+            .is_some_and(|summary| summary.completed == summary.total);
+        if finished {
+            let Some(summary) = self.tool_summaries.remove(&block_id) else {
+                return;
+            };
+            self.handle.remove_block(block_id);
+            let new_block_id = self
+                .handle
+                .print_output(self.render_summary_block(&summary));
+            self.tool_summaries.insert(new_block_id, summary);
+        } else {
+            self.update_tool_summary_block(block_id);
+        }
+    }
+
+    fn set_show_tools(&mut self, show_tools: tau_config::settings::ShowTools) {
+        if self.show_tools == show_tools {
+            return;
+        }
+        self.show_tools = show_tools;
+        for entry in &self.tool_history {
+            self.handle.set_block(
+                entry.block_id,
+                self.render_tool_history_block(&entry.display),
+            );
+        }
+        for entry in &self.diff_blocks {
+            self.handle.set_block(
+                entry.block_id,
+                self.render_diff_history_block(&entry.display, &entry.diff),
+            );
+        }
+        for (block_id, summary) in &self.tool_summaries {
+            self.handle
+                .set_block(*block_id, self.render_summary_block(summary));
+        }
+        for state in self.tool_calls.values() {
+            if let Some(block_id) = state.block_id {
+                let block = state
+                    .live_display
+                    .as_ref()
+                    .map(|display| self.render_tool_history_block(display))
+                    .unwrap_or_else(Self::empty_block);
+                self.handle.set_block(block_id, block);
+            }
+            if let Some(block_id) = state.summary_block_id
+                && let Some(summary) = self.tool_summaries.get(&block_id)
+            {
+                self.handle
+                    .set_block(block_id, self.render_summary_block(summary));
+            }
+        }
+        self.invalidate_for_retroactive_toggle();
+        self.save_cli_state();
+    }
+
     /// Clears all session-scoped UI state and re-renders an empty
     /// transcript. Persistent user preferences such as `show-diff`
     /// and `show-thinking` are intentionally preserved.
@@ -480,6 +638,8 @@ impl EventRenderer {
         self.diff_blocks.clear();
         self.thinking_history.clear();
         self.token_stats_history.clear();
+        self.tool_history.clear();
+        self.tool_summaries.clear();
         // Model selection and effort are harness-global, not
         // session-scoped. `/new` only causes a SessionStarted event;
         // the harness does not re-emit HarnessModelSelected for the
@@ -843,15 +1003,30 @@ impl EventRenderer {
                 // the user sees one line per delegation rather than
                 // a flood of nested invocations.
                 if finished.originator.is_user() {
+                    let summary_block_id = if finished.tool_calls.is_empty() {
+                        None
+                    } else {
+                        let summary = ToolSummaryDisplay {
+                            total: finished.tool_calls.len() as u64,
+                            ..ToolSummaryDisplay::default()
+                        };
+                        let block = self.render_summary_block(&summary);
+                        let id = self.handle.new_block(block);
+                        self.handle.push_above_active(id);
+                        self.tool_summaries.insert(id, summary);
+                        Some(id)
+                    };
                     for call in &finished.tool_calls {
                         let display = format_tool_call(call.name.as_str(), call.display.as_ref());
-                        let block = render_tool_block(&self.theme, &display);
+                        let block = self.render_tool_history_block(&display);
                         let id = self.handle.new_block(block);
                         self.handle.push_above_active(id);
                         self.tool_calls.insert(
                             call.id.to_string(),
                             ToolCallState {
                                 block_id: Some(id),
+                                live_display: Some(display),
+                                summary_block_id,
                                 ..ToolCallState::default()
                             },
                         );
@@ -892,7 +1067,8 @@ impl EventRenderer {
                         &synthesize_fallback_display("delegate", None),
                     ),
                 };
-                let block = render_tool_block(&self.theme, &display);
+                state.live_display = Some(display.clone());
+                let block = self.render_tool_history_block(&display);
                 self.handle.set_block(bid, block);
             }
             Event::ToolResult(result) => {
@@ -931,9 +1107,14 @@ impl EventRenderer {
                         _ => None,
                     })
                     .or_else(|| extract_diff(&result.result));
+                self.record_tool_summary_result(
+                    prior.summary_block_id,
+                    result.display.as_ref(),
+                    diff.as_ref(),
+                    false,
+                );
                 if let Some(diff) = diff {
-                    let block =
-                        render_diff_tool_block(&self.theme, &display, &diff, self.diffs_expanded);
+                    let block = self.render_diff_history_block(&display, &diff);
                     let bid = self.handle.print_output(block);
                     self.diff_blocks.push(DiffBlockEntry {
                         block_id: bid,
@@ -941,8 +1122,13 @@ impl EventRenderer {
                         diff,
                     });
                 } else {
-                    self.handle
-                        .print_output(render_tool_block(&self.theme, &display));
+                    let bid = self
+                        .handle
+                        .print_output(self.render_tool_history_block(&display));
+                    self.tool_history.push(ToolBlockEntry {
+                        block_id: bid,
+                        display,
+                    });
                 }
             }
             Event::ToolError(error) => {
@@ -971,8 +1157,19 @@ impl EventRenderer {
                         &synthesize_fallback_display(&error.tool_name, Some(&error.message)),
                     )
                 };
-                self.handle
-                    .print_output(render_tool_block(&self.theme, &display));
+                self.record_tool_summary_result(
+                    prior.summary_block_id,
+                    error.display.as_ref(),
+                    None,
+                    true,
+                );
+                let bid = self
+                    .handle
+                    .print_output(self.render_tool_history_block(&display));
+                self.tool_history.push(ToolBlockEntry {
+                    block_id: bid,
+                    display,
+                });
             }
             Event::UiShellCommand(cmd) => {
                 // Create a running block now; the harness will echo

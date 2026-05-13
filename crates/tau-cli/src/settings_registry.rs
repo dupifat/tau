@@ -5,9 +5,9 @@
 //! `/set` parser and completion (setting names with current values,
 //! then values with descriptions).
 //!
-//! All settings are currently booleans rendered as `true`/`false`,
-//! but the shape is value-list based so a future setting can take
-//! three or more named values without further plumbing.
+//! Most settings are booleans rendered as `true`/`false`; the shape is
+//! value-list based so settings can also take three or more named values
+//! without further plumbing.
 
 use tau_config::settings::CliState;
 
@@ -45,6 +45,21 @@ const BOOL_VALUES: &[SettingValue] = &[
     },
 ];
 
+const SHOW_TOOLS_VALUES: &[SettingValue] = &[
+    SettingValue {
+        value: "off",
+        description: "hide tool blocks",
+    },
+    SettingValue {
+        value: "collapse",
+        description: "show one summary per tool batch",
+    },
+    SettingValue {
+        value: "on",
+        description: "show every tool block",
+    },
+];
+
 fn bool_str(b: bool) -> &'static str {
     if b { "true" } else { "false" }
 }
@@ -67,6 +82,12 @@ pub const SETTINGS: &[SettingDef] = &[
         description: "Token usage stats below agent responses",
         values: BOOL_VALUES,
         get: |s| bool_str(s.show_token_stats),
+    },
+    SettingDef {
+        name: "show-tools",
+        description: "Tool block visibility",
+        values: SHOW_TOOLS_VALUES,
+        get: |s| s.show_tools.as_str(),
     },
 ];
 

@@ -186,6 +186,19 @@ pub(crate) struct ToolCallDisplay {
     pub(crate) suffixes: Vec<ToolSuffixSegment>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ToolSummaryDisplay {
+    pub(crate) total: u64,
+    pub(crate) completed: u64,
+    pub(crate) ok: u64,
+    pub(crate) err: u64,
+    pub(crate) matches: u64,
+    pub(crate) lines: u64,
+    pub(crate) bytes: u64,
+    pub(crate) added: u64,
+    pub(crate) removed: u64,
+}
+
 /// Build the live-header [`ToolCallDisplay`] for a still-running
 /// tool call from the harness-stamped descriptor. Falls back to a
 /// name-only block when the descriptor is absent (older logs, or
@@ -408,14 +421,18 @@ fn format_progress_counter(counter: &tau_proto::ProgressCounter) -> String {
 }
 
 fn format_tool_display_stats(stats: &tau_proto::ToolDisplayStats) -> String {
+    format_stats(stats.matches, stats.lines, stats.bytes)
+}
+
+fn format_stats(matches: Option<u64>, lines: Option<u64>, bytes: Option<u64>) -> String {
     let mut parts: Vec<String> = Vec::new();
-    if let Some(m) = stats.matches {
+    if let Some(m) = matches {
         parts.push(format!("{m}M"));
     }
-    if let Some(l) = stats.lines {
+    if let Some(l) = lines {
         parts.push(format!("{l}L"));
     }
-    if let Some(b) = stats.bytes {
+    if let Some(b) = bytes {
         parts.push(format_tool_display_bytes(b));
     }
     if parts.is_empty() {
@@ -475,6 +492,51 @@ fn short_error_chip(message: &str) -> String {
         s
     };
     format!("err: {label}")
+}
+
+pub(crate) fn build_tool_summary_display(summary: &ToolSummaryDisplay) -> ToolCallDisplay {
+    let mut suffixes = Vec::new();
+    if 0 < summary.added {
+        suffixes.push(tool_suffix(
+            format!("+{}", summary.added),
+            ToolStatus::DiffAdded,
+        ));
+    }
+    if 0 < summary.removed {
+        suffixes.push(ToolSuffixSegment {
+            text: format!("-{}", summary.removed),
+            status: ToolStatus::DiffRemoved,
+            no_leading_space: 0 < summary.added,
+        });
+    }
+    let stats = format_stats(
+        (0 < summary.matches).then_some(summary.matches),
+        (0 < summary.lines).then_some(summary.lines),
+        (0 < summary.bytes).then_some(summary.bytes),
+    );
+    if !stats.is_empty() {
+        suffixes.push(info_suffix(stats));
+    }
+    if 0 < summary.ok {
+        suffixes.push(tool_suffix(
+            format!("ok: {}", summary.ok),
+            ToolStatus::Success,
+        ));
+    }
+    if 0 < summary.err {
+        suffixes.push(tool_suffix(
+            format!("err: {}", summary.err),
+            ToolStatus::Error,
+        ));
+    }
+    if summary.completed < summary.total {
+        suffixes.push(tool_suffix("…".to_owned(), ToolStatus::Progress));
+    }
+    ToolCallDisplay {
+        tool_name: "skills:".to_owned(),
+        args: format!("{}/{}", summary.completed, summary.total),
+        suffixes,
+    }
 }
 
 /// Paints a [`ToolCallDisplay`] onto a themed block.

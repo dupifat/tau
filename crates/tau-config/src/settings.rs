@@ -172,6 +172,39 @@ pub struct CliState {
     /// Whether to render per-turn token usage stats below agent
     /// responses. Controlled by `/set show-token-stats <true|false>`.
     pub show_token_stats: bool,
+    /// How tool calls are rendered in the transcript. Controlled by
+    /// `/set show-tools <off|collapse|on>`.
+    pub show_tools: ShowTools,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ShowTools {
+    Off,
+    Collapse,
+    #[default]
+    On,
+}
+
+impl ShowTools {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Collapse => "collapse",
+            Self::On => "on",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "off" => Some(Self::Off),
+            "collapse" => Some(Self::Collapse),
+            "on" => Some(Self::On),
+            _ => None,
+        }
+    }
 }
 
 impl Default for CliState {
@@ -180,6 +213,7 @@ impl Default for CliState {
             show_diff: false,
             show_thinking: true,
             show_token_stats: false,
+            show_tools: ShowTools::On,
         }
     }
 }

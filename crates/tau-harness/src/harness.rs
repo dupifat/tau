@@ -228,7 +228,8 @@ pub(crate) struct Harness {
     /// what was *actually sent* even if the user flipped a setting
     /// between send and receive. See
     /// [`crate::conversation::compute_chain_fingerprint`].
-    pub(crate) prompt_fingerprints: std::collections::HashMap<SessionPromptId, [u8; 32]>,
+    pub(crate) prompt_fingerprints:
+        std::collections::HashMap<SessionPromptId, crate::conversation::ChainFingerprintDetail>,
     /// Provider/model registry, kept for runtime lookups (e.g.
     /// computing available efforts per current model).
     pub(crate) model_registry: tau_config::settings::ModelRegistry,
@@ -3252,7 +3253,7 @@ impl Harness {
         // `requestBodiesMatchExceptInput` check, catches divergence
         // before the round-trip), and (b) stamp the next anchor at
         // response time so a future send can repeat the comparison.
-        let request_fingerprint = crate::conversation::compute_chain_fingerprint(
+        let request_fingerprint = crate::conversation::compute_chain_fingerprint_detail(
             &system_prompt,
             &tools,
             &self.selected_params,
@@ -3273,18 +3274,44 @@ impl Harness {
                 .get(cid)
                 .expect("send_prompt_to_agent_for: unknown conversation id");
             let anchor = conv.chain_anchor.as_ref();
-            let valid = anchor.is_some_and(|a| {
+            if let Some(a) = anchor {
                 let model_ok = self.selected_model.as_ref() == Some(&a.model);
                 let count_ok = a.message_count <= messages.len();
                 let tree_ok = tree.is_some_and(|t| anchor_is_ancestor(t, a.head, conv.head));
-                let fingerprint_ok = a.request_fingerprint == request_fingerprint;
-                model_ok && count_ok && tree_ok && fingerprint_ok
-            });
-            if valid {
-                anchor.map(|a| tau_proto::PreviousResponseRef {
-                    id: a.response_id.clone(),
-                    message_index: a.message_count,
-                })
+                let fingerprint_ok = a.request_fingerprint == request_fingerprint.digest;
+                if model_ok && count_ok && tree_ok && fingerprint_ok {
+                    Some(tau_proto::PreviousResponseRef {
+                        id: a.response_id.clone(),
+                        message_index: a.message_count,
+                    })
+                } else {
+                    tracing::debug!(
+                        target: "tau_harness",
+                        conversation_id = %cid,
+                        session_id = %session_id,
+                        response_id = %a.response_id,
+                        anchor_model = %a.model,
+                        current_model = ?self.selected_model,
+                        model_ok,
+                        anchor_message_count = a.message_count,
+                        current_message_count = messages.len(),
+                        count_ok,
+                        anchor_head = ?a.head,
+                        current_head = ?conv.head,
+                        tree_ok,
+                        fingerprint_ok,
+                        fingerprint_system_prompt_ok = a.request_fingerprint_parts.system_prompt
+                            == request_fingerprint.parts.system_prompt,
+                        fingerprint_tools_ok = a.request_fingerprint_parts.tools
+                            == request_fingerprint.parts.tools,
+                        fingerprint_model_params_ok = a.request_fingerprint_parts.model_params
+                            == request_fingerprint.parts.model_params,
+                        fingerprint_tool_choice_ok = a.request_fingerprint_parts.tool_choice
+                            == request_fingerprint.parts.tool_choice,
+                        "dropping stale previous_response_id chain anchor",
+                    );
+                    None
+                }
             } else {
                 None
             }
@@ -3522,7 +3549,8 @@ impl Harness {
                     head: conv_head.flatten(),
                     model,
                     message_count,
-                    request_fingerprint,
+                    request_fingerprint: request_fingerprint.digest,
+                    request_fingerprint_parts: request_fingerprint.parts,
                 });
             }
         }

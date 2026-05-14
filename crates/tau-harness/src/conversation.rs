@@ -48,21 +48,62 @@ use crate::dedup::ResultDedupMap;
 /// tools JSON. Field serialization failures (impossibly rare on these
 /// types) collapse to empty bytes, which just means a mismatch and a
 /// safe full-replay fallback.
+#[cfg(test)]
 pub(crate) fn compute_chain_fingerprint(
     system_prompt: &str,
     tools: &[ToolDefinition],
     model_params: &ModelParams,
     tool_choice: ToolChoice,
 ) -> [u8; 32] {
+    compute_chain_fingerprint_detail(system_prompt, tools, model_params, tool_choice).digest
+}
+
+pub(crate) fn compute_chain_fingerprint_detail(
+    system_prompt: &str,
+    tools: &[ToolDefinition],
+    model_params: &ModelParams,
+    tool_choice: ToolChoice,
+) -> ChainFingerprintDetail {
+    let tools_json = serde_json::to_vec(tools).unwrap_or_default();
+    let params_json = serde_json::to_vec(model_params).unwrap_or_default();
+    let tool_choice_json = serde_json::to_vec(&tool_choice).unwrap_or_default();
+
     let mut hasher = blake3::Hasher::new();
     hasher.update(system_prompt.as_bytes());
     hasher.update(b"\0tools:");
-    hasher.update(&serde_json::to_vec(tools).unwrap_or_default());
+    hasher.update(&tools_json);
     hasher.update(b"\0params:");
-    hasher.update(&serde_json::to_vec(model_params).unwrap_or_default());
+    hasher.update(&params_json);
     hasher.update(b"\0tool_choice:");
-    hasher.update(&serde_json::to_vec(&tool_choice).unwrap_or_default());
-    *hasher.finalize().as_bytes()
+    hasher.update(&tool_choice_json);
+
+    ChainFingerprintDetail {
+        digest: *hasher.finalize().as_bytes(),
+        parts: ChainFingerprintParts {
+            system_prompt: hash_bytes(system_prompt.as_bytes()),
+            tools: hash_bytes(&tools_json),
+            model_params: hash_bytes(&params_json),
+            tool_choice: hash_bytes(&tool_choice_json),
+        },
+    }
+}
+
+fn hash_bytes(bytes: &[u8]) -> [u8; 32] {
+    *blake3::hash(bytes).as_bytes()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ChainFingerprintDetail {
+    pub(crate) digest: [u8; 32],
+    pub(crate) parts: ChainFingerprintParts,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ChainFingerprintParts {
+    pub(crate) system_prompt: [u8; 32],
+    pub(crate) tools: [u8; 32],
+    pub(crate) model_params: [u8; 32],
+    pub(crate) tool_choice: [u8; 32],
 }
 
 /// Opaque per-process conversation identifier. Not on the wire — the
@@ -217,13 +258,17 @@ pub(crate) struct ChainAnchor {
     /// `messages[message_count..]` to get the new content the upstream
     /// API hasn't seen yet.
     pub(crate) message_count: usize,
-    /// Blake3 fingerprint of `(system_prompt, tools, model_params)` as
-    /// observed when the anchor was minted. Codex rejects (or silently
-    /// misinterprets) a chained request whose non-input fields drift
-    /// from the prior turn, so the next send re-hashes the same inputs
-    /// and drops the anchor on mismatch — catching the divergence
+    /// Blake3 fingerprint of `(system_prompt, tools, model_params,
+    /// tool_choice)` as observed when the anchor was minted. Codex rejects
+    /// (or silently misinterprets) a chained request whose non-input fields
+    /// drift from the prior turn, so the next send re-hashes the same
+    /// inputs and drops the anchor on mismatch — catching the divergence
     /// before the round-trip rather than after.
     pub(crate) request_fingerprint: [u8; 32],
+    /// Per-field hashes for the same provider-visible request fields.
+    /// Only used for diagnostics when the aggregate fingerprint
+    /// mismatches, so the next session log says which field drifted.
+    pub(crate) request_fingerprint_parts: ChainFingerprintParts,
 }
 
 impl Conversation {

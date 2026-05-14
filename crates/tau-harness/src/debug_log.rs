@@ -40,11 +40,16 @@ impl DebugEventLog {
                 connection_id,
                 frame,
             } => {
-                let frame_json = serde_json::to_value(frame).unwrap_or_default();
                 let name = match frame.as_ref() {
-                    tau_proto::Frame::Event(event) => event.name().to_string(),
+                    tau_proto::Frame::Event(event) => {
+                        if event.defaults_to_transient() {
+                            return;
+                        }
+                        event.name().to_string()
+                    }
                     tau_proto::Frame::Message(_) => "<message>".to_owned(),
                 };
+                let frame_json = serde_json::to_value(frame).unwrap_or_default();
                 serde_json::json!({
                     "type": "from_connection",
                     "recorded_at_micros": recorded_at,
@@ -104,9 +109,13 @@ impl DebugEventLog {
 
 #[cfg(test)]
 mod tests {
-    use tau_proto::{AgentResponseFinished, AgentTokenUsage, ModelId, SessionPromptId};
+    use tau_proto::{
+        AgentResponseFinished, AgentResponseUpdated, AgentTokenUsage, Frame, ModelId,
+        PromptOriginator, SessionPromptId,
+    };
 
     use super::*;
+    use crate::event::HarnessEvent;
 
     fn read_lines(path: &Path) -> Vec<serde_json::Value> {
         let raw = std::fs::read_to_string(path).expect("read events.jsonl");
@@ -152,5 +161,28 @@ mod tests {
         assert_eq!(usage["prompt_cached_tokens"], 800);
         assert_eq!(usage["response_received_tokens"], 42);
         assert_eq!(usage["model"], "openai/gpt-5");
+    }
+
+    #[test]
+    fn transient_from_connection_events_are_not_logged_twice() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let mut log = DebugEventLog::open(td.path()).expect("open");
+        let event = Event::AgentResponseUpdated(AgentResponseUpdated {
+            session_prompt_id: SessionPromptId::from("sp-0"),
+            text: "partial".to_owned(),
+            thinking: None,
+            originator: PromptOriginator::User,
+        });
+
+        log.log_harness_event(&HarnessEvent::FromConnection {
+            connection_id: ConnectionId::from("conn-1"),
+            frame: Box::new(Frame::Event(event)),
+        });
+
+        let lines = read_lines(log.path());
+        assert!(
+            lines.is_empty(),
+            "transient streaming events are logged on publish; the raw inbound copy is redundant"
+        );
     }
 }

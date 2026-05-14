@@ -48,9 +48,12 @@ pub(crate) fn edit_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
         let matches: Vec<(usize, &str)> = original.match_indices(old_text).collect();
         let actual_matches = matches.len();
         if actual_matches != expected_matches {
-            return Err(with_args(ToolFailure::from(format!(
-                "matches: expected {expected_matches}, found {actual_matches}"
-            ))));
+            return Err(match_count_failure(
+                display_args.clone(),
+                old_text,
+                expected_matches,
+                actual_matches,
+            ));
         }
 
         for (start, matched) in matches {
@@ -103,4 +106,31 @@ pub(crate) fn edit_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
         ]),
         display,
     })
+}
+
+fn match_count_failure(
+    path: String,
+    old_text: &str,
+    expected_matches: usize,
+    actual_matches: usize,
+) -> ToolFailure {
+    ToolFailure::new(format!(
+        "oldText match count mismatch: expected {expected_matches}, found {actual_matches}; no changes written"
+    ))
+    .with_args(path.clone())
+    .with_details(CborValue::Map(vec![
+        (CborValue::Text("path".to_owned()), CborValue::Text(path)),
+        (
+            CborValue::Text("oldText".to_owned()),
+            CborValue::Text(old_text.to_owned()),
+        ),
+        (
+            CborValue::Text("expected_matches".to_owned()),
+            CborValue::Integer((expected_matches as i64).into()),
+        ),
+        (
+            CborValue::Text("actual_matches".to_owned()),
+            CborValue::Integer((actual_matches as i64).into()),
+        ),
+    ]))
 }

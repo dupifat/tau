@@ -563,7 +563,10 @@ fn edit_errors_use_short_reasons() {
         panic!("expected tool error");
     };
     assert_eq!(error.tool_name, EDIT_TOOL_NAME);
-    assert_eq!(error.message, "matches: expected 1, found 0");
+    assert_eq!(
+        error.message,
+        "oldText match count mismatch: expected 1, found 0; no changes written"
+    );
 
     writer
         .write_frame(&disconnect_frame(None))
@@ -613,7 +616,10 @@ fn edit_errors_include_path_details() {
         panic!("expected tool error");
     };
     assert_eq!(error.tool_name, EDIT_TOOL_NAME);
-    assert_eq!(error.message, "matches: expected 1, found 0");
+    assert_eq!(
+        error.message,
+        "oldText match count mismatch: expected 1, found 0; no changes written"
+    );
     let details = error.details.expect("details");
     let path = cbor_map_text(&details, "path").expect("path");
     assert_eq!(path, file_path.display().to_string());
@@ -720,7 +726,14 @@ fn edit_reports_actual_match_count_without_writing() {
         panic!("expected tool error");
     };
     assert_eq!(error.tool_name, EDIT_TOOL_NAME);
-    assert_eq!(error.message, "matches: expected 1, found 2");
+    assert_eq!(
+        error.message,
+        "oldText match count mismatch: expected 1, found 2; no changes written"
+    );
+    let details = error.details.expect("details");
+    assert_eq!(cbor_map_text(&details, "oldText"), Some("fish"));
+    assert_eq!(cbor_map_int(&details, "expected_matches"), Some(1));
+    assert_eq!(cbor_map_int(&details, "actual_matches"), Some(2));
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
         "one fish two fish\n"

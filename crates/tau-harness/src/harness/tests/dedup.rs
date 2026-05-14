@@ -354,6 +354,42 @@ fn dedup_map_rebuilds_on_session_restore() {
     h.shutdown().expect("shutdown");
 }
 
+/// `/new` starts a fresh conversation branch. Even if the requested
+/// session id already has durable history (possible with a short-id
+/// collision, and modeled here by resetting to the same id), the first
+/// identical result in the fresh branch must be recorded verbatim.
+#[test]
+fn new_session_reset_does_not_dedup_against_previous_branch() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    let cid = h.default_conversation_id.clone();
+    let big = CborValue::Text("n".repeat(2048));
+    let _ = run_tool_result(&mut h, "s1", &cid, "call_before_new", "ls", big.clone());
+
+    h.switch_session("s1".into(), tau_proto::SessionStartReason::New)
+        .expect("same-id /new reset");
+
+    let cid = h.default_conversation_id.clone();
+    assert_eq!(
+        h.conversations.get(&cid).expect("default conv").head,
+        None,
+        "a /new reset must start from a fresh branch head",
+    );
+
+    let after = run_tool_result(&mut h, "s1", &cid, "call_after_new", "ls", big.clone());
+    let ToolActivityOutcome::Result { result } = after else {
+        unreachable!()
+    };
+    assert_eq!(
+        result, big,
+        "first result after /new must not dedup against an older branch that the model cannot see",
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
 /// A conversation should only see its OWN branch's prior entries —
 /// it must not dedup against content that exists in the tree but
 /// only on a different conversation's branch. Modeled here by

@@ -2857,7 +2857,9 @@ impl Harness {
         new_session_id: SessionId,
         reason: tau_proto::SessionStartReason,
     ) -> Result<(), HarnessError> {
-        if new_session_id == self.current_session_id {
+        if new_session_id == self.current_session_id
+            && !matches!(reason, tau_proto::SessionStartReason::New)
+        {
             self.emit_info(&format!("already on session `{}`", new_session_id.as_str()));
             return Ok(());
         }
@@ -2889,10 +2891,20 @@ impl Harness {
         // `conversations[default].session_id` still points at the old
         // session id.
         let default_id = self.default_conversation_id.clone();
-        let new_head = self
-            .store
-            .load_session(new_session_id.as_str())?
-            .and_then(|t| t.head());
+        let new_head = if matches!(reason, tau_proto::SessionStartReason::New) {
+            // `/new` must start a fresh branch even if the requested
+            // id already has durable history (e.g. a short-id
+            // collision, or an explicit same-id reset in tests). If
+            // we reused the existing tree head, the dedup map would
+            // lazily rebuild from old tool results and emit confusing
+            // `[tau-dedup]` pointers to outputs the model cannot see
+            // in the fresh conversation.
+            None
+        } else {
+            self.store
+                .load_session(new_session_id.as_str())?
+                .and_then(|t| t.head())
+        };
         self.conversations.clear();
         self.conversations.insert(
             default_id.clone(),

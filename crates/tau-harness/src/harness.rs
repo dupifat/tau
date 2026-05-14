@@ -2885,6 +2885,15 @@ impl Harness {
         self.pending_tool_providers.clear();
         self.prompt_conversations.clear();
 
+        // Token and context accounting are session-scoped. Reset them
+        // before `SessionStarted` so clients recreating status UI for
+        // the new session do not inherit the previous transcript's
+        // cumulative totals.
+        self.context_input_tokens = None;
+        self.context_cached_tokens = None;
+        self.context_percent_used = None;
+        self.token_usage = TokenUsageStats::default();
+
         // Rebind the default conversation to the new session and drop
         // any side conversations that were tied to the old one. Without
         // this, the next `dispatch_user_prompt` would assert because

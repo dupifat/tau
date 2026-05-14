@@ -969,6 +969,13 @@ fn switch_session_rebinds_default_conversation() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start"); // bound to "s1"
     h.selected_model = Some("test/model".into());
+    let model: tau_proto::ModelId = "test/model".into();
+    h.context_input_tokens = Some(92_000);
+    h.context_cached_tokens = Some(90_000);
+    h.context_percent_used = Some(92);
+    h.token_usage.start_request(&model);
+    h.token_usage.add_sent(&model, 819_300, 750_000);
+    h.token_usage.add_received(&model, 34_000);
 
     let cid = h.default_conversation_id.clone();
     assert_eq!(h.conversations[&cid].session_id.as_str(), "s1");
@@ -996,6 +1003,10 @@ fn switch_session_rebinds_default_conversation() {
     assert!(saw_session_dir, "switch must announce the new session dir");
 
     assert_eq!(h.current_session_id.as_str(), "s2");
+    assert_eq!(h.context_input_tokens, None);
+    assert_eq!(h.context_cached_tokens, None);
+    assert_eq!(h.context_percent_used, None);
+    assert_eq!(h.token_usage, tau_proto::TokenUsageStats::default());
     assert_eq!(
         h.conversations[&cid].session_id.as_str(),
         "s2",

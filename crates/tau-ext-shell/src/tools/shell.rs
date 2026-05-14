@@ -2,7 +2,7 @@
 
 use std::sync::mpsc;
 
-use tau_proto::{CborValue, Event, Frame, ToolDisplay, ToolDisplayStatus};
+use tau_proto::{CborValue, Event, Frame, ToolDisplay, ToolDisplayPayload, ToolDisplayStatus};
 
 use crate::argument::{argument_text, optional_argument_int, optional_argument_text};
 use crate::config::ShellConfig;
@@ -32,13 +32,15 @@ pub(crate) fn run_command(
         .map(|v| v.max(1) as u64)
         .unwrap_or(DEFAULT_TIMEOUT_SECS);
     let timeout = std::time::Duration::from_secs(timeout_secs);
-    let display_args = command.clone();
+    let display_args = command_display_args(&command);
+    let display_payload = command_display_payload(&command);
 
     let mut child = shell_config
         .spawn_isolated(&command, cwd.as_deref())
         .map_err(|error| {
             ToolFailure::from(format!("failed to start shell command: {error}"))
                 .with_args(display_args.clone())
+                .with_payload(display_payload.clone())
                 .with_details(command_details_value(
                     command.clone(),
                     cwd.clone(),
@@ -56,6 +58,7 @@ pub(crate) fn run_command(
             return Err(
                 ToolFailure::from(format!("command timed out after {timeout_secs}s"))
                     .with_args(display_args)
+                    .with_payload(display_payload)
                     .with_details(command_details_value(
                         command.clone(),
                         cwd.clone(),
@@ -93,6 +96,7 @@ pub(crate) fn run_command(
 
     if success {
         let mut display = ok_display(display_args);
+        display.payload = display_payload;
         display.stats = text_stats(&combined);
         Ok(ToolOutput { result, display })
     } else {
@@ -103,6 +107,7 @@ pub(crate) fn run_command(
             args: display_args,
             status: ToolDisplayStatus::Error,
             status_text: format!("err: {exit_label}"),
+            payload: display_payload,
             ..Default::default()
         };
         display.stats = text_stats(&combined);
@@ -343,6 +348,25 @@ fn read_pipe(pipe: Option<impl std::io::Read>) -> String {
     let mut buf = String::new();
     let _ = pipe.read_to_string(&mut buf);
     buf
+}
+
+fn command_display_args(command: &str) -> String {
+    command
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(20)
+        .collect()
+}
+
+fn command_display_payload(command: &str) -> Option<ToolDisplayPayload> {
+    if command.lines().count() < 2 {
+        return None;
+    }
+    Some(ToolDisplayPayload::Text {
+        text: command.to_owned(),
+    })
 }
 
 pub(crate) fn command_details_value(

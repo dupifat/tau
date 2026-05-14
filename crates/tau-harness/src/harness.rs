@@ -4364,8 +4364,13 @@ fn build_tool_args_display(
 ) -> Option<tau_proto::ToolDisplay> {
     use tau_proto::{ToolDisplayStatus, cbor_bool_field, cbor_text_field};
 
+    let mut payload = None;
     let args = match tool_name {
-        "shell" => cbor_text_field(arguments, "command").unwrap_or_default(),
+        "shell" => {
+            let command = cbor_text_field(arguments, "command").unwrap_or_default();
+            payload = shell_command_payload(&command);
+            shell_command_args(&command)
+        }
         "read" | "write" | "edit" => cbor_text_field(arguments, "path").unwrap_or_default(),
         "find" => {
             let pattern = cbor_text_field(arguments, "pattern").unwrap_or_default();
@@ -4406,7 +4411,27 @@ fn build_tool_args_display(
         args,
         status: ToolDisplayStatus::InProgress,
         status_text: "…".to_owned(),
+        payload,
         ..Default::default()
+    })
+}
+
+fn shell_command_args(command: &str) -> String {
+    command
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(20)
+        .collect()
+}
+
+fn shell_command_payload(command: &str) -> Option<tau_proto::ToolDisplayPayload> {
+    if command.lines().count() < 2 {
+        return None;
+    }
+    Some(tau_proto::ToolDisplayPayload::Text {
+        text: command.to_owned(),
     })
 }
 

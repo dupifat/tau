@@ -6,7 +6,7 @@
 //! The dispatcher in [`crate::tools`] unpacks these into `ToolResult`
 //! / `ToolError` events with the descriptor attached.
 
-use tau_proto::{CborValue, ToolDisplay, ToolDisplayStats, ToolDisplayStatus};
+use tau_proto::{CborValue, ToolDisplay, ToolDisplayPayload, ToolDisplayStats, ToolDisplayStatus};
 
 /// Success bundle: the CBOR result the agent consumes and the display
 /// descriptor the UI consumes.
@@ -47,6 +47,11 @@ impl ToolFailure {
 
     pub fn with_details(mut self, details: CborValue) -> Self {
         self.details = Some(Box::new(details));
+        self
+    }
+
+    pub fn with_payload(mut self, payload: Option<ToolDisplayPayload>) -> Self {
+        self.display.payload = payload;
         self
     }
 }

@@ -297,6 +297,7 @@ pub(crate) struct ToolCallDisplay {
     pub(crate) tool_name: String,
     pub(crate) args: String,
     pub(crate) suffixes: Vec<ToolSuffixSegment>,
+    pub(crate) payload: Option<ToolDisplayPayload>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -323,6 +324,7 @@ pub(crate) fn format_tool_call(tool_name: &str, display: Option<&ToolDisplay>) -
         tool_name: tool_name.to_owned(),
         args,
         suffixes: vec![suffix],
+        payload: display.and_then(|d| d.payload.clone()),
     }
 }
 
@@ -509,6 +511,7 @@ pub(crate) fn render_tool_display(tool_name: &str, display: &ToolDisplay) -> Too
         tool_name: tool_name.to_owned(),
         args: display.args.clone(),
         suffixes,
+        payload: display.payload.clone(),
     }
 }
 
@@ -649,6 +652,7 @@ pub(crate) fn build_tool_summary_display(summary: &ToolSummaryDisplay) -> ToolCa
         tool_name: "tools".to_owned(),
         args: format!("{}/{}", summary.completed, summary.total),
         suffixes,
+        payload: None,
     }
 }
 
@@ -696,6 +700,10 @@ pub(crate) fn render_tool_block(
             status,
             vec![SpanTree::text(suffix.text.clone())],
         ));
+    }
+    if let Some(ToolDisplayPayload::Text { text }) = &display.payload {
+        children.push(SpanTree::span(args, vec![SpanTree::text("\n")]));
+        children.push(SpanTree::span(args, vec![SpanTree::text(text.clone())]));
     }
     themed.push_tree(SpanTree::span(output, children));
 

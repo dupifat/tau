@@ -13,7 +13,7 @@ use crate::tools::find::run_find;
 use crate::tools::grep::{RipgrepError, classify_ripgrep_stderr, grep_result_map, run_grep};
 use crate::tools::ls::run_ls;
 use crate::tools::read::{read_file, slice_lines};
-use crate::tools::shell::command_details_value;
+use crate::tools::shell::{command_details_value, run_command};
 use crate::tools::{
     EDIT_TOOL_NAME, FIND_TOOL_NAME, LS_TOOL_NAME, READ_TOOL_NAME, SHELL_TOOL_NAME, WRITE_TOOL_NAME,
 };
@@ -999,6 +999,47 @@ fn shell_extension_rejects_invalid_config() {
         .write_frame(&disconnect_frame(None))
         .expect("disconnect");
     writer.flush().expect("flush");
+}
+
+#[test]
+fn shell_tool_multiline_display_uses_short_args_and_text_payload() {
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("command".to_owned()),
+            CborValue::Text("printf hello\nprintf world".to_owned()),
+        ),
+        (
+            CborValue::Text("timeout".to_owned()),
+            CborValue::Integer(5.into()),
+        ),
+    ]);
+
+    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
+    assert_eq!(output.display.args, "printf hello");
+    assert_eq!(
+        output.display.payload,
+        Some(tau_proto::ToolDisplayPayload::Text {
+            text: "printf hello\nprintf world".to_owned(),
+        })
+    );
+}
+
+#[test]
+fn shell_tool_long_display_args_are_truncated_to_twenty_chars() {
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("command".to_owned()),
+            CborValue::Text("printf 12345678901234567890".to_owned()),
+        ),
+        (
+            CborValue::Text("timeout".to_owned()),
+            CborValue::Integer(5.into()),
+        ),
+    ]);
+
+    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
+    assert_eq!(output.display.args, "printf 1234567890123");
+    assert_eq!(output.display.payload, None);
 }
 
 #[test]

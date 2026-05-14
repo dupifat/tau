@@ -1290,6 +1290,9 @@ pub enum ToolDisplayPayload {
     /// from the summary's `added`/`removed` and renders the hunks
     /// below the chip row.
     Diff(DiffSummary),
+    /// Plain text rendered below the chip row. Used when the inline
+    /// args label would be too noisy (e.g. multi-line shell commands).
+    Text { text: String },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

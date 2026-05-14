@@ -1466,6 +1466,24 @@ fn render_tool_display_assembles_chips_in_order() {
 }
 
 #[test]
+fn render_tool_display_text_payload_is_preserved_for_block_rendering() {
+    use tau_proto::{ToolDisplay, ToolDisplayPayload, ToolDisplayStatus};
+
+    let display = ToolDisplay {
+        args: "printf hello".into(),
+        status: ToolDisplayStatus::Success,
+        status_text: "ok".into(),
+        payload: Some(ToolDisplayPayload::Text {
+            text: "printf hello\nprintf world".into(),
+        }),
+        ..Default::default()
+    };
+    let rendered = render_tool_display("shell", &display);
+    assert_eq!(rendered.args, "printf hello");
+    assert_eq!(rendered.payload, display.payload);
+}
+
+#[test]
 fn render_tool_display_diff_payload_adds_plus_minus_chips() {
     use tau_proto::{DiffSummary, ToolDisplay, ToolDisplayPayload, ToolDisplayStatus};
 

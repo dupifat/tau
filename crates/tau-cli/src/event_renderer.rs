@@ -867,11 +867,8 @@ impl EventRenderer {
                     tau_proto::Effort::Medium => {}
                     e => parts.push(e.to_string()),
                 }
-                if matches!(
-                    self.current_params.service_tier,
-                    Some(tau_proto::ServiceTier::Fast)
-                ) {
-                    parts.push("fast".into());
+                if let Some(service_tier) = self.current_params.service_tier {
+                    parts.push(service_tier.as_str().into());
                 }
                 if !self.current_params.verbosity.is_default() {
                     parts.push(format!("v={}", self.current_params.verbosity));

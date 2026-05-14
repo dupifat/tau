@@ -2219,7 +2219,7 @@ impl Harness {
                 self.publish_event(
                     None,
                     Event::HarnessInfo(tau_proto::HarnessInfo {
-                        message: format!("Fast mode set to {status}"),
+                        message: format!("Service tier set to {status}"),
                         level: tau_proto::HarnessInfoLevel::Normal,
                     }),
                 );

@@ -1428,6 +1428,42 @@ fn read_file_honors_start_line_and_line_count() {
 }
 
 #[test]
+fn read_file_reports_empty_file_as_zero_lines() {
+    let td = TempDir::new().expect("tempdir");
+    let path = td.path().join("empty.txt");
+    std::fs::write(&path, "").expect("write");
+
+    let args = CborValue::Map(vec![(
+        CborValue::Text("path".to_owned()),
+        CborValue::Text(path.display().to_string()),
+    )]);
+    let result = read_file(&args).expect("read").result;
+
+    assert_eq!(cbor_map_text(&result, "content"), Some(""));
+    assert_eq!(cbor_int_field(&result, "start_line"), Some(1));
+    assert_eq!(cbor_int_field(&result, "line_count"), Some(0));
+    assert_eq!(cbor_int_field(&result, "total_lines"), Some(0));
+}
+
+#[test]
+fn read_file_reports_no_trailing_newline_as_one_line() {
+    let td = TempDir::new().expect("tempdir");
+    let path = td.path().join("no-newline.txt");
+    std::fs::write(&path, "text").expect("write");
+
+    let args = CborValue::Map(vec![(
+        CborValue::Text("path".to_owned()),
+        CborValue::Text(path.display().to_string()),
+    )]);
+    let result = read_file(&args).expect("read").result;
+
+    assert_eq!(cbor_map_text(&result, "content"), Some("text"));
+    assert_eq!(cbor_int_field(&result, "start_line"), Some(1));
+    assert_eq!(cbor_int_field(&result, "line_count"), Some(1));
+    assert_eq!(cbor_int_field(&result, "total_lines"), Some(1));
+}
+
+#[test]
 fn read_file_rejects_invalid_line_arguments() {
     let args = CborValue::Map(vec![
         (

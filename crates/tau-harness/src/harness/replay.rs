@@ -98,6 +98,7 @@ impl Harness {
                 .selected_model
                 .as_ref()
                 .and_then(|m| model_context_window(&self.model_registry, m)),
+            role: self.selected_role.clone(),
         });
         if selector_matches_event(selectors, &selected_event) {
             let _ = self

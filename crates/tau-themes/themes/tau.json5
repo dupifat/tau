@@ -43,6 +43,7 @@
 
     // -- Model status --
     "model.status":         { fg: "dark_grey" },
+    "role.status":          { fg: "dark_yellow" },
 
     // -- Token stats --
     "token.stats":                  { fg: "dark_grey" },

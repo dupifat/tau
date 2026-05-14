@@ -80,6 +80,11 @@ pub(crate) struct EventRenderer {
     /// when the effort changes, and vice versa). `None` until the
     /// first `HarnessModelSelected`, or when no model is selected.
     current_model: Option<tau_proto::ModelId>,
+    /// Currently active agent role, as last announced by
+    /// `HarnessModelSelected`. `None` when the model was picked
+    /// directly (no role), or no model is selected. The status bar
+    /// shows this in place of the model id when present.
+    current_role: Option<String>,
     /// Current per-prompt model knobs. Mirrored into `effort_state` /
     /// `verbosity_state` / `thinking_summary_state` so the input
     /// thread can read individual fields for cycling helpers.
@@ -308,6 +313,7 @@ impl EventRenderer {
             tool_history: Vec::new(),
             state_dirs,
             current_model: None,
+            current_role: None,
             current_params: tau_proto::ModelParams::default(),
             current_context_percent: None,
             current_context_input_tokens: None,
@@ -692,42 +698,80 @@ impl EventRenderer {
     }
 
     fn render_model_status(&mut self) {
-        use tau_cli_term::resolve::themed_block;
-        use tau_themes::names;
-        let mut label = match self.current_model.as_ref() {
-            None => "no model selected".to_string(),
+        use tau_cli_term::StyledBlock;
+        use tau_cli_term::resolve::{convert_color, themed_text};
+        use tau_themes::{StyleName, ThemedText, names};
+
+        let mut themed = ThemedText::new();
+        let status_style = themed.add_style(names::MODEL_STATUS);
+        let role_style = themed.add_style(names::ROLE_STATUS);
+
+        match self.current_model.as_ref() {
+            None => {
+                themed.push(status_style, "no model selected");
+            }
             Some(model) => {
-                let mut params = if matches!(self.current_params.effort, tau_proto::Effort::Off) {
-                    "none".to_owned()
-                } else {
-                    self.current_params.effort.to_string()
-                };
+                // Prefer the role label when present; otherwise fall
+                // back to the model id so the bar still identifies
+                // *something* when the user picked a model directly.
+                let identity = self
+                    .current_role
+                    .as_deref()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| model.to_string());
+                themed.push(role_style, identity);
+
+                // Build the `(params)` chip from only the *interesting*
+                // knobs — anything at its implied default is omitted, so
+                // `default (medium)` collapses to just `default`. `Off`
+                // is the type default for `Effort` but means "no
+                // reasoning", which is worth surfacing; `Medium` is the
+                // baseline that adds no information.
+                let mut parts: Vec<String> = Vec::new();
+                match self.current_params.effort {
+                    tau_proto::Effort::Off => parts.push("none".into()),
+                    tau_proto::Effort::Medium => {}
+                    e => parts.push(e.to_string()),
+                }
                 if matches!(
                     self.current_params.service_tier,
                     Some(tau_proto::ServiceTier::Fast)
                 ) {
-                    params.push_str(", fast");
+                    parts.push("fast".into());
                 }
                 if self.current_params.verbosity != tau_proto::Verbosity::Medium {
-                    params.push_str(&format!(", v={}", self.current_params.verbosity));
+                    parts.push(format!("v={}", self.current_params.verbosity));
                 }
                 if self.current_params.thinking_summary != tau_proto::ThinkingSummary::Auto
                     && self.current_params.thinking_summary != tau_proto::ThinkingSummary::Off
                 {
-                    params.push_str(&format!(", ts={}", self.current_params.thinking_summary));
+                    parts.push(format!("ts={}", self.current_params.thinking_summary));
                 }
+                let params_chip = if parts.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", parts.join(", "))
+                };
                 let context = format_context_chip(
                     self.current_context_input_tokens,
                     self.current_context_percent,
                     self.current_context_window,
                 );
-                format!("{model} ({params}){context}")
+                themed.push(status_style, format!("{params_chip}{context}"));
             }
-        };
-        if let Some(session_id) = &self.current_session_id {
-            label.push_str(&format!(" | {session_id}"));
         }
-        let block = themed_block(&self.theme, names::MODEL_STATUS, label);
+        if let Some(session_id) = &self.current_session_id {
+            themed.push(status_style, format!(" | {session_id}"));
+        }
+
+        let bg = self
+            .theme
+            .resolve_style(&StyleName::new(names::MODEL_STATUS))
+            .bg;
+        let mut block = StyledBlock::new(themed_text(&self.theme, &themed));
+        if let Some(bg) = bg {
+            block = block.bg(convert_color(bg));
+        }
         match self.model_status_block {
             Some(bid) => {
                 self.handle.set_block(bid, block);
@@ -1426,6 +1470,7 @@ impl EventRenderer {
             }
             Event::HarnessModelSelected(selected) => {
                 self.current_model = selected.model.clone();
+                self.current_role = selected.role.clone();
                 self.current_context_window = selected.context_window;
                 self.render_model_status();
             }

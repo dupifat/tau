@@ -503,6 +503,11 @@ pub struct HarnessModelSelected {
     /// Total context window size, in tokens, if known for the model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
+    /// Currently selected agent role, when the model was reached via a
+    /// role rather than a direct model pick. `None` when the user
+    /// selected a model directly, or when no role/model is selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 /// Current context usage for the selected model.

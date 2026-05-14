@@ -47,6 +47,10 @@ pub const SYSTEM_STATUS: &str = "system.status";
 
 // -- Model status --
 pub const MODEL_STATUS: &str = "model.status";
+/// Active agent role chip inside the status bar. Painted in its own
+/// style so themes can make the currently-selected role pop out from
+/// the rest of the (otherwise dim) status line.
+pub const ROLE_STATUS: &str = "role.status";
 
 // -- Token stats --
 pub const TOKEN_STATS: &str = "token.stats";

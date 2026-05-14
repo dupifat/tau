@@ -256,6 +256,7 @@ fn new_session_preserves_model_status() {
     renderer.handle(&Event::HarnessModelSelected(HarnessModelSelected {
         model: Some("test/model".into()),
         context_window: Some(100_000),
+        role: None,
     }));
     sync(&handle);
     assert!(vt.screen_contains(80, "test/model"));

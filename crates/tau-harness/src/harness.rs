@@ -1770,6 +1770,11 @@ impl Harness {
                     let was_empty = self.selected_model.is_none();
                     let model = select.model.clone();
                     self.selected_model = Some(model.clone());
+                    // Direct model pick supersedes any previously
+                    // chosen role: clear it so subsequent role-driven
+                    // logic (param resolution, replay) sees a coherent
+                    // "no role" state.
+                    self.selected_role = None;
                     let (live_settings, _) = load_harness_settings_or_warn(&self.dirs);
                     self.selected_params = selected_params_for_model(
                         &self.dirs,
@@ -1791,6 +1796,7 @@ impl Harness {
                         Event::HarnessModelSelected(HarnessModelSelected {
                             model: Some(model),
                             context_window,
+                            role: None,
                         }),
                     );
                     self.publish_event(
@@ -1916,6 +1922,7 @@ impl Harness {
                     Event::HarnessModelSelected(HarnessModelSelected {
                         model: Some(model),
                         context_window,
+                        role: self.selected_role.clone(),
                     }),
                 );
                 self.publish_event(

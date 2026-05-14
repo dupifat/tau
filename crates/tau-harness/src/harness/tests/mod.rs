@@ -315,8 +315,10 @@ fn draft_event(text: &str) -> Event {
 #[test]
 fn shell_command_args_middle_shortens_long_first_line() {
     assert_eq!(
-        super::shell_command_args("printf 12345678901234567890\nprintf ignored"),
-        "printf 123┄1234567890"
+        super::shell_command_args(
+            "printf 1234567890123456789012345678901234567890\nprintf ignored"
+        ),
+        "printf 1234567890123┄12345678901234567890"
     );
 }
 

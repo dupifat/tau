@@ -355,7 +355,7 @@ fn command_display_args(command: &str) -> String {
 }
 
 fn shorten_command_line(line: &str) -> String {
-    const EDGE_CHARS: usize = 10;
+    const EDGE_CHARS: usize = 20;
     let chars: Vec<char> = line.chars().collect();
     if chars.len() <= EDGE_CHARS * 2 {
         return line.to_owned();

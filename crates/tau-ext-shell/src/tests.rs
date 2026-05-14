@@ -1525,7 +1525,7 @@ fn shell_tool_long_display_args_are_middle_shortened() {
     let args = CborValue::Map(vec![
         (
             CborValue::Text("command".to_owned()),
-            CborValue::Text("printf 12345678901234567890".to_owned()),
+            CborValue::Text("printf 1234567890123456789012345678901234567890".to_owned()),
         ),
         (
             CborValue::Text("timeout".to_owned()),
@@ -1534,7 +1534,10 @@ fn shell_tool_long_display_args_are_middle_shortened() {
     ]);
 
     let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
-    assert_eq!(output.display.args, "printf 123┄1234567890");
+    assert_eq!(
+        output.display.args,
+        "printf 1234567890123┄12345678901234567890"
+    );
     assert_eq!(output.display.payload, None);
 }
 

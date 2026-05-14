@@ -5015,7 +5015,7 @@ fn shell_command_args(command: &str) -> String {
 }
 
 fn shorten_shell_command_line(line: &str) -> String {
-    const EDGE_CHARS: usize = 10;
+    const EDGE_CHARS: usize = 20;
     let chars: Vec<char> = line.chars().collect();
     if chars.len() <= EDGE_CHARS * 2 {
         return line.to_owned();

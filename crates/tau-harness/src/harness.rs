@@ -2073,12 +2073,19 @@ impl Harness {
                                     }
                                 }
                             }
-                            "fast" | "fast-mode" | "fastMode" => match value.as_str() {
-                                "on" | "true" | "yes" => next_role.fast_mode = Some(true),
-                                "off" | "false" | "no" => next_role.fast_mode = Some(false),
+                            "service-tier" | "serviceTier" => match value.as_str() {
+                                "fast" => {
+                                    next_role.service_tier = Some(tau_proto::ServiceTier::Fast);
+                                }
+                                "flex" => {
+                                    next_role.service_tier = Some(tau_proto::ServiceTier::Flex);
+                                }
+                                "default" | "none" | "off" => next_role.service_tier = None,
                                 _ => {
                                     valid = false;
-                                    self.emit_info("/role: fast-mode must be on/off");
+                                    self.emit_info(
+                                        "/role: service-tier must be fast, flex, or none",
+                                    );
                                 }
                             },
                             "tools-profile" | "toolsProfile" => {
@@ -2189,14 +2196,11 @@ impl Harness {
                     self.available_roles
                         .entry(role_name.clone())
                         .or_default()
-                        .fast_mode = Some(matches!(
-                        req.service_tier,
-                        Some(tau_proto::ServiceTier::Fast)
-                    ));
-                    self.role_overrides.entry(role_name).or_default().fast_mode = Some(matches!(
-                        req.service_tier,
-                        Some(tau_proto::ServiceTier::Fast)
-                    ));
+                        .service_tier = req.service_tier;
+                    self.role_overrides
+                        .entry(role_name)
+                        .or_default()
+                        .service_tier = req.service_tier;
                     save_role_overrides(
                         &self.dirs,
                         self.selected_role.as_deref(),

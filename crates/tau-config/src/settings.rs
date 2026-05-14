@@ -490,8 +490,6 @@ pub struct AgentRole {
     pub verbosity: Option<tau_proto::Verbosity>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "thinkingSummary")]
     pub thinking_summary: Option<tau_proto::ThinkingSummary>,
-    #[serde(skip_serializing_if = "Option::is_none", rename = "fastMode")]
-    pub fast_mode: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "serviceTier")]
     pub service_tier: Option<tau_proto::ServiceTier>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "toolsProfile")]
@@ -504,7 +502,6 @@ impl AgentRole {
         self.effort = self.effort.or(fallback.effort);
         self.verbosity = self.verbosity.or(fallback.verbosity);
         self.thinking_summary = self.thinking_summary.or(fallback.thinking_summary);
-        self.fast_mode = self.fast_mode.or(fallback.fast_mode);
         self.service_tier = self.service_tier.or(fallback.service_tier);
         self.tools_profile = self
             .tools_profile

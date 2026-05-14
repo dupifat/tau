@@ -112,10 +112,7 @@ pub(crate) fn selected_params_for_role(
     let thinking_summary = current
         .and_then(|r| r.thinking_summary)
         .unwrap_or_else(|| default_thinking_summary(&allowed_thinking));
-    let service_tier = current
-        .and_then(|r| r.fast_mode)
-        .map(|enabled| enabled.then_some(tau_proto::ServiceTier::Fast))
-        .unwrap_or_else(|| current.and_then(|r| r.service_tier));
+    let service_tier = current.and_then(|r| r.service_tier);
 
     ModelParams {
         effort: clamp_effort(effort, &allowed_effort),
@@ -137,11 +134,10 @@ pub(crate) fn describe_role(
     };
     let params = selected_params_for_role(registry, roles, role, &model);
     let current = roles.get(role);
-    let fast = if matches!(params.service_tier, Some(tau_proto::ServiceTier::Fast)) {
-        ", fast"
-    } else {
-        ""
-    };
+    let service_tier = params
+        .service_tier
+        .map(|tier| format!(", service-tier={}", tier.as_str()))
+        .unwrap_or_default();
     let tools_profile = current
         .and_then(|r| r.tools_profile.as_deref())
         .map(|name| {
@@ -154,7 +150,12 @@ pub(crate) fn describe_role(
         .unwrap_or_default();
     format!(
         "model={}, effort={}, verbosity={}, thinking-summary={}{}{}",
-        model, params.effort, params.verbosity, params.thinking_summary, fast, tools_profile
+        model,
+        params.effort,
+        params.verbosity,
+        params.thinking_summary,
+        service_tier,
+        tools_profile
     )
 }
 

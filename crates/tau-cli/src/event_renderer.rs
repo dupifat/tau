@@ -119,8 +119,9 @@ pub(crate) struct EventRenderer {
     cumulative_agent_latency: Duration,
     /// Shared effort mirror for the input thread.
     effort_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
-    /// Shared Fast-mode mirror for the input thread's `fast-toggle` binding.
-    fast_mode_state: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Shared fast-service-tier mirror for the input thread's `fast-toggle`
+    /// binding.
+    fast_service_tier_state: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Shared active-role mirror for the input thread's `role-cycle` binding.
     current_role_state: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// Shared ordered role names for the input thread's `role-cycle` binding.
@@ -186,7 +187,7 @@ struct RoleCompletionDetails {
     effort: Option<String>,
     verbosity: Option<String>,
     thinking_summary: Option<String>,
-    fast_mode: Option<bool>,
+    service_tier: Option<String>,
     tools_profile: Option<String>,
 }
 
@@ -197,20 +198,15 @@ impl RoleCompletionDetails {
             effort: None,
             verbosity: None,
             thinking_summary: None,
-            fast_mode: Some(false),
+            service_tier: None,
             tools_profile: None,
         };
 
         if description == "no model" {
-            details.fast_mode = None;
             return details;
         }
 
         for part in description.split(',').map(str::trim) {
-            if part == "fast" {
-                details.fast_mode = Some(true);
-                continue;
-            }
             let Some((key, value)) = part.split_once('=') else {
                 continue;
             };
@@ -219,6 +215,7 @@ impl RoleCompletionDetails {
                 "effort" => details.effort = Some(value.to_owned()),
                 "verbosity" => details.verbosity = Some(value.to_owned()),
                 "thinking-summary" => details.thinking_summary = Some(value.to_owned()),
+                "service-tier" => details.service_tier = Some(value.to_owned()),
                 "tools-profile" => details.tools_profile = Some(value.to_owned()),
                 _ => {}
             }
@@ -241,8 +238,8 @@ impl RoleCompletionDetails {
         if let Some(thinking_summary) = self.thinking_summary.as_deref() {
             parts.push(format!("ts={thinking_summary}"));
         }
-        if self.fast_mode == Some(true) {
-            parts.push("fast".to_owned());
+        if let Some(service_tier) = self.service_tier.as_deref() {
+            parts.push(format!("st={service_tier}"));
         }
         if let Some(tools_profile) = self.tools_profile.as_deref() {
             parts.push(format!("tp={tools_profile}"));
@@ -264,11 +261,7 @@ impl RoleCompletionDetails {
                 .as_deref()
                 .unwrap_or("unset")
                 .to_owned(),
-            "fast-mode" => match self.fast_mode {
-                Some(true) => "on".to_owned(),
-                Some(false) => "off".to_owned(),
-                None => "unset".to_owned(),
-            },
+            "service-tier" => self.service_tier.as_deref().unwrap_or("unset").to_owned(),
             "tools-profile" => self.tools_profile.as_deref().unwrap_or("unset").to_owned(),
             _ => "unset".to_owned(),
         }
@@ -290,8 +283,9 @@ fn role_value_completion(setting: &str, value: &str) -> tau_cli_term::Completion
         ("thinking-summary", "auto") => "provider default summaries",
         ("thinking-summary", "concise") => "short thinking summaries",
         ("thinking-summary", "detailed") => "detailed thinking summaries",
-        ("fast-mode", "on") => "use fast service tier",
-        ("fast-mode", "off") => "use default service tier",
+        ("service-tier", "fast") => "use fast service tier",
+        ("service-tier", "flex") => "use flex service tier",
+        ("service-tier", "none") => "use default service tier",
         _ => "",
     };
     tau_cli_term::CompletionItem::new(value, description)
@@ -443,7 +437,7 @@ impl EventRenderer {
             effort_state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
                 tau_proto::Effort::Off.as_u8(),
             )),
-            fast_mode_state: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            fast_service_tier_state: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             current_role_state: std::sync::Arc::new(std::sync::Mutex::new(None)),
             roles_available: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             // Empty until the first `HarnessEffortsAvailable`
@@ -510,8 +504,8 @@ impl EventRenderer {
 
     /// Returns a clone of the shared Fast-mode mirror, used by configurable
     /// bindings.
-    pub(crate) fn fast_mode_state(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
-        self.fast_mode_state.clone()
+    pub(crate) fn fast_service_tier_state(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.fast_service_tier_state.clone()
     }
 
     /// Returns a clone of the shared active-role mirror, used by configurable
@@ -1586,7 +1580,7 @@ impl EventRenderer {
                                     effort: None,
                                     verbosity: None,
                                     thinking_summary: None,
-                                    fast_mode: None,
+                                    service_tier: None,
                                     tools_profile: None,
                                 });
                             [
@@ -1598,7 +1592,7 @@ impl EventRenderer {
                                     "thinking-summary",
                                     details.current_description("thinking-summary"),
                                 ),
-                                ("fast-mode", details.current_description("fast-mode")),
+                                ("service-tier", details.current_description("service-tier")),
                                 (
                                     "tools-profile",
                                     details.current_description("tools-profile"),
@@ -1625,7 +1619,7 @@ impl EventRenderer {
                                 .filter(|value| matches(value, args[2]))
                                 .map(|value| role_value_completion(args[1], value))
                                 .collect(),
-                            "fast-mode" => ["on", "off"]
+                            "service-tier" => ["fast", "flex", "none"]
                                 .into_iter()
                                 .filter(|value| matches(value, args[2]))
                                 .map(|value| role_value_completion(args[1], value))
@@ -1660,7 +1654,7 @@ impl EventRenderer {
             }
             Event::HarnessServiceTierChanged(changed) => {
                 self.current_params.service_tier = changed.service_tier;
-                self.fast_mode_state.store(
+                self.fast_service_tier_state.store(
                     matches!(changed.service_tier, Some(tau_proto::ServiceTier::Fast)),
                     std::sync::atomic::Ordering::Relaxed,
                 );
@@ -1754,14 +1748,14 @@ mod tests {
     #[test]
     fn role_details_report_single_current_field() {
         let details = RoleCompletionDetails::from_description(
-            "model=codex-dpcpw/gpt-5.5, effort=xhigh, verbosity=medium, thinking-summary=off, fast, tools-profile=read_only",
+            "model=codex-dpcpw/gpt-5.5, effort=xhigh, verbosity=medium, thinking-summary=off, service-tier=fast, tools-profile=read_only",
         );
 
         assert_eq!(details.current_description("model"), "codex-dpcpw/gpt-5.5");
         assert_eq!(details.current_description("effort"), "xhigh");
         assert_eq!(details.current_description("verbosity"), "medium");
         assert_eq!(details.current_description("thinking-summary"), "off");
-        assert_eq!(details.current_description("fast-mode"), "on");
+        assert_eq!(details.current_description("service-tier"), "fast");
         assert_eq!(details.current_description("tools-profile"), "read_only");
     }
 

@@ -8,7 +8,7 @@ A role can set:
 - `effort`: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`
 - `verbosity`: `low`, `medium`, or `high`
 - `thinkingSummary`: `off`, `auto`, `concise`, or `detailed`
-- `fastMode`: `true` or `false`
+- `serviceTier`: `fast` or `flex`
 - `toolsProfile`: name of a tool-availability profile from `harness.json5`
 
 Roles live in `models.json5` under `defaultRoles`:
@@ -28,6 +28,7 @@ Roles live in `models.json5` under `defaultRoles`:
     rush: {
       effort: "low",
       thinkingSummary: "off",
+      serviceTier: "fast",
     },
   },
 }
@@ -65,7 +66,7 @@ tool's extension-provided `enabled_by_default` setting. Tau includes a built-in
 
 Missing fields use Tau's hardcoded defaults for the selected model.
 
-Tau ships built-in `smart`, `deep`, and `rush` roles. `smart` is the startup fallback role; `deep` asks for higher reasoning with detailed thinking summaries; `rush` asks for lower reasoning and Fast mode.
+Tau ships built-in `smart`, `deep`, and `rush` roles. `smart` is the startup fallback role; `deep` asks for higher reasoning with detailed thinking summaries; `rush` asks for lower reasoning.
 
 
 ## Selecting a role
@@ -80,7 +81,7 @@ Use `/model <role>`.
 Use:
 
 ```text
-/role <role> <delete|model|effort|verbosity|thinking-summary|fast-mode|tools-profile> [value]
+/role <role> <delete|model|effort|verbosity|thinking-summary|service-tier|tools-profile> [value]
 ```
 
 Examples:
@@ -88,7 +89,7 @@ Examples:
 ```text
 /role smart model openai/gpt-5.3-codex
 /role deep effort xhigh
-/role rush fast-mode on
+/role rush service-tier fast
 /role smart tools-profile read_only
 /role temporary model anthropic/claude-sonnet-4-20250514
 /role temporary delete

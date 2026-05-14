@@ -356,7 +356,7 @@ pub(crate) fn run_chat(
         build_set_arg_completer(renderer.cli_state_mirror()),
     );
     let effort_state = renderer.effort_state();
-    let fast_mode_state = renderer.fast_mode_state();
+    let fast_service_tier_state = renderer.fast_service_tier_state();
     let current_role_state = renderer.current_role_state();
     let roles_available = renderer.roles_available();
     let efforts_available = renderer.efforts_available();
@@ -397,7 +397,7 @@ pub(crate) fn run_chat(
         &mut active_session_id,
         TerminalInputLoopCtx {
             effort_state,
-            fast_mode_state,
+            fast_service_tier_state,
             current_role_state,
             roles_available,
             efforts_available,
@@ -479,7 +479,7 @@ enum RendererCmd {
 
 struct TerminalInputLoopCtx {
     effort_state: Arc<std::sync::atomic::AtomicU8>,
-    fast_mode_state: Arc<std::sync::atomic::AtomicBool>,
+    fast_service_tier_state: Arc<std::sync::atomic::AtomicBool>,
     current_role_state: Arc<Mutex<Option<String>>>,
     roles_available: Arc<Mutex<Vec<String>>>,
     /// Set of effort levels the harness currently accepts, kept in
@@ -611,7 +611,7 @@ fn terminal_input_loop(
                 }
                 if text == "/fast" {
                     let enabled = ctx
-                        .fast_mode_state
+                        .fast_service_tier_state
                         .load(std::sync::atomic::Ordering::Relaxed);
                     let service_tier = if enabled {
                         None
@@ -772,7 +772,7 @@ fn terminal_input_loop(
             }
             TermEvent::FastToggle => {
                 let enabled = ctx
-                    .fast_mode_state
+                    .fast_service_tier_state
                     .load(std::sync::atomic::Ordering::Relaxed);
                 let service_tier = if enabled {
                     None
@@ -958,7 +958,7 @@ fn handle_role_command(text: &str, writer: &WriterHandle, print_local: &impl Fn(
     let extra = parts.next();
     let (Some(role), Some(command)) = (role, command) else {
         print_local(
-            "/role <role> <delete|model|effort|verbosity|thinking-summary|fast-mode|tools-profile> [value]",
+            "/role <role> <delete|model|effort|verbosity|thinking-summary|service-tier|tools-profile> [value]",
         );
         return;
     };
@@ -989,7 +989,7 @@ fn handle_role_command(text: &str, writer: &WriterHandle, print_local: &impl Fn(
         "effort",
         "verbosity",
         "thinking-summary",
-        "fast-mode",
+        "service-tier",
         "tools-profile",
     ];
     if !allowed.contains(&command) {

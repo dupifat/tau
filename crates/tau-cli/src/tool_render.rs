@@ -2,6 +2,7 @@
 //! elements. Pure functions over [`tau_proto`] payloads — no
 //! [`tau_cli_term`] state lives here.
 
+use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
@@ -116,7 +117,7 @@ fn token_stats_parts(
     ));
     if let Some(latency) = turn_latency {
         parts.push(TokenStatsPart::new(
-            format!(" {}ms", latency.as_millis()),
+            format!(" {}", StatusBarDuration(latency)),
             names::TOKEN_STATS_LATENCY,
         ));
     }
@@ -138,12 +139,29 @@ fn token_stats_parts(
     ));
     if let Some(latency) = total_latency {
         parts.push(TokenStatsPart::new(
-            format!(" {}ms", latency.as_millis()),
+            format!(" {}", StatusBarDuration(latency)),
             names::TOKEN_STATS_LATENCY,
         ));
     }
 
     parts
+}
+
+struct StatusBarDuration(Duration);
+
+impl fmt::Display for StatusBarDuration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        const MILLIS_MAX: Duration = Duration::from_secs(5);
+        const SECONDS_MAX: Duration = Duration::from_secs(5 * 60);
+
+        if self.0 < MILLIS_MAX {
+            write!(f, "{}ms", self.0.as_millis())
+        } else if self.0 < SECONDS_MAX {
+            write!(f, "{}s", self.0.as_secs())
+        } else {
+            write!(f, "{}m", self.0.as_secs() / 60)
+        }
+    }
 }
 
 fn cache_hit_style_name(possible_cached_tokens: u64, cached_tokens: u64) -> &'static str {

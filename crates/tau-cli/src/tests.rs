@@ -1638,7 +1638,7 @@ fn format_context_chip_picks_format_by_known_fields() {
 }
 
 #[test]
-fn format_token_stats_line_appends_hit_percent_when_cache_hits() {
+fn format_token_stats_line_formats_short_latencies_as_millis() {
     let usage = tau_proto::AgentTokenUsage {
         prompt_sent_tokens: 17_341,
         prompt_cached_tokens: 16_896,
@@ -1666,6 +1666,28 @@ fn format_token_stats_line_appends_hit_percent_when_cache_hits() {
     );
 
     assert_eq!(line, "Δ97% 16.8k/17.3k ↑0 ↓29 1240ms Σ ↑50k/100k ↓0 4560ms",);
+}
+
+#[test]
+fn format_token_stats_line_formats_long_latencies_compactly() {
+    let usage = tau_proto::AgentTokenUsage {
+        stats: tau_proto::TokenUsageStats {
+            total: tau_proto::TokenUsageCounts {
+                sent_tokens: 1_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let line = format_token_stats_line(
+        &usage,
+        None,
+        Some(Duration::from_millis(18_723)),
+        Some(Duration::from_secs(5 * 60 + 1)),
+    );
+
+    assert_eq!(line, "Δ0% 0/0 ↑0 ↓0 18s Σ ↑0/1k ↓0 5m");
 }
 
 #[test]

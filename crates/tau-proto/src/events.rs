@@ -215,6 +215,8 @@ impl EventName {
     pub const HARNESS_UI_DIR: Self = Self::from_static(EventCategory::Harness, "ui_dir");
     pub const HARNESS_MODELS_AVAILABLE: Self =
         Self::from_static(EventCategory::Harness, "models_available");
+    pub const HARNESS_ROLES_AVAILABLE: Self =
+        Self::from_static(EventCategory::Harness, "roles_available");
     pub const HARNESS_MODEL_SELECTED: Self =
         Self::from_static(EventCategory::Harness, "model_selected");
     pub const HARNESS_CONTEXT_USAGE_CHANGED: Self =
@@ -236,6 +238,8 @@ impl EventName {
 
     pub const UI_PROMPT_SUBMITTED: Self = Self::from_static(EventCategory::Ui, "prompt_submitted");
     pub const UI_MODEL_SELECT: Self = Self::from_static(EventCategory::Ui, "model_select");
+    pub const UI_ROLE_SELECT: Self = Self::from_static(EventCategory::Ui, "role_select");
+    pub const UI_ROLE_UPDATE: Self = Self::from_static(EventCategory::Ui, "role_update");
     pub const UI_SET_EFFORT: Self = Self::from_static(EventCategory::Ui, "set_effort");
     pub const UI_SET_SERVICE_TIER: Self = Self::from_static(EventCategory::Ui, "set_service_tier");
     pub const UI_SET_VERBOSITY: Self = Self::from_static(EventCategory::Ui, "set_verbosity");
@@ -476,6 +480,18 @@ pub struct HarnessUiDir {
 pub struct HarnessModelsAvailable {
     /// Each entry is `"provider_name/model_id"`.
     pub models: Vec<ModelId>,
+}
+
+/// The harness announces role names with resolved descriptions.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HarnessRoleInfo {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HarnessRolesAvailable {
+    pub roles: Vec<HarnessRoleInfo>,
 }
 
 /// The harness announces which model is currently selected.
@@ -1556,6 +1572,26 @@ pub struct UiModelSelect {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiDetachRequest {}
 
+/// The user requests switching to an agent role.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiRoleSelect {
+    pub role: String,
+}
+
+/// The user changes or deletes an agent role.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiRoleUpdate {
+    pub role: String,
+    pub action: UiRoleUpdateAction,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum UiRoleUpdateAction {
+    Delete,
+    Set { setting: String, value: String },
+}
+
 /// The user requests a effort change.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiSetEffort {
@@ -2364,6 +2400,8 @@ pub enum Event {
     HarnessUiDir(HarnessUiDir),
     #[serde(rename = "harness.models_available")]
     HarnessModelsAvailable(HarnessModelsAvailable),
+    #[serde(rename = "harness.roles_available")]
+    HarnessRolesAvailable(HarnessRolesAvailable),
     #[serde(rename = "harness.model_selected")]
     HarnessModelSelected(HarnessModelSelected),
     #[serde(rename = "harness.context_usage_changed")]
@@ -2390,6 +2428,10 @@ pub enum Event {
     UiPromptDraft(UiPromptDraft),
     #[serde(rename = "ui.model_select")]
     UiModelSelect(UiModelSelect),
+    #[serde(rename = "ui.role_select")]
+    UiRoleSelect(UiRoleSelect),
+    #[serde(rename = "ui.role_update")]
+    UiRoleUpdate(UiRoleUpdate),
     #[serde(rename = "ui.set_effort")]
     UiSetEffort(UiSetEffort),
     #[serde(rename = "ui.set_service_tier")]
@@ -2475,6 +2517,7 @@ impl Event {
             Self::HarnessSessionDir(_) => EventName::HARNESS_SESSION_DIR,
             Self::HarnessUiDir(_) => EventName::HARNESS_UI_DIR,
             Self::HarnessModelsAvailable(_) => EventName::HARNESS_MODELS_AVAILABLE,
+            Self::HarnessRolesAvailable(_) => EventName::HARNESS_ROLES_AVAILABLE,
             Self::HarnessModelSelected(_) => EventName::HARNESS_MODEL_SELECTED,
             Self::HarnessContextUsageChanged(_) => EventName::HARNESS_CONTEXT_USAGE_CHANGED,
             Self::HarnessEffortChanged(_) => EventName::HARNESS_EFFORT_CHANGED,
@@ -2489,6 +2532,8 @@ impl Event {
             Self::UiPromptSubmitted(_) => EventName::UI_PROMPT_SUBMITTED,
             Self::UiPromptDraft(_) => EventName::UI_PROMPT_DRAFT,
             Self::UiModelSelect(_) => EventName::UI_MODEL_SELECT,
+            Self::UiRoleSelect(_) => EventName::UI_ROLE_SELECT,
+            Self::UiRoleUpdate(_) => EventName::UI_ROLE_UPDATE,
             Self::UiSetEffort(_) => EventName::UI_SET_EFFORT,
             Self::UiSetServiceTier(_) => EventName::UI_SET_SERVICE_TIER,
             Self::UiSetVerbosity(_) => EventName::UI_SET_VERBOSITY,

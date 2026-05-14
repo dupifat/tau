@@ -1,12 +1,7 @@
 {
-  // Default model to use, in "provider/model-id" format.
-  // The provider must be defined in models.json5.
-  // default_model: "local/llama-3",
-
-  // Optional per-model default efforts.
-  // default_efforts: {
-  //   "local/llama-3": "high",
-  // },
+  // Model choice and model behavior defaults live in `models.json5` under
+  // `defaultRoles`. Use `/model <role>` to switch and `/role ...` to edit
+  // persisted role overrides.
 
   // Optional built-in extension overrides.
   // extensions: {

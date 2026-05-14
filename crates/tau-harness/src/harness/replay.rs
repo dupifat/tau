@@ -14,12 +14,13 @@
 
 use tau_proto::{
     Event, EventSelector, Frame, HarnessContextUsageChanged, HarnessModelSelected,
-    HarnessModelsAvailable, Message,
+    HarnessModelsAvailable, HarnessRolesAvailable, Message,
 };
 
 use crate::harness::{Harness, selector_matches_event};
 use crate::model::{
-    efforts_for_model, model_context_window, thinking_summaries_for_model, verbosities_for_model,
+    efforts_for_model, model_context_window, role_infos, thinking_summaries_for_model,
+    verbosities_for_model,
 };
 
 impl Harness {
@@ -80,6 +81,16 @@ impl Harness {
             let _ = self
                 .bus
                 .send_to(client_id, None, Frame::Event(models_event));
+        }
+        let roles_event = Event::HarnessRolesAvailable(HarnessRolesAvailable {
+            roles: role_infos(
+                &self.model_registry,
+                &self.available_roles,
+                &self.available_models,
+            ),
+        });
+        if selector_matches_event(selectors, &roles_event) {
+            let _ = self.bus.send_to(client_id, None, Frame::Event(roles_event));
         }
         let selected_event = Event::HarnessModelSelected(HarnessModelSelected {
             model: self.selected_model.clone(),

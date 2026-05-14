@@ -1357,14 +1357,72 @@ impl EventRenderer {
                 self.handle
                     .print_output(ui_dir_block(&self.theme, &ui_dir.path));
             }
-            Event::HarnessModelsAvailable(models) => {
-                let items: Vec<tau_cli_term::CompletionItem> = models
-                    .models
+            Event::HarnessModelsAvailable(_models) => {}
+            Event::HarnessRolesAvailable(roles) => {
+                let items: Vec<tau_cli_term::CompletionItem> = roles
+                    .roles
                     .iter()
-                    .map(|m| tau_cli_term::CompletionItem::plain(m.to_string()))
+                    .map(|r| tau_cli_term::CompletionItem::new(&r.name, &r.description))
                     .collect();
                 self.completion_data
-                    .set_arg_completions(tau_cli_term::CommandName::new("/model"), items);
+                    .set_arg_completions(tau_cli_term::CommandName::new("/model"), items.clone());
+                let completer: tau_cli_term::ArgCompleter = std::sync::Arc::new(move |args| {
+                    fn matches(value: &str, needle: &str) -> bool {
+                        needle.is_empty() || value.starts_with(needle) || value.contains(needle)
+                    }
+                    match args.len() {
+                        1 => items
+                            .iter()
+                            .filter(|item| matches(&item.value, args[0]))
+                            .cloned()
+                            .collect(),
+                        2 => {
+                            let current = items
+                                .iter()
+                                .find(|item| item.value == args[0])
+                                .map(|item| item.description.as_str())
+                                .unwrap_or("new role");
+                            [
+                                ("delete", "delete this in-memory/persisted role".to_owned()),
+                                ("model", format!("current: {current}")),
+                                ("effort", format!("current: {current}")),
+                                ("verbosity", format!("current: {current}")),
+                                ("thinking-summary", format!("current: {current}")),
+                                ("fast-mode", format!("current: {current}")),
+                            ]
+                            .into_iter()
+                            .filter(|(value, _)| matches(value, args[1]))
+                            .map(|(value, desc)| tau_cli_term::CompletionItem::new(value, desc))
+                            .collect()
+                        }
+                        3 => match args[1] {
+                            "effort" => ["off", "minimal", "low", "medium", "high", "xhigh"]
+                                .into_iter()
+                                .filter(|value| matches(value, args[2]))
+                                .map(tau_cli_term::CompletionItem::plain)
+                                .collect(),
+                            "verbosity" => ["low", "medium", "high"]
+                                .into_iter()
+                                .filter(|value| matches(value, args[2]))
+                                .map(tau_cli_term::CompletionItem::plain)
+                                .collect(),
+                            "thinking-summary" => ["off", "auto", "concise", "detailed"]
+                                .into_iter()
+                                .filter(|value| matches(value, args[2]))
+                                .map(tau_cli_term::CompletionItem::plain)
+                                .collect(),
+                            "fast-mode" => ["on", "off"]
+                                .into_iter()
+                                .filter(|value| matches(value, args[2]))
+                                .map(tau_cli_term::CompletionItem::plain)
+                                .collect(),
+                            _ => Vec::new(),
+                        },
+                        _ => Vec::new(),
+                    }
+                });
+                self.completion_data
+                    .set_arg_completer(tau_cli_term::CommandName::new("/role"), completer);
             }
             Event::HarnessModelSelected(selected) => {
                 self.current_model = selected.model.clone();

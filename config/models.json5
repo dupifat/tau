@@ -1,4 +1,25 @@
 {
+  defaultRoles: {
+    // General default role. If model is omitted, Tau uses the first available model.
+    default: {
+      // model: "local/llama-3",
+    },
+    // Smart is intentionally just an alias to default unless overridden.
+    smart: {},
+    // Deeper reasoning defaults.
+    deep: {
+      effort: "xhigh",
+      verbosity: "high",
+      thinkingSummary: "detailed",
+    },
+    // Fast, cheaper everyday defaults.
+    rush: {
+      effort: "low",
+      verbosity: "low",
+      thinkingSummary: "off",
+    },
+  },
+
   providers: {
     // Local llama.cpp / Ollama / vLLM instance.
     local: {

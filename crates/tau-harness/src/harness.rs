@@ -44,7 +44,8 @@ use crate::harness::interception::{
 };
 use crate::model::{
     clamp_effort, clamp_thinking_summary, clamp_verbosity, context_percent_used, efforts_for_model,
-    load_model_list, model_context_window, save_harness_state, selected_params_for_model,
+    load_model_list, model_context_window, model_for_role, role_infos, save_harness_state,
+    save_role_overrides, selected_params_for_model, selected_params_for_role,
     thinking_summaries_for_model, verbosities_for_model,
 };
 use crate::prompt::{
@@ -205,6 +206,12 @@ pub(crate) struct Harness {
     pub(crate) pending_user_prompt_dispatches: VecDeque<ConversationId>,
     /// All available models.
     pub(crate) available_models: Vec<ModelId>,
+    /// Available agent roles.
+    pub(crate) available_roles: std::collections::HashMap<String, tau_config::settings::AgentRole>,
+    /// Persisted role overrides loaded from state and changed at runtime.
+    pub(crate) role_overrides: std::collections::HashMap<String, tau_config::settings::AgentRole>,
+    /// Currently selected role, if any.
+    pub(crate) selected_role: Option<String>,
     /// Currently selected model. `None` means no model is selected
     /// yet (no providers configured, or the user hasn't picked one).
     pub(crate) selected_model: Option<ModelId>,
@@ -377,6 +384,9 @@ impl Harness {
         let crate::model::LoadedModelList {
             available: available_models,
             selected: selected_model,
+            selected_role,
+            roles: available_roles,
+            role_overrides,
             model_registry,
             harness_settings,
             harness_settings_error,
@@ -388,7 +398,16 @@ impl Harness {
         );
         let selected_params = selected_model
             .as_ref()
-            .map(|m| selected_params_for_model(&dirs, &harness_settings, &model_registry, m))
+            .map(|m| {
+                selected_role
+                    .as_deref()
+                    .map(|role| {
+                        selected_params_for_role(&model_registry, &available_roles, role, m)
+                    })
+                    .unwrap_or_else(|| {
+                        selected_params_for_model(&dirs, &harness_settings, &model_registry, m)
+                    })
+            })
             .unwrap_or_default();
 
         let default_conversation_id = ConversationId::new("default");
@@ -444,6 +463,9 @@ impl Harness {
             deferred_publishes: VecDeque::new(),
             pending_user_prompt_dispatches: VecDeque::new(),
             available_models,
+            available_roles,
+            role_overrides,
+            selected_role,
             selected_model,
             selected_params,
             current_session_state: CurrentSessionState::default(),
@@ -590,6 +612,9 @@ impl Harness {
         let crate::model::LoadedModelList {
             available: available_models,
             selected: selected_model,
+            selected_role,
+            roles: available_roles,
+            role_overrides,
             model_registry,
             harness_settings,
             harness_settings_error,
@@ -602,7 +627,16 @@ impl Harness {
         );
         let selected_params = selected_model
             .as_ref()
-            .map(|m| selected_params_for_model(&dirs, &harness_settings, &model_registry, m))
+            .map(|m| {
+                selected_role
+                    .as_deref()
+                    .map(|role| {
+                        selected_params_for_role(&model_registry, &available_roles, role, m)
+                    })
+                    .unwrap_or_else(|| {
+                        selected_params_for_model(&dirs, &harness_settings, &model_registry, m)
+                    })
+            })
             .unwrap_or_default();
 
         let default_conversation_id = ConversationId::new("default");
@@ -658,6 +692,9 @@ impl Harness {
             deferred_publishes: VecDeque::new(),
             pending_user_prompt_dispatches: VecDeque::new(),
             available_models,
+            available_roles,
+            role_overrides,
+            selected_role,
             selected_model,
             selected_params,
             current_session_state: CurrentSessionState::default(),
@@ -1829,6 +1866,214 @@ impl Harness {
                 }
                 Ok(true)
             }
+            Event::UiRoleSelect(select) => {
+                if !self.available_roles.contains_key(&select.role) {
+                    self.publish_event(
+                        None,
+                        Event::HarnessInfo(tau_proto::HarnessInfo {
+                            message: format!("unknown role: {}", select.role),
+                            level: tau_proto::HarnessInfoLevel::Normal,
+                        }),
+                    );
+                    return Ok(true);
+                }
+                let Some(model) =
+                    model_for_role(&self.available_roles, &select.role, &self.available_models)
+                else {
+                    self.publish_event(
+                        None,
+                        Event::HarnessInfo(tau_proto::HarnessInfo {
+                            message: format!("role `{}` has no available model", select.role),
+                            level: tau_proto::HarnessInfoLevel::Normal,
+                        }),
+                    );
+                    return Ok(true);
+                };
+                let was_empty = self.selected_model.is_none();
+                self.selected_role = Some(select.role.clone());
+                self.selected_model = Some(model.clone());
+                self.selected_params = selected_params_for_role(
+                    &self.model_registry,
+                    &self.available_roles,
+                    &select.role,
+                    &model,
+                );
+                save_role_overrides(
+                    &self.dirs,
+                    self.selected_role.as_deref(),
+                    &self.role_overrides,
+                );
+                save_harness_state(&self.dirs, Some(&model), self.selected_params);
+                self.current_session_state.context_input_tokens = None;
+                self.current_session_state.context_cached_tokens = None;
+                self.current_session_state.context_percent_used = None;
+                let context_window = model_context_window(&self.model_registry, &model);
+                let effort_levels = efforts_for_model(&self.model_registry, &model);
+                let verbosity_levels = verbosities_for_model(&self.model_registry, &model);
+                let thinking_levels = thinking_summaries_for_model(&self.model_registry, &model);
+                self.publish_event(
+                    None,
+                    Event::HarnessModelSelected(HarnessModelSelected {
+                        model: Some(model),
+                        context_window,
+                    }),
+                );
+                self.publish_event(
+                    None,
+                    Event::HarnessContextUsageChanged(HarnessContextUsageChanged {
+                        input_tokens: self.current_session_state.context_input_tokens,
+                        cached_tokens: self.current_session_state.context_cached_tokens,
+                        percent_used: self.current_session_state.context_percent_used,
+                    }),
+                );
+                self.publish_event(
+                    None,
+                    Event::HarnessEffortChanged(tau_proto::HarnessEffortChanged {
+                        level: self.selected_params.effort,
+                    }),
+                );
+                self.publish_event(
+                    None,
+                    Event::HarnessEffortsAvailable(tau_proto::HarnessEffortsAvailable {
+                        levels: effort_levels,
+                    }),
+                );
+                self.publish_event(
+                    None,
+                    Event::HarnessServiceTierChanged(tau_proto::HarnessServiceTierChanged {
+                        service_tier: self.selected_params.service_tier,
+                    }),
+                );
+                self.publish_event(
+                    None,
+                    Event::HarnessVerbosityChanged(tau_proto::HarnessVerbosityChanged {
+                        level: self.selected_params.verbosity,
+                    }),
+                );
+                self.publish_event(
+                    None,
+                    Event::HarnessVerbositiesAvailable(tau_proto::HarnessVerbositiesAvailable {
+                        levels: verbosity_levels,
+                    }),
+                );
+                self.publish_event(
+                    None,
+                    Event::HarnessThinkingSummaryChanged(
+                        tau_proto::HarnessThinkingSummaryChanged {
+                            level: self.selected_params.thinking_summary,
+                        },
+                    ),
+                );
+                self.publish_event(
+                    None,
+                    Event::HarnessThinkingSummariesAvailable(
+                        tau_proto::HarnessThinkingSummariesAvailable {
+                            levels: thinking_levels,
+                        },
+                    ),
+                );
+                if was_empty && self.turn_state.is_idle() {
+                    self.try_advance_queue();
+                }
+                Ok(true)
+            }
+            Event::UiRoleUpdate(req) => {
+                match req.action {
+                    tau_proto::UiRoleUpdateAction::Delete => {
+                        self.available_roles.remove(&req.role);
+                        self.role_overrides.remove(&req.role);
+                        if self.selected_role.as_deref() == Some(req.role.as_str()) {
+                            self.selected_role = None;
+                        }
+                    }
+                    tau_proto::UiRoleUpdateAction::Set { setting, value } => {
+                        let mut next_role = self
+                            .available_roles
+                            .get(&req.role)
+                            .cloned()
+                            .unwrap_or_default();
+                        let mut valid = true;
+                        match setting.as_str() {
+                            "model" => match value.parse::<ModelId>() {
+                                Ok(model) => next_role.model = Some(model),
+                                Err(error) => {
+                                    valid = false;
+                                    self.emit_info(&format!("/role: {error}"));
+                                }
+                            },
+                            "effort" => match value.parse::<tau_proto::Effort>() {
+                                Ok(level) => next_role.effort = Some(level),
+                                Err(error) => {
+                                    valid = false;
+                                    self.emit_info(&format!("/role: {error}"));
+                                }
+                            },
+                            "verbosity" => match value.parse::<tau_proto::Verbosity>() {
+                                Ok(level) => next_role.verbosity = Some(level),
+                                Err(error) => {
+                                    valid = false;
+                                    self.emit_info(&format!("/role: {error}"));
+                                }
+                            },
+                            "thinking-summary" | "thinkingSummary" => {
+                                match value.parse::<tau_proto::ThinkingSummary>() {
+                                    Ok(level) => next_role.thinking_summary = Some(level),
+                                    Err(error) => {
+                                        valid = false;
+                                        self.emit_info(&format!("/role: {error}"));
+                                    }
+                                }
+                            }
+                            "fast" | "fast-mode" | "fastMode" => match value.as_str() {
+                                "on" | "true" | "yes" => next_role.fast_mode = Some(true),
+                                "off" | "false" | "no" => next_role.fast_mode = Some(false),
+                                _ => {
+                                    valid = false;
+                                    self.emit_info("/role: fast-mode must be on/off");
+                                }
+                            },
+                            _ => {
+                                valid = false;
+                                self.emit_info("/role: unknown setting");
+                            }
+                        }
+                        if valid {
+                            self.available_roles
+                                .insert(req.role.clone(), next_role.clone());
+                            self.role_overrides.insert(req.role.clone(), next_role);
+                        }
+                    }
+                }
+                if self.selected_role.as_deref() == Some(req.role.as_str())
+                    && let Some(model) =
+                        model_for_role(&self.available_roles, &req.role, &self.available_models)
+                {
+                    self.selected_model = Some(model.clone());
+                    self.selected_params = selected_params_for_role(
+                        &self.model_registry,
+                        &self.available_roles,
+                        &req.role,
+                        &model,
+                    );
+                    save_harness_state(&self.dirs, Some(&model), self.selected_params);
+                }
+                save_role_overrides(
+                    &self.dirs,
+                    self.selected_role.as_deref(),
+                    &self.role_overrides,
+                );
+                self.publish_event(
+                    None,
+                    Event::HarnessRolesAvailable(tau_proto::HarnessRolesAvailable {
+                        roles: role_infos(
+                            &self.model_registry,
+                            &self.available_roles,
+                            &self.available_models,
+                        ),
+                    }),
+                );
+                Ok(true)
+            }
             Event::UiSetEffort(req) => {
                 let levels = self
                     .selected_model
@@ -1855,6 +2100,18 @@ impl Harness {
                     );
                 }
                 self.selected_params.effort = clamped;
+                if let Some(role_name) = self.selected_role.clone() {
+                    self.available_roles
+                        .entry(role_name.clone())
+                        .or_default()
+                        .effort = Some(clamped);
+                    self.role_overrides.entry(role_name).or_default().effort = Some(clamped);
+                    save_role_overrides(
+                        &self.dirs,
+                        self.selected_role.as_deref(),
+                        &self.role_overrides,
+                    );
+                }
                 save_harness_state(
                     &self.dirs,
                     self.selected_model.as_ref(),
@@ -1870,6 +2127,24 @@ impl Harness {
             }
             Event::UiSetServiceTier(req) => {
                 self.selected_params.service_tier = req.service_tier;
+                if let Some(role_name) = self.selected_role.clone() {
+                    self.available_roles
+                        .entry(role_name.clone())
+                        .or_default()
+                        .fast_mode = Some(matches!(
+                        req.service_tier,
+                        Some(tau_proto::ServiceTier::Fast)
+                    ));
+                    self.role_overrides.entry(role_name).or_default().fast_mode = Some(matches!(
+                        req.service_tier,
+                        Some(tau_proto::ServiceTier::Fast)
+                    ));
+                    save_role_overrides(
+                        &self.dirs,
+                        self.selected_role.as_deref(),
+                        &self.role_overrides,
+                    );
+                }
                 save_harness_state(
                     &self.dirs,
                     self.selected_model.as_ref(),
@@ -1920,6 +2195,18 @@ impl Harness {
                     );
                 }
                 self.selected_params.verbosity = clamped;
+                if let Some(role_name) = self.selected_role.clone() {
+                    self.available_roles
+                        .entry(role_name.clone())
+                        .or_default()
+                        .verbosity = Some(clamped);
+                    self.role_overrides.entry(role_name).or_default().verbosity = Some(clamped);
+                    save_role_overrides(
+                        &self.dirs,
+                        self.selected_role.as_deref(),
+                        &self.role_overrides,
+                    );
+                }
                 save_harness_state(
                     &self.dirs,
                     self.selected_model.as_ref(),
@@ -1959,6 +2246,21 @@ impl Harness {
                     );
                 }
                 self.selected_params.thinking_summary = clamped;
+                if let Some(role_name) = self.selected_role.clone() {
+                    self.available_roles
+                        .entry(role_name.clone())
+                        .or_default()
+                        .thinking_summary = Some(clamped);
+                    self.role_overrides
+                        .entry(role_name)
+                        .or_default()
+                        .thinking_summary = Some(clamped);
+                    save_role_overrides(
+                        &self.dirs,
+                        self.selected_role.as_deref(),
+                        &self.role_overrides,
+                    );
+                }
                 save_harness_state(
                     &self.dirs,
                     self.selected_model.as_ref(),

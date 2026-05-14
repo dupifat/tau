@@ -109,15 +109,19 @@ providers: {
 },
 ```
 
-Defaults can be set per-model:
+Defaults are normally selected through agent roles in `models.json5`:
 
 ```json5
-// harness.json5
-default_params: {
-  "anthropic/claude-opus-4-7": { effort: "high" },
-  "openai/gpt-5.5": { effort: "xhigh", verbosity: "low" },
+defaultRoles: {
+  default: { model: "openai/gpt-5.5", effort: "medium" },
+  smart: {},
+  deep: { effort: "xhigh", verbosity: "high", thinkingSummary: "detailed" },
+  rush: { effort: "low", verbosity: "low", fastMode: true },
 },
 ```
+
+`/model <role>` switches roles; `/role <role> <setting> <value>` edits or
+creates a persisted role override. See [`docs/agent-roles.md`](docs/agent-roles.md).
 
 In the UI: `/effort medium`, `/verbosity low`, `/thinking-summary
 concise`. Shift+Tab cycles **effort** specifically; the other knobs

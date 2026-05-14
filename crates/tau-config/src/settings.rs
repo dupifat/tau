@@ -384,11 +384,68 @@ pub struct ExtensionEntry {
 // ---------------------------------------------------------------------------
 
 /// Top-level model configuration (mirrors Pi's models.json).
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct ModelRegistry {
     /// Named providers, keyed by [`ProviderName`].
     pub providers: HashMap<ProviderName, ProviderConfig>,
+    /// Named agent roles. Each role is a partial set of model settings;
+    /// missing fields inherit from `default`, then from hardcoded fallbacks.
+    #[serde(rename = "defaultRoles", default = "default_agent_roles")]
+    pub default_roles: HashMap<String, AgentRole>,
+}
+
+fn default_agent_roles() -> HashMap<String, AgentRole> {
+    let mut default_roles = HashMap::new();
+    default_roles.insert("default".to_owned(), AgentRole::default());
+    default_roles.insert("smart".to_owned(), AgentRole::default());
+    default_roles.insert(
+        "deep".to_owned(),
+        AgentRole {
+            effort: Some(tau_proto::Effort::XHigh),
+            verbosity: Some(tau_proto::Verbosity::High),
+            thinking_summary: Some(tau_proto::ThinkingSummary::Detailed),
+            ..AgentRole::default()
+        },
+    );
+    default_roles.insert(
+        "rush".to_owned(),
+        AgentRole {
+            effort: Some(tau_proto::Effort::Low),
+            verbosity: Some(tau_proto::Verbosity::Low),
+            thinking_summary: Some(tau_proto::ThinkingSummary::Off),
+            ..AgentRole::default()
+        },
+    );
+    default_roles
+}
+
+impl Default for ModelRegistry {
+    fn default() -> Self {
+        Self {
+            providers: HashMap::new(),
+            default_roles: default_agent_roles(),
+        }
+    }
+}
+
+/// Partial agent-role settings loaded from `models.json5` and persisted
+/// to state. `None` means "inherit" for every field.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AgentRole {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<tau_proto::Effort>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verbosity: Option<tau_proto::Verbosity>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "thinkingSummary")]
+    pub thinking_summary: Option<tau_proto::ThinkingSummary>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "fastMode")]
+    pub fast_mode: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "serviceTier")]
+    pub service_tier: Option<tau_proto::ServiceTier>,
 }
 
 /// One LLM provider configuration.

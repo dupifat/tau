@@ -2,6 +2,9 @@
 //! valid effort/verbosity/thinking-summary levels per model, persisting
 //! the user's selection, and gauging context-window usage.
 
+use std::collections::HashMap;
+
+use tau_config::settings::AgentRole;
 use tau_proto::{ModelId, ModelParams};
 
 use crate::settings::{load_harness_settings_or_warn, load_models_or_warn};
@@ -16,6 +19,9 @@ pub(crate) struct LoadedModelList {
     /// The model the harness will start in, if any. `None` means no
     /// providers / models are configured at all.
     pub selected: Option<ModelId>,
+    pub selected_role: Option<String>,
+    pub roles: HashMap<String, AgentRole>,
+    pub role_overrides: HashMap<String, AgentRole>,
     pub model_registry: tau_config::settings::ModelRegistry,
     pub harness_settings: tau_config::settings::HarnessSettings,
     pub harness_settings_error: Option<tau_config::settings::SettingsError>,
@@ -23,10 +29,7 @@ pub(crate) struct LoadedModelList {
 }
 
 /// Load model registry and harness settings, build the flat model list
-/// and determine the initially selected model.
-///
-/// Priority: default_model from harness.json5 → last used from state →
-/// first available → `None` (no model).
+/// and determine the initially selected role/model.
 pub(crate) fn load_model_list(dirs: &tau_config::settings::TauDirs) -> LoadedModelList {
     let (model_registry, models_error) = load_models_or_warn(dirs);
     let (harness_settings, harness_settings_error) = load_harness_settings_or_warn(dirs);
@@ -37,21 +40,133 @@ pub(crate) fn load_model_list(dirs: &tau_config::settings::TauDirs) -> LoadedMod
         }
     }
     available.sort();
-    let selected = harness_settings
-        .default_model
+    let role_overrides = load_role_overrides(dirs);
+    let mut roles = model_registry.default_roles.clone();
+    for (name, role) in &role_overrides {
+        roles.insert(name.clone(), role.clone());
+    }
+    let selected_role = load_last_selected_role(dirs)
+        .filter(|role| roles.contains_key(role))
+        .or_else(|| roles.contains_key("default").then(|| "default".to_owned()))
+        .or_else(|| roles.keys().next().cloned());
+    let selected = selected_role
         .as_ref()
-        .filter(|m| available.contains(m))
-        .cloned()
+        .and_then(|role| model_for_role(&roles, role, &available))
+        .or_else(|| {
+            harness_settings
+                .default_model
+                .as_ref()
+                .filter(|m| available.contains(m))
+                .cloned()
+        })
         .or_else(|| load_last_selected_model(dirs).filter(|m| available.contains(m)))
         .or_else(|| available.first().cloned());
     LoadedModelList {
         available,
         selected,
+        selected_role,
+        roles,
+        role_overrides,
         model_registry,
         harness_settings,
         harness_settings_error,
         models_error,
     }
+}
+
+pub(crate) fn model_for_role(
+    roles: &HashMap<String, AgentRole>,
+    role: &str,
+    available: &[ModelId],
+) -> Option<ModelId> {
+    let model = roles
+        .get(role)
+        .and_then(|r| r.model.clone())
+        .or_else(|| {
+            (role != "default")
+                .then(|| roles.get("default")?.model.clone())
+                .flatten()
+        })
+        .or_else(|| available.first().cloned())?;
+    available.contains(&model).then_some(model)
+}
+
+pub(crate) fn selected_params_for_role(
+    registry: &tau_config::settings::ModelRegistry,
+    roles: &HashMap<String, AgentRole>,
+    role: &str,
+    model: &ModelId,
+) -> ModelParams {
+    let allowed_effort = efforts_for_model(registry, model);
+    let allowed_verbosity = verbosities_for_model(registry, model);
+    let allowed_thinking = thinking_summaries_for_model(registry, model);
+    let current = roles.get(role);
+    let default = (role != "default").then(|| roles.get("default")).flatten();
+    let effort = current
+        .and_then(|r| r.effort)
+        .or_else(|| default.and_then(|r| r.effort))
+        .unwrap_or_else(|| middle_effort(&allowed_effort));
+    let verbosity = current
+        .and_then(|r| r.verbosity)
+        .or_else(|| default.and_then(|r| r.verbosity))
+        .unwrap_or_else(|| middle_verbosity(&allowed_verbosity));
+    let thinking_summary = current
+        .and_then(|r| r.thinking_summary)
+        .or_else(|| default.and_then(|r| r.thinking_summary))
+        .unwrap_or_else(|| default_thinking_summary(&allowed_thinking));
+    let service_tier = current
+        .and_then(|r| r.fast_mode)
+        .or_else(|| default.and_then(|r| r.fast_mode))
+        .map(|enabled| enabled.then_some(tau_proto::ServiceTier::Fast))
+        .unwrap_or_else(|| {
+            current
+                .and_then(|r| r.service_tier)
+                .or_else(|| default.and_then(|r| r.service_tier))
+        });
+
+    ModelParams {
+        effort: clamp_effort(effort, &allowed_effort),
+        verbosity: clamp_verbosity(verbosity, &allowed_verbosity),
+        thinking_summary: clamp_thinking_summary(thinking_summary, &allowed_thinking),
+        service_tier,
+    }
+}
+
+pub(crate) fn describe_role(
+    registry: &tau_config::settings::ModelRegistry,
+    roles: &HashMap<String, AgentRole>,
+    role: &str,
+    available: &[ModelId],
+) -> String {
+    let Some(model) = model_for_role(roles, role, available) else {
+        return "no model".to_owned();
+    };
+    let params = selected_params_for_role(registry, roles, role, &model);
+    let fast = if matches!(params.service_tier, Some(tau_proto::ServiceTier::Fast)) {
+        ", fast"
+    } else {
+        ""
+    };
+    format!(
+        "model={}, effort={}, verbosity={}, thinking-summary={}{}",
+        model, params.effort, params.verbosity, params.thinking_summary, fast
+    )
+}
+
+pub(crate) fn role_infos(
+    registry: &tau_config::settings::ModelRegistry,
+    roles: &HashMap<String, AgentRole>,
+    available: &[ModelId],
+) -> Vec<tau_proto::HarnessRoleInfo> {
+    let mut out: Vec<_> = roles
+        .keys()
+        .map(|name| tau_proto::HarnessRoleInfo {
+            name: name.clone(),
+            description: describe_role(registry, roles, name, available),
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
 }
 
 /// Returns the efforts valid for `model`.
@@ -217,21 +332,28 @@ pub(crate) fn clamp_thinking_summary(
     allowed.first().copied().unwrap_or(T::Off)
 }
 
-fn load_last_params(
+fn load_state_json(
     dirs: &tau_config::settings::TauDirs,
-) -> std::collections::HashMap<ModelId, ModelParams> {
+) -> serde_json::Map<String, serde_json::Value> {
     let Some(path) = dirs.state_dir.as_ref().map(|d| d.join("harness.json5")) else {
-        return std::collections::HashMap::new();
+        return serde_json::Map::new();
     };
     let Ok(text) = std::fs::read_to_string(path) else {
-        return std::collections::HashMap::new();
+        return serde_json::Map::new();
     };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return std::collections::HashMap::new();
-    };
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default()
+}
 
-    let mut out = std::collections::HashMap::new();
-    if let Some(map) = json["last_params"].as_object() {
+fn load_last_params(dirs: &tau_config::settings::TauDirs) -> HashMap<ModelId, ModelParams> {
+    let json = load_state_json(dirs);
+    let mut out = HashMap::new();
+    if let Some(map) = json
+        .get("last_params")
+        .and_then(serde_json::Value::as_object)
+    {
         for (model, entry) in map {
             let Ok(model) = model.parse::<ModelId>() else {
                 // Skip entries persisted with a malformed id rather
@@ -341,10 +463,63 @@ pub(crate) fn default_thinking_summary(
 /// Returns `None` if the file is missing, malformed, or the saved id
 /// no longer parses as a `provider/model`.
 fn load_last_selected_model(dirs: &tau_config::settings::TauDirs) -> Option<ModelId> {
-    let path = dirs.state_dir.as_ref()?.join("harness.json5");
-    let text = std::fs::read_to_string(path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
-    json["last_selected_model"].as_str()?.parse().ok()
+    let json = load_state_json(dirs);
+    json.get("last_selected_model")?.as_str()?.parse().ok()
+}
+
+fn load_last_selected_role(dirs: &tau_config::settings::TauDirs) -> Option<String> {
+    let json = load_state_json(dirs);
+    let role = json.get("last_selected_role")?.as_str()?.to_owned();
+    (!role.is_empty()).then_some(role)
+}
+
+fn load_role_overrides(dirs: &tau_config::settings::TauDirs) -> HashMap<String, AgentRole> {
+    let json = load_state_json(dirs);
+    let mut out = HashMap::new();
+    if let Some(map) = json
+        .get("role_overrides")
+        .and_then(serde_json::Value::as_object)
+    {
+        for (name, entry) in map {
+            if let Ok(role) = serde_json::from_value::<AgentRole>(entry.clone()) {
+                out.insert(name.clone(), role);
+            }
+        }
+    }
+    out
+}
+
+pub(crate) fn save_role_overrides(
+    dirs: &tau_config::settings::TauDirs,
+    selected_role: Option<&str>,
+    roles: &HashMap<String, AgentRole>,
+) {
+    let Some(dir) = dirs.state_dir.as_ref() else {
+        return;
+    };
+    let path = dir.join("harness.json5");
+    let _ = std::fs::create_dir_all(dir);
+    let mut json = load_state_json(dirs);
+    json.insert(
+        "last_selected_role".to_owned(),
+        serde_json::Value::String(selected_role.unwrap_or_default().to_owned()),
+    );
+    let overrides = roles
+        .iter()
+        .map(|(name, role)| {
+            (
+                name.clone(),
+                serde_json::to_value(role).unwrap_or(serde_json::Value::Null),
+            )
+        })
+        .collect::<serde_json::Map<String, serde_json::Value>>();
+    json.insert(
+        "role_overrides".to_owned(),
+        serde_json::Value::Object(overrides),
+    );
+    let _ = serde_json::to_string_pretty(&serde_json::Value::Object(json))
+        .ok()
+        .and_then(|s| std::fs::write(&path, s).ok());
 }
 
 /// Persist model + params to `<state_dir>/harness.json5`. `model: None`
@@ -372,11 +547,16 @@ pub(crate) fn save_harness_state(
             )
         })
         .collect::<serde_json::Map<String, serde_json::Value>>();
-    let json = serde_json::json!({
-        "last_selected_model": model.map(ModelId::to_string).unwrap_or_default(),
-        "last_params": params_json,
-    });
-    let _ = serde_json::to_string_pretty(&json)
+    let mut json = load_state_json(dirs);
+    json.insert(
+        "last_selected_model".to_owned(),
+        serde_json::Value::String(model.map(ModelId::to_string).unwrap_or_default()),
+    );
+    json.insert(
+        "last_params".to_owned(),
+        serde_json::Value::Object(params_json),
+    );
+    let _ = serde_json::to_string_pretty(&serde_json::Value::Object(json))
         .ok()
         .and_then(|s| std::fs::write(&path, s).ok());
 }

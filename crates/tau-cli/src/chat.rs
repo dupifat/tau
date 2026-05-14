@@ -268,7 +268,8 @@ pub(crate) fn run_chat(
             "/detach",
             "Leave the UI but keep the harness running for later reattach",
         ),
-        SlashCommand::new("/model", "Switch model (e.g. /model provider/model-id)"),
+        SlashCommand::new("/model", "Switch agent role (e.g. /model smart)"),
+        SlashCommand::new("/role", "Create, edit, or delete an agent role"),
         SlashCommand::new(
             "/new",
             "Start a fresh session in this harness (current session is left as-is on disk)",
@@ -670,13 +671,17 @@ fn terminal_input_loop(
                     handle_set_command(text, &ctx.renderer_tx, &print_local);
                     continue;
                 }
-                if let Some(model) = text.strip_prefix("/model ") {
-                    let model = model.trim();
-                    if !model.is_empty() {
+                if text == "/role" || text.starts_with("/role ") {
+                    handle_role_command(text, writer, &print_local);
+                    continue;
+                }
+                if let Some(role) = text.strip_prefix("/model ") {
+                    let role = role.trim();
+                    if !role.is_empty() {
                         let _ = send_event(
                             writer,
-                            &Event::UiModelSelect(tau_proto::UiModelSelect {
-                                model: model.into(),
+                            &Event::UiRoleSelect(tau_proto::UiRoleSelect {
+                                role: role.to_owned(),
                             }),
                         );
                     }
@@ -910,6 +915,64 @@ fn handle_set_command(
         name: name.to_owned(),
         value: value.to_owned(),
     });
+}
+
+fn handle_role_command(text: &str, writer: &WriterHandle, print_local: &impl Fn(&str)) {
+    let rest = text.strip_prefix("/role").unwrap_or("").trim();
+    let mut parts = rest.split_whitespace();
+    let role = parts.next();
+    let command = parts.next();
+    let value = parts.next();
+    let extra = parts.next();
+    let (Some(role), Some(command)) = (role, command) else {
+        print_local(
+            "/role <role> <delete|model|effort|verbosity|thinking-summary|fast-mode> [value]",
+        );
+        return;
+    };
+    if command == "delete" {
+        if value.is_some() {
+            print_local("/role <role> delete takes no value");
+            return;
+        }
+        let _ = send_event(
+            writer,
+            &Event::UiRoleUpdate(tau_proto::UiRoleUpdate {
+                role: role.to_owned(),
+                action: tau_proto::UiRoleUpdateAction::Delete,
+            }),
+        );
+        return;
+    }
+    let Some(value) = value else {
+        print_local("/role <role> <setting> <value>");
+        return;
+    };
+    if extra.is_some() {
+        print_local("/role: too many arguments");
+        return;
+    }
+    let allowed = [
+        "model",
+        "effort",
+        "verbosity",
+        "thinking-summary",
+        "fast-mode",
+    ];
+    if !allowed.contains(&command) {
+        print_local("/role: unknown setting");
+        return;
+    }
+    let _ = send_event(
+        writer,
+        &Event::UiRoleUpdate(tau_proto::UiRoleUpdate {
+            role: role.to_owned(),
+            action: tau_proto::UiRoleUpdateAction::Set {
+                setting: command.to_owned(),
+                value: value.to_owned(),
+            },
+        }),
+    );
 }
 
 fn run_provider_auth(provider: &str, print_local: &impl Fn(&str)) {

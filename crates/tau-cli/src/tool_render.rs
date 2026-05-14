@@ -90,6 +90,7 @@ fn token_stats_parts(
     let previous_sent_tokens = previous_usage.map_or(0, |usage| usage.prompt_sent_tokens);
     let previous_received_tokens = previous_usage.map_or(0, |usage| usage.response_received_tokens);
     let turn_cache_possible = previous_sent_tokens.saturating_add(previous_received_tokens);
+    let new_prompt_tokens = usage.prompt_sent_tokens.saturating_sub(turn_cache_possible);
     let mut parts = Vec::new();
 
     parts.push(TokenStatsPart::new("Δ", names::TOKEN_STATS_DELTA));
@@ -105,7 +106,7 @@ fn token_stats_parts(
     ));
     parts.push(TokenStatsPart::new(" ↑", names::TOKEN_STATS_UP));
     parts.push(TokenStatsPart::new(
-        format_token_count(usage.prompt_sent_tokens),
+        format_token_count(new_prompt_tokens),
         names::TOKEN_STATS_INPUT,
     ));
     parts.push(TokenStatsPart::new(" ↓", names::TOKEN_STATS_DOWN));

@@ -507,7 +507,7 @@ impl From<tau_provider::resolver::ResolvedBackend> for BackendConfig {
                     model_id: cfg.model_id.into_string(),
                     supports_reasoning_effort: cfg.supports_reasoning_effort,
                     supports_verbosity: cfg.supports_verbosity,
-                    prompt_cache_key: cfg.prompt_cache_key,
+                    supports_prompt_cache_key: cfg.supports_prompt_cache_key,
                     prompt_cache_retention: cfg.prompt_cache_retention,
                     supports_llama_cpp_cache: cfg.supports_llama_cpp_cache,
                 })
@@ -524,7 +524,7 @@ impl From<tau_provider::resolver::ResolvedBackend> for BackendConfig {
                     supports_phase: cfg.supports_phase,
                     supports_encrypted_reasoning: cfg.supports_encrypted_reasoning,
                     supports_websocket: cfg.supports_websocket,
-                    prompt_cache_key: cfg.prompt_cache_key,
+                    supports_prompt_cache_key: cfg.supports_prompt_cache_key,
                     prompt_cache_retention: cfg.prompt_cache_retention,
                 })
             }

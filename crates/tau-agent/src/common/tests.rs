@@ -132,7 +132,7 @@ fn mix_originator_passes_through_absent_base() {
     assert_eq!(mix_originator_into_cache_key(None, &ext, false), None);
 }
 
-/// A user-originated turn must reuse the resolver-supplied base
+/// A user-originated turn must reuse the already session-scoped base
 /// verbatim, so successive turns of an interactive session keep
 /// routing to the same cache machine.
 #[test]
@@ -141,6 +141,29 @@ fn mix_originator_user_returns_base_verbatim() {
     assert_eq!(
         mix_originator_into_cache_key(Some(base), &PromptOriginator::User, false),
         Some(base.to_owned()),
+    );
+}
+
+/// Distinct sessions on the same provider endpoint must not share the
+/// same routing bucket.
+#[test]
+fn prompt_cache_key_distinct_sessions_diverge() {
+    assert_ne!(
+        prompt_cache_key_for("https://api.openai.com/v1", &SessionId::new("session-1"),),
+        prompt_cache_key_for("https://api.openai.com/v1", &SessionId::new("session-2"),),
+    );
+}
+
+/// Distinct provider endpoints must not share the same routing bucket,
+/// even for the same session id.
+#[test]
+fn prompt_cache_key_distinct_base_urls_diverge() {
+    assert_ne!(
+        prompt_cache_key_for("https://api.openai.com/v1", &SessionId::new("session-1"),),
+        prompt_cache_key_for(
+            "https://chatgpt.com/backend-api",
+            &SessionId::new("session-1"),
+        ),
     );
 }
 

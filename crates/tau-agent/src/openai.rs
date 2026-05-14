@@ -10,7 +10,7 @@ use tau_proto::{ContentBlock, ConversationMessage, ConversationRole, ToolDefinit
 
 use crate::common::{
     LlmError, PromptPayload, StreamState, ToolCallAccumulator, cbor_to_json, effort_wire,
-    mix_originator_into_cache_key, verbosity_wire,
+    mix_originator_into_cache_key, prompt_cache_key_for, verbosity_wire,
 };
 
 /// Configuration for the OpenAI-compatible backend.
@@ -25,10 +25,10 @@ pub struct OpenAiConfig {
     /// Whether the provider's API accepts a top-level `verbosity`
     /// field (OpenAI Chat Completions on GPT-5+).
     pub supports_verbosity: bool,
-    /// Routing key sent as `prompt_cache_key`. Stable per
-    /// `(base_url, model_id, cwd)` so OpenAI routes same-prefix
-    /// requests to the same machine.
-    pub prompt_cache_key: Option<String>,
+    /// Whether this provider accepts the `prompt_cache_key` field.
+    /// The wire key is derived per `(base_url, session_id)`, then
+    /// split by extension name for extension-originated turns.
+    pub supports_prompt_cache_key: bool,
     /// Provider-side prompt cache retention policy, when configured.
     pub prompt_cache_retention: Option<tau_config::settings::PromptCacheRetention>,
     /// Whether to use llama.cpp Chat Completions cache extensions.
@@ -319,8 +319,11 @@ fn build_request(
     } else {
         None
     };
+    let prompt_cache_key = config
+        .supports_prompt_cache_key
+        .then(|| prompt_cache_key_for(&config.base_url, request.session_id));
     let prompt_cache_key = mix_originator_into_cache_key(
-        config.prompt_cache_key.as_deref(),
+        prompt_cache_key.as_deref(),
         request.originator,
         request.share_user_cache_key,
     );

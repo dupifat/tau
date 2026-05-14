@@ -17,7 +17,7 @@ use tau_proto::{ContentBlock, ConversationMessage, ConversationRole};
 
 use crate::common::{
     LlmError, PromptPayload, StreamState, ToolCallAccumulator, cbor_to_json, effort_wire,
-    mix_originator_into_cache_key,
+    mix_originator_into_cache_key, prompt_cache_key_for,
 };
 
 pub(crate) mod pool;
@@ -73,9 +73,10 @@ pub struct ResponsesConfig {
     /// provider instead of one-shot HTTP+SSE. See
     /// [`tau_config::settings::ProviderCompat::supports_websocket`].
     pub supports_websocket: bool,
-    /// Routing key sent as `prompt_cache_key`. See
-    /// `openai::prompt_cache_key` for the derivation rationale.
-    pub prompt_cache_key: Option<String>,
+    /// Whether this provider accepts the `prompt_cache_key` field.
+    /// The wire key is derived per `(base_url, session_id)`, then
+    /// split by extension name for extension-originated turns.
+    pub supports_prompt_cache_key: bool,
     /// Provider-side prompt cache retention policy, when configured.
     pub prompt_cache_retention: Option<tau_config::settings::PromptCacheRetention>,
 }
@@ -565,8 +566,11 @@ fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> Respo
     } else {
         None
     };
+    let prompt_cache_key = config
+        .supports_prompt_cache_key
+        .then(|| prompt_cache_key_for(&config.base_url, request.session_id));
     let prompt_cache_key = mix_originator_into_cache_key(
-        config.prompt_cache_key.as_deref(),
+        prompt_cache_key.as_deref(),
         request.originator,
         request.share_user_cache_key,
     );

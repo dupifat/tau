@@ -11,7 +11,7 @@ fn build_request_includes_prompt_cache_fields_when_configured() {
         model_id: "gpt-5".into(),
         supports_reasoning_effort: false,
         supports_verbosity: false,
-        prompt_cache_key: Some("tau:seed".into()),
+        supports_prompt_cache_key: true,
         prompt_cache_retention: Some(PromptCacheRetention::Extended24h),
         supports_llama_cpp_cache: false,
     };
@@ -30,7 +30,7 @@ fn build_request_includes_prompt_cache_fields_when_configured() {
     let body = serde_json::to_value(build_request(&config, &request, true)).expect("serialize");
     let prompt_cache_key = body["prompt_cache_key"].as_str().expect("prompt_cache_key");
 
-    assert_eq!(prompt_cache_key, "tau:seed");
+    assert!(prompt_cache_key.starts_with("tau-"));
     assert_eq!(body["prompt_cache_retention"], "24h");
     assert_eq!(body["stream_options"]["include_usage"], true);
 }
@@ -43,7 +43,7 @@ fn build_request_includes_service_tier_when_configured() {
         model_id: "gpt-5".into(),
         supports_reasoning_effort: false,
         supports_verbosity: false,
-        prompt_cache_key: None,
+        supports_prompt_cache_key: false,
         prompt_cache_retention: None,
         supports_llama_cpp_cache: false,
     };
@@ -75,7 +75,7 @@ fn build_request_omits_prompt_cache_fields_without_seed_or_retention() {
         model_id: "local".into(),
         supports_reasoning_effort: false,
         supports_verbosity: false,
-        prompt_cache_key: None,
+        supports_prompt_cache_key: false,
         prompt_cache_retention: None,
         supports_llama_cpp_cache: false,
     };
@@ -108,7 +108,7 @@ fn build_request_includes_llama_cpp_cache_prompt_when_configured() {
         model_id: "llama-3".into(),
         supports_reasoning_effort: false,
         supports_verbosity: false,
-        prompt_cache_key: None,
+        supports_prompt_cache_key: false,
         prompt_cache_retention: None,
         supports_llama_cpp_cache: true,
     };
@@ -137,7 +137,7 @@ fn build_request_sets_parallel_tool_calls_when_tools_offered() {
         model_id: "gpt-5".into(),
         supports_reasoning_effort: false,
         supports_verbosity: false,
-        prompt_cache_key: None,
+        supports_prompt_cache_key: false,
         prompt_cache_retention: None,
         supports_llama_cpp_cache: false,
     };
@@ -172,7 +172,7 @@ fn build_request_omits_parallel_tool_calls_without_tools() {
         model_id: "gpt-5".into(),
         supports_reasoning_effort: false,
         supports_verbosity: false,
-        prompt_cache_key: None,
+        supports_prompt_cache_key: false,
         prompt_cache_retention: None,
         supports_llama_cpp_cache: false,
     };
@@ -207,7 +207,7 @@ fn build_request_emits_tool_choice_none_while_keeping_tools_declared() {
         model_id: "gpt-5".into(),
         supports_reasoning_effort: false,
         supports_verbosity: false,
-        prompt_cache_key: None,
+        supports_prompt_cache_key: false,
         prompt_cache_retention: None,
         supports_llama_cpp_cache: false,
     };
@@ -253,7 +253,7 @@ fn build_request_prompt_cache_key_differs_for_extension_originator() {
         model_id: "gpt-5".into(),
         supports_reasoning_effort: false,
         supports_verbosity: false,
-        prompt_cache_key: Some("tau-base".into()),
+        supports_prompt_cache_key: true,
         prompt_cache_retention: None,
         supports_llama_cpp_cache: false,
     };
@@ -289,7 +289,7 @@ fn build_request_prompt_cache_key_differs_for_extension_originator() {
     let ext_body =
         serde_json::to_value(build_request(&config, &ext_request, true)).expect("serialize");
 
-    assert_eq!(user_body["prompt_cache_key"], "tau-base");
+    assert!(user_body["prompt_cache_key"].is_string());
     assert!(ext_body["prompt_cache_key"].is_string());
     assert_ne!(ext_body["prompt_cache_key"], user_body["prompt_cache_key"]);
 }

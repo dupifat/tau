@@ -1060,7 +1060,7 @@ mod tests {
             supports_verbosity: false,
             supports_phase: false,
             supports_websocket: true,
-            prompt_cache_key: None,
+            supports_prompt_cache_key: false,
             prompt_cache_retention: None,
             supports_encrypted_reasoning: false,
         }

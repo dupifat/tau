@@ -141,8 +141,8 @@ user changes a knob.
 ### Prompt input caching
 
 For providers that support it, Tau emits stable `prompt_cache_key` routing
-keys (derived from base URL, model id, and session cwd) so cache hits survive
-restarts and parallel sessions, and sets `prompt_cache_retention` where
+keys (derived from base URL and session id) so cache hits survive restarts
+within a session, and sets `prompt_cache_retention` where
 available. Extension-originated turns (e.g. `core-delegate` sub-agents) get a
 distinct key so parallel delegations don't pile onto the user agent's routing
 bucket and trip OpenAI's `>15 RPM`-per-key overflow heuristic. Provider

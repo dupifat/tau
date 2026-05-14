@@ -21,7 +21,7 @@ pub struct ResolvedChatCompletions {
     pub model_id: ModelName,
     pub supports_reasoning_effort: bool,
     pub supports_verbosity: bool,
-    pub prompt_cache_key: Option<String>,
+    pub supports_prompt_cache_key: bool,
     pub prompt_cache_retention: Option<PromptCacheRetention>,
     pub supports_llama_cpp_cache: bool,
 }
@@ -45,7 +45,7 @@ pub struct ResolvedResponses {
     /// Provider exposes the Responses API over a persistent
     /// WebSocket. See [`ProviderCompat::supports_websocket`].
     pub supports_websocket: bool,
-    pub prompt_cache_key: Option<String>,
+    pub supports_prompt_cache_key: bool,
     pub prompt_cache_retention: Option<PromptCacheRetention>,
 }
 
@@ -139,7 +139,7 @@ fn responses_backend(
         supports_phase: supports_phase(provider, base_url, model_id),
         supports_encrypted_reasoning: supports_encrypted_reasoning(provider, base_url),
         supports_websocket: supports_websocket(provider, base_url),
-        prompt_cache_key: prompt_cache_key(provider, base_url, model_id),
+        supports_prompt_cache_key: supports_prompt_cache_key(provider, base_url),
         prompt_cache_retention: prompt_cache_retention(provider, base_url, model_id),
     }))
 }
@@ -157,7 +157,7 @@ fn copilot_backend(
     let base_url = extract_copilot_base_url(&access_token)
         .unwrap_or_else(|| "https://api.individual.githubcopilot.com".to_owned());
     Some(ResolvedBackend::ChatCompletions(ResolvedChatCompletions {
-        prompt_cache_key: prompt_cache_key(provider, &base_url, model_id),
+        supports_prompt_cache_key: supports_prompt_cache_key(provider, &base_url),
         prompt_cache_retention: prompt_cache_retention(provider, &base_url, model_id),
         base_url,
         api_key: access_token,
@@ -183,7 +183,7 @@ fn chat_completions_backend(
                 _ => None,
             })?;
     Some(ResolvedBackend::ChatCompletions(ResolvedChatCompletions {
-        prompt_cache_key: prompt_cache_key(provider, &base_url, model_id),
+        supports_prompt_cache_key: supports_prompt_cache_key(provider, &base_url),
         prompt_cache_retention: prompt_cache_retention(provider, &base_url, model_id),
         base_url,
         api_key: provider.api_key.clone().unwrap_or_default(),
@@ -224,35 +224,6 @@ fn jwt_issued_at_ms(jwt: &str) -> Option<u64> {
     let payload = crate::oauth::base64_url_safe_no_pad_decode(payload)?;
     let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
     claims.get("iat")?.as_u64().map(|secs| secs * 1000)
-}
-
-fn prompt_cache_key(provider: &ProviderConfig, base_url: &str, model_id: &str) -> Option<String> {
-    if !supports_prompt_cache_key(provider, base_url) {
-        return None;
-    }
-    let cwd = std::env::current_dir().ok()?;
-    Some(prompt_cache_key_for(base_url, model_id, &cwd))
-}
-
-/// Derive the per-(provider, model, workspace) cache key the OpenAI
-/// guide expects. The key is hashed with the prompt prefix on the
-/// server side and used to bias routing so semantically-related
-/// requests land on the same machine and reuse its cached KV state.
-///
-/// Granularity rationale: `(base_url, model_id, cwd)` is the
-/// coarsest grouping that still pins a session to one cache. A
-/// single workspace usually has one active conversation at a time,
-/// well under OpenAI's documented ~15 RPM ceiling per (prefix,
-/// machine) — go any coarser and bursts overflow to multiple
-/// machines, defeating the point.
-fn prompt_cache_key_for(base_url: &str, model_id: &str, cwd: &std::path::Path) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(base_url.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(model_id.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(cwd.to_string_lossy().as_bytes());
-    format!("tau-{}", hasher.finalize().to_hex())
 }
 
 fn prompt_cache_retention(

@@ -1559,6 +1559,37 @@ struct LayoutAll {
     cursor_col: usize,
 }
 
+/// Renderer-side model of the terminal content Tau believes it owns.
+///
+/// `known_lines[..viewport_start]` are in terminal scrollback,
+/// `known_lines[viewport_start..]` are currently visible. Full redraws are only
+/// needed when the scrollback prefix changes, or when the desired viewport moves
+/// upward and would need to pull rows back from scrollback.
+#[derive(Default)]
+struct TerminalModel {
+    viewport_start: usize,
+    known_lines: Vec<Vec<Cell>>,
+}
+
+impl TerminalModel {
+    fn desired_viewport_start(layout: &LayoutAll, height: usize) -> usize {
+        layout.all_lines.len().saturating_sub(height)
+    }
+
+    fn hidden_prefix_changed(&self, layout: &LayoutAll) -> bool {
+        hidden_lines_changed(&self.known_lines, &layout.all_lines, self.viewport_start)
+    }
+
+    fn changed_hidden_line(&self, layout: &LayoutAll) -> Option<usize> {
+        changed_line_in_range(&self.known_lines, &layout.all_lines, 0..self.viewport_start)
+    }
+
+    fn reset_to_layout(&mut self, layout: LayoutAll, height: usize) {
+        self.viewport_start = Self::desired_viewport_start(&layout, height);
+        self.known_lines = layout.all_lines;
+    }
+}
+
 /// Lays out the full content (history + above + input + below).
 fn layout_all(st: &SharedState) -> LayoutAll {
     let width = st.width;
@@ -1674,13 +1705,7 @@ fn redraw_loop(
     let mut screen = Screen::new(w);
     let mut prev_width = w;
     let mut prev_height = h;
-    let mut prev_visible_start: usize = 0;
-    // Renderer-side model of the terminal content we believe exists from the
-    // start of managed scrollback through the currently visible viewport. This
-    // is intentionally physical state, not just the previous logical layout:
-    // block zone changes can rebuild the layout without changing what the
-    // terminal already contains.
-    let mut known_terminal_lines: Vec<Vec<Cell>> = Vec::new();
+    let mut terminal_model = TerminalModel::default();
 
     loop {
         // Check shutdown before blocking on the channel.
@@ -1776,29 +1801,23 @@ fn redraw_loop(
                 &state,
                 reason,
                 &layout,
-                prev_visible_start,
-                layout.all_lines.len().saturating_sub(height),
+                terminal_model.viewport_start,
+                TerminalModel::desired_viewport_start(&layout, height),
                 height,
                 None,
             );
             if let Err(e) = full_render(&mut writer, &mut screen, &layout, width, height) {
                 tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
             }
-            prev_visible_start = layout.all_lines.len().saturating_sub(height);
-            known_terminal_lines = layout.all_lines;
+            terminal_model.reset_to_layout(layout, height);
         } else {
-            let total = layout.all_lines.len();
-            let visible_start = total.saturating_sub(height);
+            let visible_start = TerminalModel::desired_viewport_start(&layout, height);
 
             screen.set_width(width);
 
-            let hidden_prefix_changed = hidden_lines_changed(
-                &known_terminal_lines,
-                &layout.all_lines,
-                prev_visible_start,
-            );
+            let hidden_prefix_changed = terminal_model.hidden_prefix_changed(&layout);
 
-            if viewport_moved_up(prev_visible_start, visible_start) {
+            if viewport_moved_up(terminal_model.viewport_start, visible_start) {
                 // The desired viewport moved upward (content shrank). Rows that
                 // should re-enter the screen may currently exist only in terminal
                 // scrollback, which cannot be pulled back incrementally.
@@ -1806,7 +1825,7 @@ fn redraw_loop(
                     &state,
                     "viewport_moved_up",
                     &layout,
-                    prev_visible_start,
+                    terminal_model.viewport_start,
                     visible_start,
                     height,
                     None,
@@ -1820,16 +1839,12 @@ fn redraw_loop(
                 // patch it incrementally. Rows that are still physically
                 // visible, including rows that will scroll off during this
                 // render, are handled by the scrolling renderer below.
-                let changed_line = changed_line_in_range(
-                    &known_terminal_lines,
-                    &layout.all_lines,
-                    0..prev_visible_start,
-                );
+                let changed_line = terminal_model.changed_hidden_line(&layout);
                 mark_full_render(
                     &state,
                     "hidden_prefix_changed",
                     &layout,
-                    prev_visible_start,
+                    terminal_model.viewport_start,
                     visible_start,
                     height,
                     changed_line,
@@ -1837,7 +1852,7 @@ fn redraw_loop(
                 if let Err(e) = full_render(&mut writer, &mut screen, &layout, width, height) {
                     tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
                 }
-            } else if visible_start > prev_visible_start {
+            } else if visible_start > terminal_model.viewport_start {
                 // Content pushed lines off the top. Use the
                 // scrolling renderer (Pi-style) which renders
                 // changed lines in order and lets \r\n at the
@@ -1846,7 +1861,7 @@ fn redraw_loop(
                 if let Err(e) = screen.render_scrolling(
                     &mut writer,
                     &layout.all_lines,
-                    prev_visible_start,
+                    terminal_model.viewport_start,
                     height,
                     (layout.cursor_row, layout.cursor_col),
                 ) {
@@ -1862,8 +1877,7 @@ fn redraw_loop(
                     tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "update error");
                 }
             }
-            prev_visible_start = visible_start;
-            known_terminal_lines = layout.all_lines;
+            terminal_model.reset_to_layout(layout, height);
         }
 
         prev_width = width;

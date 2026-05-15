@@ -1877,6 +1877,141 @@ fn repeated_hidden_block_updates_each_full_redraw() {
     }
 }
 
+fn assert_terminal_rows_match(parser: &mut vt100::Parser, cols: u16, height: usize, known: &[&str]) {
+    let viewport_start = known.len().saturating_sub(height);
+    for scrollback in 0..=viewport_start {
+        parser.screen_mut().set_scrollback(scrollback);
+        let start = viewport_start - scrollback;
+        let mut expected = known[start..known.len().min(start + height)]
+            .iter()
+            .map(|line| line.trim_end().to_owned())
+            .collect::<Vec<_>>();
+        expected.resize(height, String::new());
+        let actual = vt100_rows(parser, cols)
+            .into_iter()
+            .map(|line| line.trim_end().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            expected,
+            "terminal rows should match retained model at scrollback offset {scrollback}"
+        );
+    }
+    parser.screen_mut().set_scrollback(0);
+}
+
+#[test]
+fn terminal_scrollback_matches_known_lines_model_across_visible_churn() {
+    let buf = SharedBuffer::new();
+    let mut parser = vt100::Parser::new(5, 40, 50);
+    let (_term, handle, _input_tx) =
+        Term::new_virtual(40, 5, "> ", Box::new(buf.clone()), CursorShape::Bar);
+    flush_redraws(&handle, &buf, &mut parser);
+    assert_terminal_rows_match(&mut parser, 40, 5, &["> "]);
+
+    for i in 0..6 {
+        handle.print_output(plain_block(format!("line {i}")));
+    }
+    flush_redraws(&handle, &buf, &mut parser);
+    assert_terminal_rows_match(
+        &mut parser,
+        40,
+        5,
+        &["line 0", "line 1", "line 2", "line 3", "line 4", "line 5", "> "],
+    );
+
+    let active = handle.new_block(plain_block("active"));
+    handle.push_above_active(active);
+    assert_no_full_redraw_after(&handle, &buf, &mut parser, || {});
+    assert_terminal_rows_match(
+        &mut parser,
+        40,
+        5,
+        &[
+            "line 0", "line 1", "line 2", "line 3", "line 4", "line 5", "active", "> ",
+        ],
+    );
+
+    assert_no_full_redraw_after(&handle, &buf, &mut parser, || {
+        handle.set_block(active, plain_block("active updated"));
+    });
+    assert_terminal_rows_match(
+        &mut parser,
+        40,
+        5,
+        &[
+            "line 0",
+            "line 1",
+            "line 2",
+            "line 3",
+            "line 4",
+            "line 5",
+            "active updated",
+            "> ",
+        ],
+    );
+
+    assert_no_full_redraw_after(&handle, &buf, &mut parser, || {
+        handle.remove_block(active);
+        handle.print_output(plain_block("active updated"));
+    });
+    assert_terminal_rows_match(
+        &mut parser,
+        40,
+        5,
+        &[
+            "line 0",
+            "line 1",
+            "line 2",
+            "line 3",
+            "line 4",
+            "line 5",
+            "active updated",
+            "> ",
+        ],
+    );
+
+    let status = handle.new_block(plain_block("status 0"));
+    handle.push_below(status);
+    assert_no_full_redraw_after(&handle, &buf, &mut parser, || {});
+    assert_terminal_rows_match(
+        &mut parser,
+        40,
+        5,
+        &[
+            "line 0",
+            "line 1",
+            "line 2",
+            "line 3",
+            "line 4",
+            "line 5",
+            "active updated",
+            "> ",
+            "status 0",
+        ],
+    );
+
+    assert_no_full_redraw_after(&handle, &buf, &mut parser, || {
+        handle.set_block(status, plain_block("status 1"));
+    });
+    assert_terminal_rows_match(
+        &mut parser,
+        40,
+        5,
+        &[
+            "line 0",
+            "line 1",
+            "line 2",
+            "line 3",
+            "line 4",
+            "line 5",
+            "active updated",
+            "> ",
+            "status 1",
+        ],
+    );
+}
+
 /// Shift+Enter and Alt+Enter both insert a `\n` at the cursor
 /// without submitting the line, while plain Enter still submits.
 /// Mirrors the affordance users expect from chat UIs. Shift+Enter

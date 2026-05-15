@@ -414,7 +414,7 @@ fn without_previous_response<'a>(
         previous_response: None,
         system_prompt: request.system_prompt,
         messages: request.messages,
-        compacted_input_items: &[],
+        compacted_input_items: request.compacted_input_items,
         tools: request.tools,
         params: request.params,
         tool_choice: request.tool_choice,
@@ -705,6 +705,62 @@ mod tests {
             pool.stats().chain_strips_on_fresh,
             1,
             "chain strip counter should report the cold WS rebuild"
+        );
+    }
+
+    #[test]
+    fn fresh_open_with_previous_response_preserves_compacted_items() {
+        let (addr, server) = spawn_fake_codex_server();
+        let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
+        let mut pool = WsPool::new();
+        let mut on_update = |_: &str, _: Option<&str>| {};
+        let session_id = tau_proto::SessionId::new("session-compacted");
+        let compacted_input_items = vec![
+            serde_json::json!({
+                "type": "message",
+                "role": "user",
+                "content": "compacted-sentinel",
+            })
+            .to_string(),
+        ];
+        let messages = vec![user_msg("after compaction")];
+        let request = PromptPayload {
+            system_prompt: "sys",
+            messages: &messages,
+            compacted_input_items: &compacted_input_items,
+            tools: &[],
+            params: tau_proto::ModelParams::default(),
+            tool_choice: tau_proto::ToolChoice::default(),
+            previous_response: Some(crate::common::PreviousResponse {
+                id: "resp_from_a_dead_socket",
+                message_index: 0,
+                transport: Some(tau_proto::AgentBackendTransport::Websocket),
+            }),
+            originator: &tau_proto::PromptOriginator::User,
+            session_id: &session_id,
+            share_user_cache_key: false,
+        };
+
+        run_turn_through_pool(
+            &mut pool,
+            &config,
+            "session-compacted",
+            &request,
+            &mut on_update,
+        )
+        .expect("fresh chained WS turn should replay compacted context");
+
+        let s = server.lock().expect("server lock");
+        let input = s.requests[0]
+            .get("input")
+            .and_then(serde_json::Value::as_array)
+            .expect("input array");
+        assert!(
+            input.iter().any(
+                |item| item.get("content").and_then(serde_json::Value::as_str)
+                    == Some("compacted-sentinel")
+            ),
+            "fresh WS replay must keep compacted input items when stripping the stale chain id",
         );
     }
 

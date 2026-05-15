@@ -2265,10 +2265,10 @@ pub struct AgentResponseFinished {
     /// `previous_response_id` into the next `SessionPromptCreated`
     /// so the upstream call can run in stateful-chain mode (smaller
     /// request body, server-side reasoning continuity). `None` for
-    /// backends that don't expose response ids (Chat Completions),
-    /// for error turns, and for turns the harness shouldn't chain
-    /// from (the agent withholds the id when it judged the response
-    /// unfit for chaining — e.g. after a fallback retry).
+    /// backends that don't expose response ids (Chat Completions)
+    /// and for error turns. The backend descriptor carries transport
+    /// and stale-chain recovery metadata so the harness can decide how
+    /// later prompts may chain from this id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_id: Option<String>,
     /// Provider-supplied assistant-phase label captured for this

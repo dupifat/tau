@@ -702,6 +702,13 @@ const LLM_MAX_RETRIES: usize = 8;
 /// so a genuine transient hiccup still gets a fair shake.
 const LLM_MAX_RETRIES_EXTENSION: usize = 2;
 
+/// Codex retries the WebSocket path a small number of times, then
+/// switches the session to HTTP+SSE instead of failing a turn that the
+/// non-WS transport could have served. Tau's WS pool already performs
+/// one immediate silent reconnect inside a single attempt; this budget
+/// counts retryable failures that still escaped that recovery.
+const WS_RETRY_BUDGET_BEFORE_HTTP_FALLBACK: usize = 2;
+
 fn max_retries_for(originator: &tau_proto::PromptOriginator) -> usize {
     match originator {
         tau_proto::PromptOriginator::User => LLM_MAX_RETRIES,
@@ -826,17 +833,22 @@ fn emit_retry_banner<W: Write>(
 /// For Chat Completions and HTTP-only Responses turns, this is just
 /// [`BackendConfig::stream_http`]. For Responses turns with WS
 /// enabled (and the per-session sticky-disable flag still off), it
-/// tries the WS pool first; on an upgrade-failure-style error (HTTP
-/// 426 or the sticky-disable WS-close cases the WS guide warns
-/// about), it sets `ws_disabled` for this session and falls through
-/// to HTTP for the rest of the agent's lifetime. Other errors
-/// surface to the outer retry loop, which decides whether they're
-/// retryable (`stream error: ...`) or terminal.
+/// tries the WS pool first. On protocol incompatibility (HTTP 426,
+/// account-level WS caps) it sticky-disables WS immediately. On
+/// retryable WS stream failures, it lets the outer retry loop try WS a
+/// small Codex-style budget, then sticky-disables WS and replays the
+/// same turn over HTTP+SSE.
+struct WsRetryState {
+    failures: usize,
+    budget: usize,
+}
+
 fn stream_with_dispatch(
     backend: &BackendConfig,
     request: &common::PromptPayload<'_>,
     ws_pool: &mut responses::pool::WsPool,
     ws_disabled: &mut HashSet<String>,
+    ws_retry: &mut WsRetryState,
     transport_taken: &mut tau_proto::AgentBackendTransport,
     on_update: &mut impl FnMut(&str, Option<&str>),
 ) -> Result<common::StreamState, common::LlmError> {
@@ -854,6 +866,7 @@ fn stream_with_dispatch(
                 on_update,
             ) {
                 Ok(state) => {
+                    ws_retry.failures = 0;
                     *transport_taken = tau_proto::AgentBackendTransport::Websocket;
                     return Ok(state);
                 }
@@ -867,7 +880,34 @@ fn stream_with_dispatch(
                     ws_disabled.insert(session_id.to_owned());
                     // Fall through to the HTTP path below.
                 }
-                Err(other) => return Err(other.into_llm_error()),
+                Err(other) => {
+                    let error = other.into_llm_error();
+                    *transport_taken = tau_proto::AgentBackendTransport::Websocket;
+                    if error.retry_after().is_some() {
+                        ws_retry.failures += 1;
+                        if ws_retry.failures <= ws_retry.budget {
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                session_id,
+                                ws_retry_failures = ws_retry.failures,
+                                ws_retry_budget = ws_retry.budget,
+                                "WS path failed with retryable error ({error}); retrying WS before HTTP fallback",
+                            );
+                            return Err(error);
+                        }
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            session_id,
+                            ws_retry_failures = ws_retry.failures,
+                            ws_retry_budget = ws_retry.budget,
+                            "WS retry budget exhausted ({error}); falling back to HTTP for this session",
+                        );
+                        ws_disabled.insert(session_id.to_owned());
+                        // Fall through to the HTTP path below.
+                    } else {
+                        return Err(error);
+                    }
+                }
             }
         }
     }
@@ -1034,6 +1074,10 @@ fn handle_prompt<W: Write>(
     };
 
     let originator = prompt.originator.clone();
+    let mut ws_retry = WsRetryState {
+        failures: 0,
+        budget: max_retries_for(&originator).min(WS_RETRY_BUDGET_BEFORE_HTTP_FALLBACK),
+    };
     // Captures which wire transport the *final* attempt actually
     // took. Each retry overwrites it — the descriptor stamped on the
     // emitted `AgentResponseFinished` therefore reflects the
@@ -1068,6 +1112,7 @@ fn handle_prompt<W: Write>(
                 &request,
                 ws_pool,
                 ws_disabled,
+                &mut ws_retry,
                 &mut transport_taken,
                 &mut on_update,
             )

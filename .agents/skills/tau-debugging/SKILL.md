@@ -82,3 +82,58 @@ find ~/.local/state/tau/sessions -maxdepth 1 -mindepth 1 -type d -printf '%T@ %p
 # Inspect logs for one session.
 ls -lah ~/.local/state/tau/sessions/<session_id>/logs
 ```
+
+
+## Token/cache efficiency analysis
+
+When asked to analyze cache hit or token usage efficiency for a session, inspect `events.jsonl` and count `agent.response_finished` events. These events often appear twice: once with `type: "from_connection"` and once with `type: "published"`. Filter to one type, preferably `from_connection`, or dedupe by `(response_id, session_prompt_id)` to avoid exactly doubling token totals.
+
+Useful one-shot summary:
+
+```bash
+python3 - <<'PY'
+import json, pathlib
+sid = '<session_id>'
+p = pathlib.Path.home() / '.local/state/tau/sessions' / sid / 'events.jsonl'
+rows = []
+for ln, line in enumerate(p.open(), 1):
+    j = json.loads(line)
+    ev = j.get('event', {})
+    if ev.get('event') == 'agent.response_finished' and j.get('type') == 'from_connection':
+        pl = ev.get('payload', {})
+        sp = pl.get('session_prompt_id') or '?'
+        inp = pl.get('input_tokens') or 0
+        cached = pl.get('cached_tokens') or 0
+        rows.append((sp, ln, inp, cached, inp - cached, pl.get('output_tokens') or 0, pl.get('originator')))
+
+for label, subset in [('all', rows), ('user', [r for r in rows if (r[6] or {}).get('kind') == 'user']), ('extension', [r for r in rows if (r[6] or {}).get('kind') == 'extension'])]:
+    total_in = sum(r[2] for r in subset)
+    total_cached = sum(r[3] for r in subset)
+    total_uncached = sum(r[4] for r in subset)
+    total_out = sum(r[5] for r in subset)
+    pct = 100 * total_cached / total_in if total_in else 0
+    print(label, 'calls', len(subset), 'input', total_in, 'cached', total_cached, 'uncached', total_uncached, 'cache_pct', round(pct, 1), 'output', total_out)
+
+print('\nlargest uncached calls:')
+for sp, ln, inp, cached, uncached, out, origin in sorted(rows, key=lambda r: r[4], reverse=True)[:10]:
+    pct = 100 * cached / inp if inp else 0
+    print(sp, 'line', ln, 'input', inp, 'cached', cached, 'uncached', uncached, 'cache_pct', round(pct, 1), 'output', out, 'origin', origin)
+PY
+```
+
+Red flags found in past sessions:
+
+- Internal extension prompts, especially `std-notifications` idle summaries, can create normal `ui.prompt_submitted` / `session.prompt_created` / `agent.prompt_submitted` sequences with originator `{kind: "extension"}`. If they resend full history, cache continuity may collapse and waste many uncached tokens for tiny outputs. Check lines around `extension.agent_query`, `ui.prompt_submitted`, and the following `agent.response_finished`.
+- `harness.context_usage_changed` currently follows all `agent.response_finished` events, including extension-originated prompts. Treat context/token stats carefully if side-channel prompts are present.
+- Large tool outputs in `session.prompt_created` messages can dominate context: repeated large `read` slices, cargo/check output, clippy output, or colorized `jj diff`. Grep for `┄total <n>┄` markers in `events.jsonl` to find compacted large payloads.
+- Repeated `agent.response_updated` streaming events are numerous and not useful for aggregate token accounting. Prefer `agent.response_finished`.
+
+Quick checks for side-channel waste:
+
+```bash
+# Show extension-originated prompt/response activity.
+grep -n 'extension.agent_query\|std-notifications\|"kind":"extension"' ~/.local/state/tau/sessions/<session_id>/events.jsonl
+
+# Search logs for runtime errors; no matches does not rule out token waste.
+grep -RniE 'error|warn|panic|cache|token' ~/.local/state/tau/sessions/<session_id>/logs
+```

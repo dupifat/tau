@@ -253,11 +253,11 @@ impl Screen {
         if render_start > viewport_bottom() {
             let to_bottom = (height - 1).saturating_sub(self.cursor_row);
             for _ in 0..to_bottom {
-                w.queue(Print("\n"))?;
+                w.queue(Print("\r\n"))?;
             }
             let scroll = render_start - viewport_bottom();
             for _ in 0..scroll {
-                w.queue(Print("\n"))?;
+                w.queue(Print("\r\n"))?;
             }
             viewport_top += scroll;
             self.cursor_row = height - 1;

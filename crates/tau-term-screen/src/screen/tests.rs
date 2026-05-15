@@ -66,6 +66,13 @@ fn line_chars(lines: &[Vec<Cell>]) -> Vec<String> {
         .collect()
 }
 
+fn plain_cell_lines(lines: &[&str]) -> Vec<Vec<Cell>> {
+    lines
+        .iter()
+        .map(|line| line.chars().map(Cell::plain).collect())
+        .collect()
+}
+
 // --- layout tests ---
 
 #[test]
@@ -642,6 +649,41 @@ fn cursor_positioning_after_overflow() {
 /// End-to-end test of the full_render function using vt100.
 /// Simulates: output history + live area, then position cursor
 /// in the input area using the same logic as full_render.
+#[test]
+fn render_scrolling_after_exact_width_line_does_not_duplicate_rows() {
+    let width = 5;
+    let height = 3;
+    let mut term = vt100::Parser::new(height as u16, width as u16, 20);
+    let mut screen = Screen::new(width);
+
+    let initial = ["aaaaa", "bbbbb", "ccccc"];
+    let initial_lines = plain_cell_lines(&initial);
+    let mut buf = Vec::new();
+    screen
+        .update(&mut buf, &initial_lines, (2, width))
+        .expect("initial render should succeed");
+    term.process(&buf);
+
+    let all = ["aaaaa", "BBBBB", "ccccc", "ddddd"];
+    let all_lines = plain_cell_lines(&all);
+    let mut buf = Vec::new();
+    screen
+        .render_scrolling(&mut buf, &all_lines, 0, height, (3, width))
+        .expect("scroll render should succeed");
+    let has_bare_lf = buf
+        .iter()
+        .enumerate()
+        .any(|(idx, byte)| *byte == b'\n' && (idx == 0 || buf[idx - 1] != b'\r'));
+    assert!(
+        !has_bare_lf,
+        "scrolling movement must reset to column 0 before moving down: {buf:?}"
+    );
+    term.process(&buf);
+
+    let visible: Vec<String> = term.screen().rows(0, width as u16).collect();
+    assert_eq!(visible, vec!["BBBBB", "ccccc", "ddddd"]);
+}
+
 #[test]
 fn full_render_via_vt100() {
     use crossterm::QueueableCommand;

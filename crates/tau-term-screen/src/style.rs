@@ -194,6 +194,7 @@ pub enum Align {
 #[derive(Clone, Debug)]
 pub struct StyledBlock {
     pub content: StyledText,
+    pub right_content: StyledText,
     pub bg: Option<Color>,
     pub align: Align,
     pub margin_left: u16,
@@ -204,6 +205,7 @@ impl StyledBlock {
     pub fn new(content: impl Into<StyledText>) -> Self {
         Self {
             content: content.into(),
+            right_content: StyledText::new(),
             bg: None,
             align: Align::Left,
             margin_left: 0,
@@ -218,6 +220,11 @@ impl StyledBlock {
 
     pub fn align(mut self, align: Align) -> Self {
         self.align = align;
+        self
+    }
+
+    pub fn right_content(mut self, content: impl Into<StyledText>) -> Self {
+        self.right_content = content.into();
         self
     }
 

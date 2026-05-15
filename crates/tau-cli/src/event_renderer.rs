@@ -945,16 +945,18 @@ impl EventRenderer {
         use tau_themes::{StyleName, ThemedText, names};
 
         let mut themed = ThemedText::new();
+        let mut right_themed = ThemedText::new();
         let status_style = themed.add_style(names::MODEL_STATUS);
         let model_style = themed.add_style(names::STATUS_MODEL);
         let role_style = themed.add_style(names::STATUS_ROLE);
         let session_style = themed.add_style(names::STATUS_SESSION);
-        let context_style = themed.add_style(names::STATUS_CONTEXT);
         let effort_style = themed.add_style(names::STATUS_EFFORT);
         let verbosity_style = themed.add_style(names::STATUS_VERBOSITY);
         let service_tier_style = themed.add_style(names::STATUS_SERVICE_TIER);
-        let redraw_style = themed.add_style(names::REDRAW_COUNTER);
+        let context_style = right_themed.add_style(names::STATUS_CONTEXT);
+        let redraw_style = right_themed.add_style(names::REDRAW_COUNTER);
         let mut needs_space = false;
+        let mut right_needs_space = false;
 
         match self.current_model.as_ref() {
             None => push_status_chip(
@@ -1025,9 +1027,9 @@ impl EventRenderer {
         }
         if let Some(context) = self.context_status_chip() {
             push_status_chip(
-                &mut themed,
+                &mut right_themed,
                 context_style,
-                &mut needs_space,
+                &mut right_needs_space,
                 format!("#{context}"),
             );
         }
@@ -1043,9 +1045,9 @@ impl EventRenderer {
                 .is_some_and(|at| at.elapsed() < Duration::from_secs(5 * 60));
         if show_redraw_counter {
             push_status_chip(
-                &mut themed,
+                &mut right_themed,
                 redraw_style,
-                &mut needs_space,
+                &mut right_needs_space,
                 full_render_count.to_string(),
             );
         }
@@ -1054,7 +1056,8 @@ impl EventRenderer {
             .theme
             .resolve_style(&StyleName::new(names::MODEL_STATUS))
             .bg;
-        let mut block = StyledBlock::new(themed_text(&self.theme, &themed));
+        let mut block = StyledBlock::new(themed_text(&self.theme, &themed))
+            .right_content(themed_text(&self.theme, &right_themed));
         if let Some(bg) = bg {
             block = block.bg(convert_color(bg));
         }

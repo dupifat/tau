@@ -516,10 +516,20 @@ pub fn layout_block(block: &StyledBlock, width: usize) -> Vec<Vec<Cell>> {
     let mr = block.margin_right as usize;
     let content_width = width.saturating_sub(ml + mr).max(1);
 
-    let content_lines = layout_lines()
+    let mut content_lines = layout_lines()
         .content(&block.content)
         .width(content_width)
         .call();
+    if block.align == Align::Left && !block.right_content.is_empty() && content_lines.len() == 1 {
+        let right_cells = block.right_content.to_cells();
+        let left_cols = cols(&content_lines[0]);
+        let right_cols = cols(&right_cells);
+        if left_cols + 1 + right_cols <= content_width {
+            let padding = content_width - left_cols - right_cols;
+            content_lines[0].extend(std::iter::repeat_n(Cell::plain(' '), padding));
+            content_lines[0].extend(right_cells);
+        }
+    }
 
     let fill_style = Style {
         bg: block.bg,

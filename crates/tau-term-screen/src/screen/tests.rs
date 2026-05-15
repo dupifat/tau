@@ -176,6 +176,25 @@ fn layout_block_center_alignment() {
 }
 
 #[test]
+fn layout_block_right_content_shown_when_space_available() {
+    let block = StyledBlock::new("left").right_content("right");
+    let lines = layout_block(&block, 12);
+    let text: String = lines[0].iter().map(|c| c.ch).collect();
+    assert_eq!(text, "left   right");
+}
+
+#[test]
+fn layout_block_right_content_hidden_when_left_wraps() {
+    let block = StyledBlock::new("abcdef").right_content("right");
+    let lines = layout_block(&block, 5);
+    let text: Vec<String> = lines
+        .iter()
+        .map(|line| line.iter().map(|c| c.ch).collect())
+        .collect();
+    assert_eq!(text, vec!["abcde", "f    "]);
+}
+
+#[test]
 fn layout_block_bg_applied_to_content_area() {
     let bg = Color::DarkBlue;
     let block = StyledBlock::new("ab").bg(bg).margin_left(1).margin_right(1);

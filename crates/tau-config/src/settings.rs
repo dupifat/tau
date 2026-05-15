@@ -174,6 +174,9 @@ pub struct CliState {
     /// Whether to render per-turn token usage stats below agent
     /// responses. Controlled by `/set show-token-stats <true|false>`.
     pub show_token_stats: bool,
+    /// Whether to render the full-redraw debug counter in the model
+    /// status bar. Controlled by `/set redraw-counter <true|false>`.
+    pub redraw_counter: bool,
     /// How tool calls are rendered in the transcript. Controlled by
     /// `/set show-tools <off|summarize-turn|summarize-prompt|compact|full>`.
     pub show_tools: ShowTools,
@@ -225,6 +228,7 @@ impl Default for CliState {
             show_diff: false,
             show_thinking: true,
             show_token_stats: false,
+            redraw_counter: false,
             show_tools: ShowTools::Full,
         }
     }

@@ -51,6 +51,7 @@ pub const MODEL_STATUS: &str = "model.status";
 /// style so themes can make the currently-selected role pop out from
 /// the rest of the (otherwise dim) status line.
 pub const ROLE_STATUS: &str = "role.status";
+pub const REDRAW_COUNTER: &str = "redraw.counter";
 
 // -- Token stats --
 pub const TOKEN_STATS: &str = "token.stats";

@@ -31,7 +31,6 @@ fn run_full_render(
         all_lines,
         line_sources,
         log_end: history_lines,
-        live_start: history_lines,
         cursor_row,
         cursor_col,
     };
@@ -189,7 +188,96 @@ fn full_render_exact_fit() {
     assert_eq!(screen.actual_line_count(), 5);
 }
 
-// --- full_render: Screen state allows correct subsequent diffs ---
+#[test]
+fn full_render_caps_visible_state_when_fixed_area_exceeds_height() {
+    // Two history rows plus six fixed rows (status/suggestions/below),
+    // rendered into a three-row terminal. The physical viewport starts
+    // inside the fixed area, not at log_end.
+    let all_lines = plain_lines(&[
+        "hist 0",
+        "hist 1",
+        "status",
+        "> prompt",
+        "suggestion",
+        "below 0",
+        "below 1",
+        "below 2",
+    ]);
+    let mut term = vt100::Parser::new(3, 30, 200);
+    let mut screen = Screen::new(30);
+    let mut buf = Vec::new();
+    let layout = LayoutAll {
+        line_sources: (0..all_lines.len())
+            .map(|wrapped_row| LineSource::Input { wrapped_row })
+            .collect(),
+        all_lines,
+        log_end: 2,
+        cursor_row: 3,
+        cursor_col: 8,
+    };
+    let plan = TerminalModel::bottom_aligned_plan(&layout, 3);
+
+    full_render(&mut buf, &mut screen, &layout, &plan, 30, 3).expect("render");
+    term.process(&buf);
+
+    assert_eq!(visible_rows(&term), vec!["below 0", "below 1", "below 2"]);
+    assert_eq!(screen.actual_line_count(), 3);
+}
+
+#[test]
+fn full_render_cursor_uses_physical_viewport_start() {
+    let all_lines = plain_lines(&["hist 0", "hist 1", "live 0", "> prompt", "below"]);
+    let mut term = vt100::Parser::new(3, 30, 200);
+    let mut screen = Screen::new(30);
+    let mut buf = Vec::new();
+    let layout = LayoutAll {
+        line_sources: (0..all_lines.len())
+            .map(|wrapped_row| LineSource::Input { wrapped_row })
+            .collect(),
+        all_lines,
+        log_end: 2,
+        cursor_row: 3,
+        cursor_col: 8,
+    };
+    let plan = TerminalModel::bottom_aligned_plan(&layout, 3);
+
+    full_render(&mut buf, &mut screen, &layout, &plan, 30, 3).expect("render");
+    term.process(&buf);
+
+    assert_eq!(visible_rows(&term), vec!["live 0", "> prompt", "below"]);
+    assert_eq!(term.screen().cursor_position(), (1, 8));
+    assert_eq!(screen.actual_line_count(), 3);
+}
+
+#[test]
+fn full_render_resize_to_larger_bottom_aligns_without_rubber() {
+    let all_lines = plain_lines(&[
+        "hist 0", "hist 1", "hist 2", "hist 3", "hist 4", "hist 5", "hist 6", "hist 7", "hist 8",
+        "hist 9", "> prompt",
+    ]);
+    let layout = LayoutAll {
+        line_sources: (0..all_lines.len())
+            .map(|wrapped_row| LineSource::Input { wrapped_row })
+            .collect(),
+        all_lines,
+        log_end: 10,
+        cursor_row: 10,
+        cursor_col: 8,
+    };
+    let mut model = TerminalModel {
+        viewport_start: 6,
+        rubber_height: 0,
+        known_lines: Vec::new(),
+        known_sources: Vec::new(),
+    };
+
+    let plan = TerminalModel::bottom_aligned_plan(&layout, 10);
+    model.reset_to_plan(layout, &plan);
+
+    assert_eq!(plan.rubber_height, 0);
+    assert_eq!(plan.viewport_start, 1);
+    assert_eq!(model.viewport_start, 1);
+}
 
 #[test]
 fn full_render_then_diff_render() {

@@ -104,6 +104,10 @@ pub(crate) struct EventRenderer {
     /// Whether to render per-turn token usage stats below completed
     /// agent responses.
     show_token_stats: bool,
+    /// Whether to show a temporary full-redraw counter in the status bar.
+    redraw_counter: bool,
+    last_full_render_count: u64,
+    last_full_render_at: Option<Instant>,
     /// Tool block visibility mode.
     show_tools: tau_config::settings::ShowTools,
     /// Tool summary blocks keyed by their block id. Hidden when
@@ -438,6 +442,9 @@ impl EventRenderer {
             current_context_percent: None,
             current_context_input_tokens: None,
             current_context_window: None,
+            redraw_counter: state.redraw_counter,
+            last_full_render_count: 0,
+            last_full_render_at: None,
             cumulative_agent_latency: Duration::ZERO,
             effort_state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
                 tau_proto::Effort::Off.as_u8(),
@@ -476,6 +483,7 @@ impl EventRenderer {
             show_diff: self.diffs_expanded,
             show_thinking: self.show_thinking,
             show_token_stats: self.show_token_stats,
+            redraw_counter: self.redraw_counter,
             show_tools: self.show_tools,
         };
         if let Ok(mut mirror) = self.cli_state_mirror.lock() {
@@ -543,6 +551,7 @@ impl EventRenderer {
             "show-diff" => self.set_diffs_expanded(on),
             "show-thinking" => self.set_show_thinking(on),
             "show-token-stats" => self.set_show_token_stats(on),
+            "redraw-counter" => self.set_redraw_counter(on),
             "show-tools" => {
                 if let Some(show_tools) = tau_config::settings::ShowTools::parse(value) {
                     self.set_show_tools(show_tools);
@@ -621,6 +630,15 @@ impl EventRenderer {
         self.handle.invalidate_screen();
     }
 
+    fn set_redraw_counter(&mut self, on: bool) {
+        if self.redraw_counter == on {
+            return;
+        }
+        self.redraw_counter = on;
+        self.render_model_status();
+        self.save_cli_state();
+    }
+
     fn set_show_token_stats(&mut self, on: bool) {
         if self.show_token_stats == on {
             return;
@@ -671,7 +689,7 @@ impl EventRenderer {
                     self.handle.remove_block(existing);
                 }
                 let block = render_compaction_block(&self.theme, "…", CompactionStatus::Progress);
-                let id = self.handle.new_block(block);
+                let id = self.handle.new_block("compaction-progress", block);
                 self.handle.push_above_active(id);
                 self.handle.redraw();
                 self.compaction_blocks
@@ -685,11 +703,10 @@ impl EventRenderer {
                 // on replay there is no lifecycle block, so render the final
                 // status from this event.
                 if !self.compaction_blocks.contains_key(&compacted.session_id) {
-                    self.handle.print_output(render_compaction_block(
-                        &self.theme,
-                        "ok",
-                        CompactionStatus::Success,
-                    ));
+                    self.handle.print_output(
+                        "compaction-result",
+                        render_compaction_block(&self.theme, "ok", CompactionStatus::Success),
+                    );
                 }
                 true
             }
@@ -706,8 +723,10 @@ impl EventRenderer {
                         CompactionStatus::Error,
                     ),
                 };
-                self.handle
-                    .print_output(render_compaction_block(&self.theme, status_text, status));
+                self.handle.print_output(
+                    "compaction-result",
+                    render_compaction_block(&self.theme, status_text, status),
+                );
                 true
             }
             _ => false,
@@ -911,6 +930,7 @@ impl EventRenderer {
         let mut themed = ThemedText::new();
         let status_style = themed.add_style(names::MODEL_STATUS);
         let role_style = themed.add_style(names::ROLE_STATUS);
+        let redraw_style = themed.add_style(names::REDRAW_COUNTER);
 
         match self.current_model.as_ref() {
             None => {
@@ -964,12 +984,20 @@ impl EventRenderer {
             }
         }
         if let Some(session_id) = &self.current_session_id {
-            themed.push(status_style, format!(" | {session_id}"));
+            themed.push(status_style, format!(" {session_id}"));
         }
-        themed.push(
-            status_style,
-            format!(" | full-redraws:{}", self.handle.full_render_count()),
-        );
+        let full_render_count = self.handle.full_render_count();
+        if self.last_full_render_count < full_render_count {
+            self.last_full_render_count = full_render_count;
+            self.last_full_render_at = Some(Instant::now());
+        }
+        let show_redraw_counter = self.redraw_counter
+            && self
+                .last_full_render_at
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(5 * 60));
+        if show_redraw_counter {
+            themed.push(redraw_style, format!(" {full_render_count}"));
+        }
 
         let bg = self
             .theme

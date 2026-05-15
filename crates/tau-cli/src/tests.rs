@@ -271,7 +271,7 @@ fn new_session_preserves_model_status() {
     sync(&handle);
 
     assert!(vt.screen_contains(80, "test/model"));
-    assert!(vt.screen_contains(80, "| s2"));
+    assert!(vt.screen_contains(80, " s2"));
     assert!(!vt.screen_contains(80, "no model selected"));
 }
 
@@ -2486,7 +2486,7 @@ fn overflowing_stream_replaced_cleanly_on_finish() {
 
     let text = vt.screen_text(40);
     assert!(
-        vt.screen_contains(40, "final 0"),
+        vt.screen_contains(40, "final 1"),
         "final response missing, got: {:?}",
         text
     );

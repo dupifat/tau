@@ -44,6 +44,7 @@
     // -- Model status --
     "model.status":         { fg: "dark_grey" },
     "role.status":          { fg: "dark_yellow" },
+    "redraw.counter":       { fg: "red" },
 
     // -- Token stats --
     "token.stats":                  { fg: "dark_grey" },

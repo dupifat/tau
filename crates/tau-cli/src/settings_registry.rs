@@ -92,6 +92,12 @@ pub const SETTINGS: &[SettingDef] = &[
         get: |s| bool_str(s.show_token_stats),
     },
     SettingDef {
+        name: "redraw-counter",
+        description: "Temporary full-redraw counter in the status bar",
+        values: BOOL_VALUES,
+        get: |s| bool_str(s.redraw_counter),
+    },
+    SettingDef {
         name: "show-tools",
         description: "Tool block visibility",
         values: SHOW_TOOLS_VALUES,

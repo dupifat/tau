@@ -1596,8 +1596,6 @@ struct LayoutAll {
     /// this boundary to absorb visible log shrinkage without moving the fixed
     /// area upward.
     log_end: usize,
-    /// Index in `all_lines` where the live area starts (after history).
-    live_start: usize,
     /// Absolute cursor row in `all_lines`.
     cursor_row: usize,
     /// Cursor column.
@@ -1605,19 +1603,35 @@ struct LayoutAll {
 }
 
 struct ViewPlan {
+    /// Top row of the physical terminal viewport within `render_lines`.
     viewport_start: usize,
     rubber_height: usize,
     render_lines: Vec<Vec<Cell>>,
     cursor_row: usize,
 }
 
+impl ViewPlan {
+    fn visible_start(&self, height: usize) -> usize {
+        self.render_lines.len().saturating_sub(height)
+    }
+
+    fn visible_lines(&self, height: usize) -> &[Vec<Cell>] {
+        &self.render_lines[self.visible_start(height)..]
+    }
+
+    fn cursor_in_visible(&self, height: usize) -> usize {
+        self.cursor_row.saturating_sub(self.visible_start(height))
+    }
+}
+
 /// Renderer-side model of the terminal content Tau believes it owns.
 ///
-/// `known_lines[..viewport_start]` are scrollable log rows in terminal
-/// scrollback, `known_lines[viewport_start..]` are represented on-screen above
-/// the fixed prompt/status area. `rubber_height` is temporary blank space
-/// inserted between those two areas to absorb visible shrinkage before pulling
-/// rows back from scrollback.
+/// `viewport_start` is the top row of the physical terminal viewport within
+/// the most recent planned `render_lines`. Rows before
+/// `viewport_start.min(known_lines.len())` are scrollable log rows already in
+/// terminal scrollback. `rubber_height` is temporary blank space inserted
+/// between log and fixed rows to absorb visible shrinkage before pulling rows
+/// back from scrollback.
 #[derive(Default)]
 struct TerminalModel {
     viewport_start: usize,
@@ -1635,7 +1649,7 @@ impl TerminalModel {
         hidden_lines_changed(
             &self.known_lines,
             &layout.all_lines[..layout.log_end],
-            self.viewport_start,
+            self.viewport_start.min(layout.log_end),
         )
     }
 
@@ -1643,8 +1657,34 @@ impl TerminalModel {
         changed_line_in_range(
             &self.known_lines,
             &layout.all_lines[..layout.log_end],
-            0..self.viewport_start,
+            0..self.viewport_start.min(layout.log_end),
         )
+    }
+
+    fn build_plan(layout: &LayoutAll, viewport_start: usize, rubber_height: usize) -> ViewPlan {
+        let mut render_lines = Vec::with_capacity(layout.all_lines.len() + rubber_height);
+        render_lines.extend_from_slice(&layout.all_lines[..layout.log_end]);
+        render_lines.extend(std::iter::repeat_with(Vec::new).take(rubber_height));
+        render_lines.extend_from_slice(&layout.all_lines[layout.log_end..]);
+
+        let cursor_row = if layout.log_end <= layout.cursor_row {
+            layout.cursor_row + rubber_height
+        } else {
+            layout.cursor_row
+        };
+
+        ViewPlan {
+            viewport_start,
+            rubber_height,
+            render_lines,
+            cursor_row,
+        }
+    }
+
+    fn bottom_aligned_plan(layout: &LayoutAll, height: usize) -> ViewPlan {
+        let mut plan = Self::build_plan(layout, Self::desired_viewport_start(layout, height), 0);
+        plan.viewport_start = plan.visible_start(height);
+        plan
     }
 
     fn plan_view(&self, layout: &LayoutAll, height: usize) -> ViewPlan {
@@ -1674,31 +1714,21 @@ impl TerminalModel {
         }
 
         viewport_start = viewport_start.min(log_height);
-        let mut render_lines = Vec::with_capacity(layout.all_lines.len() + rubber_height);
-        render_lines.extend_from_slice(&layout.all_lines[..layout.log_end]);
-        render_lines.extend(std::iter::repeat_with(Vec::new).take(rubber_height));
-        render_lines.extend_from_slice(&layout.all_lines[layout.log_end..]);
-
-        let cursor_row = if layout.log_end <= layout.cursor_row {
-            layout.cursor_row + rubber_height
-        } else {
-            layout.cursor_row
-        };
-
-        ViewPlan {
-            viewport_start,
-            rubber_height,
-            render_lines,
-            cursor_row,
-        }
+        let mut plan = Self::build_plan(layout, viewport_start, rubber_height);
+        plan.viewport_start = plan.visible_start(height);
+        plan
     }
 
-    fn reset_to_layout(&mut self, layout: LayoutAll, height: usize) -> ViewPlan {
-        let plan = self.plan_view(&layout, height);
+    fn reset_to_plan(&mut self, layout: LayoutAll, plan: &ViewPlan) {
         self.viewport_start = plan.viewport_start;
         self.rubber_height = plan.rubber_height;
         self.known_lines = layout.all_lines[..layout.log_end].to_vec();
         self.known_sources = layout.line_sources[..layout.log_end].to_vec();
+    }
+
+    fn reset_to_layout(&mut self, layout: LayoutAll, height: usize) -> ViewPlan {
+        let plan = self.plan_view(&layout, height);
+        self.reset_to_plan(layout, &plan);
         plan
     }
 }
@@ -1718,7 +1748,6 @@ fn layout_all(st: &SharedState) -> LayoutAll {
         &mut all_lines,
         &mut line_sources,
     );
-    let live_start = all_lines.len();
     layout_id_list(
         "above_active",
         &st.above_active,
@@ -1804,7 +1833,6 @@ fn layout_all(st: &SharedState) -> LayoutAll {
         all_lines,
         line_sources,
         log_end,
-        live_start,
         cursor_row,
         cursor_col,
     }
@@ -1834,10 +1862,10 @@ fn redraw_loop(
             if st.shutdown {
                 // Final render + move cursor below all content.
                 let layout = layout_all(&st);
-                let plan = terminal_model.plan_view(&layout, st.height.max(1));
-                let visible_start = plan.viewport_start;
-                let visible = &plan.render_lines[visible_start..];
-                let cursor_in_visible = plan.cursor_row.saturating_sub(visible_start);
+                let height = st.height.max(1);
+                let plan = terminal_model.plan_view(&layout, height);
+                let visible = plan.visible_lines(height);
+                let cursor_in_visible = plan.cursor_in_visible(height);
                 drop(st);
 
                 screen.set_width(prev_width);
@@ -1930,11 +1958,11 @@ fn redraw_loop(
                     previous_source: None,
                 },
             );
-            let plan = terminal_model.plan_view(&layout, height);
+            let plan = TerminalModel::bottom_aligned_plan(&layout, height);
             if let Err(e) = full_render(&mut writer, &mut screen, &layout, &plan, width, height) {
                 tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
             }
-            terminal_model.reset_to_layout(layout, height);
+            terminal_model.reset_to_plan(layout, &plan);
         } else {
             screen.set_width(width);
 
@@ -1985,8 +2013,8 @@ fn redraw_loop(
                 // No new scrollback rows — normal differential update. This
                 // includes visible shrinkage: rubber grows instead of moving
                 // the viewport upward.
-                let visible = &plan.render_lines[visible_start..];
-                let cursor_in_visible = plan.cursor_row.saturating_sub(visible_start);
+                let visible = plan.visible_lines(height);
+                let cursor_in_visible = plan.cursor_in_visible(height);
                 if let Err(e) =
                     screen.update(&mut writer, visible, (cursor_in_visible, layout.cursor_col))
                 {
@@ -2124,11 +2152,6 @@ fn full_render(
     stdout.queue(terminal::EndSynchronizedUpdate)?;
     stdout.flush()?;
 
-    // Position the cursor within the live area.
-    let cursor_in_live = plan
-        .cursor_row
-        .saturating_sub(layout.live_start + plan.rubber_height);
-
     // After outputting, the cursor is at the last content line.
     // When total >= height, overflow scrolled and the cursor is at
     // screen row (height - 1). When total < height, the cursor is
@@ -2139,10 +2162,7 @@ fn full_render(
         total.saturating_sub(1)
     };
 
-    // The live area starts at this screen row:
-    let viewport_top = plan.viewport_start;
-    let live_screen_start = (layout.live_start + plan.rubber_height).saturating_sub(viewport_top);
-    let cursor_screen_row = live_screen_start + cursor_in_live;
+    let cursor_screen_row = plan.cursor_in_visible(height);
 
     let up = current_screen_row.saturating_sub(cursor_screen_row);
     if up > 0 {
@@ -2153,9 +2173,8 @@ fn full_render(
 
     // Track what's visible on the terminal so the next
     // screen.update() can diff correctly.
-    let visible_start = plan.viewport_start;
-    let visible_lines = all_lines[visible_start..].to_vec();
-    let cursor_in_visible = plan.cursor_row.saturating_sub(visible_start);
+    let visible_lines = plan.visible_lines(height).to_vec();
+    let cursor_in_visible = plan.cursor_in_visible(height);
     screen.reset_to(visible_lines, cursor_in_visible, layout.cursor_col);
 
     Ok(())

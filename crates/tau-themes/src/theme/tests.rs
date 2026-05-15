@@ -181,6 +181,9 @@ fn builtin_theme_parses() {
     assert_eq!(selected.fg, Some(Color::White));
     assert_eq!(selected.bg, Some(Color::DarkBlue));
 
+    let redraw_counter = theme.resolve_style(&StyleName::new("redraw.counter"));
+    assert_eq!(redraw_counter.fg, Some(Color::Red));
+
     let token_stats = theme.resolve_style(&StyleName::new("token.stats"));
     assert_eq!(token_stats.fg, Some(Color::DarkGrey));
 

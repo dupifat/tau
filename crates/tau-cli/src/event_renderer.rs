@@ -962,6 +962,10 @@ impl EventRenderer {
         if let Some(session_id) = &self.current_session_id {
             themed.push(status_style, format!(" | {session_id}"));
         }
+        themed.push(
+            status_style,
+            format!(" | full-redraws:{}", self.handle.full_render_count()),
+        );
 
         let bg = self
             .theme

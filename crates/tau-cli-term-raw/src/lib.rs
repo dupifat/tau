@@ -160,6 +160,7 @@ struct SharedState {
     /// here via `TermHandle::print_terminal_escape` to ensure their
     /// bytes don't interleave with the active frame's render output.
     pending_raw: Vec<String>,
+    full_render_count: u64,
 }
 
 impl SharedState {
@@ -188,6 +189,7 @@ impl SharedState {
             sync_requested: 0,
             sync_completed: 0,
             pending_raw: Vec::new(),
+            full_render_count: 0,
         }
     }
 
@@ -540,6 +542,12 @@ impl TermHandle {
         self.redraw.notify();
     }
 
+    /// Number of full renders performed by the redraw thread since
+    /// terminal creation. Temporary debugging aid for scrollback bugs.
+    pub fn full_render_count(&self) -> u64 {
+        self.lock().full_render_count
+    }
+
     /// Triggers a redraw and blocks until the redraw thread has
     /// processed it. Uses a generation counter: the caller bumps
     /// `sync_requested`, the redraw thread sets `sync_completed`
@@ -565,26 +573,33 @@ impl TermHandle {
     pub fn new_block(&self, block: impl Into<StyledBlock>) -> BlockId {
         let mut st = self.lock();
         let id = st.alloc_id();
-        st.blocks.insert(id, block.into());
+        let block = block.into();
+        let content_empty = block.content.is_empty();
+        st.blocks.insert(id, block);
+        tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, content_empty, "new block");
         id
     }
 
     /// Updates the content of an existing block (or inserts it at
     /// the given id).
     pub fn set_block(&self, id: BlockId, block: impl Into<StyledBlock>) {
-        self.lock().blocks.insert(id, block.into());
+        let block = block.into();
+        let content_empty = block.content.is_empty();
+        self.lock().blocks.insert(id, block);
+        tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, content_empty, "set block");
     }
 
     /// Removes a block from the central store **and** from every zone
     /// list that references it.
     pub fn remove_block(&self, id: BlockId) {
         let mut st = self.lock();
-        st.blocks.remove(&id);
+        let existed = st.blocks.remove(&id).is_some();
         st.history.retain(|&x| x != id);
         st.above_active.retain(|&x| x != id);
         st.above_sticky.retain(|&x| x != id);
         st.suggestions.retain(|&x| x != id);
         st.below.retain(|&x| x != id);
+        tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, existed, "remove block");
     }
 
     // --- Zone lists ---
@@ -592,6 +607,7 @@ impl TermHandle {
     /// Appends a block id to the history (persistent output).
     pub fn push_history(&self, id: BlockId) {
         self.lock().history.push(id);
+        tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "history", "push block zone");
     }
 
     /// Appends a block id to the above-active zone (if not already
@@ -600,12 +616,14 @@ impl TermHandle {
         let mut st = self.lock();
         if !st.above_active.contains(&id) {
             st.above_active.push(id);
+            tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "above_active", "push block zone");
         }
     }
 
     /// Removes a block id from the above-active zone.
     pub fn remove_above_active(&self, id: BlockId) {
         self.lock().above_active.retain(|&x| x != id);
+        tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "above_active", "remove block zone");
     }
 
     /// Appends a block id to the above-sticky zone (if not already
@@ -614,12 +632,14 @@ impl TermHandle {
         let mut st = self.lock();
         if !st.above_sticky.contains(&id) {
             st.above_sticky.push(id);
+            tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "above_sticky", "push block zone");
         }
     }
 
     /// Removes a block id from the above-sticky zone.
     pub fn remove_above_sticky(&self, id: BlockId) {
         self.lock().above_sticky.retain(|&x| x != id);
+        tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "above_sticky", "remove block zone");
     }
 
     /// Appends a block id to the suggestions zone (if not already
@@ -628,12 +648,14 @@ impl TermHandle {
         let mut st = self.lock();
         if !st.suggestions.contains(&id) {
             st.suggestions.push(id);
+            tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "suggestions", "push block zone");
         }
     }
 
     /// Removes a block id from the suggestions zone.
     pub fn remove_suggestions(&self, id: BlockId) {
         self.lock().suggestions.retain(|&x| x != id);
+        tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "suggestions", "remove block zone");
     }
 
     /// Appends a block id to the below zone (if not already present).
@@ -641,12 +663,14 @@ impl TermHandle {
         let mut st = self.lock();
         if !st.below.contains(&id) {
             st.below.push(id);
+            tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "below", "push block zone");
         }
     }
 
     /// Removes a block id from the below zone.
     pub fn remove_below(&self, id: BlockId) {
         self.lock().below.retain(|&x| x != id);
+        tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "below", "remove block zone");
     }
 
     // --- Convenience ---
@@ -656,8 +680,11 @@ impl TermHandle {
     pub fn print_output(&self, block: impl Into<StyledBlock>) -> BlockId {
         let mut st = self.lock();
         let id = st.alloc_id();
-        st.blocks.insert(id, block.into());
+        let block = block.into();
+        let content_empty = block.content.is_empty();
+        st.blocks.insert(id, block);
         st.history.push(id);
+        tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, content_empty, zone = "history", "print output");
         drop(st);
         self.redraw.notify();
         id
@@ -1484,21 +1511,34 @@ impl Drop for Term {
 
 // --- Rendering helpers ---
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LineSource {
+    Block { zone: &'static str, id: BlockId },
+    Input,
+}
+
 /// Lays out blocks referenced by an id list, skipping missing ids
 /// and blocks with empty content (so callers can "hide" a block by
 /// swapping its content to empty without leaving a blank row).
 fn layout_id_list(
+    zone: &'static str,
     ids: &[BlockId],
     blocks: &HashMap<BlockId, StyledBlock>,
     width: usize,
     out: &mut Vec<Vec<Cell>>,
+    sources: &mut Vec<LineSource>,
 ) {
     for id in ids {
         if let Some(block) = blocks.get(id) {
             if block.content.is_empty() {
                 continue;
             }
-            out.extend(layout_block(block, width));
+            let lines = layout_block(block, width);
+            sources.extend(std::iter::repeat_n(
+                LineSource::Block { zone, id: *id },
+                lines.len(),
+            ));
+            out.extend(lines);
         }
     }
 }
@@ -1507,6 +1547,8 @@ fn layout_id_list(
 struct LayoutAll {
     /// All rendered lines (history + live area).
     all_lines: Vec<Vec<Cell>>,
+    /// Source block/zone for each rendered line.
+    line_sources: Vec<LineSource>,
     /// Index in `all_lines` where the live area starts (after history).
     live_start: usize,
     /// Absolute cursor row in `all_lines`.
@@ -1519,11 +1561,33 @@ struct LayoutAll {
 fn layout_all(st: &SharedState) -> LayoutAll {
     let width = st.width;
     let mut all_lines: Vec<Vec<Cell>> = Vec::new();
+    let mut line_sources: Vec<LineSource> = Vec::new();
 
-    layout_id_list(&st.history, &st.blocks, width, &mut all_lines);
+    layout_id_list(
+        "history",
+        &st.history,
+        &st.blocks,
+        width,
+        &mut all_lines,
+        &mut line_sources,
+    );
     let live_start = all_lines.len();
-    layout_id_list(&st.above_active, &st.blocks, width, &mut all_lines);
-    layout_id_list(&st.above_sticky, &st.blocks, width, &mut all_lines);
+    layout_id_list(
+        "above_active",
+        &st.above_active,
+        &st.blocks,
+        width,
+        &mut all_lines,
+        &mut line_sources,
+    );
+    layout_id_list(
+        "above_sticky",
+        &st.above_sticky,
+        &st.blocks,
+        width,
+        &mut all_lines,
+        &mut line_sources,
+    );
 
     let above_end = all_lines.len();
 
@@ -1563,12 +1627,28 @@ fn layout_all(st: &SharedState) -> LayoutAll {
 
     let cursor_row = above_end + buffer_cursor_row;
 
+    line_sources.extend(std::iter::repeat_n(LineSource::Input, input_lines.len()));
     all_lines.extend(input_lines);
-    layout_id_list(&st.suggestions, &st.blocks, width, &mut all_lines);
-    layout_id_list(&st.below, &st.blocks, width, &mut all_lines);
+    layout_id_list(
+        "suggestions",
+        &st.suggestions,
+        &st.blocks,
+        width,
+        &mut all_lines,
+        &mut line_sources,
+    );
+    layout_id_list(
+        "below",
+        &st.below,
+        &st.blocks,
+        width,
+        &mut all_lines,
+        &mut line_sources,
+    );
 
     LayoutAll {
         all_lines,
+        line_sources,
         live_start,
         cursor_row,
         cursor_col,
@@ -1678,6 +1758,20 @@ fn redraw_loop(
 
         if size_changed || force_full {
             // Path 2: Full render (resize, or post-external-program).
+            let reason = if size_changed {
+                "size_changed"
+            } else {
+                "force_full"
+            };
+            mark_full_render(
+                &state,
+                reason,
+                &layout,
+                prev_visible_start,
+                layout.all_lines.len().saturating_sub(height),
+                height,
+                None,
+            );
             if let Err(e) = full_render(&mut writer, &mut screen, &layout, width, height) {
                 tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
             }
@@ -1702,6 +1796,15 @@ fn redraw_loop(
                 // The desired viewport moved upward (content shrank). Rows that
                 // should re-enter the screen may currently exist only in terminal
                 // scrollback, which cannot be pulled back incrementally.
+                mark_full_render(
+                    &state,
+                    "viewport_moved_up",
+                    &layout,
+                    prev_visible_start,
+                    visible_start,
+                    height,
+                    None,
+                );
                 if let Err(e) = full_render(&mut writer, &mut screen, &layout, width, height) {
                     tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
                 }
@@ -1709,6 +1812,29 @@ fn redraw_loop(
                 // The terminal scrollback contains, or is about to receive,
                 // rows whose logical content changed. Rebuild it from logical
                 // content instead of trying to patch it incrementally.
+                let reason = if hidden_prefix_changed {
+                    "hidden_prefix_changed"
+                } else {
+                    "dropping_lines_changed"
+                };
+                let changed_line = if hidden_prefix_changed {
+                    changed_line_in_range(&prev_all_lines, &layout.all_lines, 0..prev_visible_start)
+                } else {
+                    changed_line_in_range(
+                        &prev_all_lines,
+                        &layout.all_lines,
+                        prev_visible_start..visible_start,
+                    )
+                };
+                mark_full_render(
+                    &state,
+                    reason,
+                    &layout,
+                    prev_visible_start,
+                    visible_start,
+                    height,
+                    changed_line,
+                );
                 if let Err(e) = full_render(&mut writer, &mut screen, &layout, width, height) {
                     tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
                 }
@@ -1760,6 +1886,45 @@ fn redraw_loop(
 /// position cursor. Used on resize and when content grows beyond
 /// the viewport. After rendering, Screen tracks the visible
 /// viewport for subsequent differential updates.
+fn changed_line_in_range(
+    prev_all_lines: &[Vec<Cell>],
+    all_lines: &[Vec<Cell>],
+    range: std::ops::Range<usize>,
+) -> Option<usize> {
+    range
+        .into_iter()
+        .find(|idx| prev_all_lines.get(*idx) != all_lines.get(*idx))
+}
+
+fn mark_full_render(
+    state: &Arc<Mutex<SharedState>>,
+    reason: &'static str,
+    layout: &LayoutAll,
+    prev_visible_start: usize,
+    visible_start: usize,
+    height: usize,
+    changed_line: Option<usize>,
+) {
+    let full_render_count = {
+        let mut st = state.lock().expect("term state mutex poisoned");
+        st.full_render_count += 1;
+        st.full_render_count
+    };
+    let source = changed_line.and_then(|idx| layout.line_sources.get(idx));
+    tracing::trace!(
+        target: "tau_cli_term_raw::redraw",
+        full_render_count,
+        reason,
+        prev_visible_start,
+        visible_start,
+        height,
+        total_lines = layout.all_lines.len(),
+        changed_line,
+        ?source,
+        "full render"
+    );
+}
+
 fn viewport_moved_up(prev_visible_start: usize, visible_start: usize) -> bool {
     visible_start < prev_visible_start
 }

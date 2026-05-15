@@ -24,8 +24,10 @@ fn run_full_render(
     let mut screen = Screen::new(cols as usize);
     let mut buf: Vec<u8> = Vec::new();
 
+    let line_sources = vec![LineSource::Input; all_lines.len()];
     let layout = LayoutAll {
         all_lines,
+        line_sources,
         live_start: history_lines,
         cursor_row,
         cursor_col,

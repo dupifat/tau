@@ -1137,7 +1137,10 @@ impl EventRenderer {
                 }
 
                 let block = streaming_block(&self.theme, names::AGENT_PENDING, "");
-                let id = self.handle.new_block("agent-response-live", block);
+                let id = self.handle.new_block(
+                    format!("agent-response-live:{}", prompt.session_prompt_id),
+                    block,
+                );
                 self.handle.push_above_active(id);
                 self.handle.redraw();
                 self.prompts
@@ -1193,7 +1196,9 @@ impl EventRenderer {
                             // re-push response — net effect: thinking
                             // is at the response's old position and
                             // the response moves down by one.
-                            let tbid = self.handle.new_block("agent-thinking-live", block);
+                            let tbid = self
+                                .handle
+                                .new_block(format!("agent-thinking-live:{spid}"), block);
                             let response_bid =
                                 self.prompts.get(spid).and_then(|s| s.response_block_id);
                             if let Some(response_bid) = response_bid {
@@ -1317,7 +1322,7 @@ impl EventRenderer {
                                 ..ToolSummaryDisplay::default()
                             };
                             let block = self.render_summary_block(&summary);
-                            let id = self.handle.new_block("tool-summary", block);
+                            let id = self.handle.new_block("tool-summary:prompt", block);
                             self.handle.push_above_active(id);
                             self.tool_summaries.insert(id, summary);
                             self.prompt_tool_summary = Some(id);
@@ -1330,7 +1335,7 @@ impl EventRenderer {
                             ..ToolSummaryDisplay::default()
                         };
                         let block = self.render_summary_block(&summary);
-                        let id = self.handle.new_block("tool-summary", block);
+                        let id = self.handle.new_block("tool-summary:turn", block);
                         self.handle.push_above_active(id);
                         self.tool_summaries.insert(id, summary);
                         Some(id)
@@ -1338,7 +1343,9 @@ impl EventRenderer {
                     for call in &finished.tool_calls {
                         let display = format_tool_call(call.name.as_str(), call.display.as_ref());
                         let block = self.render_tool_history_block(&display);
-                        let id = self.handle.new_block("tool-call", block);
+                        let id = self
+                            .handle
+                            .new_block(format!("tool-call:{}:{}", call.name, call.id), block);
                         self.handle.push_above_active(id);
                         self.tool_calls.insert(
                             call.id.to_string(),
@@ -1503,7 +1510,9 @@ impl EventRenderer {
                     "running [no context]".to_owned()
                 };
                 let block = render_shell_block(&self.theme, &cmd.command, "", Some(&label));
-                let block_id = self.handle.new_block("shell-command", block);
+                let block_id = self
+                    .handle
+                    .new_block(format!("shell-command:{}", cmd.command_id), block);
                 self.handle.push_above_active(block_id);
                 self.handle.redraw();
                 self.shell_blocks.insert(
@@ -1567,7 +1576,10 @@ impl EventRenderer {
             Event::ExtensionStarting(starting) => {
                 let block =
                     extension_status_block(&self.theme, &starting.extension_name, "starting");
-                let id = self.handle.new_block("extension-starting", block);
+                let id = self.handle.new_block(
+                    format!("extension-starting:{}", starting.instance_id),
+                    block,
+                );
                 self.handle.push_above_active(id);
                 self.handle.redraw();
                 self.extension_blocks.insert(starting.instance_id, id);

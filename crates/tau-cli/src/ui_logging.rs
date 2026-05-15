@@ -9,7 +9,7 @@ use tracing_subscriber::fmt::MakeWriter;
 use crate::mint_short_id;
 
 const UI_LOG_ENV: &str = "TAU_LOG";
-const DEFAULT_FILTER: &str = "tau_cli=info";
+const DEFAULT_FILTER: &str = "info";
 
 /// Initialize stderr tracing for component subcommands that do not
 /// have their own logging setup. Uses `TAU_LOG` so startup can be
@@ -78,7 +78,7 @@ impl UiLogging {
 ///
 /// Logs go to `$XDG_STATE_HOME/tau/uis/<ui-id>/ui.log` (normally
 /// `~/.local/state/tau/uis/<ui-id>/ui.log`). The filter comes from
-/// `TAU_LOG`, defaulting to `tau_cli=info`.
+/// `TAU_LOG`, defaulting to `info`.
 pub fn init(state_dir: &Path) -> io::Result<UiLogging> {
     let ui_id = mint_ui_id();
     let dir = state_dir.join("uis").join(&ui_id);

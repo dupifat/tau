@@ -1867,6 +1867,10 @@ fn redraw_loop(
                 // The desired viewport moved upward (content shrank). Rows that
                 // should re-enter the screen may currently exist only in terminal
                 // scrollback, which cannot be pulled back incrementally.
+                let previous_source = terminal_model
+                    .known_sources
+                    .get(terminal_model.viewport_start)
+                    .cloned();
                 mark_full_render(
                     &state,
                     "viewport_moved_up",
@@ -1874,8 +1878,8 @@ fn redraw_loop(
                     terminal_model.viewport_start,
                     visible_start,
                     height,
-                    None,
-                    None,
+                    Some(visible_start),
+                    previous_source,
                 );
                 if let Err(e) = full_render(&mut writer, &mut screen, &layout, width, height) {
                     tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
@@ -1978,22 +1982,21 @@ fn mark_full_render(
     let current_source = changed_line
         .and_then(|idx| layout.line_sources.get(idx))
         .cloned();
-    if reason == "hidden_prefix_changed" {
-        let previous = describe_line_source(previous_source.as_ref());
-        let current = describe_line_source(current_source.as_ref());
-        tracing::info!(
-            target: "tau_cli_term_raw::redraw",
-            full_render_count,
-            prev_visible_start,
-            visible_start,
-            height,
-            total_lines = layout.all_lines.len(),
-            changed_line,
-            previous_source = ?previous_source,
-            current_source = ?current_source,
-            "full redraw caused by scrollback change from {previous} to {current}"
-        );
-    }
+    let previous = describe_line_source(previous_source.as_ref());
+    let current = describe_line_source(current_source.as_ref());
+    tracing::info!(
+        target: "tau_cli_term_raw::redraw",
+        full_render_count,
+        reason,
+        prev_visible_start,
+        visible_start,
+        height,
+        total_lines = layout.all_lines.len(),
+        changed_line,
+        previous_source = ?previous_source,
+        current_source = ?current_source,
+        "full redraw caused by {reason}: {previous} -> {current}"
+    );
     tracing::trace!(
         target: "tau_cli_term_raw::redraw",
         full_render_count,

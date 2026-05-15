@@ -1900,6 +1900,27 @@ fn shell_tool_long_display_args_are_middle_shortened() {
 }
 
 #[test]
+fn shell_tool_timeout_preserves_partial_output() {
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("command".to_owned()),
+            CborValue::Text("printf 'before\\n'; sleep 2; printf 'after\\n'".to_owned()),
+        ),
+        (
+            CborValue::Text("timeout".to_owned()),
+            CborValue::Integer(1.into()),
+        ),
+    ]);
+
+    let error = run_command(&args, &crate::config::ShellConfig::default()).expect_err("timeout");
+    assert!(error.message.contains("command timed out after 1s"));
+    let details = error.details.as_ref().expect("details");
+    assert_eq!(cbor_map_text(details, "stdout"), Some("before\n"));
+    assert_eq!(cbor_int_field(details, "stdout_lines"), Some(1));
+    assert_eq!(cbor_int_field(details, "stdout_bytes"), Some(7));
+}
+
+#[test]
 fn shell_tool_reports_failures_with_details() {
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);

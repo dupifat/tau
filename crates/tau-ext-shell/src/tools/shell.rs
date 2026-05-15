@@ -50,25 +50,7 @@ pub(crate) fn run_command(
                 ))
         })?;
 
-    let wait = match wait_with_timeout(&mut child, timeout) {
-        Some(wait) => wait,
-        None => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(
-                ToolFailure::from(format!("command timed out after {timeout_secs}s"))
-                    .with_args(display_args)
-                    .with_payload(display_payload)
-                    .with_details(command_details_value(
-                        command.clone(),
-                        cwd.clone(),
-                        None,
-                        String::new(),
-                        String::new(),
-                    )),
-            );
-        }
-    };
+    let wait = wait_with_timeout(&mut child, timeout);
 
     let status_code = wait.status_code;
     let success = wait.success;
@@ -103,16 +85,26 @@ pub(crate) fn run_command(
         let exit_label = status_code
             .map(|v| v.to_string())
             .unwrap_or_else(|| "unknown".to_owned());
+        let status_text = if wait.timed_out {
+            "timeout".to_owned()
+        } else {
+            format!("err: {exit_label}")
+        };
         let mut display = ToolDisplay {
             args: display_args,
             status: ToolDisplayStatus::Error,
-            status_text: format!("err: {exit_label}"),
+            status_text,
             payload: display_payload,
             ..Default::default()
         };
         display.stats = text_stats(&combined);
+        let message = if wait.timed_out {
+            format!("command timed out after {timeout_secs}s")
+        } else {
+            format!("command exited with status {exit_label}")
+        };
         Err(ToolFailure {
-            message: format!("command exited with status {exit_label}"),
+            message,
             details: Some(Box::new(result)),
             display: Box::new(display),
         })
@@ -284,54 +276,60 @@ pub(crate) fn dispatch_user_shell_command(
     )));
 }
 
-/// Wait for a child process with a timeout. Returns `None` if timed out.
+/// Wait for a child process with a timeout, preserving output even when
+/// the timeout is reached.
 ///
-/// Pipes are read on dedicated threads to avoid deadlocks. When the child
-/// exits its pipes close, the reader threads complete, and we get our
-/// signal — no polling.
-fn wait_with_timeout(
-    child: &mut std::process::Child,
-    timeout: std::time::Duration,
-) -> Option<WaitResult> {
-    // Take the pipes so we can move them into reader threads.
+/// Pipes are read on dedicated threads to avoid deadlocks. On timeout we
+/// kill the isolated process group, wait for the child to be reaped, and
+/// only then join the reader threads so partial stdout/stderr is kept.
+fn wait_with_timeout(child: &mut std::process::Child, timeout: std::time::Duration) -> WaitResult {
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
 
-    // Read stdout/stderr on dedicated threads so a full pipe buffer
-    // can't prevent the child from exiting.
     let stdout_handle = std::thread::spawn(move || read_pipe(stdout_pipe));
     let stderr_handle = std::thread::spawn(move || read_pipe(stderr_pipe));
 
-    // Collector thread: joins both readers (which complete when the child
-    // exits and closes its pipes), then sends the output on a channel.
-    let (tx, rx) = mpsc::channel::<(String, String)>();
-    std::thread::spawn(move || {
-        let stdout = stdout_handle.join().unwrap_or_default();
-        let stderr = stderr_handle.join().unwrap_or_default();
-        let _ = tx.send((stdout, stderr));
-    });
-
-    match rx.recv_timeout(timeout) {
-        Ok((stdout, stderr)) => {
-            // Pipes closed → child *almost certainly* exited, but the
-            // child can call `close(1)/close(2)` itself, so EOF on
-            // stdio is not a hard guarantee of process reap. Treat a
-            // `wait()` failure as "exited under unknown circumstances"
-            // rather than panicking.
-            let (status_code, success) = match child.wait() {
-                Ok(status) => (status.code(), status.success()),
-                Err(_) => (None, false),
-            };
-            Some(WaitResult {
-                status_code,
-                success,
-                stdout,
-                stderr,
-            })
+    let deadline = std::time::Instant::now() + timeout;
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {}
+            Err(_) => break None,
         }
-        Err(mpsc::RecvTimeoutError::Timeout) => None,
-        Err(mpsc::RecvTimeoutError::Disconnected) => None,
+
+        let now = std::time::Instant::now();
+        if deadline <= now {
+            timed_out = true;
+            kill_child_process_group(child);
+            break child.wait().ok();
+        }
+
+        std::thread::sleep((deadline - now).min(std::time::Duration::from_millis(25)));
+    };
+
+    let stdout = stdout_handle.join().unwrap_or_default();
+    let stderr = stderr_handle.join().unwrap_or_default();
+    let status_code = status.and_then(|status| status.code());
+    let success = !timed_out && status.is_some_and(|status| status.success());
+
+    WaitResult {
+        status_code,
+        success,
+        stdout,
+        stderr,
+        timed_out,
     }
+}
+
+fn kill_child_process_group(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    #[allow(unsafe_code)]
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+
+    let _ = child.kill();
 }
 
 struct WaitResult {
@@ -339,6 +337,7 @@ struct WaitResult {
     success: bool,
     stdout: String,
     stderr: String,
+    timed_out: bool,
 }
 
 fn read_pipe(pipe: Option<impl std::io::Read>) -> String {

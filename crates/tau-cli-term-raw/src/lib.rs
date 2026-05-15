@@ -542,6 +542,17 @@ impl TermHandle {
         self.redraw.notify();
     }
 
+    /// Current terminal size tracked by the renderer.
+    pub fn size(&self) -> (usize, usize) {
+        let st = self.lock();
+        (st.width, st.height)
+    }
+
+    /// Current terminal height tracked by the renderer.
+    pub fn height(&self) -> usize {
+        self.lock().height
+    }
+
     /// Number of full renders performed by the redraw thread since
     /// terminal creation. Temporary debugging aid for scrollback bugs.
     pub fn full_render_count(&self) -> u64 {

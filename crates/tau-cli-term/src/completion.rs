@@ -333,39 +333,136 @@ fn build_arg_candidates(data: &CompletionData, cmd: &str, rest: &str) -> Vec<Can
         .collect()
 }
 
+const COMPLETION_MENU_MAX_HEIGHT_PERCENT: usize = 30;
+
 /// Renders the completion menu as a [`StyledBlock`]: each candidate
 /// on its own line, with the selected entry highlighted.
-pub fn render_menu_block(view: &CompletionView, theme: &Theme) -> StyledBlock {
+pub fn render_menu_block(
+    view: &CompletionView,
+    theme: &Theme,
+    terminal_width: usize,
+    terminal_height: usize,
+) -> StyledBlock {
+    render_menu_block_with_max_rows(
+        view,
+        theme,
+        terminal_width,
+        completion_menu_max_rows(terminal_height),
+    )
+}
+
+fn completion_menu_max_rows(terminal_height: usize) -> usize {
+    (terminal_height * COMPLETION_MENU_MAX_HEIGHT_PERCENT / 100).max(1)
+}
+
+fn visible_candidate_range(view: &CompletionView, max_rows: usize) -> std::ops::Range<usize> {
+    let total = view.candidates.len();
+    let max_rows = max_rows.max(1).min(total.max(1));
+    if total <= max_rows {
+        return 0..total;
+    }
+
+    let selected = view.selected.unwrap_or(0).min(total - 1);
+    let half = max_rows / 2;
+    let start = selected.saturating_sub(half).min(total - max_rows);
+    start..start + max_rows
+}
+
+fn truncate_to_width(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_owned();
+    }
+    if max_width == 1 {
+        return "…".to_owned();
+    }
+
+    let mut out = String::new();
+    let mut width = 0;
+    for ch in text.chars() {
+        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if max_width - 1 < width + ch_width {
+            break;
+        }
+        width += ch_width;
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
+struct MenuLineParts {
+    label: String,
+    padding: usize,
+    description: String,
+}
+
+fn menu_line_parts(
+    candidate: &Candidate,
+    max_label_width: usize,
+    terminal_width: usize,
+) -> MenuLineParts {
+    let inner_width = terminal_width.max(1).saturating_sub(4);
+    let label_budget = max_label_width.min(inner_width);
+    let label = truncate_to_width(&candidate.label, label_budget);
+    let label_width = UnicodeWidthStr::width(label.as_str());
+    let remaining = inner_width.saturating_sub(label_width);
+
+    let mut padding = 0;
+    let mut description = String::new();
+    if !candidate.description.is_empty() && 0 < remaining {
+        padding = (max_label_width.saturating_sub(label_width) + 2).min(remaining);
+        let desc_budget = remaining.saturating_sub(padding);
+        if 0 < desc_budget {
+            description = truncate_to_width(&candidate.description, desc_budget);
+        }
+    }
+
+    MenuLineParts {
+        label,
+        padding,
+        description,
+    }
+}
+
+fn render_menu_block_with_max_rows(
+    view: &CompletionView,
+    theme: &Theme,
+    terminal_width: usize,
+    max_rows: usize,
+) -> StyledBlock {
     let selected_style = resolve::resolve(theme, tau_themes::names::COMPLETION_SELECTED);
     let label_style = resolve::resolve(theme, tau_themes::names::COMPLETION_LABEL);
     let desc_style = resolve::resolve(theme, tau_themes::names::COMPLETION_DESC);
 
-    let max_label_width = view
-        .candidates
+    let visible = visible_candidate_range(view, max_rows);
+    let max_label_width = view.candidates[visible.clone()]
         .iter()
         .map(|c| UnicodeWidthStr::width(c.label.as_str()))
         .max()
         .unwrap_or(0);
 
     let mut spans: Vec<Span> = Vec::new();
-    for (i, candidate) in view.candidates.iter().enumerate() {
-        if i > 0 {
+    for (row, i) in visible.enumerate() {
+        let candidate = &view.candidates[i];
+        if row > 0 {
             spans.push(Span::plain("\n"));
         }
 
         let is_selected = view.selected == Some(i);
-        let label_width = UnicodeWidthStr::width(candidate.label.as_str());
-        let padding = max_label_width - label_width + 2;
+        let parts = menu_line_parts(candidate, max_label_width, terminal_width);
 
-        let line_text = if candidate.description.is_empty() {
-            format!("  {}  ", candidate.label)
+        let line_text = if parts.description.is_empty() {
+            format!("  {}  ", parts.label)
         } else {
             format!(
                 "  {}{:padding$}{}  ",
-                candidate.label,
+                parts.label,
                 "",
-                candidate.description,
-                padding = padding,
+                parts.description,
+                padding = parts.padding,
             )
         };
 
@@ -373,10 +470,10 @@ pub fn render_menu_block(view: &CompletionView, theme: &Theme) -> StyledBlock {
             spans.push(Span::new(line_text, selected_style));
         } else {
             spans.push(Span::plain("  "));
-            spans.push(Span::new(&candidate.label, label_style));
-            if !candidate.description.is_empty() {
-                spans.push(Span::plain(format!("{:padding$}", "", padding = padding)));
-                spans.push(Span::new(&candidate.description, desc_style));
+            spans.push(Span::new(parts.label, label_style));
+            if !parts.description.is_empty() {
+                spans.push(Span::plain(format!("{:padding$}", "", padding = parts.padding)));
+                spans.push(Span::new(parts.description, desc_style));
             }
             spans.push(Span::plain("  "));
         }
@@ -384,3 +481,70 @@ pub fn render_menu_block(view: &CompletionView, theme: &Theme) -> StyledBlock {
 
     StyledBlock::new(StyledText::from(spans))
 }
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+
+    fn view(count: usize, selected: Option<usize>) -> CompletionView {
+        CompletionView {
+            candidates: (0..count)
+                .map(|i| Candidate {
+                    label: format!("item-{i}"),
+                    description: "description".to_owned(),
+                    replacement: format!("item-{i}"),
+                })
+                .collect(),
+            selected,
+        }
+    }
+
+    fn block_text(block: &StyledBlock) -> String {
+        block
+            .content
+            .spans()
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn menu_height_is_capped_to_percent_of_terminal_height() {
+        let block = render_menu_block(&view(20, None), &Theme::builtin(), 80, 24);
+        let text = block_text(&block);
+
+        assert_eq!(text.lines().count(), 7);
+        assert!(text.contains("item-0"));
+        assert!(text.contains("item-6"));
+        assert!(!text.contains("item-7"));
+    }
+
+    #[test]
+    fn selected_candidate_stays_visible_inside_capped_menu() {
+        let block = render_menu_block(&view(20, Some(15)), &Theme::builtin(), 80, 24);
+        let text = block_text(&block);
+
+        assert_eq!(text.lines().count(), 7);
+        assert!(text.contains("item-15"));
+        assert!(!text.contains("item-0"));
+    }
+
+    #[test]
+    fn long_candidates_are_truncated_to_one_terminal_row() {
+        let view = CompletionView {
+            candidates: vec![Candidate {
+                label: "./this/is/a/very/long/path/that/would/wrap/without/truncation".to_owned(),
+                description: "directory".to_owned(),
+                replacement: String::new(),
+            }],
+            selected: None,
+        };
+        let block = render_menu_block(&view, &Theme::builtin(), 24, 24);
+        let text = block_text(&block);
+
+        assert_eq!(text.lines().count(), 1);
+        assert!(UnicodeWidthStr::width(text.as_str()) <= 24);
+        assert!(text.contains('…'));
+    }
+}
+

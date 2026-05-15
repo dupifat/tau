@@ -220,7 +220,8 @@ impl HighTerm {
     fn sync_menu_block(&mut self) {
         match self.term.completion_state() {
             Some(view) => {
-                let block = completion::render_menu_block(&view, &self.theme);
+                let (width, height) = self.handle.size();
+                let block = completion::render_menu_block(&view, &self.theme, width, height);
                 let id = match self.menu_block_id {
                     Some(id) => id,
                     None => {

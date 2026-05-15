@@ -11,6 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- Above-sticky: header bar with background and center alignment ---
     let header_id = handle.new_block(
+        "demo-header",
         StyledBlock::new(StyledText::from(Span::new(
             " tau-cli-term-raw demo ",
             Style::default().fg(Color::White).bold(),
@@ -22,6 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- Above-sticky: help line with margins ---
     let help_id = handle.new_block(
+        "demo-help",
         StyledBlock::new(StyledText::from(vec![
             Span::new("commands: ", Style::default().bold()),
             Span::new("quit", Style::default().fg(Color::Green)),
@@ -40,6 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- Below: status bar with background ---
     let status_id = handle.new_block(
+        "demo-status",
         StyledBlock::new(StyledText::from(Span::new(
             " STATUS: ready ",
             Style::default().fg(Color::Black).bold(),
@@ -63,6 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "hello" => {
                     // Styled history entry with background and margins.
                     handle.print_output(
+                        "demo-hello",
                         StyledBlock::new(StyledText::from(vec![
                             Span::new("  Hello! ", Style::default().fg(Color::White).bold()),
                             Span::new(
@@ -105,7 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 other => {
                     // Plain history echo.
-                    handle.print_output(format!("you said: {other}"));
+                    handle.print_output("demo-echo", format!("you said: {other}"));
                 }
             },
             Event::Eof => break,
@@ -140,9 +144,9 @@ const STATUS_ID: tau_cli_term_raw::BlockId = tau_cli_term_raw::BlockId(3);
 
 fn spawn_animator(handle: TermHandle) {
     // Pre-allocate block ids for the animated zones.
-    let ball_id = handle.new_block("");
+    let ball_id = handle.new_block("demo-ball", "");
     handle.push_above_active(ball_id);
-    let busy_id = handle.new_block("");
+    let busy_id = handle.new_block("demo-busy", "");
     handle.push_below(busy_id);
 
     thread::spawn(move || {
@@ -247,16 +251,19 @@ fn spawn_animator(handle: TermHandle) {
             // --- History: periodic tick message (styled) ---
             if tick % 5 == 0 {
                 let t = tick / 5;
-                handle.print_output(StyledBlock::new(StyledText::from(vec![
-                    Span::new(
-                        format!("[tick {t}] "),
-                        Style::default().fg(Color::DarkCyan).bold(),
-                    ),
-                    Span::new(
-                        "periodic status update",
-                        Style::default().fg(Color::DarkGrey).italic(),
-                    ),
-                ])));
+                handle.print_output(
+                    "demo-tick",
+                    StyledBlock::new(StyledText::from(vec![
+                        Span::new(
+                            format!("[tick {t}] "),
+                            Style::default().fg(Color::DarkCyan).bold(),
+                        ),
+                        Span::new(
+                            "periodic status update",
+                            Style::default().fg(Color::DarkGrey).italic(),
+                        ),
+                    ])),
+                );
             }
         }
     });

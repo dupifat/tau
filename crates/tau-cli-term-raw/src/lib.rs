@@ -105,6 +105,8 @@ struct CompletionMenu {
 struct SharedState {
     /// Central block storage.
     blocks: HashMap<BlockId, StyledBlock>,
+    /// Human-readable labels for diagnostics.
+    block_debug_ids: HashMap<BlockId, String>,
     /// Next auto-increment id.
     next_id: u64,
 
@@ -167,6 +169,7 @@ impl SharedState {
     fn new(width: usize, height: usize, left_prompt: StyledText) -> Self {
         Self {
             blocks: HashMap::new(),
+            block_debug_ids: HashMap::new(),
             next_id: 0,
             history: Vec::new(),
             above_active: Vec::new(),
@@ -581,13 +584,15 @@ impl TermHandle {
     // --- Block management ---
 
     /// Allocates a new [`BlockId`] and stores the block.
-    pub fn new_block(&self, block: impl Into<StyledBlock>) -> BlockId {
+    pub fn new_block(&self, debug_id: impl Into<String>, block: impl Into<StyledBlock>) -> BlockId {
         let mut st = self.lock();
         let id = st.alloc_id();
+        let debug_id = debug_id.into();
         let block = block.into();
         let content_empty = block.content.is_empty();
         st.blocks.insert(id, block);
-        tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, content_empty, "new block");
+        st.block_debug_ids.insert(id, debug_id.clone());
+        tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, debug_id, content_empty, "new block");
         id
     }
 
@@ -596,7 +601,11 @@ impl TermHandle {
     pub fn set_block(&self, id: BlockId, block: impl Into<StyledBlock>) {
         let block = block.into();
         let content_empty = block.content.is_empty();
-        self.lock().blocks.insert(id, block);
+        let mut st = self.lock();
+        st.blocks.insert(id, block);
+        st.block_debug_ids
+            .entry(id)
+            .or_insert_with(|| format!("set-block-{}", id.0));
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, content_empty, "set block");
     }
 
@@ -605,12 +614,13 @@ impl TermHandle {
     pub fn remove_block(&self, id: BlockId) {
         let mut st = self.lock();
         let existed = st.blocks.remove(&id).is_some();
+        let debug_id = st.block_debug_ids.remove(&id);
         st.history.retain(|&x| x != id);
         st.above_active.retain(|&x| x != id);
         st.above_sticky.retain(|&x| x != id);
         st.suggestions.retain(|&x| x != id);
         st.below.retain(|&x| x != id);
-        tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, existed, "remove block");
+        tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, ?debug_id, existed, "remove block");
     }
 
     // --- Zone lists ---
@@ -688,14 +698,20 @@ impl TermHandle {
 
     /// Creates a new block and appends it to the history.
     /// Triggers a redraw automatically.
-    pub fn print_output(&self, block: impl Into<StyledBlock>) -> BlockId {
+    pub fn print_output(
+        &self,
+        debug_id: impl Into<String>,
+        block: impl Into<StyledBlock>,
+    ) -> BlockId {
         let mut st = self.lock();
         let id = st.alloc_id();
+        let debug_id = debug_id.into();
         let block = block.into();
         let content_empty = block.content.is_empty();
         st.blocks.insert(id, block);
+        st.block_debug_ids.insert(id, debug_id.clone());
         st.history.push(id);
-        tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, content_empty, zone = "history", "print output");
+        tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, debug_id, content_empty, zone = "history", "print output");
         drop(st);
         self.redraw.notify();
         id
@@ -1524,8 +1540,14 @@ impl Drop for Term {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum LineSource {
-    Block { id: BlockId, wrapped_row: usize },
-    Input { wrapped_row: usize },
+    Block {
+        id: BlockId,
+        debug_id: String,
+        wrapped_row: usize,
+    },
+    Input {
+        wrapped_row: usize,
+    },
 }
 
 /// Lays out blocks referenced by an id list, skipping missing ids
@@ -1535,6 +1557,7 @@ fn layout_id_list(
     _zone: &'static str,
     ids: &[BlockId],
     blocks: &HashMap<BlockId, StyledBlock>,
+    block_debug_ids: &HashMap<BlockId, String>,
     width: usize,
     out: &mut Vec<Vec<Cell>>,
     sources: &mut Vec<LineSource>,
@@ -1548,6 +1571,10 @@ fn layout_id_list(
             for (wrapped_row, line) in lines.into_iter().enumerate() {
                 sources.push(LineSource::Block {
                     id: *id,
+                    debug_id: block_debug_ids
+                        .get(id)
+                        .cloned()
+                        .unwrap_or_else(|| "<unknown>".to_owned()),
                     wrapped_row,
                 });
                 out.push(line);
@@ -1574,12 +1601,13 @@ struct LayoutAll {
 ///
 /// `known_lines[..viewport_start]` are in terminal scrollback,
 /// `known_lines[viewport_start..]` are currently visible. Full redraws are only
-/// needed when the scrollback prefix changes, or when the desired viewport moves
-/// upward and would need to pull rows back from scrollback.
+/// needed when the scrollback prefix changes, or when the desired viewport
+/// moves upward and would need to pull rows back from scrollback.
 #[derive(Default)]
 struct TerminalModel {
     viewport_start: usize,
     known_lines: Vec<Vec<Cell>>,
+    known_sources: Vec<LineSource>,
 }
 
 impl TerminalModel {
@@ -1598,6 +1626,7 @@ impl TerminalModel {
     fn reset_to_layout(&mut self, layout: LayoutAll, height: usize) {
         self.viewport_start = Self::desired_viewport_start(&layout, height);
         self.known_lines = layout.all_lines;
+        self.known_sources = layout.line_sources;
     }
 }
 
@@ -1611,6 +1640,7 @@ fn layout_all(st: &SharedState) -> LayoutAll {
         "history",
         &st.history,
         &st.blocks,
+        &st.block_debug_ids,
         width,
         &mut all_lines,
         &mut line_sources,
@@ -1620,6 +1650,7 @@ fn layout_all(st: &SharedState) -> LayoutAll {
         "above_active",
         &st.above_active,
         &st.blocks,
+        &st.block_debug_ids,
         width,
         &mut all_lines,
         &mut line_sources,
@@ -1628,6 +1659,7 @@ fn layout_all(st: &SharedState) -> LayoutAll {
         "above_sticky",
         &st.above_sticky,
         &st.blocks,
+        &st.block_debug_ids,
         width,
         &mut all_lines,
         &mut line_sources,
@@ -1679,6 +1711,7 @@ fn layout_all(st: &SharedState) -> LayoutAll {
         "suggestions",
         &st.suggestions,
         &st.blocks,
+        &st.block_debug_ids,
         width,
         &mut all_lines,
         &mut line_sources,
@@ -1687,6 +1720,7 @@ fn layout_all(st: &SharedState) -> LayoutAll {
         "below",
         &st.below,
         &st.blocks,
+        &st.block_debug_ids,
         width,
         &mut all_lines,
         &mut line_sources,
@@ -1816,6 +1850,7 @@ fn redraw_loop(
                 TerminalModel::desired_viewport_start(&layout, height),
                 height,
                 None,
+                None,
             );
             if let Err(e) = full_render(&mut writer, &mut screen, &layout, width, height) {
                 tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
@@ -1840,6 +1875,7 @@ fn redraw_loop(
                     visible_start,
                     height,
                     None,
+                    None,
                 );
                 if let Err(e) = full_render(&mut writer, &mut screen, &layout, width, height) {
                     tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
@@ -1851,6 +1887,9 @@ fn redraw_loop(
                 // visible, including rows that will scroll off during this
                 // render, are handled by the scrolling renderer below.
                 let changed_line = terminal_model.changed_hidden_line(&layout);
+                let previous_source = changed_line
+                    .and_then(|idx| terminal_model.known_sources.get(idx))
+                    .cloned();
                 mark_full_render(
                     &state,
                     "hidden_prefix_changed",
@@ -1859,6 +1898,7 @@ fn redraw_loop(
                     visible_start,
                     height,
                     changed_line,
+                    previous_source,
                 );
                 if let Err(e) = full_render(&mut writer, &mut screen, &layout, width, height) {
                     tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
@@ -1928,13 +1968,32 @@ fn mark_full_render(
     visible_start: usize,
     height: usize,
     changed_line: Option<usize>,
+    previous_source: Option<LineSource>,
 ) {
     let full_render_count = {
         let mut st = state.lock().expect("term state mutex poisoned");
         st.full_render_count += 1;
         st.full_render_count
     };
-    let source = changed_line.and_then(|idx| layout.line_sources.get(idx));
+    let current_source = changed_line
+        .and_then(|idx| layout.line_sources.get(idx))
+        .cloned();
+    if reason == "hidden_prefix_changed" {
+        let previous = describe_line_source(previous_source.as_ref());
+        let current = describe_line_source(current_source.as_ref());
+        tracing::info!(
+            target: "tau_cli_term_raw::redraw",
+            full_render_count,
+            prev_visible_start,
+            visible_start,
+            height,
+            total_lines = layout.all_lines.len(),
+            changed_line,
+            previous_source = ?previous_source,
+            current_source = ?current_source,
+            "full redraw caused by scrollback change from {previous} to {current}"
+        );
+    }
     tracing::trace!(
         target: "tau_cli_term_raw::redraw",
         full_render_count,
@@ -1944,9 +2003,22 @@ fn mark_full_render(
         height,
         total_lines = layout.all_lines.len(),
         changed_line,
-        ?source,
+        previous_source = ?previous_source,
+        current_source = ?current_source,
         "full render"
     );
+}
+
+fn describe_line_source(source: Option<&LineSource>) -> String {
+    match source {
+        Some(LineSource::Block {
+            id,
+            debug_id,
+            wrapped_row,
+        }) => format!("block {:?} `{}` row {}", id, debug_id, wrapped_row),
+        Some(LineSource::Input { wrapped_row }) => format!("input row {wrapped_row}"),
+        None => "<missing>".to_owned(),
+    }
 }
 
 fn viewport_moved_up(prev_visible_start: usize, visible_start: usize) -> bool {

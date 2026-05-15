@@ -804,7 +804,7 @@ impl EventRenderer {
             self.handle.remove_block(block_id);
             let new_block_id = self
                 .handle
-                .print_output(self.render_summary_block(&summary));
+                .print_output("tool-summary", self.render_summary_block(&summary));
             if self.prompt_tool_summary == Some(block_id) {
                 self.prompt_tool_summary = Some(new_block_id);
             }
@@ -889,13 +889,17 @@ impl EventRenderer {
     }
 
     fn render_session_preamble(&mut self) {
-        self.handle
-            .print_output(tau_cli_term::StyledBlock::new(build_banner(&self.theme)));
+        self.handle.print_output(
+            "banner",
+            tau_cli_term::StyledBlock::new(build_banner(&self.theme)),
+        );
         let mut extensions: Vec<_> = self.ready_extensions.iter().collect();
         extensions.sort();
         for extension_name in extensions {
-            self.handle
-                .print_output(extension_status_block(&self.theme, extension_name, "kept"));
+            self.handle.print_output(
+                "extension-kept",
+                extension_status_block(&self.theme, extension_name, "kept"),
+            );
         }
     }
 
@@ -980,7 +984,7 @@ impl EventRenderer {
                 self.handle.set_block(bid, block);
             }
             None => {
-                let bid = self.handle.new_block(block);
+                let bid = self.handle.new_block("model-status", block);
                 self.handle.push_below(bid);
                 self.model_status_block = Some(bid);
             }
@@ -996,8 +1000,10 @@ impl EventRenderer {
         use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
         let reason = reason.as_deref().unwrap_or("disconnected");
-        self.handle
-            .print_output(themed_block(&self.theme, names::SYSTEM_DISCONNECT, reason));
+        self.handle.print_output(
+            "system-disconnect",
+            themed_block(&self.theme, names::SYSTEM_DISCONNECT, reason),
+        );
     }
 
     pub(crate) fn handle(&mut self, event: &Event) {
@@ -1057,7 +1063,7 @@ impl EventRenderer {
                     names::USER_PROMPT,
                     format!("{}{}", self.submitted_prompt_prefix(), prompt.text),
                 );
-                let id = self.handle.print_output(block);
+                let id = self.handle.print_output("user-prompt", block);
                 self.last_user_block = Some(id);
             }
             Event::SessionPromptQueued(queued) => {
@@ -1068,7 +1074,7 @@ impl EventRenderer {
                         names::USER_PROMPT_QUEUED,
                         format!("{}{} (queued)", self.submitted_prompt_prefix(), queued.text),
                     );
-                    let queued_id = self.handle.new_block(block);
+                    let queued_id = self.handle.new_block("user-prompt-queued", block);
                     self.handle.push_above_sticky(queued_id);
                     self.handle.redraw();
                     self.queued_user_blocks
@@ -1083,21 +1089,27 @@ impl EventRenderer {
                 // naturally above the agent's continuing response.
                 if let Some((queued_id, text)) = self.queued_user_blocks.pop_front() {
                     self.handle.remove_block(queued_id);
-                    self.handle.print_output(themed_block(
-                        &self.theme,
-                        names::USER_PROMPT,
-                        format!("{}{text}", self.submitted_prompt_prefix()),
-                    ));
+                    self.handle.print_output(
+                        "user-prompt-steered",
+                        themed_block(
+                            &self.theme,
+                            names::USER_PROMPT,
+                            format!("{}{text}", self.submitted_prompt_prefix()),
+                        ),
+                    );
                     self.handle.redraw();
                 } else {
                     // No matching "(queued)" block — fall back to
                     // rendering the steered text directly so the user
                     // still sees their message land.
-                    self.handle.print_output(themed_block(
-                        &self.theme,
-                        names::USER_PROMPT,
-                        format!("{}{}", self.submitted_prompt_prefix(), steered.text),
-                    ));
+                    self.handle.print_output(
+                        "user-prompt-steered",
+                        themed_block(
+                            &self.theme,
+                            names::USER_PROMPT,
+                            format!("{}{}", self.submitted_prompt_prefix(), steered.text),
+                        ),
+                    );
                     self.handle.redraw();
                 }
             }
@@ -1114,15 +1126,18 @@ impl EventRenderer {
                 entry.started_at = Some(Instant::now());
                 if let Some((queued_id, text)) = self.queued_user_blocks.pop_front() {
                     self.handle.remove_block(queued_id);
-                    self.handle.print_output(themed_block(
-                        &self.theme,
-                        names::USER_PROMPT,
-                        format!("{}{text}", self.submitted_prompt_prefix()),
-                    ));
+                    self.handle.print_output(
+                        "user-prompt-created",
+                        themed_block(
+                            &self.theme,
+                            names::USER_PROMPT,
+                            format!("{}{text}", self.submitted_prompt_prefix()),
+                        ),
+                    );
                 }
 
                 let block = streaming_block(&self.theme, names::AGENT_PENDING, "");
-                let id = self.handle.new_block(block);
+                let id = self.handle.new_block("agent-response-live", block);
                 self.handle.push_above_active(id);
                 self.handle.redraw();
                 self.prompts
@@ -1178,7 +1193,7 @@ impl EventRenderer {
                             // re-push response — net effect: thinking
                             // is at the response's old position and
                             // the response moves down by one.
-                            let tbid = self.handle.new_block(block);
+                            let tbid = self.handle.new_block("agent-thinking-live", block);
                             let response_bid =
                                 self.prompts.get(spid).and_then(|s| s.response_block_id);
                             if let Some(response_bid) = response_bid {
@@ -1226,11 +1241,10 @@ impl EventRenderer {
                 if self.show_thinking
                     && let Some(thinking) = thinking.filter(|t| !t.is_empty())
                 {
-                    let bid = self.handle.print_output(themed_block(
-                        &self.theme,
-                        names::AGENT_THINKING,
-                        thinking.clone(),
-                    ));
+                    let bid = self.handle.print_output(
+                        "agent-thinking",
+                        themed_block(&self.theme, names::AGENT_THINKING, thinking.clone()),
+                    );
                     self.thinking_history.push(ThinkingBlockEntry {
                         block_id: bid,
                         text: thinking,
@@ -1249,11 +1263,10 @@ impl EventRenderer {
                         context.last_agent_response = Some(text.to_owned());
                         context.active_prompt = None;
                     }
-                    self.handle.print_output(themed_block(
-                        &self.theme,
-                        names::AGENT_RESPONSE,
-                        text,
-                    ));
+                    self.handle.print_output(
+                        "agent-response",
+                        themed_block(&self.theme, names::AGENT_RESPONSE, text),
+                    );
                 }
                 if let Some(usage) = finished.token_usage.clone() {
                     let previous_usage = self.token_stats_history.last().map(|entry| &entry.usage);
@@ -1268,7 +1281,7 @@ impl EventRenderer {
                     } else {
                         Self::empty_block()
                     };
-                    let bid = self.handle.print_output(block);
+                    let bid = self.handle.print_output("token-stats", block);
                     self.token_stats_history.push(TokenStatsBlockEntry {
                         block_id: bid,
                         usage,
@@ -1304,7 +1317,7 @@ impl EventRenderer {
                                 ..ToolSummaryDisplay::default()
                             };
                             let block = self.render_summary_block(&summary);
-                            let id = self.handle.new_block(block);
+                            let id = self.handle.new_block("tool-summary", block);
                             self.handle.push_above_active(id);
                             self.tool_summaries.insert(id, summary);
                             self.prompt_tool_summary = Some(id);
@@ -1317,7 +1330,7 @@ impl EventRenderer {
                             ..ToolSummaryDisplay::default()
                         };
                         let block = self.render_summary_block(&summary);
-                        let id = self.handle.new_block(block);
+                        let id = self.handle.new_block("tool-summary", block);
                         self.handle.push_above_active(id);
                         self.tool_summaries.insert(id, summary);
                         Some(id)
@@ -1325,7 +1338,7 @@ impl EventRenderer {
                     for call in &finished.tool_calls {
                         let display = format_tool_call(call.name.as_str(), call.display.as_ref());
                         let block = self.render_tool_history_block(&display);
-                        let id = self.handle.new_block(block);
+                        let id = self.handle.new_block("tool-call", block);
                         self.handle.push_above_active(id);
                         self.tool_calls.insert(
                             call.id.to_string(),
@@ -1350,8 +1363,10 @@ impl EventRenderer {
                 }
                 if state.is_none_or(|s| s.block_id.is_none()) {
                     let text = tau_harness::format_tool_progress(progress);
-                    self.handle
-                        .print_output(themed_block(&self.theme, names::SHELL_OUTPUT, text));
+                    self.handle.print_output(
+                        "tool-progress",
+                        themed_block(&self.theme, names::SHELL_OUTPUT, text),
+                    );
                 }
             }
             Event::ToolDelegateProgress(progress) => {
@@ -1421,7 +1436,7 @@ impl EventRenderer {
                 );
                 if let Some(diff) = diff {
                     let block = self.render_diff_history_block(&display, &diff);
-                    let bid = self.handle.print_output(block);
+                    let bid = self.handle.print_output("tool-diff", block);
                     self.diff_blocks.push(DiffBlockEntry {
                         block_id: bid,
                         display,
@@ -1430,7 +1445,7 @@ impl EventRenderer {
                 } else {
                     let bid = self
                         .handle
-                        .print_output(self.render_tool_history_block(&display));
+                        .print_output("tool-result", self.render_tool_history_block(&display));
                     self.tool_history.push(ToolBlockEntry {
                         block_id: bid,
                         display,
@@ -1471,7 +1486,7 @@ impl EventRenderer {
                 );
                 let bid = self
                     .handle
-                    .print_output(self.render_tool_history_block(&display));
+                    .print_output("tool-error", self.render_tool_history_block(&display));
                 self.tool_history.push(ToolBlockEntry {
                     block_id: bid,
                     display,
@@ -1488,7 +1503,7 @@ impl EventRenderer {
                     "running [no context]".to_owned()
                 };
                 let block = render_shell_block(&self.theme, &cmd.command, "", Some(&label));
-                let block_id = self.handle.new_block(block);
+                let block_id = self.handle.new_block("shell-command", block);
                 self.handle.push_above_active(block_id);
                 self.handle.redraw();
                 self.shell_blocks.insert(
@@ -1547,12 +1562,12 @@ impl EventRenderer {
                     &finished.output,
                     Some(&suffix),
                 );
-                self.handle.print_output(block);
+                self.handle.print_output("shell-finished", block);
             }
             Event::ExtensionStarting(starting) => {
                 let block =
                     extension_status_block(&self.theme, &starting.extension_name, "starting");
-                let id = self.handle.new_block(block);
+                let id = self.handle.new_block("extension-starting", block);
                 self.handle.push_above_active(id);
                 self.handle.redraw();
                 self.extension_blocks.insert(starting.instance_id, id);
@@ -1563,52 +1578,51 @@ impl EventRenderer {
                 }
                 self.ready_extensions
                     .insert(ready.extension_name.to_string());
-                self.handle.print_output(extension_status_block(
-                    &self.theme,
-                    &ready.extension_name,
-                    "ready",
-                ));
+                self.handle.print_output(
+                    "extension-ready",
+                    extension_status_block(&self.theme, &ready.extension_name, "ready"),
+                );
             }
             Event::ExtensionExited(exited) => {
                 if let Some(bid) = self.extension_blocks.remove(&exited.instance_id) {
                     self.handle.remove_block(bid);
                 }
                 self.ready_extensions.remove(exited.extension_name.as_str());
-                self.handle.print_output(extension_status_block(
-                    &self.theme,
-                    &exited.extension_name,
-                    "exited",
-                ));
+                self.handle.print_output(
+                    "extension-exited",
+                    extension_status_block(&self.theme, &exited.extension_name, "exited"),
+                );
             }
             Event::ExtAgentsMdAvailable(agents) => {
-                self.handle.print_output(system_loaded_block(
-                    &self.theme,
-                    &agents.file_path,
-                    &agents.content,
-                ));
+                self.handle.print_output(
+                    "agents-md",
+                    system_loaded_block(&self.theme, &agents.file_path, &agents.content),
+                );
             }
             Event::ExtensionContextReady(_) => {
-                self.handle.print_output(system_status_block(
-                    &self.theme,
-                    "session context ",
-                    "ready",
-                ));
+                self.handle.print_output(
+                    "extension-context-ready",
+                    system_status_block(&self.theme, "session context ", "ready"),
+                );
             }
             Event::HarnessInfo(info) => {
                 self.handle
-                    .print_output(render_harness_info(&self.theme, info));
+                    .print_output("harness-info", render_harness_info(&self.theme, info));
             }
             Event::HarnessSessionDir(session_dir) => {
-                self.handle.print_output(session_status_block(
-                    &self.theme,
-                    &session_dir.path,
-                    "/",
-                    session_dir.status.as_str(),
-                ));
+                self.handle.print_output(
+                    "session-dir",
+                    session_status_block(
+                        &self.theme,
+                        &session_dir.path,
+                        "/",
+                        session_dir.status.as_str(),
+                    ),
+                );
             }
             Event::HarnessUiDir(ui_dir) => {
                 self.handle
-                    .print_output(ui_dir_block(&self.theme, &ui_dir.path));
+                    .print_output("ui-dir", ui_dir_block(&self.theme, &ui_dir.path));
             }
             Event::HarnessModelsAvailable(_models) => {}
             Event::HarnessRolesAvailable(roles) => {

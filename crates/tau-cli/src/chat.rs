@@ -327,9 +327,12 @@ pub(crate) fn run_chat(
 
     // Show logo if enabled.
     if settings.show_logo {
-        handle.print_output(tau_cli_term::StyledBlock::new(build_banner(&theme)));
+        handle.print_output(
+            "banner",
+            tau_cli_term::StyledBlock::new(build_banner(&theme)),
+        );
     }
-    handle.print_output(ui_dir_block(&theme, ui_logging.dir()));
+    handle.print_output("ui-dir", ui_dir_block(&theme, ui_logging.dir()));
 
     handle.redraw();
 
@@ -512,11 +515,10 @@ fn terminal_input_loop(
     let print_local = |message: &str| {
         use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
-        local_handle.print_output(themed_block(
-            &ctx.theme,
-            names::SYSTEM_INFO,
-            message.to_owned(),
-        ));
+        local_handle.print_output(
+            "system-info",
+            themed_block(&ctx.theme, names::SYSTEM_INFO, message.to_owned()),
+        );
     };
     use tau_cli_term::Event as TermEvent;
 

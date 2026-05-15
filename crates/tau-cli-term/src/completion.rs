@@ -472,7 +472,11 @@ fn render_menu_block_with_max_rows(
             spans.push(Span::plain("  "));
             spans.push(Span::new(parts.label, label_style));
             if !parts.description.is_empty() {
-                spans.push(Span::plain(format!("{:padding$}", "", padding = parts.padding)));
+                spans.push(Span::plain(format!(
+                    "{:padding$}",
+                    "",
+                    padding = parts.padding
+                )));
                 spans.push(Span::new(parts.description, desc_style));
             }
             spans.push(Span::plain("  "));
@@ -547,4 +551,3 @@ mod render_tests {
         assert!(text.contains('…'));
     }
 }
-

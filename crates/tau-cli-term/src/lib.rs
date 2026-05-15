@@ -145,8 +145,12 @@ impl HighTerm {
     }
 
     /// Appends persistent output to history.
-    pub fn print_output(&self, block: impl Into<StyledBlock>) -> BlockId {
-        self.handle.print_output(block)
+    pub fn print_output(
+        &self,
+        debug_id: impl Into<String>,
+        block: impl Into<StyledBlock>,
+    ) -> BlockId {
+        self.handle.print_output(debug_id, block)
     }
 
     /// Blocks until the next high-level event, syncing the
@@ -225,7 +229,7 @@ impl HighTerm {
                 let id = match self.menu_block_id {
                     Some(id) => id,
                     None => {
-                        let id = self.handle.new_block("");
+                        let id = self.handle.new_block("completion-menu", "");
                         self.handle.push_suggestions(id);
                         self.menu_block_id = Some(id);
                         id
@@ -289,7 +293,7 @@ impl HighTerm {
             tau_themes::names::SYSTEM_INFO,
             message.to_owned(),
         );
-        self.handle.print_output(block);
+        self.handle.print_output("prompt-action-error", block);
     }
 }
 

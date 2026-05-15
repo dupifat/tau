@@ -16,7 +16,7 @@ use crate::argument::{
 use crate::tools::find::run_find;
 use crate::tools::grep::{RipgrepError, classify_ripgrep_stderr, grep_result_map, run_grep};
 use crate::tools::ls::run_ls;
-use crate::tools::read::{read_file, slice_lines};
+use crate::tools::read::{format_read_range, read_file, slice_lines};
 use crate::tools::shell::{command_details_value, run_command};
 use crate::tools::{
     APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, FIND_TOOL_NAME, GPT_SHELL_TOOL_NAME, LS_TOOL_NAME,
@@ -1887,7 +1887,9 @@ fn read_file_honors_start_line_and_line_count() {
             CborValue::Integer(3.into()),
         ),
     ]);
-    let result = read_file(&args).expect("read").result;
+    let output = read_file(&args).expect("read");
+    let result = output.result;
+    assert_eq!(output.display.args, format!("{} 2..4", path.display()));
     assert_eq!(
         cbor_map_text(&result, "content"),
         Some("line 2\nline 3\nline 4")
@@ -1895,6 +1897,14 @@ fn read_file_honors_start_line_and_line_count() {
     assert_eq!(cbor_int_field(&result, "start_line"), Some(2));
     assert_eq!(cbor_int_field(&result, "line_count"), Some(3));
     assert_eq!(cbor_int_field(&result, "total_lines"), Some(5));
+}
+
+#[test]
+fn format_read_range_reports_requested_ranges() {
+    assert_eq!(format_read_range(None, None), "..");
+    assert_eq!(format_read_range(Some(11), None), "11..");
+    assert_eq!(format_read_range(None, Some(100)), "..100");
+    assert_eq!(format_read_range(Some(11), Some(90)), "11..100");
 }
 
 #[test]

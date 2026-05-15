@@ -12,10 +12,13 @@ use crate::truncate::truncate_head_with_notice;
 
 pub(crate) fn read_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure> {
     let path = argument_text(arguments, "path").map_err(ToolFailure::from)?;
-    let start_line = parse_read_start_line(arguments)?;
-    let line_count = parse_read_line_count(arguments)?;
+    let start_line_arg = optional_argument_int(arguments, "start_line");
+    let line_count_arg = optional_argument_int(arguments, "line_count");
+    let start_line = parse_read_start_line(start_line_arg)?;
+    let line_count = parse_read_line_count(line_count_arg)?;
     let path_buf = PathBuf::from(&path);
-    let display_args = path_buf.display().to_string();
+    let range = format_read_range(start_line_arg.map(|_| start_line), line_count);
+    let display_args = format!("{} {range}", path_buf.display());
 
     let sliced = stream_slice_lines(&path_buf, start_line, line_count)
         .map_err(|error| ToolFailure::from(error.to_string()).with_args(display_args.clone()))?;
@@ -122,19 +125,31 @@ fn stream_slice_lines(
     })
 }
 
-fn parse_read_start_line(arguments: &CborValue) -> Result<usize, ToolFailure> {
-    match optional_argument_int(arguments, "start_line") {
+fn parse_read_start_line(value: Option<i64>) -> Result<usize, ToolFailure> {
+    match value {
         None => Ok(1),
         Some(value) if value < 1 => Err(ToolFailure::new("start_line must be >= 1")),
         Some(value) => Ok(value as usize),
     }
 }
 
-fn parse_read_line_count(arguments: &CborValue) -> Result<Option<usize>, ToolFailure> {
-    match optional_argument_int(arguments, "line_count") {
+fn parse_read_line_count(value: Option<i64>) -> Result<Option<usize>, ToolFailure> {
+    match value {
         None => Ok(None),
         Some(value) if value < 1 => Err(ToolFailure::new("line_count must be >= 1")),
         Some(value) => Ok(Some(value as usize)),
+    }
+}
+
+pub(crate) fn format_read_range(start_line: Option<usize>, line_count: Option<usize>) -> String {
+    match (start_line, line_count) {
+        (None, None) => "..".to_owned(),
+        (Some(start), None) => format!("{start}.."),
+        (None, Some(count)) => format!("..{count}"),
+        (Some(start), Some(count)) => {
+            let end = start.saturating_add(count).saturating_sub(1);
+            format!("{start}..{end}")
+        }
     }
 }
 

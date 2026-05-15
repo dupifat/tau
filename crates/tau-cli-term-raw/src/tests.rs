@@ -24,7 +24,9 @@ fn run_full_render(
     let mut screen = Screen::new(cols as usize);
     let mut buf: Vec<u8> = Vec::new();
 
-    let line_sources = vec![LineSource::Input; all_lines.len()];
+    let line_sources = (0..all_lines.len())
+        .map(|wrapped_row| LineSource::Input { wrapped_row })
+        .collect();
     let layout = LayoutAll {
         all_lines,
         line_sources,
@@ -1544,6 +1546,7 @@ fn live_block_growth_scrolls_updated_lines_into_scrollback() {
     handle.push_above_active(block_id);
     flush_redraws(&handle, &buf, &mut parser);
 
+    let full_render_count = handle.full_render_count();
     handle.set_block(
         block_id,
         StyledBlock::new(StyledText::from(Span::plain(
@@ -1551,6 +1554,11 @@ fn live_block_growth_scrolls_updated_lines_into_scrollback() {
         ))),
     );
     flush_redraws(&handle, &buf, &mut parser);
+    assert_eq!(
+        handle.full_render_count(),
+        full_render_count,
+        "visible lines that scroll during the same render should not force a full redraw"
+    );
 
     assert!(
         screen_contains(&parser, 40, "stream 5"),
@@ -1673,19 +1681,19 @@ fn viewport_moved_up_requires_full_render() {
 }
 
 #[test]
-fn scrolling_when_dropping_changed_top_row_prefers_full_render() {
+fn scrolling_when_dropping_changed_top_row_can_incremental_render() {
     let prev = plain_lines(&["aaaaa", "bbbbb", "ccccc"]);
     let next = plain_lines(&["AAAAA", "bbbbb", "ccccc", "ddddd"]);
 
-    assert!(dropping_lines_changed(&prev, &next, 0, 1));
+    assert_eq!(changed_line_in_range(&prev, &next, 0..1), Some(0));
 }
 
 #[test]
-fn scrolling_when_dropping_unchanged_top_row_can_incremental_render() {
+fn scrolling_when_dropping_unchanged_top_row_has_no_prefix_change() {
     let prev = plain_lines(&["aaaaa", "bbbbb", "ccccc"]);
     let next = plain_lines(&["aaaaa", "bbbbb", "ccccc", "ddddd"]);
 
-    assert!(!dropping_lines_changed(&prev, &next, 0, 1));
+    assert_eq!(changed_line_in_range(&prev, &next, 0..1), None);
 }
 
 #[test]

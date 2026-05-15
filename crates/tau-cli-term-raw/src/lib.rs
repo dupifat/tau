@@ -1513,15 +1513,15 @@ impl Drop for Term {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum LineSource {
-    Block { zone: &'static str, id: BlockId },
-    Input,
+    Block { id: BlockId, wrapped_row: usize },
+    Input { wrapped_row: usize },
 }
 
 /// Lays out blocks referenced by an id list, skipping missing ids
 /// and blocks with empty content (so callers can "hide" a block by
 /// swapping its content to empty without leaving a blank row).
 fn layout_id_list(
-    zone: &'static str,
+    _zone: &'static str,
     ids: &[BlockId],
     blocks: &HashMap<BlockId, StyledBlock>,
     width: usize,
@@ -1534,11 +1534,13 @@ fn layout_id_list(
                 continue;
             }
             let lines = layout_block(block, width);
-            sources.extend(std::iter::repeat_n(
-                LineSource::Block { zone, id: *id },
-                lines.len(),
-            ));
-            out.extend(lines);
+            for (wrapped_row, line) in lines.into_iter().enumerate() {
+                sources.push(LineSource::Block {
+                    id: *id,
+                    wrapped_row,
+                });
+                out.push(line);
+            }
         }
     }
 }
@@ -1627,8 +1629,10 @@ fn layout_all(st: &SharedState) -> LayoutAll {
 
     let cursor_row = above_end + buffer_cursor_row;
 
-    line_sources.extend(std::iter::repeat_n(LineSource::Input, input_lines.len()));
-    all_lines.extend(input_lines);
+    for (wrapped_row, line) in input_lines.into_iter().enumerate() {
+        line_sources.push(LineSource::Input { wrapped_row });
+        all_lines.push(line);
+    }
     layout_id_list(
         "suggestions",
         &st.suggestions,
@@ -1671,7 +1675,12 @@ fn redraw_loop(
     let mut prev_width = w;
     let mut prev_height = h;
     let mut prev_visible_start: usize = 0;
-    let mut prev_all_lines: Vec<Vec<Cell>> = Vec::new();
+    // Renderer-side model of the terminal content we believe exists from the
+    // start of managed scrollback through the currently visible viewport. This
+    // is intentionally physical state, not just the previous logical layout:
+    // block zone changes can rebuild the layout without changing what the
+    // terminal already contains.
+    let mut known_terminal_lines: Vec<Vec<Cell>> = Vec::new();
 
     loop {
         // Check shutdown before blocking on the channel.
@@ -1776,20 +1785,17 @@ fn redraw_loop(
                 tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
             }
             prev_visible_start = layout.all_lines.len().saturating_sub(height);
-            prev_all_lines = layout.all_lines;
+            known_terminal_lines = layout.all_lines;
         } else {
             let total = layout.all_lines.len();
             let visible_start = total.saturating_sub(height);
 
             screen.set_width(width);
 
-            let hidden_prefix_changed =
-                hidden_lines_changed(&prev_all_lines, &layout.all_lines, prev_visible_start);
-            let dropping_lines_changed = dropping_lines_changed(
-                &prev_all_lines,
+            let hidden_prefix_changed = hidden_lines_changed(
+                &known_terminal_lines,
                 &layout.all_lines,
                 prev_visible_start,
-                visible_start,
             );
 
             if viewport_moved_up(prev_visible_start, visible_start) {
@@ -1808,27 +1814,20 @@ fn redraw_loop(
                 if let Err(e) = full_render(&mut writer, &mut screen, &layout, width, height) {
                     tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
                 }
-            } else if hidden_prefix_changed || dropping_lines_changed {
-                // The terminal scrollback contains, or is about to receive,
-                // rows whose logical content changed. Rebuild it from logical
-                // content instead of trying to patch it incrementally.
-                let reason = if hidden_prefix_changed {
-                    "hidden_prefix_changed"
-                } else {
-                    "dropping_lines_changed"
-                };
-                let changed_line = if hidden_prefix_changed {
-                    changed_line_in_range(&prev_all_lines, &layout.all_lines, 0..prev_visible_start)
-                } else {
-                    changed_line_in_range(
-                        &prev_all_lines,
-                        &layout.all_lines,
-                        prev_visible_start..visible_start,
-                    )
-                };
+            } else if hidden_prefix_changed {
+                // The terminal scrollback contains rows whose logical content
+                // changed. Rebuild it from logical content instead of trying to
+                // patch it incrementally. Rows that are still physically
+                // visible, including rows that will scroll off during this
+                // render, are handled by the scrolling renderer below.
+                let changed_line = changed_line_in_range(
+                    &known_terminal_lines,
+                    &layout.all_lines,
+                    0..prev_visible_start,
+                );
                 mark_full_render(
                     &state,
-                    reason,
+                    "hidden_prefix_changed",
                     &layout,
                     prev_visible_start,
                     visible_start,
@@ -1864,7 +1863,7 @@ fn redraw_loop(
                 }
             }
             prev_visible_start = visible_start;
-            prev_all_lines = layout.all_lines;
+            known_terminal_lines = layout.all_lines;
         }
 
         prev_width = width;
@@ -1927,15 +1926,6 @@ fn mark_full_render(
 
 fn viewport_moved_up(prev_visible_start: usize, visible_start: usize) -> bool {
     visible_start < prev_visible_start
-}
-
-fn dropping_lines_changed(
-    prev_all_lines: &[Vec<Cell>],
-    all_lines: &[Vec<Cell>],
-    prev_visible_start: usize,
-    visible_start: usize,
-) -> bool {
-    (prev_visible_start..visible_start).any(|idx| prev_all_lines.get(idx) != all_lines.get(idx))
 }
 
 fn hidden_lines_changed(

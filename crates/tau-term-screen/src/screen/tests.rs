@@ -901,6 +901,35 @@ fn scrollback_rebuilt_after_resize() {
 }
 
 #[test]
+fn scrolling_from_exact_width_cursor_with_top_change_keeps_scrollback_order() {
+    let width = 5;
+    let height = 3;
+    let mut term = vt100::Parser::new(height, width, 20);
+    let mut screen = Screen::new(width as usize);
+
+    let initial = plain_cell_lines(&["aaaaa", "bbbbb", "ccccc"]);
+    let mut buf = Vec::new();
+    screen
+        .update(&mut buf, &initial, (2, width as usize))
+        .expect("initial render should succeed");
+    term.process(&buf);
+
+    let all = plain_cell_lines(&["AAAAA", "bbbbb", "ccccc", "ddddd"]);
+    let mut buf = Vec::new();
+    screen
+        .render_scrolling(&mut buf, &all, 0, height as usize, (3, width as usize))
+        .expect("scroll render should succeed");
+    term.process(&buf);
+
+    let visible: Vec<String> = term.screen().rows(0, width).collect();
+    assert_eq!(visible, vec!["bbbbb", "ccccc", "ddddd"]);
+
+    term.screen_mut().set_scrollback(1);
+    let scrolled: Vec<String> = term.screen().rows(0, width).collect();
+    assert_eq!(scrolled, vec!["AAAAA", "bbbbb", "ccccc"]);
+}
+
+#[test]
 fn repeated_scrolling_growth_does_not_duplicate_overflow_rows() {
     let width = 5;
     let height = 3;

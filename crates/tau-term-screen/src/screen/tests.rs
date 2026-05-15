@@ -901,6 +901,54 @@ fn scrollback_rebuilt_after_resize() {
 }
 
 #[test]
+fn scrolling_after_already_scrolled_does_not_rewrite_rows_that_will_drop() {
+    let width = 5;
+    let height = 3;
+    let mut screen = Screen::new(width);
+    let mut prev_visible_start = 0;
+
+    for frame in [
+        &["aaaaa", "bbbbb", "ccccc"][..],
+        &["aaaaa", "bbbbb", "ccccc", "ddddd"][..],
+    ] {
+        let lines = plain_cell_lines(frame);
+        let visible_start = lines.len().saturating_sub(height);
+        let mut buf = Vec::new();
+        if visible_start > prev_visible_start {
+            screen
+                .render_scrolling(&mut buf, &lines, prev_visible_start, height, (2, width))
+                .expect("scroll render should succeed");
+        } else {
+            screen
+                .update(&mut buf, &lines[visible_start..], (2, width))
+                .expect("update should succeed");
+        }
+        prev_visible_start = visible_start;
+    }
+
+    let lines = plain_cell_lines(&["aaaaa", "bbbbb", "ccccc", "ddddd", "eeeee"]);
+    let mut buf = Vec::new();
+    screen
+        .render_scrolling(&mut buf, &lines, prev_visible_start, height, (2, width))
+        .expect("scroll render should succeed");
+
+    let output = String::from_utf8_lossy(&buf);
+    assert!(output.contains("eeeee"));
+    assert!(
+        !output.contains("bbbbb"),
+        "must not rewrite the row that should only drop to scrollback: {buf:?}"
+    );
+    assert!(
+        !output.contains("ccccc"),
+        "must not rewrite unchanged middle row: {buf:?}"
+    );
+    assert!(
+        !output.contains("ddddd"),
+        "must not rewrite unchanged bottom row: {buf:?}"
+    );
+}
+
+#[test]
 fn scrolling_growth_by_empty_line_still_scrolls_viewport() {
     let width = 5;
     let height = 3;

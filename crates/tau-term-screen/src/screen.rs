@@ -209,13 +209,18 @@ impl Screen {
         let total = all_lines.len();
         let new_viewport_top = total.saturating_sub(height);
 
-        // Find first and last changed line across ALL content. Keep
-        // missing lines distinct from present-but-empty lines: appending
+        // Find first and last changed line across the part of the content that
+        // is, or was, physically represented on the terminal. Lines above the
+        // previous viewport are already in scrollback; treating them as changed
+        // would force us to rewrite the top visible rows just before they drop
+        // into scrollback.
+        //
+        // Keep missing lines distinct from present-but-empty lines: appending
         // an empty physical row still needs to scroll the viewport.
         let max_idx = total.max(prev_viewport_top + self.lines.len());
         let mut first_changed: Option<usize> = None;
         let mut last_changed: Option<usize> = None;
-        for i in 0..max_idx {
+        for i in prev_viewport_top..max_idx {
             let old = if i >= prev_viewport_top {
                 self.lines.get(i - prev_viewport_top).map(|l| l.as_slice())
             } else {

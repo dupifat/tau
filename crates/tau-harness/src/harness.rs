@@ -1030,7 +1030,18 @@ impl Harness {
             return;
         }
         let transient = event.defaults_to_transient();
-        let sync = Some(ConversationHeadSync { cid: cid.clone() });
+        let Some(session_id) = self.conversations.get(cid).map(|c| c.session_id.clone()) else {
+            // The conversation was torn down between the existence
+            // check above and now. Fall back to a plain publish so
+            // the event still reaches subscribers; persistence will
+            // use the event's own attribution if it still has one.
+            self.enqueue_publish(source, event, transient, false, None);
+            return;
+        };
+        let sync = Some(ConversationHeadSync {
+            cid: cid.clone(),
+            session_id,
+        });
         self.enqueue_publish(source, event, transient, false, sync);
     }
 
@@ -1138,8 +1149,15 @@ impl Harness {
         if let Some(log) = &mut self.debug_log {
             log.log_published_event(source_id.as_ref(), &event, recorded_at);
         }
-        let folded_node_id =
-            self.persist_session_event(source, &event, transient, parent_for_fold, recorded_at);
+        let session_id = sync_head_for.as_ref().map(|s| s.session_id.clone());
+        let folded_node_id = self.persist_session_event(
+            source,
+            &event,
+            transient,
+            parent_for_fold,
+            session_id.as_ref(),
+            recorded_at,
+        );
         if let Event::SessionPromptCreated(prompt) = &event {
             self.note_session_prompt_created(prompt);
         }
@@ -1229,12 +1247,15 @@ impl Harness {
         event: &Event,
         transient: bool,
         parent_node_id: Option<Option<tau_proto::NodeId>>,
+        session_id_override: Option<&SessionId>,
         recorded_at: tau_proto::UnixMicros,
     ) -> Option<tau_proto::NodeId> {
         if transient {
             return None;
         }
-        let session_id = self.session_id_for_event(event)?;
+        let session_id = session_id_override
+            .cloned()
+            .or_else(|| self.session_id_for_event(event))?;
         let source = source.map(tau_proto::ConnectionId::from);
         self.store
             .append_session_event_at(

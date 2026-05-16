@@ -486,6 +486,92 @@ fn interception_defers_subsequent_publishes_until_reply() {
 }
 
 #[test]
+fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
+    // Regression for a real rostra session failure. A tool result can
+    // arrive while an unrelated event is parked in interception. The
+    // result publish is deferred, but the intake path still completes
+    // the call immediately and clears `tool_conversations`. The
+    // eventual deferred commit must persist to the conversation's
+    // session from the publish snapshot, not from now-missing call
+    // tracking; otherwise the next LLM prompt contains a tool_use
+    // without its matching tool_result and the provider rejects it.
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let session_id = h.current_session_id.clone();
+    h.initialized_sessions.insert(session_id.clone());
+    let cid = h.default_conversation_id.clone();
+    let call_id: ToolCallId = "call-read".into();
+    let tool_name = ToolName::new("read");
+
+    h.tool_conversations.insert(call_id.clone(), cid.clone());
+    h.pending_tool_names
+        .insert(call_id.clone(), tool_name.clone());
+    h.publish_for_conversation(
+        &cid,
+        Event::ToolRequest(tau_proto::ToolRequest {
+            call_id: call_id.clone(),
+            tool_name: tool_name.clone(),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    );
+
+    let _interceptor = connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        Frame::Message(Message::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+    h.publish_event(None, draft_event("held"));
+    assert!(
+        h.pending_intercept.is_some(),
+        "draft publish should be parked in interception"
+    );
+
+    h.handle_extension_event(
+        "tool-provider",
+        Frame::Event(Event::ToolResult(ToolResult {
+            call_id: call_id.clone(),
+            tool_name: tool_name.clone(),
+            result: CborValue::Text("ok".to_owned()),
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        })),
+    )
+    .expect("defer tool result");
+    assert!(
+        !h.tool_conversations.contains_key(&call_id),
+        "tool call tracking is cleared before the deferred publish commits"
+    );
+
+    h.handle_extension_event(
+        "interceptor",
+        Frame::Message(Message::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("intercept reply");
+
+    let tree = h.store.session(session_id.as_str()).expect("session tree");
+    let has_result = tree.current_branch().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionEntry::ToolActivity(activity)
+                if activity.call_id == call_id
+                    && matches!(activity.outcome, ToolActivityOutcome::Result { .. })
+        )
+    });
+    assert!(
+        has_result,
+        "deferred tool.result must persist despite cleared call tracking"
+    );
+}
+
+#[test]
 fn interception_drop_of_must_pass_event_is_overridden() {
     // UiPromptSubmitted is on the MUST_PASS list — even if an
     // interceptor returns Drop, the harness must publish the

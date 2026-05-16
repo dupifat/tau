@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use tau_proto::{
     Event, EventName, EventSelector, ExtensionName, Frame, InterceptAction, InterceptReply,
-    InterceptRequest, InterceptionPriority, Message,
+    InterceptRequest, InterceptionPriority, Message, SessionId,
 };
 
 use crate::conversation::ConversationId;
@@ -69,12 +69,15 @@ pub(crate) struct DeferredPublish {
 
 /// Carried on a publish so that, once the event commits and the
 /// `SessionTree` fold advances `tree.head()`, the harness can sync
-/// the originating conversation's cached `head` to the new node.
+/// the originating conversation's cached `head` to the new node and
+/// persist the event to the originating session even if call-level
+/// tracking has been cleared while the publish was deferred.
 /// Replaces the old "publish then read `tree.head()`" idiom which
 /// breaks when an interceptor parks the publish.
 #[derive(Clone)]
 pub(crate) struct ConversationHeadSync {
     pub(crate) cid: ConversationId,
+    pub(crate) session_id: SessionId,
 }
 
 /// Event types where a `Drop` reply from an interceptor is

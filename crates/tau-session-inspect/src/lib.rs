@@ -173,23 +173,11 @@ pub fn format_session_entry(entry: &SessionEntry) -> String {
         SessionEntry::ToolActivity(a) => match &a.outcome {
             ToolActivityOutcome::Requested { arguments, .. } => {
                 if a.tool_name.as_str() == "skill" {
-                    match cbor_map_text(arguments, "action") {
-                        Some("load") => {
-                            let name = cbor_map_text(arguments, "name").unwrap_or_default();
-                            if name.is_empty() {
-                                "tool.request skill".to_owned()
-                            } else {
-                                format!("tool.request skill {name}")
-                            }
-                        }
-                        _ => {
-                            let query = cbor_map_text(arguments, "query").unwrap_or_default();
-                            if query.is_empty() {
-                                "tool.request skill search".to_owned()
-                            } else {
-                                format!("tool.request skill search {query}")
-                            }
-                        }
+                    let query = cbor_query_label(arguments, "query");
+                    if query.is_empty() {
+                        "tool.request skill".to_owned()
+                    } else {
+                        format!("tool.request skill {query}")
                     }
                 } else {
                     format!("tool.request {}", a.tool_name)
@@ -224,14 +212,30 @@ pub fn latest_agent_preview(session: &SessionTree) -> Option<String> {
         })
 }
 
-/// Extract a string value from a CBOR map by key.
-fn cbor_map_text<'a>(map: &'a CborValue, key: &str) -> Option<&'a str> {
-    match map {
-        CborValue::Map(entries) => entries.iter().find_map(|(k, v)| match (k, v) {
-            (CborValue::Text(k), CborValue::Text(v)) if k == key => Some(v.as_str()),
-            _ => None,
-        }),
+fn cbor_query_label(map: &CborValue, key: &str) -> String {
+    let CborValue::Map(entries) = map else {
+        return String::new();
+    };
+    let Some(value) = entries.iter().find_map(|(k, v)| match k {
+        CborValue::Text(k) if k == key => Some(v),
         _ => None,
+    }) else {
+        return String::new();
+    };
+    match value {
+        CborValue::Text(s) => s.trim().to_owned(),
+        CborValue::Array(items) => items
+            .iter()
+            .filter_map(|item| match item {
+                CborValue::Text(s) => {
+                    let s = s.trim();
+                    (!s.is_empty()).then(|| s.to_owned())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => String::new(),
     }
 }
 

@@ -46,7 +46,7 @@ The agent calls `skill` with a `query` string or an array of query strings:
 { "query": ["rust", "style"] }
 ```
 
-Tau matches query terms case-insensitively against skill names and descriptions, merges the hits, and sorts by `hit_count` descending then by name. By default, Tau does not read skill bodies during search; `search_content: true` also searches body text.
+Tau trims, lowercases, and deduplicates query terms, then matches them against skill names and descriptions. Hits are merged and sorted by `hit_count` descending then by name. By default, Tau does not read skill bodies during search; `search_content: true` also searches body text.
 
 If the query is unambiguous, Tau returns the full skill body with frontmatter stripped:
 

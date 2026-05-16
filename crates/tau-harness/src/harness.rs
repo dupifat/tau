@@ -5304,18 +5304,15 @@ fn build_tool_args_display(
             Some(name) if !name.is_empty() => format!("[{name}]"),
             _ => String::new(),
         },
-        "skill" => match cbor_text_field(arguments, "action").as_deref() {
-            Some("load") => cbor_text_field(arguments, "name").unwrap_or_default(),
-            _ => {
-                let query = cbor_text_field(arguments, "query").unwrap_or_default();
-                let scope = if cbor_bool_field(arguments, "search_content").unwrap_or(false) {
-                    " [content]"
-                } else {
-                    ""
-                };
-                format!("search: {query}{scope}")
-            }
-        },
+        "skill" => {
+            let query = cbor_query_label(arguments, "query");
+            let scope = if cbor_bool_field(arguments, "search_content").unwrap_or(false) {
+                " [content]"
+            } else {
+                ""
+            };
+            format!("{query}{scope}")
+        }
         _ => return None,
     };
     Some(tau_proto::ToolDisplay {
@@ -5325,6 +5322,33 @@ fn build_tool_args_display(
         payload,
         ..Default::default()
     })
+}
+
+fn cbor_query_label(arguments: &tau_proto::CborValue, key: &str) -> String {
+    let tau_proto::CborValue::Map(entries) = arguments else {
+        return String::new();
+    };
+    let Some(value) = entries.iter().find_map(|(k, v)| match k {
+        tau_proto::CborValue::Text(k) if k == key => Some(v),
+        _ => None,
+    }) else {
+        return String::new();
+    };
+    match value {
+        tau_proto::CborValue::Text(s) => s.trim().to_owned(),
+        tau_proto::CborValue::Array(items) => items
+            .iter()
+            .filter_map(|item| match item {
+                tau_proto::CborValue::Text(s) => {
+                    let s = s.trim();
+                    (!s.is_empty()).then(|| s.to_owned())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => String::new(),
+    }
 }
 
 fn shell_command_args(command: &str) -> String {

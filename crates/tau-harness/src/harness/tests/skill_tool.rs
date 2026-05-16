@@ -72,16 +72,10 @@ fn skill_tool_reads_file_content() {
         id: "call-skill".into(),
         name: "skill".into(),
         tool_type: tau_proto::ToolType::Function,
-        arguments: CborValue::Map(vec![
-            (
-                CborValue::Text("action".to_owned()),
-                CborValue::Text("load".to_owned()),
-            ),
-            (
-                CborValue::Text("name".to_owned()),
-                CborValue::Text("my-skill".to_owned()),
-            ),
-        ]),
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("query".to_owned()),
+            CborValue::Text("my-skill".to_owned()),
+        )]),
         display: None,
     };
     let cid = h.default_conversation_id.clone();
@@ -110,7 +104,7 @@ fn skill_tool_reads_file_content() {
 }
 
 #[test]
-fn skill_tool_returns_error_for_unknown_skill() {
+fn skill_tool_returns_error_for_missing_query() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
 
@@ -122,190 +116,29 @@ fn skill_tool_returns_error_for_unknown_skill() {
         id: "call-missing".into(),
         name: "skill".into(),
         tool_type: tau_proto::ToolType::Function,
-        arguments: CborValue::Map(vec![
-            (
-                CborValue::Text("action".to_owned()),
-                CborValue::Text("load".to_owned()),
-            ),
-            (
-                CborValue::Text("name".to_owned()),
-                CborValue::Text("nonexistent".to_owned()),
-            ),
-        ]),
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("action".to_owned()),
+            CborValue::Text("load".to_owned()),
+        )]),
         display: None,
     };
     let cid = h.default_conversation_id.clone();
-    h.handle_skill_tool_call(&cid, &call).expect("skill call");
-
-    // Verify a tool error was persisted.
-    let branch = h.store.session("s1").expect("session").current_branch();
-    let has_skill_error = branch.iter().any(|entry| {
-        matches!(
-            entry,
-            SessionEntry::ToolActivity(ToolActivityRecord {
-                outcome: ToolActivityOutcome::Error { .. },
-                ..
-            })
-        )
-    });
-    assert!(has_skill_error, "expected skill tool error in session");
-    let events = h.store.session_events("s1").expect("session events");
-    assert!(
-        events.iter().any(|entry| matches!(
-            &entry.event,
-            Event::ToolError(error) if error.call_id.as_str() == "call-missing"
-        )),
-        "expected skill tool error in durable session event log"
-    );
-}
-
-#[test]
-fn skill_load_unknown_attaches_split_name_search_suggestions() {
-    // Agents routinely guess at skill names; when the load misses we
-    // free-search using the requested name split on `-`/`_` so the
-    // error response carries plausible alternatives.
-    //
-    // Use synthetic tokens that won't collide with the user's real
-    // `~/.agents/skills` library that `echo_harness` discovers, then
-    // wipe `discovered_skills` so the assertions are deterministic.
-    const PREFIX: &str = "qzxtest";
-    const TKLANG: &str = "qzxlang";
-    const TKSTYLE: &str = "qzxstyle";
-
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-
-    let make_skill = |name: &str, description: &str| {
-        let dir = td.path().join(name);
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let path = dir.join("SKILL.md");
-        std::fs::write(
-            &path,
-            format!("---\nname: {name}\ndescription: {description}\n---\nbody"),
-        )
-        .expect("write");
-        path
-    };
-    let lang_name = format!("{PREFIX}-{TKLANG}-helper");
-    let style_name = format!("{PREFIX}-{TKSTYLE}-guide");
-    let decoy_name = "totally-unrelated-skill".to_owned();
-    let lang_path = make_skill(&lang_name, &format!("{TKLANG} helpers"));
-    let style_path = make_skill(&style_name, &format!("{TKSTYLE} guide"));
-    let decoy_path = make_skill(&decoy_name, "unrelated thing");
-
-    let mut h = echo_harness(&sp).expect("start");
-    h.discovered_skills.clear();
-    for (name, desc, path) in [
-        (lang_name.clone(), format!("{TKLANG} helpers"), lang_path),
-        (style_name.clone(), format!("{TKSTYLE} guide"), style_path),
-        (decoy_name.clone(), "unrelated thing".to_owned(), decoy_path),
-    ] {
-        h.discovered_skills.insert(
-            tau_proto::SkillName::from(name.as_str()),
-            DiscoveredSkill {
-                source_id: "skills".into(),
-                description: desc,
-                file_path: path,
-                add_to_prompt: false,
-            },
-        );
-    }
-
-    let requested = format!("{PREFIX}-{TKLANG}-{TKSTYLE}");
-    append_user_message_via_event(&mut h, "s1", "load skill");
-    let cid = h.default_conversation_id.clone();
-    seed_tools_running(&mut h, &cid, vec!["call-miss".into()]);
-    let call = AgentToolCall {
-        id: "call-miss".into(),
-        name: "skill".into(),
-        tool_type: tau_proto::ToolType::Function,
-        arguments: CborValue::Map(vec![
-            (
-                CborValue::Text("action".to_owned()),
-                CborValue::Text("load".to_owned()),
-            ),
-            (
-                CborValue::Text("name".to_owned()),
-                CborValue::Text(requested.clone()),
-            ),
-        ]),
-        display: None,
-    };
     h.handle_skill_tool_call(&cid, &call).expect("skill call");
 
     let events = h.store.session_events("s1").expect("session events");
     let err = events
         .iter()
         .find_map(|entry| match &entry.event {
-            Event::ToolError(e) if e.call_id.as_str() == "call-miss" => Some(e),
+            Event::ToolError(e) if e.call_id.as_str() == "call-missing" => Some(e),
             _ => None,
         })
         .expect("tool error");
-    assert!(
-        err.message.contains("unknown skill"),
-        "unexpected message: {}",
-        err.message
-    );
-    let details = err.details.as_ref().expect("details");
-    let CborValue::Map(entries) = details else {
-        panic!("details should be a map: {details:?}");
-    };
-    let get = |key: &str| {
-        entries.iter().find_map(|(k, v)| match k {
-            CborValue::Text(s) if s == key => Some(v),
-            _ => None,
-        })
-    };
-    assert_eq!(
-        get("name"),
-        Some(&CborValue::Text(requested.clone())),
-        "details.name should echo the requested name"
-    );
-    let queries = match get("queries") {
-        Some(CborValue::Array(a)) => a.clone(),
-        other => panic!("queries should be array: {other:?}"),
-    };
-    let needles: Vec<String> = queries
-        .iter()
-        .filter_map(|v| match v {
-            CborValue::Text(s) => Some(s.clone()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(needles, vec![PREFIX, TKLANG, TKSTYLE]);
-    let matches = match get("matches") {
-        Some(CborValue::Array(a)) => a.clone(),
-        other => panic!("matches should be array: {other:?}"),
-    };
-    let match_names: Vec<String> = matches
-        .iter()
-        .filter_map(|m| match m {
-            CborValue::Map(fields) => fields.iter().find_map(|(k, v)| match (k, v) {
-                (CborValue::Text(k), CborValue::Text(v)) if k == "name" => Some(v.clone()),
-                _ => None,
-            }),
-            _ => None,
-        })
-        .collect();
-    // Both helpers should be suggested (each shares two needles with
-    // the requested name); the unrelated decoy must not appear.
-    assert!(
-        match_names.iter().any(|n| n == &lang_name),
-        "expected {lang_name} in suggestions, got: {match_names:?}"
-    );
-    assert!(
-        match_names.iter().any(|n| n == &style_name),
-        "expected {style_name} in suggestions, got: {match_names:?}"
-    );
-    assert!(
-        !match_names.iter().any(|n| n == &decoy_name),
-        "unrelated decoy leaked into suggestions: {match_names:?}"
-    );
+    assert!(err.message.contains("missing required argument: query"));
 }
 
 #[test]
 fn skill_tool_search_matches_name_description_and_optional_content() {
-    // The search action backs progressive skill discovery: when most
+    // Query matching backs progressive skill discovery: when most
     // skills are not advertised at session start, the agent must be
     // able to find them by keyword. Default scope is name +
     // description; `search_content: true` opts into grepping bodies.
@@ -493,9 +326,9 @@ fn skill_tool_search_matches_name_description_and_optional_content() {
         .expect("search 3");
     assert_eq!(read_matches(&h, "call-3"), vec!["zqx-alpha", "zqx-beta"]);
 
-    // Name match works case-insensitively.
+    // Name match works case-insensitively and ignores padding.
     seed_tools_running(&mut h, &cid, vec!["call-4".into()]);
-    h.handle_skill_tool_call(&cid, &call_search("ZQX-ALPHA", false, "call-4"))
+    h.handle_skill_tool_call(&cid, &call_search(" ZQX-ALPHA ", false, "call-4"))
         .expect("search 4");
     assert_eq!(read_loaded_name(&h, "call-4"), "zqx-alpha");
 }
@@ -641,6 +474,18 @@ fn skill_tool_search_accepts_multiple_terms_and_ranks_by_hit_count() {
          gamma matches none and must be filtered out",
     );
 
+    seed_tools_running(&mut h, &cid, vec!["call-dedup".into()]);
+    h.handle_skill_tool_call(
+        &cid,
+        &call_search_array(&[" zqxalpha ", "ZQXALPHA"], "call-dedup"),
+    )
+    .expect("dedup search");
+    assert_eq!(
+        read_match_records(&h, "call-dedup"),
+        vec![("zqx-alpha".to_owned(), 1), ("zqx-beta".to_owned(), 1),],
+        "duplicate terms should not inflate hit_count",
+    );
+
     // A single matching skill is loaded directly.
     seed_tools_running(&mut h, &cid, vec!["call-single".into()]);
     h.handle_skill_tool_call(&cid, &call_search_array(&[T2], "call-single"))
@@ -763,36 +608,26 @@ fn skill_tool_loads_exact_single_term_match_even_with_other_hits() {
 }
 
 #[test]
-fn skill_tool_unknown_action_returns_error() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
+fn skill_tool_default_display_formats_array_query() {
+    let display = super::super::build_tool_args_display(
+        "skill",
+        &CborValue::Map(vec![
+            (
+                CborValue::Text("query".to_owned()),
+                CborValue::Array(vec![
+                    CborValue::Text(" git ".to_owned()),
+                    CborValue::Text("commit".to_owned()),
+                ]),
+            ),
+            (
+                CborValue::Text("search_content".to_owned()),
+                CborValue::Bool(true),
+            ),
+        ]),
+    )
+    .expect("display");
 
-    let cid = h.default_conversation_id.clone();
-    seed_tools_running(&mut h, &cid, vec!["call-bogus".into()]);
-    let call = AgentToolCall {
-        id: "call-bogus".into(),
-        name: "skill".into(),
-        tool_type: tau_proto::ToolType::Function,
-        arguments: CborValue::Map(vec![(
-            CborValue::Text("action".to_owned()),
-            CborValue::Text("invoke".to_owned()),
-        )]),
-        display: None,
-    };
-    h.handle_skill_tool_call(&cid, &call).expect("dispatch");
-    let events = h.store.session_events("s1").expect("events");
-    let err = events
-        .iter()
-        .find_map(|entry| match &entry.event {
-            Event::ToolError(e) if e.call_id.as_str() == "call-bogus" => Some(e.message.clone()),
-            _ => None,
-        })
-        .expect("tool error");
-    assert!(
-        err.contains("unknown skill action"),
-        "unexpected error message: {err}"
-    );
+    assert_eq!(display.args, "git commit [content]");
 }
 
 #[test]

@@ -15,7 +15,7 @@ use crate::conversation::ConversationId;
 use crate::discovery::DiscoveredSkill;
 use crate::error::HarnessError;
 use crate::harness::{HARNESS_CONNECTION_ID, Harness};
-use crate::prompt::{cbor_map_bool, cbor_map_text};
+use crate::prompt::cbor_map_bool;
 
 impl Harness {
     /// Register harness-owned tools (e.g. `skill`).
@@ -38,7 +38,8 @@ impl Harness {
                      (\"commit\", \"git commit\", \"version control\"). If the \
                      search resolves to one skill, or one single-term match has \
                      exactly that skill name, the full skill is loaded; otherwise \
-                     matching skill names and descriptions are returned."
+                     matching skill names and descriptions are returned. Query \
+                     terms are trimmed and deduplicated."
                         .to_owned(),
                 ),
                 tool_type: tau_proto::ToolType::Function,
@@ -48,7 +49,7 @@ impl Harness {
                         "query": {
                             "type": ["string", "array"],
                             "items": {"type": "string"},
-                            "description": "One or more keywords matched case-insensitively against skill names and descriptions. Single string or array of strings."
+                            "description": "One or more keywords matched case-insensitively against skill names and descriptions. Single string or array of strings. Terms are trimmed and deduplicated."
                         },
                         "search_content": {
                             "type": "boolean",
@@ -70,8 +71,6 @@ impl Harness {
     /// - one total match loads that skill;
     /// - one single-term query with an exact skill-name match loads that skill;
     /// - otherwise returns `{name, description}` matches.
-    ///
-    /// Legacy `action: load/search` calls are still accepted.
     pub(crate) fn handle_skill_tool_call(
         &mut self,
         cid: &ConversationId,
@@ -98,22 +97,7 @@ impl Harness {
             }),
         );
 
-        let action = cbor_map_text(&call.arguments, "action");
-        let result_event = match action {
-            Some("load") => self.handle_skill_load(&call_id, &tool_name, &call.arguments),
-            Some("search") | None => self.handle_skill_query(&call_id, &tool_name, &call.arguments),
-            Some(other) => {
-                let message = format!("unknown skill action: {other:?}");
-                Event::ToolError(tau_proto::ToolError {
-                    call_id: call_id.clone(),
-                    tool_name: tool_name.clone(),
-                    display: Some(skill_error_display("", &message)),
-                    message,
-                    details: None,
-                    originator: tau_proto::PromptOriginator::User,
-                })
-            }
-        };
+        let result_event = self.handle_skill_query(&call_id, &tool_name, &call.arguments);
 
         // Publish, then drop the in-flight tracking — order matters:
         // `session_id_for_event` reads `tool_conversations` to
@@ -125,53 +109,15 @@ impl Harness {
         Ok(())
     }
 
-    fn handle_skill_load(
-        &self,
-        call_id: &ToolCallId,
-        tool_name: &ToolName,
-        arguments: &CborValue,
-    ) -> Event {
-        let Some(name) = cbor_map_text(arguments, "name") else {
-            let message = "missing required argument: name (action=load)".to_owned();
-            return Event::ToolError(tau_proto::ToolError {
-                call_id: call_id.clone(),
-                tool_name: tool_name.clone(),
-                display: Some(skill_error_display("", &message)),
-                message,
-                details: None,
-                originator: tau_proto::PromptOriginator::User,
-            });
-        };
-        self.read_skill_by_name(call_id, tool_name, name)
-    }
-
     fn read_skill_by_name(&self, call_id: &ToolCallId, tool_name: &ToolName, name: &str) -> Event {
         let Some(skill) = self.discovered_skills.get(name) else {
-            // Same agent that asked for `dpc-rust-code-style` very likely
-            // wanted one of the skills containing "rust" or "style", so
-            // run a free search using the requested name split into
-            // word-like tokens. Returning the hits in `details` lets the
-            // agent pick the right name on a follow-up call without
-            // having to issue an explicit `search` first; the
-            // surrounding event is still an error so it can't be
-            // mistaken for a successful load.
-            let needles = split_skill_name_into_needles(name);
-            let matches = if needles.is_empty() {
-                Vec::new()
-            } else {
-                self.search_discovered_skills(&needles, false)
-            };
             let message = format!("unknown skill: {name}");
-            let mut display = skill_error_display(name, &message);
-            display
-                .info_chips
-                .insert(0, format!("({} suggestions)", matches.len()));
             return Event::ToolError(tau_proto::ToolError {
                 call_id: call_id.clone(),
                 tool_name: tool_name.clone(),
+                display: Some(skill_error_display(name, &message)),
                 message,
-                details: Some(skill_load_not_found_details(name, &needles, &matches)),
-                display: Some(display),
+                details: None,
                 originator: tau_proto::PromptOriginator::User,
             });
         };
@@ -267,7 +213,7 @@ impl Harness {
     ) -> Event {
         let scope_label = if search_content { " [content]" } else { "" };
         let queries_label = needles.join(" ");
-        let display_args = format!("search: {queries_label}{scope_label}");
+        let display_args = format!("{queries_label}{scope_label}");
 
         let mut display = skill_ok_display(&display_args);
         display.stats = skill_search_stats(&hits);
@@ -379,13 +325,6 @@ impl Harness {
     }
 }
 
-/// Split a skill name into lowercased word-like needles by treating
-/// `-` and `_` as separators. Used when an agent's `load` request
-/// names a skill that doesn't exist: searching the discovered skills
-/// for these needles often surfaces the one the agent actually
-/// wanted (e.g. `dpc-rust-code-style` → `[dpc, rust, code, style]`).
-/// Empty parts are dropped; duplicates are removed in first-seen
-/// order so a name like `foo-foo` doesn't double-count itself.
 fn skill_ok_display(args: &str) -> ToolDisplay {
     ToolDisplay {
         args: args.to_owned(),
@@ -447,72 +386,10 @@ fn error_chip_text(message: &str) -> String {
     format!("err: {label}")
 }
 
-fn split_skill_name_into_needles(name: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for part in name.split(['-', '_']) {
-        if part.is_empty() {
-            continue;
-        }
-        let lower = part.to_lowercase();
-        if !out.iter().any(|existing| existing == &lower) {
-            out.push(lower);
-        }
-    }
-    out
-}
-
-/// Build the `details` payload for a failed `skill` load. Mirrors
-/// the shape of a successful `search` result (`query`,
-/// `search_content`, `matches`) so a UI that already knows how to
-/// render skill-search hits can show the suggestion count next to
-/// the error, and so the agent reading the details on its next turn
-/// sees a familiar structure.
-fn skill_load_not_found_details(
-    name: &str,
-    needles: &[String],
-    matches: &[(usize, String, String)],
-) -> CborValue {
-    let matches_cbor = CborValue::Array(
-        matches
-            .iter()
-            .map(|(hit_count, skill_name, description)| {
-                CborValue::Map(vec![
-                    (
-                        CborValue::Text("name".to_owned()),
-                        CborValue::Text(skill_name.clone()),
-                    ),
-                    (
-                        CborValue::Text("description".to_owned()),
-                        CborValue::Text(description.clone()),
-                    ),
-                    (
-                        CborValue::Text("hit_count".to_owned()),
-                        CborValue::Integer((*hit_count as u64).into()),
-                    ),
-                ])
-            })
-            .collect(),
-    );
-    let queries_echo =
-        CborValue::Array(needles.iter().map(|n| CborValue::Text(n.clone())).collect());
-    CborValue::Map(vec![
-        (
-            CborValue::Text("name".to_owned()),
-            CborValue::Text(name.to_owned()),
-        ),
-        (CborValue::Text("queries".to_owned()), queries_echo),
-        (
-            CborValue::Text("search_content".to_owned()),
-            CborValue::Bool(false),
-        ),
-        (CborValue::Text("matches".to_owned()), matches_cbor),
-    ])
-}
-
 /// Parse the `query` argument of a `skill` tool call into one-or-more
 /// lowercased search needles. Accepts either a single string (one
-/// needle) or an array of strings (multiple needles whose hits are
-/// merged and ranked by hit-count). Returns a user-facing error message
+/// needle) or an array of strings. Terms are trimmed, lowercased, and
+/// deduplicated before matching. Returns a user-facing error message
 /// string on missing/empty/malformed input.
 fn extract_skill_search_queries(arguments: &CborValue) -> Result<Vec<String>, String> {
     let CborValue::Map(entries) = arguments else {
@@ -526,13 +403,13 @@ fn extract_skill_search_queries(arguments: &CborValue) -> Result<Vec<String>, St
         })
         .ok_or_else(|| "missing required argument: query".to_owned())?;
 
-    let needles: Vec<String> = match raw {
-        CborValue::Text(s) => vec![s.to_lowercase()],
+    let raw_needles: Vec<String> = match raw {
+        CborValue::Text(s) => vec![s.trim().to_lowercase()],
         CborValue::Array(items) => {
             let mut out = Vec::with_capacity(items.len());
             for item in items {
                 match item {
-                    CborValue::Text(s) => out.push(s.to_lowercase()),
+                    CborValue::Text(s) => out.push(s.trim().to_lowercase()),
                     _ => return Err("query array entries must all be strings".to_owned()),
                 }
             }
@@ -543,7 +420,12 @@ fn extract_skill_search_queries(arguments: &CborValue) -> Result<Vec<String>, St
         }
     };
 
-    let needles: Vec<String> = needles.into_iter().filter(|n| !n.is_empty()).collect();
+    let mut needles: Vec<String> = Vec::with_capacity(raw_needles.len());
+    for needle in raw_needles.into_iter().filter(|n| !n.is_empty()) {
+        if !needles.iter().any(|existing| existing == &needle) {
+            needles.push(needle);
+        }
+    }
     if needles.is_empty() {
         return Err("query must include at least one non-empty term".to_owned());
     }

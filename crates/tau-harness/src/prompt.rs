@@ -288,17 +288,6 @@ pub(crate) fn assemble_prompt_context_from(
     }
 }
 
-/// Extract a string value from a CBOR map by key.
-pub(crate) fn cbor_map_text<'a>(map: &'a CborValue, key: &str) -> Option<&'a str> {
-    match map {
-        CborValue::Map(entries) => entries.iter().find_map(|(k, v)| match (k, v) {
-            (CborValue::Text(k), CborValue::Text(v)) if k == key => Some(v.as_str()),
-            _ => None,
-        }),
-        _ => None,
-    }
-}
-
 /// Extract a boolean value from a CBOR map by key.
 pub(crate) fn cbor_map_bool(map: &CborValue, key: &str) -> Option<bool> {
     match map {

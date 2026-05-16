@@ -17,6 +17,7 @@ use tau_proto::{
 
 use crate::daemon::{DaemonOutput, resolve_daemon};
 use crate::event_renderer::EventRenderer;
+use crate::prompt_history::PromptHistoryStore;
 use crate::tool_render::ui_dir_block;
 use crate::{CliError, MUTEX_POISONED, build_banner, locked, ui_logging};
 
@@ -322,8 +323,23 @@ pub(crate) fn run_chat(
         .bind
         .iter()
         .map(|(key, action)| (key.clone(), encode_binding_action(action)));
-    let (mut term, handle, completion_data) =
-        HighTerm::new(prompt, commands, theme.clone(), cursor_shape, bindings)?;
+    let dirs = tau_config::settings::TauDirs::default();
+    let prompt_history = PromptHistoryStore::new(&dirs);
+    let input_history = match prompt_history.load() {
+        Ok(history) => history,
+        Err(error) => {
+            tracing::warn!(target: "tau_cli::ui", %error, "failed to load persistent prompt history");
+            Vec::new()
+        }
+    };
+    let (mut term, handle, completion_data) = HighTerm::new_with_input_history(
+        prompt,
+        commands,
+        theme.clone(),
+        cursor_shape,
+        bindings,
+        input_history,
+    )?;
 
     // Show logo if enabled.
     if settings.show_logo {
@@ -344,14 +360,13 @@ pub(crate) fn run_chat(
     // handle for the input loop's Shift+Tab cycle. Load the
     // persisted `cli.json` state so `/set show-*` toggles survive
     // restarts.
-    let dirs = tau_config::settings::TauDirs::default();
     let cli_state = tau_config::settings::CliState::load(&dirs);
     let renderer = EventRenderer::new_with_state(
         renderer_handle,
         completion_data.clone(),
         theme.clone(),
         cli_state,
-        dirs,
+        dirs.clone(),
         settings.submitted_prompt_symbol,
     );
     // Register `/set`'s context-aware arg completer. The first-arg
@@ -412,6 +427,7 @@ pub(crate) fn run_chat(
             renderer_tx: event_tx,
             editor_context,
             draft_handle: draft_handle.clone(),
+            prompt_history,
         },
     )?;
 
@@ -499,6 +515,7 @@ struct TerminalInputLoopCtx {
     renderer_tx: mpsc::Sender<RendererCmd>,
     editor_context: Arc<Mutex<tau_cli_term::EditorContext>>,
     draft_handle: DraftHandle,
+    prompt_history: PromptHistoryStore,
 }
 
 fn terminal_input_loop(
@@ -536,6 +553,9 @@ fn terminal_input_loop(
                 let text = line.trim();
                 if text.is_empty() {
                     continue;
+                }
+                if let Err(error) = ctx.prompt_history.append(&line) {
+                    tracing::warn!(target: "tau_cli::ui", %error, "failed to append persistent prompt history");
                 }
                 if let Ok(mut context) = ctx.editor_context.lock() {
                     context.previous_prompt = Some(text.to_owned());

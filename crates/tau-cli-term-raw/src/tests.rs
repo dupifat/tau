@@ -389,6 +389,39 @@ fn input_history_navigates_submitted_and_draft_entries() {
 }
 
 #[test]
+fn seeded_input_history_is_recalled_before_current_draft() {
+    let buf = SharedBuffer::new();
+    let (mut term, handle, input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+    term.seed_input_history(["old one".to_owned(), "old two".to_owned()]);
+
+    handle.set_buffer("draft".to_owned(), 5);
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )))
+        .expect("send up");
+    assert!(matches!(
+        term.get_next_event().expect("event"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "old two");
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )))
+        .expect("send up");
+    assert!(matches!(
+        term.get_next_event().expect("event"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "old one");
+}
+
+#[test]
 fn down_from_non_empty_draft_creates_fresh_prompt_and_history_entry() {
     let buf = SharedBuffer::new();
     let (term, handle, input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);

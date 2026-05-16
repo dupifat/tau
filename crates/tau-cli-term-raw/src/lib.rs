@@ -92,6 +92,18 @@ struct PromptDraft {
     redo: Vec<PromptSnapshot>,
 }
 
+impl PromptDraft {
+    fn submitted(buffer: String) -> Self {
+        let cursor = buffer.len();
+        Self {
+            buffer,
+            cursor,
+            undo: Vec::new(),
+            redo: Vec::new(),
+        }
+    }
+}
+
 /// State for input-history navigation. Present only while Up/Down
 /// has recalled a previous line and the user hasn't submitted or
 /// dismissed yet.
@@ -1164,6 +1176,21 @@ impl Term {
                 parsed.map(|key| (key, action))
             })
             .collect();
+    }
+
+    /// Appends previously submitted prompts to the input history.
+    ///
+    /// Intended for startup seeding from persistent history. Empty
+    /// prompts are ignored, and the active edit buffer is left intact.
+    pub fn seed_input_history(&mut self, history: impl IntoIterator<Item = String>) {
+        let mut st = self.handle.lock();
+        st.input_history.extend(
+            history
+                .into_iter()
+                .filter(|buffer| !buffer.is_empty())
+                .map(PromptDraft::submitted),
+        );
+        st.history_nav = None;
     }
 
     /// Re-evaluates the completion source against the current buffer

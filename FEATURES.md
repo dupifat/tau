@@ -301,6 +301,13 @@ completion menu shows each setting's current value; the second-arg
 menu shows the meaning of each allowed value. State is persisted to
 `<state_dir>/cli.json`.
 
+### Prompt input history
+
+Submitted prompt lines are kept in prompt history for the current run and are
+also appended to `<state_dir>/prompt-history.cbor`. New `tau` processes seed
+Up/Down prompt recall from that file, so recent prompts from previous runs are
+available like in-session history.
+
 ### Path autocompletion
 
 When the prompt buffer starts with `./` or `../`, Tab triggers filesystem path

@@ -78,7 +78,27 @@ impl HighTerm {
         cursor_shape: CursorShape,
         bindings: impl IntoIterator<Item = (String, String)>,
     ) -> io::Result<(Self, TermHandle, CompletionData)> {
+        Self::new_with_input_history(
+            left_prompt,
+            commands,
+            theme,
+            cursor_shape,
+            bindings,
+            std::iter::empty(),
+        )
+    }
+
+    /// Creates a new terminal and seeds prompt input history.
+    pub fn new_with_input_history(
+        left_prompt: impl Into<StyledText>,
+        commands: Vec<SlashCommand>,
+        theme: Theme,
+        cursor_shape: CursorShape,
+        bindings: impl IntoIterator<Item = (String, String)>,
+        input_history: impl IntoIterator<Item = String>,
+    ) -> io::Result<(Self, TermHandle, CompletionData)> {
         let (mut term, handle) = tau_cli_term_raw::Term::new(left_prompt, cursor_shape)?;
+        term.seed_input_history(input_history);
         term.set_bindings(bindings);
         let handle_clone = handle.clone();
         let data = CompletionData::new();

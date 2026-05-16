@@ -75,12 +75,16 @@ fn plain_cell_lines(lines: &[&str]) -> Vec<Vec<Cell>> {
 
 // --- layout tests ---
 
+/// Defines the layout base case: even empty content owns one addressable row so
+/// cursor code never has to handle a zero-line prompt.
 #[test]
 fn layout_empty_produces_one_empty_line() {
     let lines = layout_lines().content(&StyledText::new()).width(80).call();
     assert_eq!(line_chars(&lines), vec![""]);
 }
 
+/// Documents the non-wrapping baseline for short plain text before exercising
+/// the edge cases below.
 #[test]
 fn layout_short_produces_one_line() {
     let lines = layout_lines()
@@ -90,6 +94,8 @@ fn layout_short_produces_one_line() {
     assert_eq!(line_chars(&lines), vec!["abc"]);
 }
 
+/// Protects the cell-width wrapping contract used by prompt and block renderers
+/// to map logical content onto terminal rows.
 #[test]
 fn layout_wraps_at_width() {
     let lines = layout_lines()
@@ -99,6 +105,8 @@ fn layout_wraps_at_width() {
     assert_eq!(line_chars(&lines), vec!["abc", "de"]);
 }
 
+/// Exact-width generic content must stop at the current row; continuation rows
+/// are only added by prompt cursor policy when needed.
 #[test]
 fn layout_exact_width_is_one_line() {
     let lines = layout_lines()
@@ -108,6 +116,8 @@ fn layout_exact_width_is_one_line() {
     assert_eq!(line_chars(&lines), vec!["abc"]);
 }
 
+/// Guards the style-to-cell conversion path so styled spans keep their
+/// attributes after layout.
 #[test]
 fn layout_preserves_styles() {
     let style = Style::default().fg(Color::Red);
@@ -121,6 +131,7 @@ fn layout_preserves_styles() {
     assert_eq!(lines[0][3], Cell::new('d', style));
 }
 
+/// Explicit newlines must split visual rows even when no wrapping is needed.
 #[test]
 fn layout_handles_newlines() {
     let lines = layout_lines()
@@ -130,6 +141,8 @@ fn layout_handles_newlines() {
     assert_eq!(line_chars(&lines), vec!["abc", "def"]);
 }
 
+/// Covers the boundary where an explicit newline occurs at the wrap width,
+/// avoiding either merged rows or phantom blank rows.
 #[test]
 fn layout_newline_and_wrap() {
     let lines = layout_lines()
@@ -141,6 +154,8 @@ fn layout_newline_and_wrap() {
 
 // --- layout_block tests ---
 
+/// Documents the block layout invariant: rows are padded to terminal width so
+/// repainting can clear stale content.
 #[test]
 fn layout_block_plain() {
     let block = StyledBlock::new("hello");
@@ -154,6 +169,8 @@ fn layout_block_plain() {
     assert!(text[5..].chars().all(|c| c == ' '));
 }
 
+/// Margins are part of the full-width block row but outside the content area;
+/// this protects left/right spacing math.
 #[test]
 fn layout_block_with_margins() {
     let block = StyledBlock::new("hi").margin_left(2).margin_right(3);
@@ -166,6 +183,8 @@ fn layout_block_with_margins() {
     assert_eq!(&text[17..20], "   ", "right margin");
 }
 
+/// Center alignment splits spare cells evenly so status/header blocks stay
+/// visually stable.
 #[test]
 fn layout_block_center_alignment() {
     let block = StyledBlock::new("hi").align(Align::Center);
@@ -175,6 +194,8 @@ fn layout_block_center_alignment() {
     assert_eq!(text, "    hi    ");
 }
 
+/// Right-side block content is an inline adornment when both left and right
+/// parts fit on one row.
 #[test]
 fn layout_block_right_content_shown_when_space_available() {
     let block = StyledBlock::new("left").right_content("right");
@@ -183,6 +204,8 @@ fn layout_block_right_content_shown_when_space_available() {
     assert_eq!(text, "left   right");
 }
 
+/// When primary block content wraps, the right adornment is hidden rather than
+/// colliding with wrapped text.
 #[test]
 fn layout_block_right_content_hidden_when_left_wraps() {
     let block = StyledBlock::new("abcdef").right_content("right");
@@ -194,6 +217,8 @@ fn layout_block_right_content_hidden_when_left_wraps() {
     assert_eq!(text, vec!["abcde", "f    "]);
 }
 
+/// Block backgrounds should paint content and padding, but not margins, so
+/// margins remain transparent separators.
 #[test]
 fn layout_block_bg_applied_to_content_area() {
     let bg = Color::DarkBlue;
@@ -209,6 +234,8 @@ fn layout_block_bg_applied_to_content_area() {
     assert_eq!(lines[0][3].style.bg, Some(bg), "padding has bg");
 }
 
+/// Combining a block background with styled text must not overwrite the
+/// foreground color from the span.
 #[test]
 fn layout_block_content_fg_preserved_with_bg() {
     let fg = Color::Red;
@@ -221,6 +248,8 @@ fn layout_block_content_fg_preserved_with_bg() {
     assert_eq!(lines[0][0].style.bg, Some(bg));
 }
 
+/// Smoke-tests the complete block rendering path through ANSI output and a
+/// terminal emulator, not just the in-memory cells.
 #[test]
 fn layout_block_renders_through_vt100() {
     let bg = Color::Blue;
@@ -255,6 +284,8 @@ fn layout_block_renders_through_vt100() {
 
 // --- screen rendering tests (using vt100 as a headless terminal) ---
 
+/// Baseline render test: the first diff frame must draw prompt text and place
+/// the cursor at the requested cell.
 #[test]
 fn first_render_shows_prompt() {
     let mut t = TestTerm::new(24, 80);
@@ -263,6 +294,8 @@ fn first_render_shows_prompt() {
     assert_eq!(t.cursor(), (0, 7));
 }
 
+/// Appending within an existing row should repaint the changed tail without
+/// disturbing the cursor or surrounding content.
 #[test]
 fn appending_one_char_updates_correctly() {
     let mut t = TestTerm::new(24, 80);
@@ -274,6 +307,8 @@ fn appending_one_char_updates_correctly() {
     assert_eq!(t.cursor(), (0, 7));
 }
 
+/// Moving the cursor inside unchanged content must update terminal cursor
+/// position without repainting stale text.
 #[test]
 fn cursor_moves_without_changing_content() {
     let mut t = TestTerm::new(24, 80);
@@ -285,6 +320,8 @@ fn cursor_moves_without_changing_content() {
     assert_eq!(t.cursor(), (0, 2));
 }
 
+/// Shrinking a line must erase the old suffix so previous prompt characters do
+/// not remain visible.
 #[test]
 fn shrinking_clears_old_text() {
     let mut t = TestTerm::new(24, 80);
@@ -296,6 +333,8 @@ fn shrinking_clears_old_text() {
     assert_eq!(t.cursor(), (0, 4));
 }
 
+/// Protects basic prompt wrapping and cursor placement when input exceeds the
+/// terminal width.
 #[test]
 fn wrapping_to_second_line() {
     let mut t = TestTerm::new(24, 10);
@@ -306,6 +345,8 @@ fn wrapping_to_second_line() {
     assert_eq!(t.cursor(), (1, 2));
 }
 
+/// When wrapped input shrinks back to one row, the now-unused wrapped row must
+/// be cleared.
 #[test]
 fn removing_wrapped_line_clears_it() {
     let mut t = TestTerm::new(24, 10);
@@ -318,6 +359,8 @@ fn removing_wrapped_line_clears_it() {
     assert_eq!(t.cursor(), (0, 4));
 }
 
+/// Async output invalidates Tau-owned rows; the next prompt render must redraw
+/// from scratch at the same cursor position.
 #[test]
 fn invalidate_and_rerender_after_async_output() {
     let mut t = TestTerm::new(24, 80);
@@ -330,6 +373,8 @@ fn invalidate_and_rerender_after_async_output() {
     assert_eq!(t.cursor(), (0, 7));
 }
 
+/// Documents the exact-width cursor transition: filling the last column moves
+/// the cursor to column zero of the next row.
 #[test]
 fn growing_from_one_to_two_lines() {
     let mut t = TestTerm::new(24, 10);
@@ -350,6 +395,8 @@ fn growing_from_one_to_two_lines() {
     assert_eq!(t.cursor(), (1, 1));
 }
 
+/// A cursor inside wrapped content should be addressed on its visual row, not
+/// forced to the end of the rendered prompt.
 #[test]
 fn cursor_in_middle_of_wrapped_content() {
     let mut t = TestTerm::new(24, 10);
@@ -362,6 +409,8 @@ fn cursor_in_middle_of_wrapped_content() {
 
 // --- styled rendering tests ---
 
+/// Ensures styled spans generate terminal styling escapes while preserving the
+/// visible text.
 #[test]
 fn styled_content_renders_with_color() {
     let mut t = TestTerm::new(24, 80);
@@ -389,6 +438,8 @@ fn styled_content_renders_with_color() {
     );
 }
 
+/// Changing only style attributes must still be treated as a diff so style-only
+/// updates reach the terminal.
 #[test]
 fn styled_diff_only_rerenders_changed_styles() {
     let mut t = TestTerm::new(24, 80);
@@ -464,6 +515,8 @@ fn build_prompt_layout(
     (desired, (cursor_row, cursor_col))
 }
 
+/// Multi-zone layouts must keep status/above-prompt rows before the editable
+/// input row and offset the cursor accordingly.
 #[test]
 fn above_prompt_renders_before_input() {
     let mut t = TestTerm::new(24, 40);
@@ -477,6 +530,8 @@ fn above_prompt_renders_before_input() {
     assert_eq!(t.cursor(), (1, 7));
 }
 
+/// Multiple above-prompt rows should stack above input without confusing cursor
+/// row accounting.
 #[test]
 fn multi_line_above_prompt() {
     let mut t = TestTerm::new(24, 40);
@@ -491,6 +546,8 @@ fn multi_line_above_prompt() {
     assert_eq!(t.cursor(), (2, 4));
 }
 
+/// Right prompt content should be right-aligned on a single input row when it
+/// fits.
 #[test]
 fn right_prompt_shown_when_space_available() {
     let mut t = TestTerm::new(24, 40);
@@ -505,6 +562,8 @@ fn right_prompt_shown_when_space_available() {
     assert_eq!(row.len(), 40);
 }
 
+/// Right prompt content must disappear when the input plus gap would exceed
+/// terminal width.
 #[test]
 fn right_prompt_hidden_when_input_too_long() {
     let mut t = TestTerm::new(24, 20);
@@ -522,6 +581,8 @@ fn right_prompt_hidden_when_input_too_long() {
     assert!(row.starts_with("> abcdefghijklmno"), "row: {row:?}");
 }
 
+/// Once input wraps, the right prompt is hidden so it cannot be rendered on the
+/// wrong visual row.
 #[test]
 fn right_prompt_hidden_when_input_wraps() {
     let mut t = TestTerm::new(24, 10);
@@ -537,6 +598,8 @@ fn right_prompt_hidden_when_input_wraps() {
     assert_eq!(row1, "ij");
 }
 
+/// Covers the combined status, input, and right-prompt path that real prompts
+/// use.
 #[test]
 fn all_three_zones_together() {
     let mut t = TestTerm::new(24, 40);
@@ -703,6 +766,8 @@ fn render_scrolling_after_exact_width_line_does_not_duplicate_rows() {
     assert_eq!(visible, vec!["BBBBB", "ccccc", "ddddd"]);
 }
 
+/// End-to-end model of a full redraw: overflow builds scrollback, visible rows
+/// are the viewport, and the cursor returns to input.
 #[test]
 fn full_render_via_vt100() {
     use crossterm::QueueableCommand;
@@ -1032,6 +1097,9 @@ impl PendingWrapTerm {
     }
 }
 
+/// Regression guard from `fix(term-screen): avoid pending-wrap double scroll`:
+/// moving down from a terminal pending-wrap state must produce one scroll, not
+/// two.
 #[test]
 fn scrolling_from_pending_wrap_scrolls_once() {
     let width = 5;
@@ -1052,6 +1120,9 @@ fn scrolling_from_pending_wrap_scrolls_once() {
     assert_eq!(term.rows, vec!["ccccc", "ddddd", "eeeee"]);
 }
 
+/// Regression guard from `fix(term-screen): avoid rewriting rows before
+/// scroll`: rows about to leave the viewport must be scrolled naturally, not
+/// repainted into scrollback.
 #[test]
 fn scrolling_after_already_scrolled_does_not_rewrite_rows_that_will_drop() {
     let width = 5;
@@ -1100,6 +1171,8 @@ fn scrolling_after_already_scrolled_does_not_rewrite_rows_that_will_drop() {
     );
 }
 
+/// Regression guard from `fix(term-screen): scroll when appending empty rows`:
+/// even an empty appended row must advance the viewport and scrollback.
 #[test]
 fn scrolling_growth_by_empty_line_still_scrolls_viewport() {
     let width = 5;
@@ -1129,6 +1202,8 @@ fn scrolling_growth_by_empty_line_still_scrolls_viewport() {
     assert_eq!(scrolled, vec!["aaaaa", "bbbbb", "ccccc"]);
 }
 
+/// Protects the sequence where an empty row scroll is followed by a text row,
+/// preserving terminal order across frames.
 #[test]
 fn scrolling_empty_line_then_text_line_keeps_order() {
     let width = 5;
@@ -1172,6 +1247,8 @@ fn scrolling_empty_line_then_text_line_keeps_order() {
     assert_eq!(scrolled, vec!["aaaaa", "bbbbb", "ccccc"]);
 }
 
+/// When a changed top row becomes scrollback during the same frame, scrollback
+/// must contain the new text, not the old cached row.
 #[test]
 fn scrolling_changed_view_top_into_scrollback_preserves_new_text() {
     let width = 5;
@@ -1215,6 +1292,8 @@ fn scrolling_changed_view_top_into_scrollback_preserves_new_text() {
     assert_eq!(scrolled, vec!["aaaaa", "BBBBB", "ccccc"]);
 }
 
+/// Compares incremental scrolling with full-render behavior for exact-width
+/// cursor positions across possible cursor rows.
 #[test]
 fn scrolling_matches_full_render_for_cursor_rows_and_exact_width_lines() {
     let width = 5;
@@ -1266,6 +1345,8 @@ fn scrolling_matches_full_render_for_cursor_rows_and_exact_width_lines() {
     }
 }
 
+/// Exact-width cursors can leave the terminal in pending-wrap state; this
+/// protects scrollback order when the hidden top row also changes.
 #[test]
 fn scrolling_from_exact_width_cursor_with_top_change_keeps_scrollback_order() {
     let width = 5;
@@ -1295,6 +1376,8 @@ fn scrolling_from_exact_width_cursor_with_top_change_keeps_scrollback_order() {
     assert_eq!(scrolled, vec!["AAAAA", "bbbbb", "ccccc"]);
 }
 
+/// Repeated one-row growth should move each overflow row into scrollback
+/// exactly once, without duplicate visible or history rows.
 #[test]
 fn repeated_scrolling_growth_does_not_duplicate_overflow_rows() {
     let width = 5;

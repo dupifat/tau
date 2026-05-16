@@ -62,6 +62,8 @@ fn visible_rows(term: &vt100::Parser) -> Vec<String> {
 
 // --- full_render: content overflows terminal height ---
 
+/// Full redraw is allowed to write past the viewport; this locks in which rows
+/// stay visible and which enter terminal scrollback.
 #[test]
 fn full_render_overflow_visible_and_scrollback() {
     // 3 history lines + 4 live lines = 7 total, 5-row terminal.
@@ -91,6 +93,8 @@ fn full_render_overflow_visible_and_scrollback() {
     assert_eq!(sb[1], "history 1");
 }
 
+/// After an overflowing full redraw, cursor coordinates and the retained Screen
+/// cache must both be relative to the physical viewport.
 #[test]
 fn full_render_overflow_cursor_and_screen_state() {
     // 3 history + 4 live = 7, 5-row terminal.
@@ -121,6 +125,8 @@ fn full_render_overflow_cursor_and_screen_state() {
 
 // --- full_render: content shorter than terminal ---
 
+/// Cursor shape settings should use steady crossterm styles so Tau does not
+/// accidentally request blinking cursors.
 #[test]
 fn cursor_shape_maps_to_steady_styles() {
     assert_eq!(
@@ -133,6 +139,8 @@ fn cursor_shape_maps_to_steady_styles() {
     );
 }
 
+/// Short full-render content should start at the top without synthetic padding
+/// rows.
 #[test]
 fn full_render_short_content_at_top() {
     // 0 history + 3 live = 3, 10-row terminal.
@@ -150,6 +158,8 @@ fn full_render_short_content_at_top() {
     }
 }
 
+/// For non-overflowing full redraws, cursor placement and retained cache rows
+/// should match the original content indices.
 #[test]
 fn full_render_short_content_cursor() {
     // 0 history + 3 live = 3, 10-row terminal.
@@ -171,6 +181,8 @@ fn full_render_short_content_cursor() {
 
 // --- full_render: exact fit ---
 
+/// Exact-fit full redraws are the boundary between short and overflowing
+/// content, so cursor and cache math must not branch incorrectly.
 #[test]
 fn full_render_exact_fit() {
     // 2 history + 3 live = 5, 5-row terminal.
@@ -192,6 +204,8 @@ fn full_render_exact_fit() {
     assert_eq!(screen.actual_line_count(), 5);
 }
 
+/// When fixed prompt/status content is taller than the terminal, retained state
+/// must cap to the physical viewport instead of log boundaries.
 #[test]
 fn full_render_caps_visible_state_when_fixed_area_exceeds_height() {
     // Two history rows plus six fixed rows (status/suggestions/below),
@@ -228,6 +242,8 @@ fn full_render_caps_visible_state_when_fixed_area_exceeds_height() {
     assert_eq!(screen.actual_line_count(), 3);
 }
 
+/// Cursor positioning after full redraw must subtract the physical viewport
+/// start, not the history/live split.
 #[test]
 fn full_render_cursor_uses_physical_viewport_start() {
     let all_lines = plain_lines(&["hist 0", "hist 1", "live 0", "> prompt", "below"]);
@@ -253,6 +269,8 @@ fn full_render_cursor_uses_physical_viewport_start() {
     assert_eq!(screen.actual_line_count(), 3);
 }
 
+/// A resize full redraw should bottom-align real content directly and discard
+/// any previous rubber-gap assumptions.
 #[test]
 fn full_render_resize_to_larger_bottom_aligns_without_rubber() {
     let all_lines = plain_lines(&[
@@ -283,6 +301,8 @@ fn full_render_resize_to_larger_bottom_aligns_without_rubber() {
     assert_eq!(model.viewport_start, 1);
 }
 
+/// A diff render after full redraw must compare against the retained visible
+/// viewport so subsequent live updates remain incremental.
 #[test]
 fn full_render_then_diff_render() {
     // After full_render, Screen tracks the live area.
@@ -306,6 +326,8 @@ fn full_render_then_diff_render() {
     assert!(!buf2.is_empty(), "diff should produce output");
 }
 
+/// Documents the prompt-history contract: submitted entries are navigable while
+/// the unsent draft is restored at the end.
 #[test]
 fn input_history_navigates_submitted_and_draft_entries() {
     let buf = SharedBuffer::new();
@@ -392,6 +414,8 @@ fn input_history_navigates_submitted_and_draft_entries() {
     assert_eq!(handle.get_buffer(), "draft");
 }
 
+/// Seeded history from previous sessions should appear before the current draft
+/// when navigating upward.
 #[test]
 fn seeded_input_history_is_recalled_before_current_draft() {
     let buf = SharedBuffer::new();
@@ -425,6 +449,8 @@ fn seeded_input_history_is_recalled_before_current_draft() {
     assert_eq!(handle.get_buffer(), "old one");
 }
 
+/// Pressing Down from a non-empty draft creates a fresh editable prompt while
+/// keeping the draft reachable via history.
 #[test]
 fn down_from_non_empty_draft_creates_fresh_prompt_and_history_entry() {
     let buf = SharedBuffer::new();
@@ -461,6 +487,8 @@ fn down_from_non_empty_draft_creates_fresh_prompt_and_history_entry() {
     assert_eq!(handle.get_cursor(), 0);
 }
 
+/// History Up from a multi-line draft should preserve visual column on the
+/// previous entry's last row.
 #[test]
 fn up_lands_at_last_row_same_col_in_previous_entry() {
     let buf = SharedBuffer::new();
@@ -493,6 +521,8 @@ fn up_lands_at_last_row_same_col_in_previous_entry() {
     assert_eq!(handle.get_cursor(), 2);
 }
 
+/// History Down should mirror Up by landing on the next entry's first row at
+/// the preserved visual column.
 #[test]
 fn down_lands_at_first_row_same_col_in_next_entry() {
     let buf = SharedBuffer::new();
@@ -554,6 +584,8 @@ fn down_lands_at_first_row_same_col_in_next_entry() {
     assert_eq!(handle.get_cursor(), 1);
 }
 
+/// Vertical motion inside a buffer must remember the intended column even when
+/// an intermediate row is too short.
 #[test]
 fn down_preserves_sticky_column_across_short_line_in_buffer() {
     let buf = SharedBuffer::new();
@@ -585,6 +617,8 @@ fn down_preserves_sticky_column_across_short_line_in_buffer() {
     assert_eq!(handle.get_cursor(), 15);
 }
 
+/// Typing after vertical motion establishes a new column so future Up/Down does
+/// not use stale sticky-column state.
 #[test]
 fn typing_clears_sticky_column() {
     let buf = SharedBuffer::new();
@@ -624,6 +658,8 @@ fn typing_clears_sticky_column() {
     assert_eq!(handle.get_cursor(), 12);
 }
 
+/// History navigation should preserve the desired column across short entries
+/// instead of permanently clamping it.
 #[test]
 fn step_history_preserves_sticky_column_across_short_entry() {
     let buf = SharedBuffer::new();
@@ -681,6 +717,8 @@ fn step_history_preserves_sticky_column_across_short_entry() {
     assert_eq!(handle.get_cursor(), 4);
 }
 
+/// Upward motion through a short in-buffer row should keep the original column
+/// for the next row.
 #[test]
 fn up_preserves_sticky_column_across_short_line_in_buffer() {
     let buf = SharedBuffer::new();
@@ -710,6 +748,8 @@ fn up_preserves_sticky_column_across_short_line_in_buffer() {
     assert_eq!(handle.get_cursor(), 4);
 }
 
+/// The sticky column chosen while moving through a multi-line draft must carry
+/// into history navigation.
 #[test]
 fn sticky_column_carries_from_buffer_into_history() {
     let buf = SharedBuffer::new();
@@ -762,6 +802,8 @@ fn sticky_column_carries_from_buffer_into_history() {
     assert_eq!(handle.get_cursor(), 1);
 }
 
+/// Editing with Backspace should reset sticky-column state so later vertical
+/// moves follow the edited cursor position.
 #[test]
 fn backspace_clears_sticky_column() {
     let buf = SharedBuffer::new();
@@ -802,6 +844,8 @@ fn backspace_clears_sticky_column() {
     assert_eq!(handle.get_cursor(), 8);
 }
 
+/// Horizontal cursor movement intentionally abandons sticky-column state before
+/// the next vertical move.
 #[test]
 fn left_clears_sticky_column() {
     let buf = SharedBuffer::new();
@@ -837,6 +881,8 @@ fn left_clears_sticky_column() {
     assert_eq!(handle.get_cursor(), 9);
 }
 
+/// Home jumps to the prompt edge and should reset vertical sticky state, even
+/// when later rows are short.
 #[test]
 fn home_clears_sticky_column() {
     let buf = SharedBuffer::new();
@@ -884,6 +930,8 @@ fn home_clears_sticky_column() {
     assert_eq!(handle.get_cursor(), 11);
 }
 
+/// Ctrl-Up bypasses in-buffer vertical motion and jumps to history while
+/// preserving the current visual column.
 #[test]
 fn ctrl_up_jumps_to_history_with_column_preserved() {
     let buf = SharedBuffer::new();
@@ -916,6 +964,8 @@ fn ctrl_up_jumps_to_history_with_column_preserved() {
     assert_eq!(handle.get_cursor(), 2);
 }
 
+/// Ctrl-K/Ctrl-J history shortcuts should share the same column-preserving
+/// behavior as arrow-key history navigation.
 #[test]
 fn ctrl_k_steps_history_back_with_column_preserved() {
     let buf = SharedBuffer::new();
@@ -956,6 +1006,8 @@ fn ctrl_k_steps_history_back_with_column_preserved() {
     assert_eq!(handle.get_cursor(), 1);
 }
 
+/// Regression guard from `fix(cli): keep Ctrl-C from exiting prompt`: Ctrl-C on
+/// an empty prompt is a notice, not EOF.
 #[test]
 fn ctrl_c_empty_prompt_prints_notice_not_eof() {
     let buf = SharedBuffer::new();
@@ -975,6 +1027,8 @@ fn ctrl_c_empty_prompt_prints_notice_not_eof() {
     }
 }
 
+/// Clearing a non-empty prompt with Ctrl-C should participate in undo/redo like
+/// other buffer edits.
 #[test]
 fn ctrl_c_clear_can_be_undone_and_redone() {
     let buf = SharedBuffer::new();
@@ -1002,6 +1056,8 @@ fn ctrl_c_clear_can_be_undone_and_redone() {
     assert_eq!(handle.get_cursor(), 0);
 }
 
+/// Undo state belongs to the edited history entry and must survive leaving and
+/// returning to that entry.
 #[test]
 fn undo_state_follows_history_entry() {
     let buf = SharedBuffer::new();
@@ -1084,6 +1140,8 @@ fn undo_state_follows_history_entry() {
     assert_eq!(handle.get_buffer(), "first");
 }
 
+/// Wrapped single-line input should use visual columns, not byte offsets, for
+/// Up/Down cursor movement.
 #[test]
 fn vertical_motion_uses_visual_column_in_wrapped_line() {
     let buf = SharedBuffer::new();
@@ -1106,6 +1164,8 @@ fn vertical_motion_uses_visual_column_in_wrapped_line() {
     assert_eq!(handle.get_cursor(), 2);
 }
 
+/// Regression guard for the WIP history slot: after returning to a draft, Down
+/// must push the new draft again and reset the prompt.
 #[test]
 fn down_at_wip_slot_in_nav_mode_pushes_and_resets() {
     // Repro: after a Down has pushed once, navigating Up then
@@ -1187,6 +1247,8 @@ fn down_at_wip_slot_in_nav_mode_pushes_and_resets() {
     assert_eq!(handle.get_buffer(), "second");
 }
 
+/// Empty prompts should not create hidden history entries when navigated,
+/// preventing later recall of blank submissions.
 #[test]
 fn down_from_empty_prompt_does_not_create_history_entry() {
     let buf = SharedBuffer::new();
@@ -1237,6 +1299,8 @@ fn down_from_empty_prompt_does_not_create_history_entry() {
     assert_eq!(handle.get_buffer(), "x");
 }
 
+/// Up inside a multi-line draft should move within the draft before stepping
+/// into history.
 #[test]
 fn vertical_motion_stays_within_multiline_buffer_before_history() {
     let buf = SharedBuffer::new();
@@ -1258,6 +1322,8 @@ fn vertical_motion_stays_within_multiline_buffer_before_history() {
     assert_eq!(handle.get_cursor(), 1);
 }
 
+/// A diff after a full redraw with history must update visible rows
+/// incrementally while keeping history rows in the cache.
 #[test]
 fn full_render_then_diff_with_history() {
     // 3 history + 2 live = 5, 5-row terminal.
@@ -1364,6 +1430,8 @@ fn assert_full_redraw_after(
     );
 }
 
+/// Pasting multiline text should normalize layout and cursor state so the
+/// rendered terminal matches the buffer.
 #[test]
 fn multiline_buffer_layout_tracks_cursor_after_paste() {
     let buf = SharedBuffer::new();
@@ -1390,6 +1458,8 @@ fn multiline_buffer_layout_tracks_cursor_after_paste() {
     assert_eq!(parser.screen().cursor_position(), (1, 9));
 }
 
+/// Long prompts must scroll the viewport to keep the cursor visible, then let
+/// edits update that viewport correctly.
 #[test]
 fn long_multiline_prompt_scrolls_viewport_to_cursor() {
     let buf = SharedBuffer::new();
@@ -1448,6 +1518,8 @@ fn long_multiline_prompt_scrolls_viewport_to_cursor() {
     assert_eq!(parser.screen().cursor_position(), (0, 7));
 }
 
+/// Regression guard from `fix(cli-term-raw): normalize pasted newlines`: CRLF
+/// paste input should render and position the cursor like LF input.
 #[test]
 fn paste_normalizes_crlf_so_cursor_matches_rendered_multiline_buffer() {
     let buf = SharedBuffer::new();
@@ -1474,6 +1546,8 @@ fn paste_normalizes_crlf_so_cursor_matches_rendered_multiline_buffer() {
     assert_eq!(parser.screen().cursor_position(), (1, 9));
 }
 
+/// Unit-level guard for the byte/visual-position helpers used by multiline
+/// prompt navigation.
 #[test]
 fn multiline_buffer_vertical_cursor_motion_uses_visual_lines() {
     let width = 10;
@@ -1575,6 +1649,8 @@ fn prompt_input_repeated_full_lines_ending_in_newline_do_not_stack_phantom_rows(
     assert_eq!((layout.cursor_row, layout.cursor_col), (2, 0));
 }
 
+/// Virtual terminal smoke test: constructing Term should render the prompt on
+/// the redraw thread.
 #[test]
 fn virtual_term_shows_prompt() {
     let buf = SharedBuffer::new();
@@ -1590,6 +1666,8 @@ fn virtual_term_shows_prompt() {
     drop(term);
 }
 
+/// Direct buffer updates should flow through layout and redraw so typed input
+/// appears next to the prompt.
 #[test]
 fn virtual_term_renders_typed_input() {
     let buf = SharedBuffer::new();
@@ -1610,6 +1688,8 @@ fn virtual_term_renders_typed_input() {
     );
 }
 
+/// Printed output blocks should be included in the virtual terminal frame, not
+/// only stored in the model.
 #[test]
 fn virtual_term_renders_print_output() {
     let buf = SharedBuffer::new();
@@ -1632,6 +1712,8 @@ fn virtual_term_renders_print_output() {
     );
 }
 
+/// Updating a live block should replace visible content in place and clear the
+/// previous text.
 #[test]
 fn virtual_term_updates_block_in_place() {
     let buf = SharedBuffer::new();
@@ -1670,6 +1752,8 @@ fn virtual_term_updates_block_in_place() {
     );
 }
 
+/// Streaming-finalization path: active partial output is removed and final
+/// output is printed to history without leaving stale partial text.
 #[test]
 fn virtual_term_block_removed_from_active_then_printed_to_history() {
     let buf = SharedBuffer::new();
@@ -2066,6 +2150,8 @@ fn live_block_growth_scrolls_updated_lines_into_scrollback() {
     );
 }
 
+/// Visible history updates can be patched incrementally; this protects the
+/// no-full-redraw fast path.
 #[test]
 fn visible_history_block_update_does_not_full_redraw() {
     let buf = SharedBuffer::new();
@@ -2085,6 +2171,8 @@ fn visible_history_block_update_does_not_full_redraw() {
     });
 }
 
+/// Hidden scrollback changes require a full redraw because the terminal
+/// scrollback cannot be patched in place.
 #[test]
 fn hidden_history_block_update_full_redraws() {
     let buf = SharedBuffer::new();
@@ -2104,6 +2192,8 @@ fn hidden_history_block_update_full_redraws() {
     });
 }
 
+/// Visible active tool/status updates should stay on the incremental path for
+/// smooth streaming output.
 #[test]
 fn visible_active_block_update_does_not_full_redraw() {
     let buf = SharedBuffer::new();
@@ -2124,6 +2214,8 @@ fn visible_active_block_update_does_not_full_redraw() {
     });
 }
 
+/// Finalizing a visible active block into history should preserve the viewport
+/// and avoid an unnecessary full redraw.
 #[test]
 fn active_block_finalized_to_history_does_not_full_redraw_when_visible() {
     let buf = SharedBuffer::new();
@@ -2145,6 +2237,8 @@ fn active_block_finalized_to_history_does_not_full_redraw_when_visible() {
     });
 }
 
+/// Removing a visible active block can remain incremental when new tail content
+/// keeps the viewport moving downward.
 #[test]
 fn visible_active_block_removal_does_not_full_redraw_when_viewport_still_moves_down() {
     let buf = SharedBuffer::new();
@@ -2166,6 +2260,9 @@ fn visible_active_block_removal_does_not_full_redraw_when_viewport_still_moves_d
     });
 }
 
+/// Regression guard from `fix(term): absorb visible shrinkage with viewport
+/// rubber`: shrinkage is absorbed with a blank rubber row instead of full
+/// redraw.
 #[test]
 fn removing_visible_block_that_moves_viewport_up_uses_rubber_without_full_redraw() {
     let buf = SharedBuffer::new();
@@ -2186,6 +2283,8 @@ fn removing_visible_block_that_moves_viewport_up_uses_rubber_without_full_redraw
     });
 }
 
+/// After rubber has kept an incremental frame stable, a later full redraw must
+/// discard the rubber and repaint the true viewport.
 #[test]
 fn full_redraw_after_rubber_discards_rubber_and_repaints_viewport() {
     let buf = SharedBuffer::new();
@@ -2222,6 +2321,8 @@ fn full_redraw_after_rubber_discards_rubber_and_repaints_viewport() {
     );
 }
 
+/// Regression guard from `fix(term): redraw resize scrollback without rubber
+/// gaps`: resizing after rubber must rebuild without leaving the synthetic gap.
 #[test]
 fn resize_full_redraw_discards_rubber_gap() {
     let buf = SharedBuffer::new();
@@ -2270,6 +2371,8 @@ fn resize_full_redraw_discards_rubber_gap() {
     );
 }
 
+/// Resize full redraw must rebuild terminal scrollback correctly even when rows
+/// exactly fill the old or new width.
 #[test]
 fn resize_full_redraw_rebuilds_scrollback_for_exact_width_lines() {
     let buf = SharedBuffer::new();
@@ -2316,6 +2419,8 @@ fn resize_full_redraw_rebuilds_scrollback_for_exact_width_lines() {
     );
 }
 
+/// Shrinking the terminal should rebuild the scrollback model without blank
+/// gaps between history and prompt.
 #[test]
 fn resize_full_redraw_rebuilds_scrollback_without_gap() {
     let buf = SharedBuffer::new();
@@ -2360,6 +2465,8 @@ fn resize_full_redraw_rebuilds_scrollback_without_gap() {
     );
 }
 
+/// Below-prompt status changes are visible fixed-area updates and should not
+/// force a scrollback-resetting full redraw.
 #[test]
 fn below_status_update_with_scrollback_does_not_full_redraw() {
     let buf = SharedBuffer::new();
@@ -2380,6 +2487,8 @@ fn below_status_update_with_scrollback_does_not_full_redraw() {
     });
 }
 
+/// Tool-summary churn reorders visible blocks during normal operation; this
+/// protects the incremental path for that UI pattern.
 #[test]
 fn tool_summary_like_reorder_in_visible_area_does_not_full_redraw() {
     let buf = SharedBuffer::new();
@@ -2413,6 +2522,8 @@ fn tool_summary_like_reorder_in_visible_area_does_not_full_redraw() {
     });
 }
 
+/// Pseudo-random visible block churn stress-tests that visible-only mutations
+/// keep using incremental rendering.
 #[test]
 fn randomized_visible_block_churn_does_not_full_redraw() {
     let buf = SharedBuffer::new();
@@ -2481,6 +2592,8 @@ fn randomized_visible_block_churn_does_not_full_redraw() {
     }
 }
 
+/// Every hidden scrollback mutation needs its own full redraw so the retained
+/// model never diverges from terminal history.
 #[test]
 fn repeated_hidden_block_updates_each_full_redraw() {
     let buf = SharedBuffer::new();
@@ -2542,6 +2655,8 @@ fn assert_no_full_redraw_and_rows(
     assert_terminal_rows_match(parser, cols, height, expected);
 }
 
+/// Basic append operations should keep Tau's retained model and vt100's
+/// scrollback in lockstep without full redraws.
 #[test]
 fn terminal_scrollback_model_matches_vt100_for_basic_append_paths() {
     let buf = SharedBuffer::new();
@@ -2589,6 +2704,8 @@ fn terminal_scrollback_model_matches_vt100_for_basic_append_paths() {
     );
 }
 
+/// Empty visible blocks are layout no-ops and must not perturb the retained
+/// terminal model.
 #[test]
 fn empty_blocks_in_visible_zones_do_not_change_model_or_full_redraw() {
     let buf = SharedBuffer::new();
@@ -2678,6 +2795,8 @@ fn empty_blocks_in_visible_zones_do_not_change_model_or_full_redraw() {
     );
 }
 
+/// Empty history blocks hidden in scrollback should also be no-ops, avoiding
+/// expensive redraws for zero-height content.
 #[test]
 fn empty_history_blocks_in_scrollback_do_not_change_model_or_full_redraw() {
     let buf = SharedBuffer::new();
@@ -2714,6 +2833,8 @@ fn empty_history_blocks_in_scrollback_do_not_change_model_or_full_redraw() {
     });
 }
 
+/// Repeated history appends should naturally spill rows into terminal
+/// scrollback while staying incremental.
 #[test]
 fn repeated_tail_appends_spill_viewport_to_scrollback_without_full_redraw() {
     let buf = SharedBuffer::new();
@@ -2733,6 +2854,8 @@ fn repeated_tail_appends_spill_viewport_to_scrollback_without_full_redraw() {
     }
 }
 
+/// Growing live output in place should scroll overflow rows into terminal
+/// scrollback without resorting to full redraw.
 #[test]
 fn repeated_live_growth_spills_viewport_to_scrollback_without_full_redraw() {
     let buf = SharedBuffer::new();
@@ -2761,6 +2884,8 @@ fn repeated_live_growth_spills_viewport_to_scrollback_without_full_redraw() {
     }
 }
 
+/// Middle active-block growth, shrinkage, and removal are visible-only edits
+/// and should keep the model synchronized incrementally.
 #[test]
 fn middle_visible_active_block_lifecycle_without_scrollback_does_not_full_redraw() {
     let buf = SharedBuffer::new();
@@ -2845,6 +2970,8 @@ fn middle_visible_active_block_lifecycle_without_scrollback_does_not_full_redraw
     );
 }
 
+/// Below-zone middle block edits exercise the same incremental splice logic
+/// below the prompt.
 #[test]
 fn middle_visible_below_block_lifecycle_without_scrollback_does_not_full_redraw() {
     let buf = SharedBuffer::new();
@@ -2902,6 +3029,8 @@ fn middle_visible_below_block_lifecycle_without_scrollback_does_not_full_redraw(
     );
 }
 
+/// Sticky above-prompt blocks should support visible middle edits without
+/// invalidating the full screen.
 #[test]
 fn middle_visible_sticky_block_lifecycle_without_scrollback_does_not_full_redraw() {
     let buf = SharedBuffer::new();
@@ -2959,6 +3088,8 @@ fn middle_visible_sticky_block_lifecycle_without_scrollback_does_not_full_redraw
     );
 }
 
+/// Suggestion block churn should be patched in place so completions can update
+/// without full redraw flicker.
 #[test]
 fn middle_visible_suggestions_block_lifecycle_without_scrollback_does_not_full_redraw() {
     let buf = SharedBuffer::new();
@@ -3022,6 +3153,8 @@ fn middle_visible_suggestions_block_lifecycle_without_scrollback_does_not_full_r
     );
 }
 
+/// Changing prompt height shifts below blocks; this protects incremental
+/// movement and retained-model consistency.
 #[test]
 fn prompt_height_changes_shift_below_blocks_without_full_redraw_or_model_drift() {
     let buf = SharedBuffer::new();
@@ -3057,6 +3190,8 @@ fn prompt_height_changes_shift_below_blocks_without_full_redraw_or_model_drift()
     );
 }
 
+/// A visible middle block can grow enough to push rows into scrollback; the
+/// retained model must still match vt100 without full redraw.
 #[test]
 fn visible_middle_block_growth_into_scrollback_keeps_model_in_sync_without_full_redraw() {
     let buf = SharedBuffer::new();
@@ -3113,6 +3248,8 @@ fn visible_middle_block_growth_into_scrollback_keeps_model_in_sync_without_full_
     );
 }
 
+/// Compensating shrink/growth across zones should preserve row order and model
+/// sync while staying incremental.
 #[test]
 fn visible_middle_block_shrink_with_compensating_below_growth_keeps_model_in_sync_without_full_redraw()
  {
@@ -3160,6 +3297,8 @@ fn visible_middle_block_shrink_with_compensating_below_growth_keeps_model_in_syn
     );
 }
 
+/// Long-form integration guard: visible churn across history, active, and below
+/// zones must match the known-lines model at every scrollback offset.
 #[test]
 fn terminal_scrollback_matches_known_lines_model_across_visible_churn() {
     let buf = SharedBuffer::new();
@@ -3299,6 +3438,8 @@ fn trailing_newline_buffer_grows_prompt_height() {
     assert_eq!(parser.screen().cursor_position(), (1, 0));
 }
 
+/// Regression guard from `fix(term): wrap prompt cursor after exact-width
+/// input`: an exact-width prompt end needs a cursor row before below blocks.
 #[test]
 fn exact_width_prompt_end_grows_prompt_height_for_cursor() {
     let buf = SharedBuffer::new();
@@ -3319,6 +3460,8 @@ fn exact_width_prompt_end_grows_prompt_height_for_cursor() {
     assert_eq!(parser.screen().cursor_position(), (2, 0));
 }
 
+/// Shift-Enter and Alt-Enter should insert newlines for multiline prompts,
+/// while plain Enter still submits.
 #[test]
 fn shift_or_alt_enter_inserts_newline_without_submitting() {
     let buf = SharedBuffer::new();
@@ -3369,6 +3512,8 @@ fn shift_or_alt_enter_inserts_newline_without_submitting() {
     ));
 }
 
+/// If the row leaving the viewport changed, the scrolling planner should know
+/// it can still render that prefix before it drops.
 #[test]
 fn scrolling_when_dropping_changed_top_row_can_incremental_render() {
     let prev = plain_lines(&["aaaaa", "bbbbb", "ccccc"]);
@@ -3377,6 +3522,8 @@ fn scrolling_when_dropping_changed_top_row_can_incremental_render() {
     assert_eq!(changed_line_in_range(&prev, &next, 0..1), Some(0));
 }
 
+/// If the leaving row is unchanged, prefix-change detection must not invent
+/// work that would force an unnecessary redraw.
 #[test]
 fn scrolling_when_dropping_unchanged_top_row_has_no_prefix_change() {
     let prev = plain_lines(&["aaaaa", "bbbbb", "ccccc"]);
@@ -3385,6 +3532,8 @@ fn scrolling_when_dropping_unchanged_top_row_has_no_prefix_change() {
     assert_eq!(changed_line_in_range(&prev, &next, 0..1), None);
 }
 
+/// Hidden-line detection should ignore visible-only edits so incremental
+/// repaint remains available.
 #[test]
 fn hidden_lines_changed_ignores_visible_changes() {
     let prev = plain_lines(&["old hidden", "visible"]);
@@ -3393,6 +3542,8 @@ fn hidden_lines_changed_ignores_visible_changes() {
     assert!(!hidden_lines_changed(&prev, &next, 1));
 }
 
+/// Hidden-line detection must catch changed scrollback rows because those
+/// require a full redraw.
 #[test]
 fn hidden_lines_changed_detects_scrollback_changes() {
     let prev = plain_lines(&["old hidden", "visible"]);
@@ -3401,6 +3552,8 @@ fn hidden_lines_changed_detects_scrollback_changes() {
     assert!(hidden_lines_changed(&prev, &next, 1));
 }
 
+/// Removing a hidden scrollback row also invalidates terminal history and must
+/// force the full-redraw path.
 #[test]
 fn hidden_lines_changed_detects_removed_scrollback_line() {
     let prev = plain_lines(&["hidden", "visible"]);

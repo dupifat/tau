@@ -269,7 +269,7 @@ pub(crate) fn run_chat(
             "Leave the UI but keep the harness running for later reattach",
         ),
         SlashCommand::new("/model", "Switch agent role (e.g. /model smart)"),
-        SlashCommand::new("/role", "Create, edit, or delete an agent role"),
+        SlashCommand::new("/role", "Switch, create, edit, or delete an agent role"),
         SlashCommand::new(
             "/new",
             "Start a fresh session in this harness (current session is left as-is on disk)",
@@ -1007,9 +1007,18 @@ fn handle_role_command(text: &str, writer: &WriterHandle, print_local: &impl Fn(
     let command = parts.next();
     let value = parts.next();
     let extra = parts.next();
-    let (Some(role), Some(command)) = (role, command) else {
+    let Some(role) = role else {
         print_local(
-            "/role <role> <delete|model|effort|verbosity|thinking-summary|service-tier|tools-profile> [value]",
+            "/role <role> [delete|model|effort|verbosity|thinking-summary|service-tier|tools-profile] [value]",
+        );
+        return;
+    };
+    let Some(command) = command else {
+        let _ = send_event(
+            writer,
+            &Event::UiRoleSelect(tau_proto::UiRoleSelect {
+                role: role.to_owned(),
+            }),
         );
         return;
     };

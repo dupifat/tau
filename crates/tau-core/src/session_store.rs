@@ -19,7 +19,9 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use tau_proto::{ConnectionId, Event, LogEventId, NodeId, SessionId, UnixMicros};
 
-use crate::session::{PersistedSessionEvent, SessionMeta, SessionTree};
+use crate::session::{
+    PersistedSessionEvent, SessionEventValidationError, SessionMeta, SessionTree,
+};
 
 /// Errors returned by the append-only session store.
 #[derive(Debug)]
@@ -55,6 +57,9 @@ pub enum SessionStoreError {
     },
     InvalidSessionDir {
         path: PathBuf,
+    },
+    InvalidEvent {
+        source: SessionEventValidationError,
     },
 }
 
@@ -108,6 +113,7 @@ impl fmt::Display for SessionStoreError {
                 "invalid session directory name (non-utf8): {}",
                 path.display()
             ),
+            Self::InvalidEvent { source } => write!(f, "invalid session event: {source}"),
         }
     }
 }
@@ -121,6 +127,7 @@ impl Error for SessionStoreError {
             Self::Write { source, .. } => Some(source),
             Self::Decode { source, .. } => Some(source),
             Self::Encode { source, .. } => Some(source),
+            Self::InvalidEvent { source } => Some(source),
             Self::Locked { .. } => None,
             Self::InvalidSessionDir { .. } => None,
         }
@@ -363,6 +370,8 @@ impl SessionStore {
             .sessions
             .entry(sid.clone())
             .or_insert_with(|| SessionTree::from_events(sid, &[]));
+        tree.validate_event(&event)
+            .map_err(|source| SessionStoreError::InvalidEvent { source })?;
         // Cached: `from_events` populated this from the highest
         // persisted id at load time; we keep it advanced below.
         // Avoids re-reading and re-decoding the entire on-disk log

@@ -36,8 +36,8 @@
 
 use std::collections::HashMap;
 
-use tau_core::{SessionEntry, ToolActivityOutcome};
-use tau_proto::{CborValue, NodeId, ToolCallId};
+use tau_core::SessionEntry;
+use tau_proto::{CborValue, NodeId, ToolCallId, ToolResultStatus};
 
 /// Sentinel prefix on dedup-pointer text. Picked so it is exceedingly
 /// unlikely to appear at the start of a real tool output. Used both
@@ -103,35 +103,40 @@ impl ResultDedupMap {
     ) {
         self.map.clear();
         for entry in branch {
-            let SessionEntry::ToolActivity(activity) = entry else {
+            let SessionEntry::ToolResults { items } = entry else {
                 continue;
             };
-            let (content_hash, content_bytes) = match &activity.outcome {
-                ToolActivityOutcome::Result { result } => {
-                    if is_dedup_pointer_value(result) {
-                        continue;
+            for item in items {
+                let (content_hash, content_bytes) = match &item.status {
+                    ToolResultStatus::Success => {
+                        if is_dedup_pointer_value(&item.output) {
+                            continue;
+                        }
+                        let bytes = encode_for_hash(&item.output);
+                        (hash_truncated(&bytes), bytes.len())
                     }
-                    let bytes = encode_for_hash(result);
-                    (hash_truncated(&bytes), bytes.len())
-                }
-                ToolActivityOutcome::Error { message, details } => {
-                    if message.starts_with(DEDUP_MARKER) {
-                        continue;
+                    ToolResultStatus::Error { message } => {
+                        if message.starts_with(DEDUP_MARKER) {
+                            continue;
+                        }
+                        let bytes = encode_error_for_hash(message, Some(&item.output));
+                        (hash_truncated(&bytes), bytes.len())
                     }
-                    let bytes = encode_error_for_hash(message, details.as_ref());
-                    (hash_truncated(&bytes), bytes.len())
+                    ToolResultStatus::Cancelled { reason } => {
+                        if reason.starts_with(DEDUP_MARKER) {
+                            continue;
+                        }
+                        let bytes = encode_error_for_hash(reason, Some(&item.output));
+                        (hash_truncated(&bytes), bytes.len())
+                    }
+                };
+                if content_bytes < threshold {
+                    continue;
                 }
-                ToolActivityOutcome::Requested { .. } => continue,
-            };
-            if content_bytes < threshold {
-                continue;
+                self.map
+                    .entry(content_hash)
+                    .or_insert_with(|| item.call_id.clone());
             }
-            // Earlier occurrences win — the pointer must reference the
-            // first `call_id` in the assembled history so the model
-            // sees the canonical content above the pointer.
-            self.map
-                .entry(content_hash)
-                .or_insert_with(|| activity.call_id.clone());
         }
         self.built_for = new_head;
     }
@@ -274,8 +279,7 @@ pub(crate) fn is_dedup_pointer_value(value: &CborValue) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use tau_core::{ToolActivityOutcome, ToolActivityRecord};
-    use tau_proto::{CborValue, ToolCallId, ToolName};
+    use tau_proto::{CborValue, ToolCallId, ToolName, ToolResultItem, ToolResultStatus, ToolType};
 
     use super::*;
 
@@ -284,13 +288,14 @@ mod tests {
     }
 
     fn result_entry(call_id: &str, content: &str) -> SessionEntry {
-        SessionEntry::ToolActivity(ToolActivityRecord {
-            call_id: ToolCallId::from(call_id),
-            tool_name: ToolName::new("read"),
-            outcome: ToolActivityOutcome::Result {
-                result: cbor_text(content),
-            },
-        })
+        SessionEntry::ToolResults {
+            items: vec![ToolResultItem {
+                call_id: ToolCallId::from(call_id),
+                tool_type: ToolType::Function,
+                status: ToolResultStatus::Success,
+                output: cbor_text(content),
+            }],
+        }
     }
 
     #[test]

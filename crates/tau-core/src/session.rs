@@ -8,12 +8,35 @@
 //! other API mutates the tree, so the on-disk log and the cached
 //! view cannot drift.
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use tau_proto::{
-    ConnectionId, Event, LogEventId, SessionId, ToolCallId, ToolName, ToolType, UnixMicros,
+    AgentBackend, AgentTokenUsage, ConnectionId, ContentPart, ContextItem, ContextRole, Event,
+    LogEventId, MessageItem, SessionId, ToolCallId, ToolResultItem, ToolResultStatus, UnixMicros,
 };
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionEventValidationError {
+    message: String,
+}
+
+impl SessionEventValidationError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for SessionEventValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for SessionEventValidationError {}
 
 /// Default starting `LogEventId` for a tree with no events.
 const FIRST_EVENT_ID: u64 = 0;
@@ -21,74 +44,28 @@ const FIRST_EVENT_ID: u64 = 0;
 /// One persisted chat or tool activity entry belonging to a session.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum SessionEntry {
-    UserMessage {
-        text: String,
+    UserInput {
+        items: Vec<ContextItem>,
     },
-    CompactedSummary {
-        summary: String,
-        input_items: Vec<String>,
+    AssistantResponse {
+        provider_response_id: Option<String>,
+        backend: Option<AgentBackend>,
+        output_items: Vec<ContextItem>,
+        usage: Option<AgentTokenUsage>,
     },
-    AgentMessage {
-        /// Visible message text. `None` for tool-only turns where the
-        /// model emitted nothing but `function_call` items — those
-        /// turns still warrant an entry whenever `reasoning_items`
-        /// are present, so the assembler can re-attach the reasoning
-        /// to the next request.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        text: Option<String>,
-        /// Provider-supplied reasoning summary captured during the
-        /// turn, if any. Persisted alongside the response so resume
-        /// can re-render it; intentionally excluded from prompt
-        /// replay (see harness `assemble_conversation`).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        thinking: Option<String>,
-        /// Provider-supplied `phase` label captured for this turn
-        /// (`commentary` vs. `final_answer`). Persisted so it can be
-        /// echoed back on later turns — the OpenAI Codex deployment
-        /// checklist explicitly calls out missing phase on history
-        /// as a cause of early stopping on `gpt-5.3-codex+`. Older
-        /// sessions without this field deserialize as `None` and
-        /// fall back to the default-`final_answer` behavior in the
-        /// Responses backend.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        phase: Option<tau_proto::MessagePhase>,
-        /// Provider-supplied reasoning output items (raw JSON
-        /// blobs), captured when the backend ran with
-        /// `include: ["reasoning.encrypted_content"]` (Codex
-        /// `gpt-5.3-codex+`). The harness replays these verbatim
-        /// before the next turn's message/function_call items so the
-        /// model's reasoning continuity survives a broken chain —
-        /// same role as Pi's `thinkingSignature` blob, persisted on
-        /// disk so a resume after restart still recovers it.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        reasoning_items: Vec<String>,
+    ToolResults {
+        items: Vec<ToolResultItem>,
     },
-    ToolActivity(ToolActivityRecord),
+    Compaction {
+        replacement_window: Vec<ContextItem>,
+    },
 }
 
-/// One persisted tool activity record associated with a session.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ToolActivityRecord {
-    pub call_id: ToolCallId,
-    pub tool_name: ToolName,
-    pub outcome: ToolActivityOutcome,
-}
-
-/// The persisted outcome of one tool activity.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum ToolActivityOutcome {
-    Requested {
-        #[serde(default, skip_serializing_if = "ToolType::is_default")]
-        tool_type: ToolType,
-        arguments: tau_proto::CborValue,
-    },
-    Result {
-        result: tau_proto::CborValue,
-    },
-    Error {
-        message: String,
-        details: Option<tau_proto::CborValue>,
-    },
+#[derive(Clone, Debug, Default, PartialEq)]
+struct PendingToolRound {
+    assistant_node_id: NodeId,
+    call_order: Vec<ToolCallId>,
+    terminal_results: HashMap<ToolCallId, ToolResultItem>,
 }
 
 // `NodeId` lives on the wire (tree-folding events carry their own
@@ -132,6 +109,8 @@ pub struct SessionTree {
     /// the last id (the previous behaviour was O(N) per append,
     /// quadratic over a long session).
     pub(crate) next_event_id: LogEventId,
+    pending_tool_rounds: HashMap<NodeId, PendingToolRound>,
+    tool_call_rounds: HashMap<ToolCallId, NodeId>,
 }
 
 impl SessionTree {
@@ -241,6 +220,8 @@ impl SessionTree {
             nodes: Vec::new(),
             head: None,
             next_event_id: LogEventId::new(FIRST_EVENT_ID),
+            pending_tool_rounds: HashMap::new(),
+            tool_call_rounds: HashMap::new(),
         };
         for entry in events {
             // Persisted records store the inner `Option<NodeId>` only
@@ -312,91 +293,111 @@ impl SessionTree {
         match event {
             Event::UiPromptSubmitted(prompt) => Some(self.append_node_at(
                 parent,
-                SessionEntry::UserMessage {
-                    text: prompt.text.clone(),
+                SessionEntry::UserInput {
+                    items: vec![ContextItem::Message(MessageItem {
+                        role: ContextRole::User,
+                        content: vec![ContentPart::Text {
+                            text: prompt.text.clone(),
+                        }],
+                        phase: None,
+                    })],
                 },
             )),
             Event::SessionUserMessageInjected(injected) => Some(self.append_node_at(
                 parent,
-                SessionEntry::UserMessage {
-                    text: injected.text.clone(),
+                SessionEntry::UserInput {
+                    items: vec![ContextItem::Message(MessageItem {
+                        role: ContextRole::User,
+                        content: vec![ContentPart::Text {
+                            text: injected.text.clone(),
+                        }],
+                        phase: None,
+                    })],
                 },
             )),
             Event::SessionPromptSteered(steered) => Some(self.append_node_at(
                 parent,
-                SessionEntry::UserMessage {
-                    text: steered.text.clone(),
+                SessionEntry::UserInput {
+                    items: vec![ContextItem::Message(MessageItem {
+                        role: ContextRole::User,
+                        content: vec![ContentPart::Text {
+                            text: steered.text.clone(),
+                        }],
+                        phase: None,
+                    })],
                 },
             )),
             Event::SessionCompacted(compacted) => Some(self.append_node_at(
                 parent,
-                SessionEntry::CompactedSummary {
-                    summary: compacted.summary.clone(),
-                    input_items: compacted.compacted_input_items.clone(),
+                SessionEntry::Compaction {
+                    replacement_window: compacted.replacement_window.clone(),
                 },
             )),
             Event::AgentResponseFinished(response) => {
-                // An entry is warranted whenever the turn produced
-                // *some* assistant output that isn't already
-                // captured elsewhere on the tree: visible text,
-                // displayable thinking, or encrypted reasoning items.
-                // Tool calls land on
-                // `SessionEntry::ToolActivity` via downstream
-                // `ToolRequest` events, so a pure tool-only turn
-                // with no reasoning still produces no `AgentMessage`
-                // — same shape as before this field existed.
-                if response.text.is_some()
-                    || response
-                        .thinking
-                        .as_ref()
-                        .is_some_and(|thinking| !thinking.is_empty())
-                    || !response.reasoning_items.is_empty()
-                {
-                    Some(self.append_node_at(
-                        parent,
-                        SessionEntry::AgentMessage {
-                            text: response.text.clone(),
-                            thinking: response.thinking.clone(),
-                            phase: response.phase,
-                            reasoning_items: response.reasoning_items.clone(),
-                        },
-                    ))
-                } else {
-                    None
+                let node_id = self.append_node_at(
+                    parent,
+                    SessionEntry::AssistantResponse {
+                        provider_response_id: response.provider_response_id.clone(),
+                        backend: response.backend.clone(),
+                        output_items: response.output_items.clone(),
+                        usage: response.usage.clone(),
+                    },
+                );
+                let mut call_order = Vec::new();
+                let mut seen = HashSet::new();
+                for item in &response.output_items {
+                    if let ContextItem::ToolCall(call) = item {
+                        assert!(
+                            seen.insert(call.call_id.clone()),
+                            "duplicate tool call id in agent response: {}",
+                            call.call_id
+                        );
+                        assert!(
+                            !self.tool_call_rounds.contains_key(&call.call_id),
+                            "tool call id reused while a round is open: {}",
+                            call.call_id
+                        );
+                        call_order.push(call.call_id.clone());
+                    }
                 }
+                if !call_order.is_empty() {
+                    for call_id in &call_order {
+                        self.tool_call_rounds.insert(call_id.clone(), node_id);
+                    }
+                    self.pending_tool_rounds.insert(
+                        node_id,
+                        PendingToolRound {
+                            assistant_node_id: node_id,
+                            call_order,
+                            terminal_results: HashMap::new(),
+                        },
+                    );
+                }
+                Some(node_id)
             }
-            Event::ToolRequest(request) => Some(self.append_node_at(
-                parent,
-                SessionEntry::ToolActivity(ToolActivityRecord {
-                    call_id: request.call_id.clone(),
-                    tool_name: request.tool_name.clone(),
-                    outcome: ToolActivityOutcome::Requested {
-                        tool_type: request.tool_type,
-                        arguments: request.arguments.clone(),
-                    },
-                }),
-            )),
-            Event::ToolResult(result) => Some(self.append_node_at(
-                parent,
-                SessionEntry::ToolActivity(ToolActivityRecord {
-                    call_id: result.call_id.clone(),
-                    tool_name: result.tool_name.clone(),
-                    outcome: ToolActivityOutcome::Result {
-                        result: result.result.clone(),
-                    },
-                }),
-            )),
-            Event::ToolError(error) => Some(self.append_node_at(
-                parent,
-                SessionEntry::ToolActivity(ToolActivityRecord {
-                    call_id: error.call_id.clone(),
-                    tool_name: error.tool_name.clone(),
-                    outcome: ToolActivityOutcome::Error {
-                        message: error.message.clone(),
-                        details: error.details.clone(),
-                    },
-                }),
-            )),
+            Event::ToolRequest(_) => None,
+            Event::ToolResult(result) => self.record_terminal_tool_result(ToolResultItem {
+                call_id: result.call_id.clone(),
+                tool_type: result.tool_type,
+                status: ToolResultStatus::Success,
+                output: result.result.clone(),
+            }),
+            Event::ToolError(error) => self.record_terminal_tool_result(ToolResultItem {
+                call_id: error.call_id.clone(),
+                tool_type: error.tool_type,
+                status: ToolResultStatus::Error {
+                    message: error.message.clone(),
+                },
+                output: error.details.clone().unwrap_or(tau_proto::CborValue::Null),
+            }),
+            Event::ToolCancelled(cancelled) => self.record_terminal_tool_result(ToolResultItem {
+                call_id: cancelled.call_id.clone(),
+                tool_type: cancelled.tool_type,
+                status: ToolResultStatus::Cancelled {
+                    reason: "cancelled".to_owned(),
+                },
+                output: tau_proto::CborValue::Null,
+            }),
             Event::UiNavigateTree(req) => {
                 let target = NodeId::new(req.node_id);
                 if (target.get() as usize) < self.nodes.len() {
@@ -406,6 +407,109 @@ impl SessionTree {
             }
             _ => None,
         }
+    }
+
+    /// Validate an event against the current transcript fold state before
+    /// appending it to the durable log.
+    pub fn validate_event(&self, event: &Event) -> Result<(), SessionEventValidationError> {
+        match event {
+            Event::AgentResponseFinished(response) => {
+                let mut seen = HashSet::new();
+                for item in &response.output_items {
+                    let ContextItem::ToolCall(call) = item else {
+                        continue;
+                    };
+                    if call.call_id.as_str().is_empty() {
+                        return Err(SessionEventValidationError::new(
+                            "agent response contained an empty tool call id",
+                        ));
+                    }
+                    if !seen.insert(call.call_id.clone()) {
+                        return Err(SessionEventValidationError::new(format!(
+                            "agent response contained duplicate tool call id: {}",
+                            call.call_id
+                        )));
+                    }
+                    if self.tool_call_rounds.contains_key(&call.call_id) {
+                        return Err(SessionEventValidationError::new(format!(
+                            "agent response reused open tool call id: {}",
+                            call.call_id
+                        )));
+                    }
+                }
+                Ok(())
+            }
+            Event::ToolResult(result) => self.validate_terminal_tool_result(&result.call_id),
+            Event::ToolError(error) => self.validate_terminal_tool_result(&error.call_id),
+            Event::ToolCancelled(cancelled) => {
+                self.validate_terminal_tool_result(&cancelled.call_id)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn record_terminal_tool_result(&mut self, item: ToolResultItem) -> Option<NodeId> {
+        let Some(assistant_node_id) = self.tool_call_rounds.get(&item.call_id).copied() else {
+            panic!(
+                "terminal tool result for unknown or already-closed call_id: {}",
+                item.call_id
+            );
+        };
+        let Some(round) = self.pending_tool_rounds.get_mut(&assistant_node_id) else {
+            panic!(
+                "tool call mapped to missing pending round: {}",
+                item.call_id
+            );
+        };
+        round.terminal_results.insert(item.call_id.clone(), item);
+        if round.terminal_results.len() != round.call_order.len() {
+            return None;
+        }
+
+        let round = self
+            .pending_tool_rounds
+            .remove(&assistant_node_id)
+            .expect("pending round should exist when terminal");
+        for call_id in &round.call_order {
+            self.tool_call_rounds.remove(call_id);
+        }
+        let items = round
+            .call_order
+            .iter()
+            .map(|call_id| {
+                round
+                    .terminal_results
+                    .get(call_id)
+                    .cloned()
+                    .expect("terminal round missing tool result")
+            })
+            .collect();
+        Some(self.append_node_at(
+            Some(round.assistant_node_id),
+            SessionEntry::ToolResults { items },
+        ))
+    }
+
+    fn validate_terminal_tool_result(
+        &self,
+        call_id: &ToolCallId,
+    ) -> Result<(), SessionEventValidationError> {
+        let Some(assistant_node_id) = self.tool_call_rounds.get(call_id) else {
+            return Err(SessionEventValidationError::new(format!(
+                "terminal tool result for unknown or already-closed call_id: {call_id}"
+            )));
+        };
+        let Some(round) = self.pending_tool_rounds.get(assistant_node_id) else {
+            return Err(SessionEventValidationError::new(format!(
+                "tool call mapped to missing pending round: {call_id}"
+            )));
+        };
+        if round.terminal_results.contains_key(call_id) {
+            return Err(SessionEventValidationError::new(format!(
+                "duplicate terminal tool result for call_id: {call_id}"
+            )));
+        }
+        Ok(())
     }
 }
 

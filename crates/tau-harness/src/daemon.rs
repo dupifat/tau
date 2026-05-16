@@ -17,7 +17,9 @@ use tau_socket::SocketPeer;
 use crate::error::HarnessError;
 use crate::event::HarnessEvent;
 use crate::format::{format_extension_event, format_tool_progress};
-use crate::harness::{Harness, default_agent_runner};
+use crate::harness::{
+    Harness, assistant_text_from_output_items, default_agent_runner, tool_calls_from_output_items,
+};
 use crate::runtime_dir;
 use crate::settings::{Config, resolve_config};
 
@@ -167,7 +169,7 @@ pub fn run_embedded_message_with_echo(
         tau_agent::run_echo(r, w).map_err(|e| e.to_string())
     }
     run_embedded_message_impl(
-        state_dir,
+        state_dir.into(),
         session_id,
         message,
         echo_runner,
@@ -185,7 +187,12 @@ fn run_embedded_message_impl(
     options: EmbeddedOptions,
 ) -> Result<InteractionOutcome, HarnessError> {
     let state_dir = state_dir.into();
-    let dirs = options.dirs.unwrap_or_default();
+    let dirs = options
+        .dirs
+        .unwrap_or_else(|| tau_config::settings::TauDirs {
+            config_dir: Some(state_dir.join("config")),
+            state_dir: Some(state_dir.join("runtime")),
+        });
     let mut harness = Harness::new_with_agent(state_dir, dirs, agent_runner, tools, session_id)?;
     let mut outcome = harness.send_user_message(session_id, message, None)?;
     harness.shutdown()?;
@@ -221,7 +228,13 @@ pub fn run_daemon(
     let socket_path = socket_path.into();
     let state_dir = state_dir.into();
     let listener = bind_listener(&socket_path)?;
-    let dirs = options.dirs.clone().unwrap_or_default();
+    let dirs = options
+        .dirs
+        .clone()
+        .unwrap_or_else(|| tau_config::settings::TauDirs {
+            config_dir: Some(state_dir.join("config")),
+            state_dir: Some(state_dir.join("runtime")),
+        });
     let mut harness = Harness::new(state_dir, dirs, eager_session_id)?;
 
     let tx = harness.tx.clone();
@@ -330,6 +343,7 @@ pub fn send_daemon_message_with_trace(
             EventSelector::Prefix("agent.".to_owned()),
             EventSelector::Prefix("session.".to_owned()),
             EventSelector::Prefix("tool.".to_owned()),
+            EventSelector::Prefix("shell.".to_owned()),
             EventSelector::Prefix("extension.".to_owned()),
             EventSelector::Prefix("harness.".to_owned()),
         ],
@@ -361,6 +375,9 @@ pub fn send_daemon_message_with_trace(
                 Frame::Event(Event::ToolProgress(p)) => {
                     progress_messages.push(format_tool_progress(&p))
                 }
+                Frame::Event(Event::ShellCommandProgress(_)) => {
+                    progress_messages.push("shell: running shell command".to_owned())
+                }
                 Frame::Event(Event::HarnessInfo(ref info)) => {
                     lifecycle_messages.push(info.message.clone());
                 }
@@ -378,7 +395,7 @@ pub fn send_daemon_message_with_trace(
                     our_spid_counter = parse_spid_counter(prompt.session_prompt_id.as_ref());
                 }
                 Frame::Event(Event::AgentResponseFinished(finished))
-                    if finished.tool_calls.is_empty()
+                    if tool_calls_from_output_items(&finished.output_items).is_empty()
                         && our_spid_counter.is_some_and(|ours| {
                             parse_spid_counter(finished.session_prompt_id.as_ref())
                                 .is_some_and(|c| ours <= c)
@@ -390,7 +407,8 @@ pub fn send_daemon_message_with_trace(
                     return Ok(InteractionOutcome {
                         lifecycle_messages,
                         progress_messages,
-                        response: finished.text.unwrap_or_default(),
+                        response: assistant_text_from_output_items(&finished.output_items)
+                            .unwrap_or_default(),
                     });
                 }
                 Frame::Message(Message::Disconnect(d)) => {

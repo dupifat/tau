@@ -179,17 +179,19 @@ mod tests {
         let model: ModelId = "openai/gpt-5".parse().expect("model id");
         let event = Event::AgentResponseFinished(AgentResponseFinished {
             session_prompt_id: SessionPromptId::from("sp-0"),
-            input_tokens: Some(1000),
-            cached_tokens: Some(800),
-            output_tokens: Some(42),
-            token_usage: Some(AgentTokenUsage {
+            output_items: Vec::new(),
+            stop_reason: tau_proto::AgentStopReason::EndTurn,
+            originator: PromptOriginator::User,
+            usage: Some(AgentTokenUsage {
                 model: Some(model),
                 prompt_sent_tokens: 1000,
                 prompt_cached_tokens: 800,
                 response_received_tokens: 42,
                 stats: tau_proto::TokenUsageStats::default(),
             }),
-            ..AgentResponseFinished::default()
+            backend: None,
+            provider_response_id: None,
+            ws_pool_delta: None,
         });
         log.log_published_event(
             Some(&ConnectionId::from("conn-1")),
@@ -203,7 +205,7 @@ mod tests {
         assert_eq!(line["type"], "published");
         assert_eq!(line["event_name"], "agent.response_finished");
         assert_eq!(line["source"], "conn-1");
-        let usage = &line["event"]["payload"]["token_usage"];
+        let usage = &line["event"]["payload"]["usage"];
         assert_eq!(usage["prompt_sent_tokens"], 1000);
         assert_eq!(usage["prompt_cached_tokens"], 800);
         assert_eq!(usage["response_received_tokens"], 42);

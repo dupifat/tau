@@ -5,8 +5,8 @@
 //!
 //! Events emitted (all via `Osc1337SetUserVar`):
 //! - `ui.prompt_submitted` → `user-notification = protoss-probe-ack`
-//! - final `agent.response_finished` (only when `tool_calls` is empty) →
-//!   `user-notification = protoss-upgrade-complete`
+//! - final `agent.response_finished` (only when `stop_reason` does not request
+//!   tools) → `user-notification = protoss-upgrade-complete`
 //! - After `idle_seconds` (default 60) of inactivity following a final response
 //!   → `user-text-notification = {"urgency": "normal", "title": "Agent idle:
 //!   <host>:<cwd>", "body": "Waiting for user input", "app_name": "tau"}`. If
@@ -417,7 +417,7 @@ where
                     }
                     Event::AgentResponseFinished(finished) => {
                         // The agent emits one `AgentResponseFinished`
-                        // per LLM call. When `tool_calls` is non-empty,
+                        // per LLM call. When `stop_reason` requests tools,
                         // the harness will run the tools and feed the
                         // results back as a new prompt — the *turn*
                         // isn't actually done yet. Only fire the
@@ -426,10 +426,10 @@ where
                         // pending tool work. (Sub-agent finishes are
                         // already filtered out at the top of the
                         // dispatch loop.)
-                        if !finished.tool_calls.is_empty() {
+                        if finished.stop_reason.requests_tool_calls() {
                             tracing::trace!(
                                 target: LOG_TARGET,
-                                tool_calls = finished.tool_calls.len(),
+                                stop_reason = ?finished.stop_reason,
                                 "skipping mid-turn AgentResponseFinished",
                             );
                             continue;

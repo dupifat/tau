@@ -1,5 +1,15 @@
 use super::*;
 
+fn user_text_item(text: &str) -> ContextItem {
+    ContextItem::Message(MessageItem {
+        role: ContextRole::User,
+        content: vec![ContentPart::Text {
+            text: text.to_owned(),
+        }],
+        phase: None,
+    })
+}
+
 fn representative_events() -> Vec<Event> {
     vec![
         Event::ToolRegister(ToolRegister {
@@ -30,6 +40,7 @@ fn representative_events() -> Vec<Event> {
         Event::ToolResult(ToolResult {
             call_id: "call-1".into(),
             tool_name: ToolName::new("echo"),
+            tool_type: ToolType::Function,
             result: CborValue::Text("hello".to_owned()),
             display: None,
             originator: PromptOriginator::User,
@@ -37,6 +48,7 @@ fn representative_events() -> Vec<Event> {
         Event::ToolError(ToolError {
             call_id: "call-1".into(),
             tool_name: ToolName::new("missing_tool"),
+            tool_type: ToolType::Function,
             message: "no live provider".to_owned(),
             details: None,
             display: None,
@@ -76,16 +88,7 @@ fn representative_events() -> Vec<Event> {
                 session_prompt_id: "sp-compact-1".into(),
                 session_id: "s1".into(),
                 system_prompt: "You are helpful.".to_owned(),
-                system_prompt_ref: None,
-                messages: vec![ConversationMessage {
-                    role: ConversationRole::User,
-                    content: vec![ContentBlock::Text {
-                        text: "compact this".to_owned(),
-                    }],
-                    phase: None,
-                }],
-                message_prefix: None,
-                compacted_input_items: Vec::new(),
+                context_items: vec![user_text_item("compact this")],
                 tools: Vec::new(),
                 tools_ref: None,
                 model: None,
@@ -97,23 +100,14 @@ fn representative_events() -> Vec<Event> {
                 },
                 share_user_cache_key: false,
                 ctx_id: None,
-                previous_response: None,
+                previous_response_candidate: None,
             },
         }),
         Event::SessionPromptCreated(SessionPromptCreated {
             session_prompt_id: "sp-1".into(),
             session_id: "s1".into(),
             system_prompt: "You are helpful.".to_owned(),
-            system_prompt_ref: None,
-            messages: vec![ConversationMessage {
-                role: ConversationRole::User,
-                content: vec![ContentBlock::Text {
-                    text: "hello".to_owned(),
-                }],
-                phase: None,
-            }],
-            message_prefix: None,
-            compacted_input_items: Vec::new(),
+            context_items: vec![user_text_item("hello")],
             tools: vec![ToolDefinition {
                 name: ToolName::new("read"),
                 model_visible_name: None,
@@ -128,25 +122,24 @@ fn representative_events() -> Vec<Event> {
             tool_choice: ToolChoice::default(),
             originator: PromptOriginator::User,
             ctx_id: None,
-            previous_response: None,
+            previous_response_candidate: None,
             share_user_cache_key: false,
         }),
         Event::AgentResponseFinished(AgentResponseFinished {
             session_prompt_id: "sp-1".into(),
-            text: Some("Hi there".to_owned()),
-            tool_calls: Vec::new(),
-            input_tokens: None,
-            cached_tokens: None,
-            output_tokens: None,
-            thinking: None,
-            token_usage: None,
+            output_items: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: "Hi there".to_owned(),
+                }],
+                phase: None,
+            })],
+            stop_reason: AgentStopReason::EndTurn,
+            usage: None,
             originator: PromptOriginator::User,
 
             backend: None,
-            response_id: None,
-            phase: None,
-            reasoning_items: Vec::new(),
-            compacted_input_items: Vec::new(),
+            provider_response_id: None,
             ws_pool_delta: None,
         }),
         Event::ExtensionStarting(ExtensionStarting {
@@ -378,22 +371,6 @@ fn tool_name_new_panics_on_invalid() {
 }
 
 #[test]
-fn tool_name_maybe_classifies_inputs() {
-    assert!(matches!(
-        ToolNameMaybe::from("read"),
-        ToolNameMaybe::Valid(_)
-    ));
-    assert!(matches!(
-        ToolNameMaybe::from(""),
-        ToolNameMaybe::Invalid(ref s) if s.is_empty()
-    ));
-    assert!(matches!(
-        ToolNameMaybe::from("fs.read"),
-        ToolNameMaybe::Invalid(ref s) if s == "fs.read"
-    ));
-}
-
-#[test]
 fn tool_name_rejects_overlong_input() {
     // ASCII alphanumerics that exceed the cap must be rejected even
     // though they pass the character-class check.
@@ -508,34 +485,11 @@ fn event_defaults_to_transient_marks_progress_kinds() {
 }
 
 #[test]
-fn tool_name_maybe_serializes_as_transparent_string() {
-    // The wire format must be a plain string — same bytes as if
-    // the field were declared `String`. That's what lets us
-    // introduce `ToolNameMaybe` without a protocol bump.
-    let valid = ToolNameMaybe::from("read");
-    let invalid = ToolNameMaybe::from("bad.name");
-    assert_eq!(
-        serde_json::to_string(&valid).expect("serialize valid"),
-        "\"read\""
-    );
-    assert_eq!(
-        serde_json::to_string(&invalid).expect("serialize invalid"),
-        "\"bad.name\""
-    );
-
-    // Round-trip via JSON picks the right variant.
-    let reparsed: ToolNameMaybe = serde_json::from_str("\"read\"").expect("deserialize valid");
-    assert!(matches!(reparsed, ToolNameMaybe::Valid(_)));
-    let reparsed: ToolNameMaybe =
-        serde_json::from_str("\"bad.name\"").expect("deserialize invalid");
-    assert!(matches!(reparsed, ToolNameMaybe::Invalid(_)));
-}
-
-#[test]
 fn tool_spec_enabled_by_default_defaults_true_when_omitted() {
     let parsed: ToolSpec = serde_json::from_value(serde_json::json!({
         "name": "echo",
         "description": "Echo a payload",
+        "tool_type": "function",
         "side_effects": "pure"
     }))
     .expect("deserialize tool spec");
@@ -616,7 +570,6 @@ fn model_params_serializes_skipping_defaults() {
         json,
         serde_json::json!({
             "effort": "high",
-            "verbosity": "low",
             "thinking_summary": "concise",
             "service_tier": "fast",
         })

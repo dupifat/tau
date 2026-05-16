@@ -151,6 +151,7 @@ where
                 writer.write_frame(&Frame::Event(Event::ToolError(ToolError {
                     call_id: invoke.call_id,
                     tool_name: invoke.tool_name,
+                    tool_type: tau_proto::ToolType::Function,
                     message: "restarting failed".to_owned(),
                     details: None,
                     display: None,

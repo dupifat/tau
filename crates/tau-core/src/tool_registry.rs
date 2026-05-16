@@ -201,11 +201,12 @@ impl ToolRegistry {
         requester_id: &str,
         request: ToolRequest,
     ) -> Result<ToolRouteReport, ToolRouteError> {
+        let tool_name = request.tool_name.clone();
         let provider_connection_id = self
-            .resolve_provider(&request.tool_name)
+            .resolve_provider(tool_name.as_str())
             .map(|provider| provider.connection_id.clone())
             .ok_or_else(|| ToolRouteError::NoProvider {
-                tool_name: request.tool_name.clone(),
+                tool_name: tool_name.clone(),
             })?;
 
         let route_report = bus
@@ -214,7 +215,7 @@ impl ToolRegistry {
                 Some(requester_id),
                 tau_proto::Frame::Event(Event::ToolInvoke(tau_proto::ToolInvoke {
                     call_id: request.call_id,
-                    tool_name: request.tool_name,
+                    tool_name,
                     arguments: request.arguments,
                     originator: request.originator,
                 })),

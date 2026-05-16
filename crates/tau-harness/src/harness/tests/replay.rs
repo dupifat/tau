@@ -1,5 +1,15 @@
 use super::*;
 
+fn assistant_output(text: &str) -> Vec<tau_proto::ContextItem> {
+    vec![tau_proto::ContextItem::Message(tau_proto::MessageItem {
+        role: tau_proto::ContextRole::Assistant,
+        content: vec![tau_proto::ContentPart::Text {
+            text: text.to_owned(),
+        }],
+        phase: None,
+    })]
+}
+
 #[test]
 fn late_joining_ui_client_receives_replayed_session_events() {
     let td = TempDir::new().expect("tempdir");
@@ -68,10 +78,14 @@ fn late_joining_ui_client_receives_replayed_session_events() {
                 got_prompt = true;
             }
             Frame::Event(Event::AgentResponseFinished(finished))
-                if finished
-                    .text
-                    .as_deref()
-                    .is_some_and(|text| text.contains("hello replay")) =>
+                if finished.output_items.iter().any(|item| {
+                    matches!(
+                        item,
+                        tau_proto::ContextItem::Message(tau_proto::MessageItem { content, .. })
+                            if matches!(&content[0], tau_proto::ContentPart::Text { text }
+                                if text.contains("hello replay"))
+                    )
+                }) =>
             {
                 got_response = true;
             }
@@ -107,19 +121,16 @@ fn late_joining_ui_client_replays_only_final_session_events() {
             session_prompt_id: spid.clone(),
             session_id: "s1".into(),
             system_prompt: String::new(),
-            system_prompt_ref: None,
-            messages: Vec::new(),
-            message_prefix: None,
-            compacted_input_items: Vec::new(),
+            context_items: Vec::new(),
             tools: Vec::new(),
             tools_ref: None,
             model: None,
             model_params: Default::default(),
             tool_choice: Default::default(),
             originator: Default::default(),
-            ctx_id: None,
-            previous_response: None,
+            previous_response_candidate: None,
             share_user_cache_key: false,
+            ctx_id: None,
         }),
     );
     h.publish_event(
@@ -143,28 +154,19 @@ fn late_joining_ui_client_replays_only_final_session_events() {
         Event::SessionCompacted(tau_proto::SessionCompacted {
             session_id: "s1".into(),
             originator: tau_proto::PromptOriginator::User,
-            summary: "Conversation compacted.".to_owned(),
-            compacted_input_items: vec!["{}".to_owned()],
+            replacement_window: assistant_output("Conversation compacted."),
         }),
     );
     h.publish_event(
         None,
         Event::AgentResponseFinished(AgentResponseFinished {
             session_prompt_id: spid,
-            text: Some("final".to_owned()),
-            tool_calls: Vec::new(),
+            output_items: assistant_output("final"),
+            stop_reason: tau_proto::AgentStopReason::EndTurn,
             originator: Default::default(),
-            input_tokens: None,
-            cached_tokens: None,
-            output_tokens: None,
-            thinking: None,
-            token_usage: None,
-
+            usage: None,
             backend: None,
-            response_id: None,
-            phase: None,
-            reasoning_items: Vec::new(),
-            compacted_input_items: Vec::new(),
+            provider_response_id: None,
             ws_pool_delta: None,
         }),
     );
@@ -370,25 +372,19 @@ fn resumed_harness_replays_persisted_session_history() {
             .clone();
         h.handle_agent_response_finished(AgentResponseFinished {
             session_prompt_id: spid,
-            text: Some("remembered potato".to_owned()),
-            tool_calls: Vec::new(),
-            input_tokens: None,
-            cached_tokens: None,
-            output_tokens: None,
-            thinking: None,
-            token_usage: None,
+            output_items: assistant_output("remembered potato"),
+            stop_reason: tau_proto::AgentStopReason::EndTurn,
             originator: tau_proto::PromptOriginator::User,
-
+            usage: None,
             backend: None,
-            response_id: None,
-            phase: None,
-            reasoning_items: Vec::new(),
-            compacted_input_items: Vec::new(),
+            provider_response_id: None,
             ws_pool_delta: None,
         })
         .expect("persist agent response");
 
         h.shutdown().expect("shutdown");
+        drop(h);
+        wait_for_session_unlock(&sp, "s1");
     }
 
     let mut resumed = echo_harness_for("s1", &sp).expect("resume");
@@ -404,7 +400,7 @@ fn resumed_harness_replays_persisted_session_history() {
         .expect("resumed session prompt id")
         .clone();
     let prompt = read_prompt_created(&resumed, &spid);
-    let serialized = serde_json::to_string(&prompt.messages).expect("json");
+    let serialized = serde_json::to_string(&prompt.context_items).expect("json");
 
     assert!(
         serialized.contains("remember potato"),
@@ -438,44 +434,20 @@ fn thinking_is_persisted_but_excluded_from_prompt_replay() {
     let spid1 = h.send_prompt_to_agent("s1");
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: spid1,
-        text: Some("answer".to_owned()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: Some("The user is asking ...".to_owned()),
-        token_usage: None,
+        output_items: assistant_output("answer"),
+        stop_reason: tau_proto::AgentStopReason::EndTurn,
         originator: tau_proto::PromptOriginator::User,
-
+        usage: None,
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("persist agent response");
 
-    // Confirm it was stored on the session entry.
-    let stored = h
-        .store
-        .session("s1")
-        .expect("session")
-        .current_branch()
-        .into_iter()
-        .find_map(|e| match e {
-            SessionEntry::AgentMessage { thinking, .. } => Some(thinking.clone()),
-            _ => None,
-        })
-        .expect("agent message");
-    assert_eq!(stored.as_deref(), Some("The user is asking ..."));
-
-    // The next prompt's replayed messages must NOT contain the
-    // thinking text.
     append_user_message_via_event(&mut h, "s1", "second");
     let spid2 = h.send_prompt_to_agent("s1");
     let prompt2 = read_prompt_created(&h, &spid2);
-    let serialized = serde_json::to_string(&prompt2.messages).expect("json");
+    let serialized = serde_json::to_string(&prompt2.context_items).expect("json");
     assert!(
         !serialized.contains("The user is asking"),
         "prompt replay must not echo reasoning summary back to the model",

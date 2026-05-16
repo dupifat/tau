@@ -138,8 +138,8 @@ pub(crate) struct WsConn {
 
 struct PrewarmAnchor {
     response_id: String,
-    message_count: usize,
-    messages: Vec<tau_proto::ConversationMessage>,
+    item_count: usize,
+    context_items: Vec<tau_proto::ContextItem>,
     fingerprint: String,
 }
 
@@ -149,10 +149,10 @@ impl PrewarmAnchor {
         config: &ResponsesConfig,
         request: &PromptPayload<'_>,
     ) -> Result<bool, LlmError> {
-        if request.messages.len() < self.messages.len() {
+        if request.context_items.len() < self.context_items.len() {
             return Ok(false);
         }
-        if request.messages[..self.messages.len()] != self.messages {
+        if request.context_items[..self.context_items.len()] != self.context_items {
             return Ok(false);
         }
         Ok(self.fingerprint == ws_chain_fingerprint(config, request)?)
@@ -235,14 +235,13 @@ impl WsConn {
                     Some(anchor) if anchor.matches(config, request)? => {
                         owned_previous = PreviousResponse {
                             id: &anchor.response_id,
-                            message_index: anchor.message_count,
+                            next_item_index: anchor.item_count,
                             transport: Some(tau_proto::AgentBackendTransport::Websocket),
                         };
                         chained_request = PromptPayload {
                             previous_response: Some(owned_previous),
                             system_prompt: request.system_prompt,
-                            messages: request.messages,
-                            compacted_input_items: &[],
+                            context_items: request.context_items,
                             tools: request.tools,
                             params: request.params,
                             tool_choice: request.tool_choice,
@@ -277,8 +276,8 @@ impl WsConn {
         let state = self.run_envelope(envelope, &mut |_, _| {})?;
         self.prewarm_anchor = state.response_id.as_ref().map(|response_id| PrewarmAnchor {
             response_id: response_id.clone(),
-            message_count: request.messages.len(),
-            messages: request.messages.to_vec(),
+            item_count: request.context_items.len(),
+            context_items: request.context_items.to_vec(),
             fingerprint,
         });
         Ok(state)

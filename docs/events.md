@@ -49,20 +49,22 @@ tree and the prompt lifecycle.
   emitted before `session.started` for the next one. Extensions flush or
   drop per-session state.
 - **`session.prompt_queued`** — A user prompt arrived while the agent
-  was busy and was queued instead of dispatched.
+  was busy and was queued instead of dispatched. Operational only;
+  transient rather than durable transcript state.
 - **`session.prompt_steered`** — A previously queued prompt is being
   folded into the in-flight turn as a steering message rather than
   starting a fresh turn. Folds into the session tree as one user
   message at the current head.
 - **`session.prompt_created`** — The harness persisted a prompt and
-  assigned it an id; payload carries the assembled system prompt,
-  message history, available tools, model, effort, thinking-summary
-  setting, and originator. This is the input handed to the agent.
-  `message_prefix`, when present, means `messages` is only the suffix;
-  prepend `base.messages[..message_count]` from the referenced prompt
-  to materialize the full history. `tools_ref`, when present, means
+  assigned it an id; payload carries `system_prompt`, assembled
+  `context_items`, available tools, model, effort,
+  thinking-summary setting, and originator. This is the input handed
+  to the agent. `context_items` is fully materialized history for the
+  turn. This event is transient operational delivery state, not durable
+  transcript truth. `tools_ref`, when present, means
   `tools` is empty; copy full tool definitions from the referenced
-  prompt.
+  prompt. Durable transcript truth comes from later
+  user/assistant/completed-tool/session-compacted facts.
 - **`session.user_message_injected`** — A synthetic user message
   inserted by the harness (e.g. `!`-shell command output, AGENTS.md
   preamble). Folds into the session tree like a real user prompt.
@@ -72,13 +74,14 @@ tree and the prompt lifecycle.
 Emitted by the agent backend (tau-agent, or any drop-in replacement).
 
 - **`agent.prompt_submitted`** — The agent accepted a `session.prompt_created`
-  and started processing it. Echoes the originator.
+  and started processing it. Echoes the originator. Transient.
 - **`agent.response_updated`** — Streaming update with the full text so
   far (replace, not delta) and accumulated reasoning summary if any.
   Transient by default.
-- **`agent.response_finished`** — Final response: text, any tool calls
-  the agent wants to make, usage tokens, final thinking summary,
-  echoed originator. Routed by the harness based on the originator.
+- **`agent.response_finished`** — Final assistant output in original
+  item order via `output_items`, plus optional usage, provider
+  response id, backend metadata, and echoed originator. Routed by the
+  harness based on the originator.
 
 ## Tools
 
@@ -91,18 +94,25 @@ the agent requests calls, and the harness orchestrates dispatch.
 - **`tool.unregister`** *(extension)* — A previously registered tool is
   withdrawn.
 - **`tool.request`** *(agent)* — The agent asks for a tool call by id,
-  name, and CBOR arguments. Goes through the harness's dispatch queue.
+  model-produced name, and CBOR arguments. Goes through the harness's
+  dispatch queue. Operational only; transient rather than durable
+  transcript truth.
 - **`tool.invoke`** *(harness)* — The harness has decided to run a
   request and is dispatching it to the tool's implementing extension.
-- **`tool.result`** *(extension)* — Successful tool result, by call id.
+- **`tool.result`** *(extension/harness)* — Successful runtime tool
+  completion, by call id, with tool-owned `result` plus optional UI
+  `display` metadata and echoed originator. This event shape remains
+  operational and renderer-friendly. The durable transcript fold uses
+  a separate terminal tool-result fact shape (`tool_type`, `status`,
+  `output`) derived by the harness/runtime layer.
 - **`tool.error`** *(extension)* — Tool failure with a message and
-  optional structured details.
+  optional structured details. Operational only; transient.
 - **`tool.progress`** *(extension)* — In-flight progress update with an
   optional message and current/total counters. Transient.
 - **`tool.cancel`** *(harness)* — The harness asks an extension to
   cancel an in-flight call.
 - **`tool.cancelled`** *(extension)* — The extension acknowledges that a
-  call has been cancelled.
+  call has been cancelled. Operational only; transient.
 - **`tool.delegate_progress`** *(harness)* — Live snapshot of a sub-agent
   spawned by the `delegate` tool: tools-in-flight, total, context
   tokens, percent. Transient; the UI re-renders the parent tool block.

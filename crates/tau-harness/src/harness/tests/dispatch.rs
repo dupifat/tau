@@ -1,6 +1,15 @@
 use super::*;
 use crate::conversation::{Conversation, ConversationId};
 
+fn responses_backend() -> tau_proto::AgentBackend {
+    tau_proto::AgentBackend {
+        kind: tau_proto::AgentBackendKind::Responses,
+        base_url: "https://api.example.test".to_owned(),
+        transport: tau_proto::AgentBackendTransport::HttpSse,
+        stale_chain_fallback: false,
+    }
+}
+
 fn assert_delegate_tools_counter(
     progress: &tau_proto::DelegateProgress,
     complete: Option<u64>,
@@ -36,6 +45,33 @@ fn assert_delegate_ctx_counter(
     assert_eq!(counter.unit, tau_proto::ProgressUnit::Tokens);
     assert_eq!(counter.complete, complete);
     assert_eq!(counter.total, total);
+}
+
+fn text_part(item: &ContextItem) -> Option<&str> {
+    match item {
+        ContextItem::Message(message) => message.content.iter().find_map(|part| match part {
+            ContentPart::Text { text } => Some(text.as_str()),
+        }),
+        ContextItem::ToolResult(result) => match &result.output {
+            CborValue::Text(text) => Some(text.as_str()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn tool_call_id(item: &ContextItem) -> Option<&str> {
+    match item {
+        ContextItem::ToolCall(call) => Some(call.call_id.as_str()),
+        _ => None,
+    }
+}
+
+fn tool_result_id(item: &ContextItem) -> Option<&str> {
+    match item {
+        ContextItem::ToolResult(result) => Some(result.call_id.as_str()),
+        _ => None,
+    }
 }
 
 #[test]
@@ -109,42 +145,41 @@ fn pure_mutating_pure_serializes_through_dispatch_state_machine() {
     ]);
     let response = AgentResponseFinished {
         session_prompt_id: "sp-x".into(),
-        text: None,
-        tool_calls: vec![
-            AgentToolCall {
-                id: "c1".into(),
-                name: "read".into(),
+        output_items: vec![
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "c1".into(),
+                name: tau_proto::ToolName::new("read"),
                 tool_type: tau_proto::ToolType::Function,
                 arguments: read_args.clone(),
-                display: None,
-            },
-            AgentToolCall {
-                id: "c2".into(),
-                name: "write".into(),
+            }),
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "c2".into(),
+                name: tau_proto::ToolName::new("write"),
                 tool_type: tau_proto::ToolType::Function,
                 arguments: write_args,
-                display: None,
-            },
-            AgentToolCall {
-                id: "c3".into(),
-                name: "read".into(),
+            }),
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "c3".into(),
+                name: tau_proto::ToolName::new("read"),
                 tool_type: tau_proto::ToolType::Function,
                 arguments: read_args,
-                display: None,
-            },
+            }),
         ],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     };
 
@@ -219,42 +254,41 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
     };
     let response = AgentResponseFinished {
         session_prompt_id: "sp-x".into(),
-        text: None,
-        tool_calls: vec![
-            AgentToolCall {
-                id: "c1".into(),
-                name: "write".into(),
+        output_items: vec![
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "c1".into(),
+                name: tau_proto::ToolName::new("write"),
                 tool_type: tau_proto::ToolType::Function,
                 arguments: write_args("a.txt"),
-                display: None,
-            },
-            AgentToolCall {
-                id: "c2".into(),
-                name: "write".into(),
+            }),
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "c2".into(),
+                name: tau_proto::ToolName::new("write"),
                 tool_type: tau_proto::ToolType::Function,
                 arguments: write_args("b.txt"),
-                display: None,
-            },
-            AgentToolCall {
-                id: "c3".into(),
-                name: "write".into(),
+            }),
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "c3".into(),
+                name: tau_proto::ToolName::new("write"),
                 tool_type: tau_proto::ToolType::Function,
                 arguments: write_args("c.txt"),
-                display: None,
-            },
+            }),
         ],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     };
     h.handle_agent_response_finished(response)
@@ -265,26 +299,22 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
     drive_harness_until_call_completes(&mut h, "c3");
 
     // After all three tools complete, the harness has auto-dispatched
-    // a follow-up prompt. Read its messages and check that every
-    // tool_use has a matching tool_result on the same branch.
+    // a follow-up prompt. Read its context items and check that every
+    // tool call has a matching tool result on the same branch.
     let spid: SessionPromptId = "sp-0".into();
     let prompt = read_prompt_created(&h, &spid);
-    let mut tool_use_ids: Vec<String> = Vec::new();
-    let mut tool_result_ids: Vec<String> = Vec::new();
-    for msg in &prompt.messages {
-        for block in &msg.content {
-            match block {
-                tau_proto::ContentBlock::ToolUse { id, .. } => {
-                    tool_use_ids.push(id.to_string());
-                }
-                tau_proto::ContentBlock::ToolResult { tool_use_id, .. } => {
-                    tool_result_ids.push(tool_use_id.to_string());
-                }
-                tau_proto::ContentBlock::Text { .. } => {}
-                tau_proto::ContentBlock::Reasoning { .. } => {}
-            }
-        }
-    }
+    let tool_use_ids: Vec<String> = prompt
+        .context_items
+        .iter()
+        .filter_map(tool_call_id)
+        .map(str::to_owned)
+        .collect();
+    let tool_result_ids: Vec<String> = prompt
+        .context_items
+        .iter()
+        .filter_map(tool_result_id)
+        .map(str::to_owned)
+        .collect();
     assert_eq!(
         tool_use_ids,
         vec!["c1".to_owned(), "c2".to_owned(), "c3".to_owned()],
@@ -330,26 +360,27 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
     ]);
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: "sp-x".into(),
-        text: None,
-        tool_calls: vec![AgentToolCall {
-            id: "c1".into(),
-            name: "write".into(),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "c1".into(),
+            name: tau_proto::ToolName::new("write"),
             tool_type: tau_proto::ToolType::Function,
             arguments: write_args,
-            display: None,
-        }],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        })],
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("agent response with tool call");
@@ -391,7 +422,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
 
     // Walk the event log and verify ordering: the SessionPromptSteered
     // is published before the next-round SessionPromptCreated, and the
-    // latter's `messages` includes the steered text alongside the
+    // latter's `context_items` includes the steered text alongside the
     // original user prompt.
     let next_round_spid: SessionPromptId = "sp-0".into();
     let mut cursor = 0;
@@ -416,14 +447,14 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
                 saw_next_round = true;
 
                 let user_texts: Vec<String> = p
-                    .messages
+                    .context_items
                     .iter()
-                    .filter(|m| matches!(m.role, tau_proto::ConversationRole::User))
-                    .flat_map(|m| {
-                        m.content.iter().filter_map(|b| match b {
-                            tau_proto::ContentBlock::Text { text } => Some(text.clone()),
-                            _ => None,
-                        })
+                    .filter_map(|item| match item {
+                        ContextItem::Message(MessageItem {
+                            role: ContextRole::User,
+                            ..
+                        }) => text_part(item).map(str::to_owned),
+                        _ => None,
                     })
                     .collect();
                 assert!(
@@ -436,19 +467,18 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
                 // on the same branch — otherwise the model sees its
                 // tool_use replied to with a steer instead of the
                 // ToolResult, which providers reject.
-                let last_tool_result_idx = p.messages.iter().rposition(|m| {
-                    m.content
-                        .iter()
-                        .any(|b| matches!(b, tau_proto::ContentBlock::ToolResult { .. }))
-                });
-                let last_user_idx = p.messages.iter().rposition(|m| {
-                    matches!(m.role, tau_proto::ConversationRole::User)
-                        && m.content.iter().any(|b| {
-                            matches!(
-                                b,
-                                tau_proto::ContentBlock::Text { text } if text == "redirect"
-                            )
-                        })
+                let last_tool_result_idx = p
+                    .context_items
+                    .iter()
+                    .rposition(|item| matches!(item, ContextItem::ToolResult(_)));
+                let last_user_idx = p.context_items.iter().rposition(|item| {
+                    matches!(
+                        item,
+                        ContextItem::Message(MessageItem {
+                            role: ContextRole::User,
+                            ..
+                        }) if text_part(item) == Some("redirect")
+                    )
                 });
                 assert!(
                     last_tool_result_idx.is_some(),
@@ -473,6 +503,54 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
 }
 
 #[test]
+fn tool_calls_stop_reason_without_tool_items_does_not_wedge_turn() {
+    // Providers can disagree between their terminal stop reason and
+    // emitted item list. With no concrete tool-call items, there is no
+    // round Tau can execute, so the harness must finish this model call
+    // instead of entering an empty ToolsRunning state.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    h.submit_user_prompt("s1".into(), "hello".to_owned())
+        .expect("submit");
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: "sp-0".into(),
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+            content: vec![ContentPart::Text {
+                text: "done".to_owned(),
+            }],
+            phase: None,
+        })],
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("finish");
+
+    let cid = h.default_conversation_id.clone();
+    assert!(matches!(
+        h.conversations.get(&cid).expect("default").turn_state,
+        ConversationTurnState::Idle
+    ));
+    assert!(h.pending_tool_invocations.is_empty());
+
+    h.submit_user_prompt("s1".into(), "again".to_owned())
+        .expect("submit again");
+    assert!(matches!(
+        h.conversations.get(&cid).expect("default").turn_state,
+        ConversationTurnState::AgentThinking { .. }
+    ));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
 fn session_prompt_created_uses_refs_for_linear_extension() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
@@ -485,19 +563,30 @@ fn session_prompt_created_uses_refs_for_linear_extension() {
 
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: spid1.clone(),
-        text: Some("hi".to_owned()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+
+            content: vec![ContentPart::Text {
+                text: "hi".to_owned(),
+            }],
+
+            phase: None,
+        })],
+
+        stop_reason: tau_proto::AgentStopReason::EndTurn,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("finish first");
@@ -506,18 +595,10 @@ fn session_prompt_created_uses_refs_for_linear_extension() {
     let spid2 = h.send_prompt_to_agent("s1");
     let raw2 = read_raw_prompt_created(&h, &spid2);
     let prompt2 = read_prompt_created(&h, &spid2);
-    let system_prompt_ref = raw2.system_prompt_ref.expect("system prompt reference");
-    let prefix = raw2.message_prefix.expect("prefix reference");
-    let tools_ref = raw2.tools_ref.expect("tools reference");
-
-    assert_eq!(system_prompt_ref.base_session_prompt_id, spid1);
-    assert!(raw2.system_prompt.is_empty());
+    assert!(raw2.tools_ref.is_none());
+    assert_eq!(raw2.system_prompt, prompt1.system_prompt);
     assert_eq!(prompt2.system_prompt, prompt1.system_prompt);
-    assert_eq!(prefix.base_session_prompt_id, spid1);
-    assert_eq!(prefix.message_count, prompt1.messages.len());
-    assert_eq!(raw2.messages, prompt2.messages[prompt1.messages.len()..]);
-    assert_eq!(tools_ref.base_session_prompt_id, spid1);
-    assert!(raw2.tools.is_empty());
+    assert_eq!(raw2.context_items, prompt2.context_items);
     assert_eq!(prompt2.tools, prompt1.tools);
 
     h.shutdown().expect("shutdown");
@@ -537,20 +618,31 @@ fn linear_session_prompts_strictly_extend_previous_messages() {
 
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: spid1,
-        text: Some("hi".to_owned()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+
+            content: vec![ContentPart::Text {
+                text: "hi".to_owned(),
+            }],
+
+            phase: None,
+        })],
+
+        stop_reason: tau_proto::AgentStopReason::EndTurn,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("persist first agent response");
@@ -565,15 +657,15 @@ fn linear_session_prompts_strictly_extend_previous_messages() {
     assert_eq!(prompt2.model, prompt1.model);
     assert_eq!(prompt2.model_params, prompt1.model_params);
     assert!(
-        prompt1.messages.len() < prompt2.messages.len(),
+        prompt1.context_items.len() < prompt2.context_items.len(),
         "second prompt should strictly extend first: {} !< {}",
-        prompt1.messages.len(),
-        prompt2.messages.len()
+        prompt1.context_items.len(),
+        prompt2.context_items.len()
     );
     assert_eq!(
-        &prompt2.messages[..prompt1.messages.len()],
-        prompt1.messages.as_slice(),
-        "second prompt must keep first prompt messages as an exact prefix"
+        &prompt2.context_items[..prompt1.context_items.len()],
+        prompt1.context_items.as_slice(),
+        "second prompt must keep first prompt context items as an exact prefix"
     );
 
     h.shutdown().expect("shutdown");
@@ -581,11 +673,11 @@ fn linear_session_prompts_strictly_extend_previous_messages() {
 
 /// When the agent reports a `response_id` on a finished turn, the
 /// next `SessionPromptCreated` for that conversation must carry a
-/// `previous_response` pointing back at it — that's the hook the
+/// `previous_response_candidate` pointing back at it — that's the hook the
 /// Responses backend uses to switch into stateful-chain mode and
-/// send just the delta upstream. `message_index` must equal the
-/// assembled message count at the moment the anchor was captured,
-/// so the delta slice is exactly the messages added since.
+/// send just the delta upstream. `next_item_index` must equal the
+/// assembled item count at the moment the anchor was captured,
+/// so the delta slice is exactly the items added since.
 #[test]
 fn response_id_anchors_next_prompt_with_previous_response() {
     let td = TempDir::new().expect("tempdir");
@@ -600,19 +692,30 @@ fn response_id_anchors_next_prompt_with_previous_response() {
 
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: spid1,
-        text: Some("first answer".to_owned()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+
+            content: vec![ContentPart::Text {
+                text: "first answer".to_owned(),
+            }],
+
+            phase: None,
+        })],
+
+        stop_reason: tau_proto::AgentStopReason::EndTurn,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
-        backend: None,
-        response_id: Some("resp_abc".to_owned()),
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        backend: Some(responses_backend()),
+        provider_response_id: Some("resp_abc".to_owned()),
         ws_pool_delta: None,
     })
     .expect("finish first");
@@ -622,14 +725,16 @@ fn response_id_anchors_next_prompt_with_previous_response() {
     let spid2: SessionPromptId = "sp-1".into();
     let prompt2 = read_prompt_created(&h, &spid2);
 
-    let prev = prompt2.previous_response.expect("chain anchor on prompt 2");
-    assert_eq!(prev.id, "resp_abc");
+    let prev = prompt2
+        .previous_response_candidate
+        .expect("chain anchor on prompt 2");
+    assert_eq!(prev.provider_response_id, "resp_abc");
     // After turn 1 finished and was folded, the assembled count is:
-    //   user "first" + assistant "first answer" = 2 messages.
-    // That's the slice point — `messages[2..]` on prompt 2 is just
-    // the new "second" user turn (1 message).
-    assert_eq!(prev.message_index, prompt1.messages.len() + 1);
-    assert_eq!(prev.message_index + 1, prompt2.messages.len());
+    //   user "first" + assistant "first answer" = 2 context items.
+    // That's the slice point — `context_items[2..]` on prompt 2 is
+    // just the new "second" user turn (1 item).
+    assert_eq!(prev.next_item_index, prompt1.context_items.len() + 1);
+    assert_eq!(prev.next_item_index + 1, prompt2.context_items.len());
 
     h.shutdown().expect("shutdown");
 }
@@ -646,19 +751,30 @@ fn chained_low_corrected_cache_hit_emits_diagnostic() {
     let spid1: SessionPromptId = "sp-0".into();
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: spid1,
-        text: Some("first answer".to_owned()),
-        tool_calls: Vec::new(),
-        input_tokens: Some(1_000),
-        cached_tokens: Some(0),
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+
+            content: vec![ContentPart::Text {
+                text: "first answer".to_owned(),
+            }],
+
+            phase: None,
+        })],
+
+        stop_reason: tau_proto::AgentStopReason::EndTurn,
+        usage: match (Some(1_000), Some(0), None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
-        backend: None,
-        response_id: Some("resp_abc".to_owned()),
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        backend: Some(responses_backend()),
+        provider_response_id: Some("resp_abc".to_owned()),
         ws_pool_delta: None,
     })
     .expect("finish first");
@@ -668,19 +784,30 @@ fn chained_low_corrected_cache_hit_emits_diagnostic() {
     let spid2: SessionPromptId = "sp-1".into();
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: spid2.clone(),
-        text: Some("second answer".to_owned()),
-        tool_calls: Vec::new(),
-        input_tokens: Some(1_100),
-        cached_tokens: Some(0),
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+
+            content: vec![ContentPart::Text {
+                text: "second answer".to_owned(),
+            }],
+
+            phase: None,
+        })],
+
+        stop_reason: tau_proto::AgentStopReason::EndTurn,
+        usage: match (Some(1_100), Some(0), None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
-        backend: None,
-        response_id: Some("resp_def".to_owned()),
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        backend: Some(responses_backend()),
+        provider_response_id: Some("resp_def".to_owned()),
         ws_pool_delta: Some(tau_proto::WsPoolDelta {
             upgrades: 0,
             silent_reconnects: 0,
@@ -723,19 +850,30 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
     let spid1: SessionPromptId = "sp-0".into();
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: spid1,
-        text: Some("first answer".to_owned()),
-        tool_calls: Vec::new(),
-        input_tokens: Some(500),
-        cached_tokens: Some(0),
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+
+            content: vec![ContentPart::Text {
+                text: "first answer".to_owned(),
+            }],
+
+            phase: None,
+        })],
+
+        stop_reason: tau_proto::AgentStopReason::EndTurn,
+        usage: match (Some(500), Some(0), None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
         backend: None,
-        response_id: Some("resp_abc".to_owned()),
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: Some("resp_abc".to_owned()),
         ws_pool_delta: None,
     })
     .expect("finish first");
@@ -745,19 +883,30 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
     let spid2: SessionPromptId = "sp-1".into();
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: spid2,
-        text: Some("second answer".to_owned()),
-        tool_calls: Vec::new(),
-        input_tokens: Some(500),
-        cached_tokens: Some(0),
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+
+            content: vec![ContentPart::Text {
+                text: "second answer".to_owned(),
+            }],
+
+            phase: None,
+        })],
+
+        stop_reason: tau_proto::AgentStopReason::EndTurn,
+        usage: match (Some(500), Some(0), None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
         backend: None,
-        response_id: Some("resp_def".to_owned()),
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: Some("resp_def".to_owned()),
         ws_pool_delta: None,
     })
     .expect("finish second");
@@ -791,19 +940,30 @@ fn model_switch_invalidates_chain_anchor() {
     let spid1: SessionPromptId = "sp-0".into();
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: spid1,
-        text: Some("first answer".to_owned()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+
+            content: vec![ContentPart::Text {
+                text: "first answer".to_owned(),
+            }],
+
+            phase: None,
+        })],
+
+        stop_reason: tau_proto::AgentStopReason::EndTurn,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
         backend: None,
-        response_id: Some("resp_abc".to_owned()),
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: Some("resp_abc".to_owned()),
         ws_pool_delta: None,
     })
     .expect("finish first");
@@ -817,7 +977,7 @@ fn model_switch_invalidates_chain_anchor() {
     let prompt2 = read_prompt_created(&h, &spid2);
 
     assert!(
-        prompt2.previous_response.is_none(),
+        prompt2.previous_response_candidate.is_none(),
         "model switch must clear the previous-response anchor"
     );
 
@@ -847,19 +1007,30 @@ fn params_drift_invalidates_chain_anchor() {
     let spid1: SessionPromptId = "sp-0".into();
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: spid1,
-        text: Some("first answer".to_owned()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+
+            content: vec![ContentPart::Text {
+                text: "first answer".to_owned(),
+            }],
+
+            phase: None,
+        })],
+
+        stop_reason: tau_proto::AgentStopReason::EndTurn,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
         backend: None,
-        response_id: Some("resp_abc".to_owned()),
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: Some("resp_abc".to_owned()),
         ws_pool_delta: None,
     })
     .expect("finish first");
@@ -873,7 +1044,7 @@ fn params_drift_invalidates_chain_anchor() {
     let prompt2 = read_prompt_created(&h, &spid2);
 
     assert!(
-        prompt2.previous_response.is_none(),
+        prompt2.previous_response_candidate.is_none(),
         "params drift must clear the previous-response anchor"
     );
 }
@@ -898,19 +1069,30 @@ fn system_prompt_drift_invalidates_chain_anchor() {
     let spid1: SessionPromptId = "sp-0".into();
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: spid1,
-        text: Some("first answer".to_owned()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+
+            content: vec![ContentPart::Text {
+                text: "first answer".to_owned(),
+            }],
+
+            phase: None,
+        })],
+
+        stop_reason: tau_proto::AgentStopReason::EndTurn,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
         backend: None,
-        response_id: Some("resp_skills".to_owned()),
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: Some("resp_skills".to_owned()),
         ws_pool_delta: None,
     })
     .expect("finish first");
@@ -936,7 +1118,7 @@ fn system_prompt_drift_invalidates_chain_anchor() {
     let prompt2 = read_prompt_created(&h, &spid2);
 
     assert!(
-        prompt2.previous_response.is_none(),
+        prompt2.previous_response_candidate.is_none(),
         "system-prompt drift (skill became visible) must clear the chain anchor"
     );
 }
@@ -959,19 +1141,30 @@ fn tools_drift_invalidates_chain_anchor() {
     let spid1: SessionPromptId = "sp-0".into();
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: spid1,
-        text: Some("first answer".to_owned()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+
+            content: vec![ContentPart::Text {
+                text: "first answer".to_owned(),
+            }],
+
+            phase: None,
+        })],
+
+        stop_reason: tau_proto::AgentStopReason::EndTurn,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
         backend: None,
-        response_id: Some("resp_tools".to_owned()),
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: Some("resp_tools".to_owned()),
         ws_pool_delta: None,
     })
     .expect("finish first");
@@ -1000,7 +1193,7 @@ fn tools_drift_invalidates_chain_anchor() {
     let prompt2 = read_prompt_created(&h, &spid2);
 
     assert!(
-        prompt2.previous_response.is_none(),
+        prompt2.previous_response_candidate.is_none(),
         "tools drift (new tool registered) must clear the chain anchor"
     );
 }
@@ -1024,19 +1217,30 @@ fn stable_params_preserve_chain_anchor() {
     let spid1: SessionPromptId = "sp-0".into();
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: spid1,
-        text: Some("first answer".to_owned()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+
+            content: vec![ContentPart::Text {
+                text: "first answer".to_owned(),
+            }],
+
+            phase: None,
+        })],
+
+        stop_reason: tau_proto::AgentStopReason::EndTurn,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
-        backend: None,
-        response_id: Some("resp_xyz".to_owned()),
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        backend: Some(responses_backend()),
+        provider_response_id: Some("resp_xyz".to_owned()),
         ws_pool_delta: None,
     })
     .expect("finish first");
@@ -1047,10 +1251,10 @@ fn stable_params_preserve_chain_anchor() {
     let prompt2 = read_prompt_created(&h, &spid2);
 
     let prev = prompt2
-        .previous_response
+        .previous_response_candidate
         .as_ref()
         .expect("chain should survive when no inputs drifted");
-    assert_eq!(prev.id, "resp_xyz");
+    assert_eq!(prev.provider_response_id, "resp_xyz");
 }
 
 /// A turn that didn't yield a `response_id` (Chat Completions
@@ -1070,19 +1274,30 @@ fn missing_response_id_leaves_chain_unset() {
 
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: spid1,
-        text: Some("first answer".to_owned()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+
+            content: vec![ContentPart::Text {
+                text: "first answer".to_owned(),
+            }],
+
+            phase: None,
+        })],
+
+        stop_reason: tau_proto::AgentStopReason::EndTurn,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("finish first");
@@ -1093,7 +1308,7 @@ fn missing_response_id_leaves_chain_unset() {
     let prompt2 = read_prompt_created(&h, &spid2);
 
     assert!(
-        prompt2.previous_response.is_none(),
+        prompt2.previous_response_candidate.is_none(),
         "no response_id on the prior turn means no chain"
     );
 
@@ -1121,20 +1336,31 @@ fn queued_prompt_extends_completed_first_prompt() {
 
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: spid1,
-        text: Some("first answer".to_owned()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+
+            content: vec![ContentPart::Text {
+                text: "first answer".to_owned(),
+            }],
+
+            phase: None,
+        })],
+
+        stop_reason: tau_proto::AgentStopReason::EndTurn,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("finish first");
@@ -1142,21 +1368,22 @@ fn queued_prompt_extends_completed_first_prompt() {
     let spid2: SessionPromptId = "sp-1".into();
     let prompt2 = read_prompt_created(&h, &spid2);
     assert!(
-        prompt1.messages.len() < prompt2.messages.len(),
+        prompt1.context_items.len() < prompt2.context_items.len(),
         "queued follow-up should extend the first prompt"
     );
     assert_eq!(
-        &prompt2.messages[..prompt1.messages.len()],
-        prompt1.messages.as_slice()
+        &prompt2.context_items[..prompt1.context_items.len()],
+        prompt1.context_items.as_slice()
     );
-    let last = prompt2.messages.last().expect("last message");
-    assert_eq!(last.role, tau_proto::ConversationRole::User);
-    assert_eq!(
-        last.content,
-        vec![tau_proto::ContentBlock::Text {
-            text: "second".to_owned()
-        }]
-    );
+    let last = prompt2.context_items.last().expect("last item");
+    assert!(matches!(
+        last,
+        ContextItem::Message(MessageItem {
+            role: ContextRole::User,
+            ..
+        })
+    ));
+    assert_eq!(text_part(last), Some("second"));
 
     h.shutdown().expect("shutdown");
 }
@@ -1256,19 +1483,30 @@ fn user_prompt_auto_compacts_before_submission() {
         &cid,
         Event::AgentResponseFinished(AgentResponseFinished {
             session_prompt_id: "sp-old".into(),
-            text: Some("earlier answer".to_owned()),
-            tool_calls: Vec::new(),
-            input_tokens: None,
-            cached_tokens: None,
-            output_tokens: None,
-            thinking: None,
-            token_usage: None,
+            output_items: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+
+                content: vec![ContentPart::Text {
+                    text: "earlier answer".to_owned(),
+                }],
+
+                phase: None,
+            })],
+
+            stop_reason: tau_proto::AgentStopReason::EndTurn,
+            usage: match (None, None, None) {
+                (None, None, None) => None,
+                (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                    model: None,
+                    prompt_sent_tokens: input_tokens.unwrap_or(0),
+                    prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                    response_received_tokens: output_tokens.unwrap_or(0),
+                    stats: Default::default(),
+                }),
+            },
             originator: tau_proto::PromptOriginator::User,
             backend: None,
-            response_id: None,
-            phase: None,
-            reasoning_items: Vec::new(),
-            compacted_input_items: Vec::new(),
+            provider_response_id: None,
             ws_pool_delta: None,
         }),
     );
@@ -1293,7 +1531,13 @@ fn user_prompt_auto_compacts_before_submission() {
             .expect("session")
             .current_branch()
             .iter()
-            .all(|entry| !matches!(entry, SessionEntry::UserMessage { text } if text == "new question")),
+            .all(|entry| {
+                !matches!(
+                    entry,
+                    SessionEntry::UserInput { items }
+                        if items.iter().any(|item| text_part(item) == Some("new question"))
+                )
+            }),
         "user prompt must not be persisted until compaction finishes"
     );
 
@@ -1306,41 +1550,36 @@ fn user_prompt_auto_compacts_before_submission() {
         .expect("compaction prompt");
     let summary_prompt = read_compaction_requested(&h, &summary_spid);
     assert!(
-        summary_prompt.previous_response.is_none(),
+        summary_prompt.previous_response_candidate.is_none(),
         "compaction requests should not reuse previous_response_id chaining"
     );
 
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: summary_spid,
-        text: Some("Conversation compacted.".to_owned()),
-        tool_calls: Vec::new(),
-        input_tokens: Some(400),
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        output_items: vec![ContextItem::Compaction(tau_proto::OpaqueProviderItem(
+            CborValue::Map(vec![(
+                CborValue::Text("type".to_owned()),
+                CborValue::Text("summary".to_owned()),
+            )]),
+        ))],
+
+        stop_reason: tau_proto::AgentStopReason::EndTurn,
+        usage: match (Some(400), None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::Extension {
             name: HARNESS_CONNECTION_ID.into(),
             query_id: format!("auto-compact-{cid}"),
         },
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: vec![
-            serde_json::json!({
-                "type": "message",
-                "role": "assistant",
-                "status": "completed",
-                "content": [{
-                    "type": "output_text",
-                    "text": "Conversation compacted.",
-                    "annotations": [],
-                    "logprobs": []
-                }]
-            })
-            .to_string(),
-        ],
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("summary finished");
@@ -1357,12 +1596,12 @@ fn user_prompt_auto_compacts_before_submission() {
     let branch = h.store.session("s1").expect("session").current_branch();
     assert!(matches!(
         branch.get(branch.len().saturating_sub(2)),
-        Some(SessionEntry::CompactedSummary { summary, input_items })
-            if summary == "Conversation compacted." && !input_items.is_empty()
+        Some(SessionEntry::Compaction { replacement_window }) if !replacement_window.is_empty()
     ));
     assert!(matches!(
         branch.last(),
-        Some(SessionEntry::UserMessage { text }) if text == "new question"
+        Some(SessionEntry::UserInput { items })
+            if items.iter().any(|item| text_part(item) == Some("new question"))
     ));
 
     h.shutdown().expect("shutdown");
@@ -1383,19 +1622,30 @@ fn user_prompt_does_not_auto_compact_without_context_percent_signal() {
         &cid,
         Event::AgentResponseFinished(AgentResponseFinished {
             session_prompt_id: "sp-old".into(),
-            text: Some(large_text.clone()),
-            tool_calls: Vec::new(),
-            input_tokens: None,
-            cached_tokens: None,
-            output_tokens: None,
-            thinking: None,
-            token_usage: None,
+            output_items: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+
+                content: vec![ContentPart::Text {
+                    text: large_text.clone(),
+                }],
+
+                phase: None,
+            })],
+
+            stop_reason: tau_proto::AgentStopReason::EndTurn,
+            usage: match (None, None, None) {
+                (None, None, None) => None,
+                (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                    model: None,
+                    prompt_sent_tokens: input_tokens.unwrap_or(0),
+                    prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                    response_received_tokens: output_tokens.unwrap_or(0),
+                    stats: Default::default(),
+                }),
+            },
             originator: tau_proto::PromptOriginator::User,
             backend: None,
-            response_id: None,
-            phase: None,
-            reasoning_items: Vec::new(),
-            compacted_input_items: Vec::new(),
+            provider_response_id: None,
             ws_pool_delta: None,
         }),
     );
@@ -1415,14 +1665,8 @@ fn user_prompt_does_not_auto_compact_without_context_percent_signal() {
         .expect("in-flight prompt");
     let prompt = read_prompt_created(&h, &spid);
     assert_eq!(
-        prompt.messages.last(),
-        Some(&tau_proto::ConversationMessage {
-            role: tau_proto::ConversationRole::User,
-            content: vec![tau_proto::ContentBlock::Text {
-                text: "new question".to_owned(),
-            }],
-            phase: None,
-        })
+        prompt.context_items.last().and_then(text_part),
+        Some("new question")
     );
 
     h.shutdown().expect("shutdown");
@@ -1442,19 +1686,30 @@ fn manual_compact_forces_compaction_without_followup_turn() {
         &cid,
         Event::AgentResponseFinished(AgentResponseFinished {
             session_prompt_id: "sp-old".into(),
-            text: Some("earlier answer".to_owned()),
-            tool_calls: Vec::new(),
-            input_tokens: None,
-            cached_tokens: None,
-            output_tokens: None,
-            thinking: None,
-            token_usage: None,
+            output_items: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+
+                content: vec![ContentPart::Text {
+                    text: "earlier answer".to_owned(),
+                }],
+
+                phase: None,
+            })],
+
+            stop_reason: tau_proto::AgentStopReason::EndTurn,
+            usage: match (None, None, None) {
+                (None, None, None) => None,
+                (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                    model: None,
+                    prompt_sent_tokens: input_tokens.unwrap_or(0),
+                    prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                    response_received_tokens: output_tokens.unwrap_or(0),
+                    stats: Default::default(),
+                }),
+            },
             originator: tau_proto::PromptOriginator::User,
             backend: None,
-            response_id: None,
-            phase: None,
-            reasoning_items: Vec::new(),
-            compacted_input_items: Vec::new(),
+            provider_response_id: None,
             ws_pool_delta: None,
         }),
     );
@@ -1470,39 +1725,34 @@ fn manual_compact_forces_compaction_without_followup_turn() {
         })
         .expect("compaction prompt");
     let summary_prompt = read_compaction_requested(&h, &summary_spid);
-    assert!(summary_prompt.previous_response.is_none());
+    assert!(summary_prompt.previous_response_candidate.is_none());
 
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: summary_spid,
-        text: Some("Conversation compacted.".to_owned()),
-        tool_calls: Vec::new(),
-        input_tokens: Some(300),
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        output_items: vec![ContextItem::Compaction(tau_proto::OpaqueProviderItem(
+            CborValue::Map(vec![(
+                CborValue::Text("type".to_owned()),
+                CborValue::Text("summary".to_owned()),
+            )]),
+        ))],
+
+        stop_reason: tau_proto::AgentStopReason::EndTurn,
+        usage: match (Some(300), None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::Extension {
             name: HARNESS_CONNECTION_ID.into(),
             query_id: format!("auto-compact-{cid}"),
         },
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: vec![
-            serde_json::json!({
-                "type": "message",
-                "role": "assistant",
-                "status": "completed",
-                "content": [{
-                    "type": "output_text",
-                    "text": "Conversation compacted.",
-                    "annotations": [],
-                    "logprobs": []
-                }]
-            })
-            .to_string(),
-        ],
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("summary finished");
@@ -1518,8 +1768,7 @@ fn manual_compact_forces_compaction_without_followup_turn() {
     let branch = h.store.session("s1").expect("session").current_branch();
     assert!(matches!(
         branch.last(),
-        Some(SessionEntry::CompactedSummary { summary, input_items })
-            if summary == "Conversation compacted." && !input_items.is_empty()
+        Some(SessionEntry::Compaction { replacement_window }) if !replacement_window.is_empty()
     ));
 
     h.shutdown().expect("shutdown");
@@ -1747,26 +1996,27 @@ fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
 
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: spid,
-        text: None,
-        tool_calls: vec![AgentToolCall {
-            id: "delegate-call".into(),
-            name: "delegate".into(),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "delegate-call".into(),
+            name: tau_proto::ToolName::new("delegate"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(Vec::new()),
-            display: None,
-        }],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        })],
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("tool response");
@@ -1807,23 +2057,34 @@ fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
         .expect("side prompt id");
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: side_spid,
-        text: Some("delegated answer".to_owned()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+
+            content: vec![ContentPart::Text {
+                text: "delegated answer".to_owned(),
+            }],
+
+            phase: None,
+        })],
+
+        stop_reason: tau_proto::AgentStopReason::EndTurn,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::Extension {
             name: "conn-delegate".into(),
             query_id: "q1".to_owned(),
         },
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("side finished");
@@ -1900,26 +2161,27 @@ fn ext_agent_query_during_tool_call_branches_off_unresolved_tool_use() {
 
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: spid,
-        text: None,
-        tool_calls: vec![AgentToolCall {
-            id: "delegate-call".into(),
-            name: "delegate".into(),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "delegate-call".into(),
+            name: tau_proto::ToolName::new("delegate"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(Vec::new()),
-            display: None,
-        }],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        })],
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("tool response");
@@ -1948,36 +2210,37 @@ fn ext_agent_query_during_tool_call_branches_off_unresolved_tool_use() {
     // unresolved `delegate` tool_use (which would be an orphan ToolUse
     // the provider rejects), and never the user's task framing (which
     // would invite recursive re-delegation).
-    let saw_orphan_tool_use = prompt.messages.iter().any(|message| {
-        message.content.iter().any(|block| {
-            matches!(
-                block,
-                tau_proto::ContentBlock::ToolUse { id, .. }
-                    if id.as_str() == "delegate-call"
-            )
-        })
-    });
+    let saw_orphan_tool_use = prompt
+        .context_items
+        .iter()
+        .any(|item| tool_call_id(item) == Some("delegate-call"));
     assert!(
         !saw_orphan_tool_use,
         "side prompt must not replay the parent's unresolved delegate tool_use"
     );
 
-    let saw_user_framing = prompt.messages.iter().any(|message| {
-        matches!(message.role, tau_proto::ConversationRole::User)
-            && message.content.iter().any(|block| {
-                matches!(block, tau_proto::ContentBlock::Text { text } if text.contains("delegate something"))
-            })
+    let saw_user_framing = prompt.context_items.iter().any(|item| {
+        matches!(
+            item,
+            ContextItem::Message(MessageItem {
+                role: ContextRole::User,
+                ..
+            }) if text_part(item).is_some_and(|text| text.contains("delegate something"))
+        )
     });
     assert!(
         !saw_user_framing,
         "side prompt must NOT inherit the user's task framing — sub-agents start with a fresh context"
     );
 
-    let saw_own_instruction = prompt.messages.iter().any(|message| {
-        matches!(message.role, tau_proto::ConversationRole::User)
-            && message.content.iter().any(|block| {
-                matches!(block, tau_proto::ContentBlock::Text { text } if text == "side task")
-            })
+    let saw_own_instruction = prompt.context_items.iter().any(|item| {
+        matches!(
+            item,
+            ContextItem::Message(MessageItem {
+                role: ContextRole::User,
+                ..
+            }) if text_part(item) == Some("side task")
+        )
     });
     assert!(
         saw_own_instruction,
@@ -2027,20 +2290,31 @@ fn non_tool_ext_agent_query_inherits_parent_branch() {
     );
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: main_spid,
-        text: Some("I fixed the off-by-one in foo.rs".to_owned()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+
+            content: vec![ContentPart::Text {
+                text: "I fixed the off-by-one in foo.rs".to_owned(),
+            }],
+
+            phase: None,
+        })],
+
+        stop_reason: tau_proto::AgentStopReason::EndTurn,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -2075,45 +2349,47 @@ fn non_tool_ext_agent_query_inherits_parent_branch() {
     // that order. Without inheritance the side prompt would only
     // hold the instruction and the model would default to a generic
     // "I'm ready for your next task" reply.
-    let user_task_present = side_prompt.messages.iter().any(|m| {
-        matches!(m.role, tau_proto::ConversationRole::User) && m.content.iter().any(|b| {
-            matches!(
-                b,
-                tau_proto::ContentBlock::Text { text } if text.contains("find the bug in foo.rs")
-            )
-        })
+    let user_task_present = side_prompt.context_items.iter().any(|item| {
+        matches!(
+            item,
+            ContextItem::Message(MessageItem {
+                role: ContextRole::User,
+                ..
+            }) if text_part(item).is_some_and(|text| text.contains("find the bug in foo.rs"))
+        )
     });
-    let agent_answer_present = side_prompt.messages.iter().any(|m| {
-        matches!(m.role, tau_proto::ConversationRole::Assistant) && m.content.iter().any(|b| {
-            matches!(
-                b,
-                tau_proto::ContentBlock::Text { text } if text.contains("I fixed the off-by-one")
-            )
-        })
+    let agent_answer_present = side_prompt.context_items.iter().any(|item| {
+        matches!(
+            item,
+            ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                ..
+            }) if text_part(item).is_some_and(|text| text.contains("I fixed the off-by-one"))
+        )
     });
-    let instruction_present = side_prompt.messages.iter().any(|m| {
-        matches!(m.role, tau_proto::ConversationRole::User)
-            && m.content.iter().any(|b| {
-                matches!(
-                    b,
-                    tau_proto::ContentBlock::Text { text } if text == "Summarize in one sentence."
-                )
-            })
+    let instruction_present = side_prompt.context_items.iter().any(|item| {
+        matches!(
+            item,
+            ContextItem::Message(MessageItem {
+                role: ContextRole::User,
+                ..
+            }) if text_part(item) == Some("Summarize in one sentence.")
+        )
     });
     assert!(
         user_task_present,
         "side prompt must inherit the user's original task message: {:?}",
-        side_prompt.messages,
+        side_prompt.context_items,
     );
     assert!(
         agent_answer_present,
         "side prompt must inherit the agent's final reply: {:?}",
-        side_prompt.messages,
+        side_prompt.context_items,
     );
     assert!(
         instruction_present,
         "side prompt must contain the summarize-instruction itself: {:?}",
-        side_prompt.messages,
+        side_prompt.context_items,
     );
 
     // Tool execution is blocked locally by the harness. The provider
@@ -2162,19 +2438,30 @@ fn non_tool_ext_agent_query_preserves_chain_anchor_and_tool_choice() {
     let main_spid: SessionPromptId = "sp-0".into();
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: main_spid,
-        text: Some("I fixed the off-by-one in foo.rs".to_owned()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+
+            content: vec![ContentPart::Text {
+                text: "I fixed the off-by-one in foo.rs".to_owned(),
+            }],
+
+            phase: None,
+        })],
+
+        stop_reason: tau_proto::AgentStopReason::EndTurn,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
-        backend: None,
-        response_id: Some("resp_parent".to_owned()),
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        backend: Some(responses_backend()),
+        provider_response_id: Some("resp_parent".to_owned()),
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -2210,11 +2497,11 @@ fn non_tool_ext_agent_query_preserves_chain_anchor_and_tool_choice() {
          otherwise it cold-starts a separate cache bucket from the user's prefix \
          and the whole point of sharing the warm prefix is lost",
     );
-    let prev = side_prompt.previous_response.as_ref().expect(
+    let prev = side_prompt.previous_response_candidate.as_ref().expect(
         "idle-summary side conv must inherit parent's chain anchor — \
          the wire request stays cache-compatible with the parent",
     );
-    assert_eq!(prev.id, "resp_parent");
+    assert_eq!(prev.provider_response_id, "resp_parent");
 }
 
 /// Counterpart to `non_tool_ext_agent_query_inherits_parent_branch`.
@@ -2263,26 +2550,27 @@ fn delegate_ext_agent_query_keeps_tool_choice_auto() {
     );
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: main_spid,
-        text: None,
-        tool_calls: vec![AgentToolCall {
-            id: "delegate-call".into(),
-            name: "delegate".into(),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "delegate-call".into(),
+            name: tau_proto::ToolName::new("delegate"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(Vec::new()),
-            display: None,
-        }],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        })],
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -2446,26 +2734,27 @@ fn side_conversation_pure_tool_dispatches_through_parent_mutating_delegate() {
     );
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: main_spid,
-        text: None,
-        tool_calls: vec![AgentToolCall {
-            id: "delegate-call".into(),
-            name: "delegate".into(),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "delegate-call".into(),
+            name: tau_proto::ToolName::new("delegate"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(Vec::new()),
-            display: None,
-        }],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        })],
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -2493,29 +2782,30 @@ fn side_conversation_pure_tool_dispatches_through_parent_mutating_delegate() {
         .expect("side prompt id");
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: side_spid,
-        text: None,
-        tool_calls: vec![AgentToolCall {
-            id: "websearch-call".into(),
-            name: "websearch".into(),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "websearch-call".into(),
+            name: tau_proto::ToolName::new("websearch"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(Vec::new()),
-            display: None,
-        }],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        })],
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-delegate".into(),
             query_id: "q1".to_owned(),
         },
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("side response");
@@ -2549,7 +2839,7 @@ fn side_conversation_pure_tool_dispatches_through_parent_mutating_delegate() {
 /// agent opt two known-safe delegations into parallel scheduling.
 #[test]
 fn read_only_delegate_calls_dispatch_concurrently() {
-    use tau_proto::{CborValue, ToolNameMaybe};
+    use tau_proto::CborValue;
 
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
@@ -2591,35 +2881,35 @@ fn read_only_delegate_calls_dispatch_concurrently() {
     )]);
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: main_spid,
-        text: None,
-        tool_calls: vec![
-            AgentToolCall {
-                id: "ro-1".into(),
-                name: ToolNameMaybe::from_raw("delegate"),
+        output_items: vec![
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "ro-1".into(),
+                name: ToolName::new("delegate"),
                 tool_type: tau_proto::ToolType::Function,
                 arguments: read_only_args.clone(),
-                display: None,
-            },
-            AgentToolCall {
-                id: "ro-2".into(),
-                name: ToolNameMaybe::from_raw("delegate"),
+            }),
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "ro-2".into(),
+                name: ToolName::new("delegate"),
                 tool_type: tau_proto::ToolType::Function,
                 arguments: read_only_args.clone(),
-                display: None,
-            },
+            }),
         ],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -2674,35 +2964,35 @@ fn read_only_delegate_calls_dispatch_concurrently() {
     );
     h2.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: spid2,
-        text: None,
-        tool_calls: vec![
-            AgentToolCall {
-                id: "mut-1".into(),
-                name: ToolNameMaybe::from_raw("delegate"),
+        output_items: vec![
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "mut-1".into(),
+                name: ToolName::new("delegate"),
                 tool_type: tau_proto::ToolType::Function,
                 arguments: CborValue::Map(Vec::new()),
-                display: None,
-            },
-            AgentToolCall {
-                id: "mut-2".into(),
-                name: ToolNameMaybe::from_raw("delegate"),
+            }),
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "mut-2".into(),
+                name: ToolName::new("delegate"),
                 tool_type: tau_proto::ToolType::Function,
                 arguments: CborValue::Map(Vec::new()),
-                display: None,
-            },
+            }),
         ],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -2774,26 +3064,27 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
     );
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: main_spid,
-        text: None,
-        tool_calls: vec![AgentToolCall {
-            id: "delegate-call".into(),
-            name: "delegate".into(),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "delegate-call".into(),
+            name: tau_proto::ToolName::new("delegate"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(Vec::new()),
-            display: None,
-        }],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        })],
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -2826,29 +3117,30 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
         .expect("side prompt id");
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: side_spid,
-        text: None,
-        tool_calls: vec![AgentToolCall {
-            id: "websearch-call".into(),
-            name: "websearch".into(),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "websearch-call".into(),
+            name: tau_proto::ToolName::new("websearch"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(Vec::new()),
-            display: None,
-        }],
-        input_tokens: Some(1234),
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        })],
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        usage: match (Some(1234), None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-delegate".into(),
             query_id: "q1".to_owned(),
         },
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("side response");
@@ -2876,6 +3168,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
         Frame::Event(Event::ToolResult(ToolResult {
             call_id: "websearch-call".into(),
             tool_name: tau_proto::ToolName::new("websearch"),
+            tool_type: tau_proto::ToolType::Function,
             result: CborValue::Text("fake result".to_owned()),
             display: None,
             originator: tau_proto::PromptOriginator::User,
@@ -2902,7 +3195,6 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
 /// in `tau-agent-yvxco1`'s log.
 #[test]
 fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
-    use tau_proto::ToolNameMaybe;
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -2940,26 +3232,27 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
     );
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: main_spid,
-        text: None,
-        tool_calls: vec![AgentToolCall {
-            id: "outer-call".into(),
-            name: ToolNameMaybe::from_raw("delegate"),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "outer-call".into(),
+            name: ToolName::new("delegate"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(Vec::new()),
-            display: None,
-        }],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        })],
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -2988,29 +3281,30 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         .expect("outer side prompt id");
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: outer_side_spid,
-        text: None,
-        tool_calls: vec![AgentToolCall {
-            id: "nested-call".into(),
-            name: ToolNameMaybe::from_raw("delegate"),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "nested-call".into(),
+            name: ToolName::new("delegate"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(Vec::new()),
-            display: None,
-        }],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        })],
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-delegate".into(),
             query_id: "q-outer".to_owned(),
         },
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("outer response");
@@ -3041,23 +3335,34 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         .expect("nested side prompt id");
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: nested_side_spid,
-        text: Some("nested answer".to_owned()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+
+            content: vec![ContentPart::Text {
+                text: "nested answer".to_owned(),
+            }],
+
+            phase: None,
+        })],
+
+        stop_reason: tau_proto::AgentStopReason::EndTurn,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-delegate".into(),
             query_id: "q-nested".to_owned(),
         },
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("nested final");
@@ -3069,6 +3374,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         Frame::Event(Event::ToolResult(ToolResult {
             call_id: "nested-call".into(),
             tool_name: tau_proto::ToolName::new("delegate"),
+            tool_type: tau_proto::ToolType::Function,
             result: CborValue::Text("nested answer".to_owned()),
             display: None,
             originator: tau_proto::PromptOriginator::User,
@@ -3090,21 +3396,18 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         .expect("outer resume prompt id");
     let prompt = read_prompt_created(&h, &outer_resume_spid);
 
-    let mut tool_uses = Vec::new();
-    let mut tool_results = Vec::new();
-    for message in &prompt.messages {
-        for block in &message.content {
-            match block {
-                tau_proto::ContentBlock::ToolUse { id, .. } => {
-                    tool_uses.push(id.as_str().to_owned())
-                }
-                tau_proto::ContentBlock::ToolResult { tool_use_id, .. } => {
-                    tool_results.push(tool_use_id.as_str().to_owned())
-                }
-                _ => {}
-            }
-        }
-    }
+    let tool_uses: Vec<String> = prompt
+        .context_items
+        .iter()
+        .filter_map(tool_call_id)
+        .map(str::to_owned)
+        .collect();
+    let tool_results: Vec<String> = prompt
+        .context_items
+        .iter()
+        .filter_map(tool_result_id)
+        .map(str::to_owned)
+        .collect();
     assert!(
         !tool_uses.iter().any(|id| id == "outer-call"),
         "outer sub-agent's prompt must not include the parent's `outer-call` ToolUse; got: {tool_uses:?}",
@@ -3128,7 +3431,6 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
 /// rejects with `No tool output found for function call …`.
 #[test]
 fn nested_ext_agent_query_branches_from_tool_owner_conversation() {
-    use tau_proto::ToolNameMaybe;
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -3165,26 +3467,27 @@ fn nested_ext_agent_query_branches_from_tool_owner_conversation() {
     );
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: main_spid,
-        text: None,
-        tool_calls: vec![AgentToolCall {
-            id: "outer-call".into(),
-            name: ToolNameMaybe::from_raw("delegate"),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "outer-call".into(),
+            name: ToolName::new("delegate"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(Vec::new()),
-            display: None,
-        }],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        })],
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -3207,29 +3510,30 @@ fn nested_ext_agent_query_branches_from_tool_owner_conversation() {
         .expect("outer side prompt id");
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: outer_side_spid,
-        text: None,
-        tool_calls: vec![AgentToolCall {
-            id: "nested-call".into(),
-            name: ToolNameMaybe::from_raw("delegate"),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "nested-call".into(),
+            name: ToolName::new("delegate"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(Vec::new()),
-            display: None,
-        }],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        })],
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-delegate".into(),
             query_id: "q-outer".to_owned(),
         },
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("outer response");
@@ -3255,14 +3559,12 @@ fn nested_ext_agent_query_branches_from_tool_owner_conversation() {
         .expect("nested side prompt id");
     let prompt = read_prompt_created(&h, &nested_side_spid);
 
-    let mut tool_uses = Vec::new();
-    for message in &prompt.messages {
-        for block in &message.content {
-            if let tau_proto::ContentBlock::ToolUse { id, .. } = block {
-                tool_uses.push(id.as_str().to_owned());
-            }
-        }
-    }
+    let tool_uses: Vec<String> = prompt
+        .context_items
+        .iter()
+        .filter_map(tool_call_id)
+        .map(str::to_owned)
+        .collect();
     assert!(
         !tool_uses.iter().any(|id| id == "outer-call"),
         "nested sub-agent's prompt must not include the default branch's unresolved `outer-call`; got: {tool_uses:?}",
@@ -3277,7 +3579,6 @@ fn nested_ext_agent_query_branches_from_tool_owner_conversation() {
 
 #[test]
 fn completed_side_conversation_tool_result_reprompts_parent() {
-    use tau_proto::ToolNameMaybe;
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -3313,26 +3614,27 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
     );
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: spid,
-        text: None,
-        tool_calls: vec![AgentToolCall {
-            id: "outer-call".into(),
-            name: ToolNameMaybe::from_raw("delegate"),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "outer-call".into(),
+            name: ToolName::new("delegate"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(Vec::new()),
-            display: None,
-        }],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        })],
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -3355,23 +3657,34 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         .expect("side prompt id");
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: side_spid,
-        text: Some("outer answer".to_owned()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+
+            content: vec![ContentPart::Text {
+                text: "outer answer".to_owned(),
+            }],
+
+            phase: None,
+        })],
+
+        stop_reason: tau_proto::AgentStopReason::EndTurn,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-delegate".into(),
             query_id: "q-outer".to_owned(),
         },
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("side final");
@@ -3381,6 +3694,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         Frame::Event(Event::ToolResult(ToolResult {
             call_id: "outer-call".into(),
             tool_name: tau_proto::ToolName::new("delegate"),
+            tool_type: tau_proto::ToolType::Function,
             result: CborValue::Text("outer answer".to_owned()),
             display: None,
             originator: tau_proto::PromptOriginator::User,
@@ -3394,14 +3708,12 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() == "default").then_some(spid.clone()))
         .expect("main resume prompt id");
     let prompt = read_prompt_created(&h, &main_resume_spid);
-    let mut tool_results = Vec::new();
-    for message in &prompt.messages {
-        for block in &message.content {
-            if let tau_proto::ContentBlock::ToolResult { tool_use_id, .. } = block {
-                tool_results.push(tool_use_id.as_str().to_owned());
-            }
-        }
-    }
+    let tool_results: Vec<String> = prompt
+        .context_items
+        .iter()
+        .filter_map(tool_result_id)
+        .map(str::to_owned)
+        .collect();
     assert!(
         tool_results.iter().any(|id| id == "outer-call"),
         "parent conversation must be re-prompted with delegate ToolResult; got: {tool_results:?}",
@@ -3412,7 +3724,6 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
 
 #[test]
 fn recursive_delegate_prompt_contains_only_leaf_instruction() {
-    use tau_proto::ToolNameMaybe;
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -3449,26 +3760,27 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
     );
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: main_spid,
-        text: None,
-        tool_calls: vec![AgentToolCall {
-            id: "top-call".into(),
-            name: ToolNameMaybe::from_raw("delegate"),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "top-call".into(),
+            name: ToolName::new("delegate"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(Vec::new()),
-            display: None,
-        }],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        })],
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -3491,29 +3803,30 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         .expect("top prompt id");
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: top_spid,
-        text: None,
-        tool_calls: vec![AgentToolCall {
-            id: "leaf-call".into(),
-            name: ToolNameMaybe::from_raw("delegate"),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "leaf-call".into(),
+            name: ToolName::new("delegate"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(Vec::new()),
-            display: None,
-        }],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        })],
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-delegate".into(),
             query_id: "q-top".to_owned(),
         },
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("top response");
@@ -3544,14 +3857,9 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         .expect("leaf prompt id");
     let prompt = read_prompt_created(&h, &leaf_spid);
     let rendered = prompt
-        .messages
+        .context_items
         .iter()
-        .flat_map(|message| message.content.iter())
-        .filter_map(|block| match block {
-            tau_proto::ContentBlock::Text { text } => Some(text.as_str()),
-            tau_proto::ContentBlock::ToolResult { content, .. } => Some(content.as_str()),
-            _ => None,
-        })
+        .filter_map(text_part)
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -3568,14 +3876,12 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         "leaf prompt must not inherit ancestor task framing; got: {rendered}",
     );
 
-    let mut tool_uses = Vec::new();
-    for message in &prompt.messages {
-        for block in &message.content {
-            if let tau_proto::ContentBlock::ToolUse { id, .. } = block {
-                tool_uses.push(id.as_str().to_owned());
-            }
-        }
-    }
+    let tool_uses: Vec<String> = prompt
+        .context_items
+        .iter()
+        .filter_map(tool_call_id)
+        .map(str::to_owned)
+        .collect();
     assert!(
         tool_uses.is_empty(),
         "leaf prompt must not inherit unresolved ancestor tool calls; got: {tool_uses:?}",
@@ -3595,8 +3901,90 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
 /// producing orphan ToolUse blocks the provider rejects with
 /// `No tool output found for function call …`.
 #[test]
+fn tool_call_response_preserves_assistant_text_items() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let sink = connect_test_tool(&mut h, "agent-finished-sink");
+    h.bus
+        .set_subscriptions(
+            "agent-finished-sink",
+            vec![tau_proto::EventSelector::Exact(
+                tau_proto::EventName::AGENT_RESPONSE_FINISHED,
+            )],
+        )
+        .expect("subscribe");
+    let _ = connect_test_tool(&mut h, "conn-delegate");
+    h.registry.register(
+        "conn-delegate",
+        ToolSpec {
+            name: tau_proto::ToolName::new("delegate"),
+            model_visible_name: None,
+            description: None,
+            parameters: None,
+            tool_type: tau_proto::ToolType::Function,
+            format: None,
+            enabled_by_default: true,
+            side_effects: ToolSideEffects::Mutating,
+        },
+    );
+
+    let spid: SessionPromptId = "sp-text-and-tool".into();
+    h.prompt_conversations
+        .insert(spid.clone(), h.default_conversation_id.clone());
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: spid.clone(),
+        output_items: vec![
+            ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: "I'll delegate this.".to_owned(),
+                }],
+                phase: Some(tau_proto::MessagePhase::Commentary),
+            }),
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "call-delegate".into(),
+                name: ToolName::new("delegate"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+            }),
+        ],
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("response");
+
+    let frames = sink.lock().expect("sink");
+    let published = frames
+        .iter()
+        .find_map(|routed| match peel_inner_event(&routed.frame) {
+            Some(Event::AgentResponseFinished(finished)) if finished.session_prompt_id == spid => {
+                Some(finished)
+            }
+            _ => None,
+        })
+        .expect("published response");
+
+    assert_eq!(published.output_items.len(), 2);
+    assert_eq!(
+        text_part(&published.output_items[0]),
+        Some("I'll delegate this."),
+        "tool-call normalization must not drop assistant text items",
+    );
+    assert!(matches!(
+        published.output_items[1],
+        ContextItem::ToolCall(_)
+    ));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
 fn parallel_side_convs_do_not_share_branch_cursor() {
-    use tau_proto::ToolNameMaybe;
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -3633,35 +4021,35 @@ fn parallel_side_convs_do_not_share_branch_cursor() {
     );
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: main_spid,
-        text: None,
-        tool_calls: vec![
-            AgentToolCall {
-                id: "main-A".into(),
-                name: ToolNameMaybe::from_raw("delegate"),
+        output_items: vec![
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "main-A".into(),
+                name: ToolName::new("delegate"),
                 tool_type: tau_proto::ToolType::Function,
                 arguments: CborValue::Map(Vec::new()),
-                display: None,
-            },
-            AgentToolCall {
-                id: "main-B".into(),
-                name: ToolNameMaybe::from_raw("delegate"),
+            }),
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "main-B".into(),
+                name: ToolName::new("delegate"),
                 tool_type: tau_proto::ToolType::Function,
                 arguments: CborValue::Map(Vec::new()),
-                display: None,
-            },
+            }),
         ],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -3732,29 +4120,30 @@ fn parallel_side_convs_do_not_share_branch_cursor() {
         .expect("spid A");
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: spid_a,
-        text: None,
-        tool_calls: vec![AgentToolCall {
-            id: "A-tool".into(),
-            name: ToolNameMaybe::from_raw("delegate"),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "A-tool".into(),
+            name: ToolName::new("delegate"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(Vec::new()),
-            display: None,
-        }],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        })],
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-delegate".into(),
             query_id: "q-A".to_owned(),
         },
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("A response");
@@ -3766,11 +4155,11 @@ fn parallel_side_convs_do_not_share_branch_cursor() {
         .find(|n| {
             matches!(
                 &n.entry,
-                tau_core::SessionEntry::ToolActivity(rec)
-                    if rec.call_id.as_str() == "A-tool"
+                tau_core::SessionEntry::AssistantResponse { output_items, .. }
+                    if output_items.iter().any(|item| tool_call_id(item) == Some("A-tool"))
             )
         })
-        .expect("A-tool ToolActivity node");
+        .expect("A-tool assistant-response node");
     assert_eq!(
         a_tool_node.parent_id, head_a_after_init,
         "conv A's ToolRequest must be parented under conv A's UserMessage; \
@@ -3788,7 +4177,6 @@ fn parallel_side_convs_do_not_share_branch_cursor() {
 /// extensions don't have to track this themselves.
 #[test]
 fn tool_events_carry_owning_conversation_originator() {
-    use tau_proto::ToolNameMaybe;
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -3837,26 +4225,27 @@ fn tool_events_carry_owning_conversation_originator() {
     );
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: main_spid,
-        text: None,
-        tool_calls: vec![AgentToolCall {
-            id: "main-call".into(),
-            name: ToolNameMaybe::from_raw("delegate"),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "main-call".into(),
+            name: ToolName::new("delegate"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(Vec::new()),
-            display: None,
-        }],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        })],
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -3879,29 +4268,30 @@ fn tool_events_carry_owning_conversation_originator() {
         .expect("sub prompt id");
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: sub_spid,
-        text: None,
-        tool_calls: vec![AgentToolCall {
-            id: "sub-call".into(),
-            name: ToolNameMaybe::from_raw("delegate"),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "sub-call".into(),
+            name: ToolName::new("delegate"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(Vec::new()),
-            display: None,
-        }],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        })],
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-delegate".into(),
             query_id: "q-sub".to_owned(),
         },
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("sub response");

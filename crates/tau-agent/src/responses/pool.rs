@@ -413,8 +413,7 @@ fn without_previous_response<'a>(
     crate::common::PromptPayload {
         previous_response: None,
         system_prompt: request.system_prompt,
-        messages: request.messages,
-        compacted_input_items: request.compacted_input_items,
+        context_items: request.context_items,
         tools: request.tools,
         params: request.params,
         tool_choice: request.tool_choice,
@@ -475,8 +474,7 @@ mod tests {
             let session_id = tau_proto::SessionId::new(session);
             let request = PromptPayload {
                 system_prompt: "sys",
-                messages: &[],
-                compacted_input_items: &[],
+                context_items: &[],
                 tools: &[],
                 params: tau_proto::ModelParams::default(),
                 tool_choice: tau_proto::ToolChoice::default(),
@@ -574,8 +572,7 @@ mod tests {
         let session_id = tau_proto::SessionId::new("session-x");
         let request = PromptPayload {
             system_prompt: "sys",
-            messages: &[],
-            compacted_input_items: &[],
+            context_items: &[],
             tools: &[],
             params: tau_proto::ModelParams::default(),
             tool_choice: tau_proto::ToolChoice::default(),
@@ -612,8 +609,7 @@ mod tests {
 
         let prewarm = PromptPayload {
             system_prompt: "sys",
-            messages: &prewarmed_messages,
-            compacted_input_items: &[],
+            context_items: &prewarmed_messages,
             tools: &[],
             params: tau_proto::ModelParams::default(),
             tool_choice: tau_proto::ToolChoice::default(),
@@ -626,8 +622,7 @@ mod tests {
             .expect("prewarm ok");
 
         let real = PromptPayload {
-            messages: &real_messages,
-            compacted_input_items: &[],
+            context_items: &real_messages,
             ..prewarm
         };
         run_turn_through_pool(&mut pool, &config, "session-prewarm", &real, &mut on_update)
@@ -671,14 +666,13 @@ mod tests {
         let session_id = tau_proto::SessionId::new("session-fresh");
         let request = PromptPayload {
             system_prompt: "sys",
-            messages: &[],
-            compacted_input_items: &[],
+            context_items: &[],
             tools: &[],
             params: tau_proto::ModelParams::default(),
             tool_choice: tau_proto::ToolChoice::default(),
             previous_response: Some(crate::common::PreviousResponse {
                 id: "resp_from_a_dead_socket",
-                message_index: 0,
+                next_item_index: 0,
                 transport: Some(tau_proto::AgentBackendTransport::Websocket),
             }),
             originator: &tau_proto::PromptOriginator::User,
@@ -715,25 +709,25 @@ mod tests {
         let mut pool = WsPool::new();
         let mut on_update = |_: &str, _: Option<&str>| {};
         let session_id = tau_proto::SessionId::new("session-compacted");
-        let compacted_input_items = vec![
-            serde_json::json!({
-                "type": "message",
-                "role": "user",
-                "content": "compacted-sentinel",
-            })
-            .to_string(),
+        let messages = vec![
+            tau_proto::ContextItem::Compaction(tau_proto::OpaqueProviderItem(
+                crate::common::json_to_cbor(&serde_json::json!({
+                    "type": "message",
+                    "role": "user",
+                    "content": "compacted-sentinel",
+                })),
+            )),
+            user_msg("after compaction"),
         ];
-        let messages = vec![user_msg("after compaction")];
         let request = PromptPayload {
             system_prompt: "sys",
-            messages: &messages,
-            compacted_input_items: &compacted_input_items,
+            context_items: &messages,
             tools: &[],
             params: tau_proto::ModelParams::default(),
             tool_choice: tau_proto::ToolChoice::default(),
             previous_response: Some(crate::common::PreviousResponse {
                 id: "resp_from_a_dead_socket",
-                message_index: 0,
+                next_item_index: 0,
                 transport: Some(tau_proto::AgentBackendTransport::Websocket),
             }),
             originator: &tau_proto::PromptOriginator::User,
@@ -786,8 +780,7 @@ mod tests {
         let session_id = tau_proto::SessionId::new("session-die");
         let req1 = PromptPayload {
             system_prompt: "sys",
-            messages: &[],
-            compacted_input_items: &[],
+            context_items: &[],
             tools: &[],
             params: tau_proto::ModelParams::default(),
             tool_choice: tau_proto::ToolChoice::default(),
@@ -806,14 +799,13 @@ mod tests {
         // than sticky-disabling WS for the session.
         let req2 = PromptPayload {
             system_prompt: "sys",
-            messages: &[],
-            compacted_input_items: &[],
+            context_items: &[],
             tools: &[],
             params: tau_proto::ModelParams::default(),
             tool_choice: tau_proto::ToolChoice::default(),
             previous_response: Some(crate::common::PreviousResponse {
                 id: &prev_id,
-                message_index: 0,
+                next_item_index: 0,
                 transport: Some(tau_proto::AgentBackendTransport::Websocket),
             }),
             originator: &tau_proto::PromptOriginator::User,
@@ -1056,14 +1048,14 @@ mod tests {
         }
     }
 
-    fn user_msg(text: &str) -> tau_proto::ConversationMessage {
-        tau_proto::ConversationMessage {
-            role: tau_proto::ConversationRole::User,
-            content: vec![tau_proto::ContentBlock::Text {
+    fn user_msg(text: &str) -> tau_proto::ContextItem {
+        tau_proto::ContextItem::Message(tau_proto::MessageItem {
+            role: tau_proto::ContextRole::User,
+            content: vec![tau_proto::ContentPart::Text {
                 text: text.to_owned(),
             }],
             phase: None,
-        }
+        })
     }
 
     fn run_turn(
@@ -1075,8 +1067,7 @@ mod tests {
         let session_id = tau_proto::SessionId::new(session);
         let request = PromptPayload {
             system_prompt: "sys",
-            messages: &[],
-            compacted_input_items: &[],
+            context_items: &[],
             tools: &[],
             params: tau_proto::ModelParams::default(),
             tool_choice: tau_proto::ToolChoice::default(),

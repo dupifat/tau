@@ -9,8 +9,8 @@
 use std::io::Read;
 
 use tau_proto::{
-    AgentToolCall, CborValue, Event, ToolCallId, ToolDisplay, ToolDisplayStats, ToolDisplayStatus,
-    ToolName, ToolRequest,
+    CborValue, Event, ToolCallId, ToolDisplay, ToolDisplayStats, ToolDisplayStatus, ToolName,
+    ToolRequest, ToolType,
 };
 
 const MAX_SKILL_CONTENT_BYTES: usize = 64 * 1024;
@@ -18,7 +18,7 @@ const MAX_SKILL_SEARCH_MATCHES: usize = 50;
 
 use crate::conversation::ConversationId;
 use crate::error::HarnessError;
-use crate::harness::{HARNESS_CONNECTION_ID, Harness};
+use crate::harness::{AgentToolCall, HARNESS_CONNECTION_ID, Harness, PendingTool};
 
 impl Harness {
     /// Register harness-owned tools (e.g. `skill`).
@@ -88,8 +88,13 @@ impl Harness {
         // request + result both attribute to this conversation's
         // session via `session_id_for_event`.
         self.tool_conversations.insert(call_id.clone(), cid.clone());
-        self.pending_tool_names
-            .insert(call_id.clone(), tool_name.clone());
+        self.pending_tools.insert(
+            call_id.clone(),
+            PendingTool {
+                name: tool_name.clone(),
+                tool_type: call.tool_type,
+            },
+        );
         self.bump_tools_started_for(cid);
         self.publish_for_conversation(
             cid,
@@ -125,6 +130,7 @@ impl Harness {
             return Event::ToolError(tau_proto::ToolError {
                 call_id: call_id.clone(),
                 tool_name: tool_name.clone(),
+                tool_type: ToolType::Function,
                 display: Some(skill_error_display(name, &message)),
                 message,
                 details: None,
@@ -141,6 +147,7 @@ impl Harness {
                         return Event::ToolError(tau_proto::ToolError {
                             call_id: call_id.clone(),
                             tool_name: tool_name.clone(),
+                            tool_type: ToolType::Function,
                             display: Some(skill_error_display(name, &message)),
                             message,
                             details: None,
@@ -164,6 +171,7 @@ impl Harness {
                 Event::ToolResult(tau_proto::ToolResult {
                     call_id: call_id.clone(),
                     tool_name: tool_name.clone(),
+                    tool_type: ToolType::Function,
                     result: CborValue::Map(vec![
                         (
                             CborValue::Text("name".to_owned()),
@@ -192,6 +200,7 @@ impl Harness {
                 Event::ToolError(tau_proto::ToolError {
                     call_id: call_id.clone(),
                     tool_name: tool_name.clone(),
+                    tool_type: ToolType::Function,
                     display: Some(skill_error_display(name, &message)),
                     message,
                     details: None,
@@ -213,6 +222,7 @@ impl Harness {
                 return Event::ToolError(tau_proto::ToolError {
                     call_id: call_id.clone(),
                     tool_name: tool_name.clone(),
+                    tool_type: ToolType::Function,
                     display: Some(skill_error_display("search:", &message)),
                     message,
                     details: None,
@@ -226,6 +236,7 @@ impl Harness {
                 return Event::ToolError(tau_proto::ToolError {
                     call_id: call_id.clone(),
                     tool_name: tool_name.clone(),
+                    tool_type: ToolType::Function,
                     display: Some(skill_error_display("search:", &message)),
                     message,
                     details: None,
@@ -308,6 +319,7 @@ impl Harness {
         Event::ToolResult(tau_proto::ToolResult {
             call_id: call_id.clone(),
             tool_name: tool_name.clone(),
+            tool_type: ToolType::Function,
             result: CborValue::Map(vec![
                 (CborValue::Text("queries".to_owned()), queries_echo),
                 (

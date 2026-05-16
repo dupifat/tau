@@ -240,6 +240,7 @@ fn dispatch_tool_invoke(invoke: ToolInvoke, searcher: &dyn Searcher, tx: &mpsc::
         let _ = tx.send(Frame::Event(Event::ToolError(ToolError {
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
+            tool_type: tau_proto::ToolType::Function,
             display: Some(exa_error_display("unknown tool")),
             message: "unknown tool".to_owned(),
             details: None,
@@ -261,6 +262,7 @@ fn dispatch_tool_invoke(invoke: ToolInvoke, searcher: &dyn Searcher, tx: &mpsc::
                 Event::ToolResult(ToolResult {
                     call_id: invoke.call_id,
                     tool_name: invoke.tool_name,
+                    tool_type: tau_proto::ToolType::Function,
                     result: CborValue::Text(text),
                     display: Some(display),
                     originator: tau_proto::PromptOriginator::User,
@@ -276,6 +278,7 @@ fn dispatch_tool_invoke(invoke: ToolInvoke, searcher: &dyn Searcher, tx: &mpsc::
                 Event::ToolError(ToolError {
                     call_id: invoke.call_id,
                     tool_name: invoke.tool_name,
+                    tool_type: tau_proto::ToolType::Function,
                     display: Some(exa_error_display(&message)),
                     message,
                     details: Some(invoke.arguments),
@@ -286,6 +289,7 @@ fn dispatch_tool_invoke(invoke: ToolInvoke, searcher: &dyn Searcher, tx: &mpsc::
         Err(message) => Event::ToolError(ToolError {
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
+            tool_type: tau_proto::ToolType::Function,
             display: Some(exa_error_display(&message)),
             message,
             details: Some(invoke.arguments),

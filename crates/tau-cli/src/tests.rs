@@ -4,11 +4,12 @@ use std::time::{Duration, Instant};
 use tau_cli_term::TermHandle;
 use tau_cli_term_raw::{Color, Term};
 use tau_proto::{
-    AgentResponseFinished, AgentResponseUpdated, CborValue, Event, ExtAgentsMdAvailable,
-    ExtensionReady, HarnessContextUsageChanged, HarnessEffortChanged, HarnessModelSelected,
-    HarnessRoleInfo, HarnessRolesAvailable, HarnessVerbosityChanged, SessionPromptCreated,
-    SessionPromptQueued, SessionStartReason, SessionStarted, ToolResult, UiPromptSubmitted,
-    Verbosity,
+    AgentResponseFinished, AgentResponseUpdated, AgentStopReason, CborValue, ContentPart,
+    ContextItem, ContextRole, Event, ExtAgentsMdAvailable, ExtensionReady,
+    HarnessContextUsageChanged, HarnessEffortChanged, HarnessModelSelected, HarnessRoleInfo,
+    HarnessRolesAvailable, HarnessVerbosityChanged, MessageItem, SessionPromptCreated,
+    SessionPromptQueued, SessionStartReason, SessionStarted, ToolCallItem, ToolResult,
+    UiPromptSubmitted, Verbosity,
 };
 
 use super::chat::{DraftSlot, is_local_slash_command, should_send_draft_snapshot};
@@ -96,6 +97,56 @@ fn eventually_screen_contains(vt: &VtWriter, w: u16, needle: &str) -> bool {
     false
 }
 
+fn assistant_message_item(text: impl Into<String>) -> ContextItem {
+    ContextItem::Message(MessageItem {
+        role: ContextRole::Assistant,
+        content: vec![ContentPart::Text { text: text.into() }],
+        phase: None,
+    })
+}
+
+fn session_prompt_created(session_prompt_id: &str, session_id: &str) -> SessionPromptCreated {
+    SessionPromptCreated {
+        session_prompt_id: session_prompt_id.into(),
+        session_id: session_id.into(),
+        system_prompt: String::new(),
+        context_items: Vec::new(),
+        tools: Vec::new(),
+        tools_ref: None,
+        model: None,
+        model_params: tau_proto::ModelParams::default(),
+        tool_choice: Default::default(),
+        originator: tau_proto::PromptOriginator::User,
+        share_user_cache_key: false,
+        ctx_id: None,
+        previous_response_candidate: None,
+    }
+}
+
+fn finished_response(
+    session_prompt_id: &str,
+    output_items: Vec<ContextItem>,
+) -> AgentResponseFinished {
+    let stop_reason = if output_items
+        .iter()
+        .any(|item| matches!(item, ContextItem::ToolCall(_)))
+    {
+        AgentStopReason::ToolCalls
+    } else {
+        AgentStopReason::EndTurn
+    };
+    AgentResponseFinished {
+        session_prompt_id: session_prompt_id.into(),
+        output_items,
+        stop_reason,
+        originator: tau_proto::PromptOriginator::User,
+        usage: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    }
+}
+
 #[test]
 fn stale_draft_snapshot_is_dropped_after_submit_epoch_bump() {
     let handle = (Mutex::new(DraftSlot::default()), std::sync::Condvar::new());
@@ -158,54 +209,28 @@ fn new_session_clears_session_ui_state() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
-    renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
-        session_prompt_id: "sp-0".into(),
-        session_id: "s1".into(),
-        system_prompt: String::new(),
-        system_prompt_ref: None,
-        messages: Vec::new(),
-        message_prefix: None,
-        compacted_input_items: Vec::new(),
-        tools: Vec::new(),
-        tools_ref: None,
-        model: None,
-        model_params: tau_proto::ModelParams::default(),
-        tool_choice: Default::default(),
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-        previous_response: None,
-        share_user_cache_key: false,
-    }));
-    renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
-        session_prompt_id: "sp-0".into(),
-        text: Some("old response".into()),
-        tool_calls: vec![tau_proto::AgentToolCall {
-            id: "call-1".into(),
-            name: "read".into(),
-            tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Map(vec![(
-                CborValue::Text("path".into()),
-                CborValue::Text("src/lib.rs".into()),
-            )]),
-            display: None,
-        }],
-        input_tokens: Some(100),
-        cached_tokens: Some(50),
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
-        originator: tau_proto::PromptOriginator::User,
-
-        backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
-        ws_pool_delta: None,
-    }));
+    renderer.handle(&Event::SessionPromptCreated(session_prompt_created(
+        "sp-0", "s1",
+    )));
+    renderer.handle(&Event::AgentResponseFinished(finished_response(
+        "sp-0",
+        vec![
+            assistant_message_item("old response"),
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "call-1".into(),
+                name: tau_proto::ToolName::new("read"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(vec![(
+                    CborValue::Text("path".into()),
+                    CborValue::Text("src/lib.rs".into()),
+                )]),
+            }),
+        ],
+    )));
     renderer.handle(&Event::ToolResult(ToolResult {
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new("read"),
+        tool_type: tau_proto::ToolType::Function,
         result: CborValue::Map(vec![
             (
                 CborValue::Text("path".into()),
@@ -460,24 +485,9 @@ fn single_prompt_response_cycle() {
     assert!(vt.screen_contains(80, "> hello"));
 
     // Harness creates session prompt.
-    renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
-        session_prompt_id: "sp-0".into(),
-        session_id: "s1".into(),
-        system_prompt: String::new(),
-        system_prompt_ref: None,
-        messages: Vec::new(),
-        message_prefix: None,
-        compacted_input_items: Vec::new(),
-        tools: Vec::new(),
-        tools_ref: None,
-        model: None,
-        model_params: tau_proto::ModelParams::default(),
-        tool_choice: Default::default(),
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-        previous_response: None,
-        share_user_cache_key: false,
-    }));
+    renderer.handle(&Event::SessionPromptCreated(session_prompt_created(
+        "sp-0", "s1",
+    )));
     sync(&handle);
     assert!(vt.screen_contains(80, "…"));
 
@@ -492,24 +502,10 @@ fn single_prompt_response_cycle() {
     assert!(vt.screen_contains(80, "Hi there!"));
 
     // Agent finishes.
-    renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
-        session_prompt_id: "sp-0".into(),
-        text: Some("Hi there! How can I help?".into()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
-        originator: tau_proto::PromptOriginator::User,
-
-        backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
-        ws_pool_delta: None,
-    }));
+    renderer.handle(&Event::AgentResponseFinished(finished_response(
+        "sp-0",
+        vec![assistant_message_item("Hi there! How can I help?")],
+    )));
     sync(&handle);
     assert!(
         vt.screen_contains(80, "Hi there! How can I help?"),
@@ -534,25 +530,11 @@ fn thinking_renders_as_separate_block_above_response() {
         ctx_id: None,
     }));
     renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
-        session_prompt_id: "sp-0".into(),
-        session_id: "s1".into(),
-        system_prompt: String::new(),
-        system_prompt_ref: None,
-        messages: Vec::new(),
-        message_prefix: None,
-        compacted_input_items: Vec::new(),
-        tools: Vec::new(),
-        tools_ref: None,
-        model: None,
         model_params: tau_proto::ModelParams {
             thinking_summary: tau_proto::ThinkingSummary::Auto,
             ..Default::default()
         },
-        tool_choice: Default::default(),
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-        previous_response: None,
-        share_user_cache_key: false,
+        ..session_prompt_created("sp-0", "s1")
     }));
     sync(&handle);
 
@@ -598,24 +580,10 @@ fn thinking_renders_as_separate_block_above_response() {
     );
 
     // On finish both stick in history.
-    renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
-        session_prompt_id: "sp-0".into(),
-        text: Some("actual answer".into()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: Some("planning the answer".into()),
-        token_usage: None,
-        originator: tau_proto::PromptOriginator::User,
-
-        backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
-        ws_pool_delta: None,
-    }));
+    renderer.handle(&Event::AgentResponseFinished(finished_response(
+        "sp-0",
+        vec![assistant_message_item("actual answer")],
+    )));
     sync(&handle);
     // Thinking should appear above the response in the history.
     let lines = vt.screen_text(80);
@@ -649,44 +617,22 @@ fn set_show_thinking_round_trip_restores_history() {
         ctx_id: None,
     }));
     renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
-        session_prompt_id: "sp-0".into(),
-        session_id: "s1".into(),
-        system_prompt: String::new(),
-        system_prompt_ref: None,
-        messages: Vec::new(),
-        message_prefix: None,
-        compacted_input_items: Vec::new(),
-        tools: Vec::new(),
-        tools_ref: None,
-        model: None,
         model_params: tau_proto::ModelParams {
             thinking_summary: tau_proto::ThinkingSummary::Auto,
             ..Default::default()
         },
-        tool_choice: Default::default(),
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-        previous_response: None,
-        share_user_cache_key: false,
+        ..session_prompt_created("sp-0", "s1")
     }));
-    renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
+    renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
         session_prompt_id: "sp-0".into(),
-        text: Some("the_response".into()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
+        text: "the_response".into(),
         thinking: Some("the_thinking_text".into()),
-        token_usage: None,
         originator: tau_proto::PromptOriginator::User,
-
-        backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
-        ws_pool_delta: None,
     }));
+    renderer.handle(&Event::AgentResponseFinished(finished_response(
+        "sp-0",
+        vec![assistant_message_item("the_response")],
+    )));
     sync(&handle);
     assert!(vt.screen_contains(80, "the_thinking_text"));
     assert!(vt.screen_contains(80, "the_response"));
@@ -751,44 +697,16 @@ fn thinking_created_while_off_stays_invisible_after_toggle_on() {
         ctx_id: None,
     }));
     renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
-        session_prompt_id: "sp-0".into(),
-        session_id: "s1".into(),
-        system_prompt: String::new(),
-        system_prompt_ref: None,
-        messages: Vec::new(),
-        message_prefix: None,
-        compacted_input_items: Vec::new(),
-        tools: Vec::new(),
-        tools_ref: None,
-        model: None,
         model_params: tau_proto::ModelParams {
             thinking_summary: tau_proto::ThinkingSummary::Auto,
             ..Default::default()
         },
-        tool_choice: Default::default(),
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-        previous_response: None,
-        share_user_cache_key: false,
+        ..session_prompt_created("sp-0", "s1")
     }));
-    renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
-        session_prompt_id: "sp-0".into(),
-        text: Some("answer".into()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: Some("hidden reasoning".into()),
-        token_usage: None,
-        originator: tau_proto::PromptOriginator::User,
-
-        backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
-        ws_pool_delta: None,
-    }));
+    renderer.handle(&Event::AgentResponseFinished(finished_response(
+        "sp-0",
+        vec![assistant_message_item("answer")],
+    )));
     sync(&handle);
     assert!(vt.screen_contains(80, "answer"));
     assert!(!vt.screen_contains(80, "hidden reasoning"));
@@ -816,48 +734,19 @@ fn no_thinking_block_when_summary_absent() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
-    renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
-        session_prompt_id: "sp-0".into(),
-        session_id: "s1".into(),
-        system_prompt: String::new(),
-        system_prompt_ref: None,
-        messages: Vec::new(),
-        message_prefix: None,
-        compacted_input_items: Vec::new(),
-        tools: Vec::new(),
-        tools_ref: None,
-        model: None,
-        model_params: tau_proto::ModelParams::default(),
-        tool_choice: Default::default(),
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-        previous_response: None,
-        share_user_cache_key: false,
-    }));
+    renderer.handle(&Event::SessionPromptCreated(session_prompt_created(
+        "sp-0", "s1",
+    )));
     renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
         session_prompt_id: "sp-0".into(),
         text: "hello".into(),
         thinking: None,
         originator: tau_proto::PromptOriginator::User,
     }));
-    renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
-        session_prompt_id: "sp-0".into(),
-        text: Some("hello".into()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
-        originator: tau_proto::PromptOriginator::User,
-
-        backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
-        ws_pool_delta: None,
-    }));
+    renderer.handle(&Event::AgentResponseFinished(finished_response(
+        "sp-0",
+        vec![assistant_message_item("hello")],
+    )));
     sync(&handle);
     // Just make sure we didn't crash and the response is visible.
     assert!(vt.screen_contains(80, "hello"));
@@ -879,24 +768,9 @@ fn queued_prompt_renders_after_first_completes() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
-    renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
-        session_prompt_id: "sp-0".into(),
-        session_id: "s1".into(),
-        system_prompt: String::new(),
-        system_prompt_ref: None,
-        messages: Vec::new(),
-        message_prefix: None,
-        compacted_input_items: Vec::new(),
-        tools: Vec::new(),
-        tools_ref: None,
-        model: None,
-        model_params: tau_proto::ModelParams::default(),
-        tool_choice: Default::default(),
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-        previous_response: None,
-        share_user_cache_key: false,
-    }));
+    renderer.handle(&Event::SessionPromptCreated(session_prompt_created(
+        "sp-0", "s1",
+    )));
 
     // Second prompt queued.
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
@@ -917,46 +791,17 @@ fn queued_prompt_renders_after_first_completes() {
     );
 
     // First finishes.
-    renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
-        session_prompt_id: "sp-0".into(),
-        text: Some("response one".into()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
-        originator: tau_proto::PromptOriginator::User,
-
-        backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
-        ws_pool_delta: None,
-    }));
+    renderer.handle(&Event::AgentResponseFinished(finished_response(
+        "sp-0",
+        vec![assistant_message_item("response one")],
+    )));
     sync(&handle);
     assert!(vt.screen_contains(80, "response one"));
 
     // Second dispatched — "(queued)" should be removed.
-    renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
-        session_prompt_id: "sp-1".into(),
-        session_id: "s1".into(),
-        system_prompt: String::new(),
-        system_prompt_ref: None,
-        messages: Vec::new(),
-        message_prefix: None,
-        compacted_input_items: Vec::new(),
-        tools: Vec::new(),
-        tools_ref: None,
-        model: None,
-        model_params: tau_proto::ModelParams::default(),
-        tool_choice: Default::default(),
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-        previous_response: None,
-        share_user_cache_key: false,
-    }));
+    renderer.handle(&Event::SessionPromptCreated(session_prompt_created(
+        "sp-1", "s1",
+    )));
     sync(&handle);
     assert!(
         !vt.screen_contains(80, "(queued)"),
@@ -983,24 +828,10 @@ fn queued_prompt_renders_after_first_completes() {
     );
 
     // Second finishes.
-    renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
-        session_prompt_id: "sp-1".into(),
-        text: Some("response two complete".into()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
-        originator: tau_proto::PromptOriginator::User,
-
-        backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
-        ws_pool_delta: None,
-    }));
+    renderer.handle(&Event::AgentResponseFinished(finished_response(
+        "sp-1",
+        vec![assistant_message_item("response two complete")],
+    )));
     sync(&handle);
     assert!(
         vt.screen_contains(80, "response two complete"),
@@ -1033,24 +864,9 @@ fn three_queued_prompts_render_sequentially() {
             ctx_id: None,
         }));
         if i == 0 {
-            renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
-                session_prompt_id: "sp-0".into(),
-                session_id: "s1".into(),
-                system_prompt: String::new(),
-                system_prompt_ref: None,
-                messages: Vec::new(),
-                message_prefix: None,
-                compacted_input_items: Vec::new(),
-                tools: Vec::new(),
-                tools_ref: None,
-                model: None,
-                model_params: tau_proto::ModelParams::default(),
-                tool_choice: Default::default(),
-                originator: tau_proto::PromptOriginator::User,
-                ctx_id: None,
-                previous_response: None,
-                share_user_cache_key: false,
-            }));
+            renderer.handle(&Event::SessionPromptCreated(session_prompt_created(
+                "sp-0", "s1",
+            )));
         } else {
             renderer.handle(&Event::SessionPromptQueued(SessionPromptQueued {
                 session_id: "s1".into(),
@@ -1065,21 +881,7 @@ fn three_queued_prompts_render_sequentially() {
         if i > 0 {
             renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
                 session_prompt_id: spid.clone(),
-                session_id: "s1".into(),
-                system_prompt: String::new(),
-                system_prompt_ref: None,
-                messages: Vec::new(),
-                message_prefix: None,
-                compacted_input_items: Vec::new(),
-                tools: Vec::new(),
-                tools_ref: None,
-                model: None,
-                model_params: tau_proto::ModelParams::default(),
-                tool_choice: Default::default(),
-                originator: tau_proto::PromptOriginator::User,
-                ctx_id: None,
-                previous_response: None,
-                share_user_cache_key: false,
+                ..session_prompt_created("sp-ignore", "s1")
             }));
         }
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
@@ -1088,24 +890,10 @@ fn three_queued_prompts_render_sequentially() {
             thinking: None,
             originator: tau_proto::PromptOriginator::User,
         }));
-        renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
-            session_prompt_id: spid,
-            text: Some(format!("response-{i}")),
-            tool_calls: Vec::new(),
-            input_tokens: None,
-            cached_tokens: None,
-            output_tokens: None,
-            thinking: None,
-            token_usage: None,
-            originator: tau_proto::PromptOriginator::User,
-
-            backend: None,
-            response_id: None,
-            phase: None,
-            reasoning_items: Vec::new(),
-            compacted_input_items: Vec::new(),
-            ws_pool_delta: None,
-        }));
+        renderer.handle(&Event::AgentResponseFinished(finished_response(
+            spid.as_ref(),
+            vec![assistant_message_item(format!("response-{i}"))],
+        )));
         sync(&handle);
     }
 
@@ -1136,24 +924,9 @@ fn streaming_indicator_appends_during_updates() {
         tau_themes::Theme::builtin(),
     );
 
-    renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
-        session_prompt_id: "sp-0".into(),
-        session_id: "s1".into(),
-        system_prompt: String::new(),
-        system_prompt_ref: None,
-        messages: Vec::new(),
-        message_prefix: None,
-        compacted_input_items: Vec::new(),
-        tools: Vec::new(),
-        tools_ref: None,
-        model: None,
-        model_params: tau_proto::ModelParams::default(),
-        tool_choice: Default::default(),
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-        previous_response: None,
-        share_user_cache_key: false,
-    }));
+    renderer.handle(&Event::SessionPromptCreated(session_prompt_created(
+        "sp-0", "s1",
+    )));
     sync(&handle);
     assert!(vt.screen_contains(80, "…"));
 
@@ -1166,24 +939,10 @@ fn streaming_indicator_appends_during_updates() {
     sync(&handle);
     assert!(vt.screen_contains(80, "Hello …"));
 
-    renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
-        session_prompt_id: "sp-0".into(),
-        text: Some("Hello".into()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
-        originator: tau_proto::PromptOriginator::User,
-
-        backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
-        ws_pool_delta: None,
-    }));
+    renderer.handle(&Event::AgentResponseFinished(finished_response(
+        "sp-0",
+        vec![assistant_message_item("Hello")],
+    )));
     sync(&handle);
     assert!(vt.screen_contains(80, "Hello"));
     assert!(!vt.screen_contains(80, "Hello …"));
@@ -1210,8 +969,7 @@ fn compaction_lifecycle_renders_status_line() {
     renderer.handle(&Event::SessionCompacted(tau_proto::SessionCompacted {
         session_id: "s1".into(),
         originator: tau_proto::PromptOriginator::User,
-        summary: "Conversation compacted.".to_owned(),
-        compacted_input_items: vec!["{}".to_owned()],
+        replacement_window: vec![assistant_message_item("Conversation compacted.")],
     }));
     sync(&handle);
     assert!(vt.screen_contains(80, "compact …"));
@@ -1242,8 +1000,7 @@ fn replayed_compacted_event_renders_success_status() {
     renderer.handle(&Event::SessionCompacted(tau_proto::SessionCompacted {
         session_id: "s1".into(),
         originator: tau_proto::PromptOriginator::User,
-        summary: "Conversation compacted.".to_owned(),
-        compacted_input_items: vec!["{}".to_owned()],
+        replacement_window: vec![assistant_message_item("Conversation compacted.")],
     }));
     sync(&handle);
     assert!(vt.screen_contains(80, "compact ok"));
@@ -1258,40 +1015,18 @@ fn delegate_progress_redraws_live_parent_block() {
         tau_themes::Theme::builtin(),
     );
 
-    renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
-        session_prompt_id: "sp-0".into(),
-        text: None,
-        tool_calls: vec![tau_proto::AgentToolCall {
-            id: "call-delegate".into(),
-            name: "delegate".into(),
+    renderer.handle(&Event::AgentResponseFinished(finished_response(
+        "sp-0",
+        vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "call-delegate".into(),
+            name: tau_proto::ToolName::new("delegate"),
             tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Map(Vec::new()),
-            display: Some(tau_proto::ToolDisplay {
-                args: "[probe]".into(),
-                progress_counters: vec![tau_proto::ProgressCounter {
-                    label: Some("tools".into()),
-                    unit: tau_proto::ProgressUnit::Count,
-                    complete: Some(0),
-                    total: Some(0),
-                }],
-                status: tau_proto::ToolDisplayStatus::InProgress,
-                status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
-                ..Default::default()
-            }),
-        }],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
-        originator: tau_proto::PromptOriginator::User,
-        backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
-        ws_pool_delta: None,
-    }));
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("task_name".into()),
+                CborValue::Text("[probe]".into()),
+            )]),
+        })],
+    )));
     sync(&handle);
     assert!(vt.screen_contains(100, "[probe]"));
     assert!(!vt.screen_contains(100, "%3/3"));
@@ -1353,8 +1088,7 @@ fn side_conversation_compaction_is_hidden_from_main_transcript() {
     renderer.handle(&Event::SessionCompacted(tau_proto::SessionCompacted {
         session_id: "s1".into(),
         originator: originator.clone(),
-        summary: "Conversation compacted.".to_owned(),
-        compacted_input_items: vec!["{}".to_owned()],
+        replacement_window: vec![assistant_message_item("Conversation compacted.")],
     }));
     renderer.handle(&Event::SessionCompactionFinished(
         tau_proto::SessionCompactionFinished {
@@ -1405,44 +1139,25 @@ fn running_tool_call_shows_ellipsis_until_result() {
         tau_themes::Theme::builtin(),
     );
 
-    renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
-        session_prompt_id: "sp-0".into(),
-        text: None,
-        tool_calls: vec![tau_proto::AgentToolCall {
-            id: "call-1".into(),
-            name: "read".into(),
+    renderer.handle(&Event::AgentResponseFinished(finished_response(
+        "sp-0",
+        vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "call-1".into(),
+            name: tau_proto::ToolName::new("read"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(vec![(
                 CborValue::Text("path".into()),
                 CborValue::Text("src/main.rs".into()),
             )]),
-            display: Some(tau_proto::ToolDisplay {
-                args: "src/main.rs".into(),
-                status: tau_proto::ToolDisplayStatus::InProgress,
-                status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
-                ..Default::default()
-            }),
-        }],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
-        originator: tau_proto::PromptOriginator::User,
-
-        backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
-        ws_pool_delta: None,
-    }));
+        })],
+    )));
     sync(&handle);
     assert!(vt.screen_contains(80, "read src/main.rs …"));
 
     renderer.handle(&Event::ToolResult(ToolResult {
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new("read"),
+        tool_type: tau_proto::ToolType::Function,
         result: CborValue::Map(vec![
             (
                 CborValue::Text("path".into()),
@@ -1472,6 +1187,52 @@ fn running_tool_call_shows_ellipsis_until_result() {
 }
 
 #[test]
+fn finished_response_preserves_message_and_tool_item_order() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    renderer.handle(&Event::AgentResponseFinished(finished_response(
+        "sp-0",
+        vec![
+            assistant_message_item("before tool"),
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "call-1".into(),
+                name: tau_proto::ToolName::new("read"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(vec![(
+                    CborValue::Text("path".into()),
+                    CborValue::Text("src/main.rs".into()),
+                )]),
+            }),
+            assistant_message_item("after tool"),
+        ],
+    )));
+    sync(&handle);
+
+    let lines = vt.screen_text(100);
+    let before = lines
+        .iter()
+        .position(|line| line.contains("before tool"))
+        .unwrap_or_else(|| panic!("missing first message: {lines:?}"));
+    let tool = lines
+        .iter()
+        .position(|line| line.contains("read src/main.rs"))
+        .unwrap_or_else(|| panic!("missing tool call: {lines:?}"));
+    let after = lines
+        .iter()
+        .position(|line| line.contains("after tool"))
+        .unwrap_or_else(|| panic!("missing second message: {lines:?}"));
+    assert!(
+        before < tool && tool < after,
+        "output_items order should be preserved; lines: {lines:?}",
+    );
+}
+
+#[test]
 fn show_tools_summarize_turn_summarizes_tool_batch() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
@@ -1481,48 +1242,29 @@ fn show_tools_summarize_turn_summarizes_tool_batch() {
     );
     renderer.apply_setting("show-tools", "summarize-turn");
 
-    renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
-        session_prompt_id: "sp-0".into(),
-        text: None,
-        tool_calls: vec![
-            tau_proto::AgentToolCall {
-                id: "call-1".into(),
-                name: "read".into(),
+    renderer.handle(&Event::AgentResponseFinished(finished_response(
+        "sp-0",
+        vec![
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "call-1".into(),
+                name: tau_proto::ToolName::new("read"),
                 tool_type: tau_proto::ToolType::Function,
-                arguments: CborValue::Null,
-                display: Some(tau_proto::ToolDisplay {
-                    args: "src/main.rs".into(),
-                    status: tau_proto::ToolDisplayStatus::InProgress,
-                    status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
-                    ..Default::default()
-                }),
-            },
-            tau_proto::AgentToolCall {
-                id: "call-2".into(),
-                name: "grep".into(),
+                arguments: CborValue::Map(vec![(
+                    CborValue::Text("path".into()),
+                    CborValue::Text("src/main.rs".into()),
+                )]),
+            }),
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "call-2".into(),
+                name: tau_proto::ToolName::new("grep"),
                 tool_type: tau_proto::ToolType::Function,
-                arguments: CborValue::Null,
-                display: Some(tau_proto::ToolDisplay {
-                    args: "foo".into(),
-                    status: tau_proto::ToolDisplayStatus::InProgress,
-                    status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
-                    ..Default::default()
-                }),
-            },
+                arguments: CborValue::Map(vec![(
+                    CborValue::Text("pattern".into()),
+                    CborValue::Text("foo".into()),
+                )]),
+            }),
         ],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
-        originator: tau_proto::PromptOriginator::User,
-        backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
-        ws_pool_delta: None,
-    }));
+    )));
     sync(&handle);
     assert!(vt.screen_contains(80, "tools 0/2 …"));
     assert!(!vt.screen_contains(80, "read src/main.rs"));
@@ -1530,6 +1272,7 @@ fn show_tools_summarize_turn_summarizes_tool_batch() {
     renderer.handle(&Event::ToolResult(ToolResult {
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new("read"),
+        tool_type: tau_proto::ToolType::Function,
         result: CborValue::Null,
         display: Some(tau_proto::ToolDisplay {
             args: "src/main.rs".into(),
@@ -1547,6 +1290,7 @@ fn show_tools_summarize_turn_summarizes_tool_batch() {
     renderer.handle(&Event::ToolError(tau_proto::ToolError {
         call_id: "call-2".into(),
         tool_name: tau_proto::ToolName::new("grep"),
+        tool_type: tau_proto::ToolType::Function,
         message: "nope".into(),
         details: None,
         display: Some(tau_proto::ToolDisplay {
@@ -1573,37 +1317,22 @@ fn show_tools_summarize_prompt_aggregates_across_tool_followups() {
     );
     renderer.apply_setting("show-tools", "summarize-prompt");
 
-    renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
-        session_prompt_id: "sp-0".into(),
-        text: None,
-        tool_calls: vec![tau_proto::AgentToolCall {
-            id: "call-1".into(),
-            name: "read".into(),
+    renderer.handle(&Event::AgentResponseFinished(finished_response(
+        "sp-0",
+        vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "call-1".into(),
+            name: tau_proto::ToolName::new("read"),
             tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Null,
-            display: Some(tau_proto::ToolDisplay {
-                args: "src/main.rs".into(),
-                status: tau_proto::ToolDisplayStatus::InProgress,
-                status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
-                ..Default::default()
-            }),
-        }],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
-        originator: tau_proto::PromptOriginator::User,
-        backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
-        ws_pool_delta: None,
-    }));
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("path".into()),
+                CborValue::Text("src/main.rs".into()),
+            )]),
+        })],
+    )));
     renderer.handle(&Event::ToolResult(ToolResult {
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new("read"),
+        tool_type: tau_proto::ToolType::Function,
         result: CborValue::Null,
         display: Some(tau_proto::ToolDisplay {
             args: "src/main.rs".into(),
@@ -1621,34 +1350,18 @@ fn show_tools_summarize_prompt_aggregates_across_tool_followups() {
     sync(&handle);
     assert!(vt.screen_contains(80, "tools 1/1 (1L, 13B) ok: 1"));
 
-    renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
-        session_prompt_id: "sp-1".into(),
-        text: None,
-        tool_calls: vec![tau_proto::AgentToolCall {
-            id: "call-2".into(),
-            name: "grep".into(),
+    renderer.handle(&Event::AgentResponseFinished(finished_response(
+        "sp-1",
+        vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "call-2".into(),
+            name: tau_proto::ToolName::new("grep"),
             tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Null,
-            display: Some(tau_proto::ToolDisplay {
-                args: "foo".into(),
-                status: tau_proto::ToolDisplayStatus::InProgress,
-                status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
-                ..Default::default()
-            }),
-        }],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
-        originator: tau_proto::PromptOriginator::User,
-        backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
-        ws_pool_delta: None,
-    }));
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("pattern".into()),
+                CborValue::Text("foo".into()),
+            )]),
+        })],
+    )));
     sync(&handle);
     assert!(vt.screen_contains(80, "tools 1/2 (1L, 13B) ok: 1 …"));
     assert!(!vt.screen_contains(80, "tools 1/1"));
@@ -1657,6 +1370,7 @@ fn show_tools_summarize_prompt_aggregates_across_tool_followups() {
     renderer.handle(&Event::ToolResult(ToolResult {
         call_id: "call-2".into(),
         tool_name: tau_proto::ToolName::new("grep"),
+        tool_type: tau_proto::ToolType::Function,
         result: CborValue::Null,
         display: Some(tau_proto::ToolDisplay {
             args: "foo".into(),
@@ -1687,37 +1401,22 @@ fn show_tools_compact_hides_payload_body() {
     );
     renderer.apply_setting("show-tools", "compact");
 
-    renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
-        session_prompt_id: "sp-0".into(),
-        text: None,
-        tool_calls: vec![tau_proto::AgentToolCall {
-            id: "call-1".into(),
-            name: "read".into(),
+    renderer.handle(&Event::AgentResponseFinished(finished_response(
+        "sp-0",
+        vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "call-1".into(),
+            name: tau_proto::ToolName::new("read"),
             tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Null,
-            display: Some(tau_proto::ToolDisplay {
-                args: "src/main.rs".into(),
-                status: tau_proto::ToolDisplayStatus::InProgress,
-                status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
-                ..Default::default()
-            }),
-        }],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
-        originator: tau_proto::PromptOriginator::User,
-        backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
-        ws_pool_delta: None,
-    }));
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("path".into()),
+                CborValue::Text("src/main.rs".into()),
+            )]),
+        })],
+    )));
     renderer.handle(&Event::ToolResult(ToolResult {
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new("read"),
+        tool_type: tau_proto::ToolType::Function,
         result: CborValue::Null,
         display: Some(tau_proto::ToolDisplay {
             args: "src/main.rs".into(),
@@ -1750,32 +1449,22 @@ fn show_tools_off_hides_tool_blocks() {
     );
     renderer.apply_setting("show-tools", "off");
 
-    renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
-        session_prompt_id: "sp-0".into(),
-        text: None,
-        tool_calls: vec![tau_proto::AgentToolCall {
-            id: "call-1".into(),
-            name: "read".into(),
+    renderer.handle(&Event::AgentResponseFinished(finished_response(
+        "sp-0",
+        vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "call-1".into(),
+            name: tau_proto::ToolName::new("read"),
             tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Null,
-            display: None,
-        }],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
-        originator: tau_proto::PromptOriginator::User,
-        backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
-        ws_pool_delta: None,
-    }));
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("path".into()),
+                CborValue::Text("src/main.rs".into()),
+            )]),
+        })],
+    )));
     renderer.handle(&Event::ToolResult(ToolResult {
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new("read"),
+        tool_type: tau_proto::ToolType::Function,
         result: CborValue::Null,
         display: None,
         originator: tau_proto::PromptOriginator::User,
@@ -1797,6 +1486,7 @@ fn websearch_tool_result_shows_result_count_and_size() {
     renderer.handle(&Event::ToolResult(ToolResult {
         call_id: "call-web".into(),
         tool_name: tau_proto::ToolName::new("websearch_exa"),
+        tool_type: tau_proto::ToolType::Function,
         result: CborValue::Text(
             "Title: One\nURL: https://one.example\n\nTitle: Two\nURL: https://two.example\n".into(),
         ),
@@ -1828,48 +1518,19 @@ fn streaming_block_does_not_duplicate_on_finish() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
-    renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
-        session_prompt_id: "sp-0".into(),
-        session_id: "s1".into(),
-        system_prompt: String::new(),
-        system_prompt_ref: None,
-        messages: Vec::new(),
-        message_prefix: None,
-        compacted_input_items: Vec::new(),
-        tools: Vec::new(),
-        tools_ref: None,
-        model: None,
-        model_params: tau_proto::ModelParams::default(),
-        tool_choice: Default::default(),
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-        previous_response: None,
-        share_user_cache_key: false,
-    }));
+    renderer.handle(&Event::SessionPromptCreated(session_prompt_created(
+        "sp-0", "s1",
+    )));
     renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
         session_prompt_id: "sp-0".into(),
         text: "hello!".into(),
         thinking: None,
         originator: tau_proto::PromptOriginator::User,
     }));
-    renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
-        session_prompt_id: "sp-0".into(),
-        text: Some("hello!".into()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
-        originator: tau_proto::PromptOriginator::User,
-
-        backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
-        ws_pool_delta: None,
-    }));
+    renderer.handle(&Event::AgentResponseFinished(finished_response(
+        "sp-0",
+        vec![assistant_message_item("hello!")],
+    )));
     sync(&handle);
 
     // Count how many rows contain "hello!".
@@ -2417,24 +2078,9 @@ fn three_prompts_during_streaming_all_render_correctly() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
-    renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
-        session_prompt_id: "sp-0".into(),
-        session_id: "s1".into(),
-        system_prompt: String::new(),
-        system_prompt_ref: None,
-        messages: Vec::new(),
-        message_prefix: None,
-        compacted_input_items: Vec::new(),
-        tools: Vec::new(),
-        tools_ref: None,
-        model: None,
-        model_params: tau_proto::ModelParams::default(),
-        tool_choice: Default::default(),
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-        previous_response: None,
-        share_user_cache_key: false,
-    }));
+    renderer.handle(&Event::SessionPromptCreated(session_prompt_created(
+        "sp-0", "s1",
+    )));
 
     // Agent starts streaming response 1.
     renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
@@ -2482,24 +2128,12 @@ fn three_prompts_during_streaming_all_render_correctly() {
     sync(&handle);
 
     // Response 1 finishes.
-    renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
-        session_prompt_id: "sp-0".into(),
-        text: Some("Hello!\n\nHow can I help you today?".into()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
-        originator: tau_proto::PromptOriginator::User,
-
-        backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
-        ws_pool_delta: None,
-    }));
+    renderer.handle(&Event::AgentResponseFinished(finished_response(
+        "sp-0",
+        vec![assistant_message_item(
+            "Hello!\n\nHow can I help you today?",
+        )],
+    )));
     sync(&handle);
     assert!(
         vt.screen_contains(80, "How can I help you today?"),
@@ -2508,48 +2142,21 @@ fn three_prompts_during_streaming_all_render_correctly() {
     );
 
     // Second prompt dispatched.
-    renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
-        session_prompt_id: "sp-1".into(),
-        session_id: "s1".into(),
-        system_prompt: String::new(),
-        system_prompt_ref: None,
-        messages: Vec::new(),
-        message_prefix: None,
-        compacted_input_items: Vec::new(),
-        tools: Vec::new(),
-        tools_ref: None,
-        model: None,
-        model_params: tau_proto::ModelParams::default(),
-        tool_choice: Default::default(),
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-        previous_response: None,
-        share_user_cache_key: false,
-    }));
+    renderer.handle(&Event::SessionPromptCreated(session_prompt_created(
+        "sp-1", "s1",
+    )));
     renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
         session_prompt_id: "sp-1".into(),
         text: "Hello again!\n\nHow can I help you?".into(),
         thinking: None,
         originator: tau_proto::PromptOriginator::User,
     }));
-    renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
-        session_prompt_id: "sp-1".into(),
-        text: Some("Hello again!\n\nHow can I help you?".into()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
-        originator: tau_proto::PromptOriginator::User,
-
-        backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
-        ws_pool_delta: None,
-    }));
+    renderer.handle(&Event::AgentResponseFinished(finished_response(
+        "sp-1",
+        vec![assistant_message_item(
+            "Hello again!\n\nHow can I help you?",
+        )],
+    )));
     sync(&handle);
     assert!(
         vt.screen_contains(80, "How can I help you?"),
@@ -2558,48 +2165,21 @@ fn three_prompts_during_streaming_all_render_correctly() {
     );
 
     // Third prompt dispatched.
-    renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
-        session_prompt_id: "sp-2".into(),
-        session_id: "s1".into(),
-        system_prompt: String::new(),
-        system_prompt_ref: None,
-        messages: Vec::new(),
-        message_prefix: None,
-        compacted_input_items: Vec::new(),
-        tools: Vec::new(),
-        tools_ref: None,
-        model: None,
-        model_params: tau_proto::ModelParams::default(),
-        tool_choice: Default::default(),
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-        previous_response: None,
-        share_user_cache_key: false,
-    }));
+    renderer.handle(&Event::SessionPromptCreated(session_prompt_created(
+        "sp-2", "s1",
+    )));
     renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
         session_prompt_id: "sp-2".into(),
         text: "Hi there!\n\nWhat can I help you with?".into(),
         thinking: None,
         originator: tau_proto::PromptOriginator::User,
     }));
-    renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
-        session_prompt_id: "sp-2".into(),
-        text: Some("Hi there!\n\nWhat can I help you with?".into()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
-        originator: tau_proto::PromptOriginator::User,
-
-        backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
-        ws_pool_delta: None,
-    }));
+    renderer.handle(&Event::AgentResponseFinished(finished_response(
+        "sp-2",
+        vec![assistant_message_item(
+            "Hi there!\n\nWhat can I help you with?",
+        )],
+    )));
     sync(&handle);
 
     // All three responses should be visible.
@@ -2653,24 +2233,9 @@ fn emoji_in_response_renders_correctly() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
-    renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
-        session_prompt_id: "sp-0".into(),
-        session_id: "s1".into(),
-        system_prompt: String::new(),
-        system_prompt_ref: None,
-        messages: Vec::new(),
-        message_prefix: None,
-        compacted_input_items: Vec::new(),
-        tools: Vec::new(),
-        tools_ref: None,
-        model: None,
-        model_params: tau_proto::ModelParams::default(),
-        tool_choice: Default::default(),
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-        previous_response: None,
-        share_user_cache_key: false,
-    }));
+    renderer.handle(&Event::SessionPromptCreated(session_prompt_created(
+        "sp-0", "s1",
+    )));
 
     // Response with emoji followed by text on next line.
     let response = "Hello! 👋\n\nHow can I help you today?";
@@ -2680,24 +2245,10 @@ fn emoji_in_response_renders_correctly() {
         thinking: None,
         originator: tau_proto::PromptOriginator::User,
     }));
-    renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
-        session_prompt_id: "sp-0".into(),
-        text: Some(response.into()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
-        originator: tau_proto::PromptOriginator::User,
-
-        backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
-        ws_pool_delta: None,
-    }));
+    renderer.handle(&Event::AgentResponseFinished(finished_response(
+        "sp-0",
+        vec![assistant_message_item(response)],
+    )));
     sync(&handle);
 
     let text = vt.screen_text(40);
@@ -2739,45 +2290,16 @@ fn multiple_emoji_no_column_drift() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
-    renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
-        session_prompt_id: "sp-0".into(),
-        session_id: "s1".into(),
-        system_prompt: String::new(),
-        system_prompt_ref: None,
-        messages: Vec::new(),
-        message_prefix: None,
-        compacted_input_items: Vec::new(),
-        tools: Vec::new(),
-        tools_ref: None,
-        model: None,
-        model_params: tau_proto::ModelParams::default(),
-        tool_choice: Default::default(),
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-        previous_response: None,
-        share_user_cache_key: false,
-    }));
+    renderer.handle(&Event::SessionPromptCreated(session_prompt_created(
+        "sp-0", "s1",
+    )));
 
     // 3 emoji = 6 columns + "end" = 9 columns total.
     let response = "🎉🎊🎈end\nnext line here";
-    renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
-        session_prompt_id: "sp-0".into(),
-        text: Some(response.into()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
-        originator: tau_proto::PromptOriginator::User,
-
-        backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
-        ws_pool_delta: None,
-    }));
+    renderer.handle(&Event::AgentResponseFinished(finished_response(
+        "sp-0",
+        vec![assistant_message_item(response)],
+    )));
     sync(&handle);
 
     let text = vt.screen_text(40);
@@ -2807,24 +2329,9 @@ fn overflowing_stream_replaced_cleanly_on_finish() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
-    renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
-        session_prompt_id: "sp-0".into(),
-        session_id: "s1".into(),
-        system_prompt: String::new(),
-        system_prompt_ref: None,
-        messages: Vec::new(),
-        message_prefix: None,
-        compacted_input_items: Vec::new(),
-        tools: Vec::new(),
-        tools_ref: None,
-        model: None,
-        model_params: tau_proto::ModelParams::default(),
-        tool_choice: Default::default(),
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-        previous_response: None,
-        share_user_cache_key: false,
-    }));
+    renderer.handle(&Event::SessionPromptCreated(session_prompt_created(
+        "sp-0", "s1",
+    )));
 
     let partial = "stream 0\nstream 1\nstream 2\nstream 3\nPARTIAL ONLY";
     renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
@@ -2841,24 +2348,10 @@ fn overflowing_stream_replaced_cleanly_on_finish() {
     );
 
     let final_text = "final 0\nfinal 1\nfinal 2";
-    renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
-        session_prompt_id: "sp-0".into(),
-        text: Some(final_text.into()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
-        originator: tau_proto::PromptOriginator::User,
-
-        backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
-        ws_pool_delta: None,
-    }));
+    renderer.handle(&Event::AgentResponseFinished(finished_response(
+        "sp-0",
+        vec![assistant_message_item(final_text)],
+    )));
     sync(&handle);
 
     let text = vt.screen_text(40);

@@ -33,7 +33,7 @@ enum ContextRole {
 
 struct ToolCallItem {
     call_id: ToolCallId,
-    name: ToolNameMaybe,
+    name: ToolName,
     tool_type: ToolType,
     arguments: CborValue,
 }
@@ -57,6 +57,9 @@ struct OpaqueProviderItem(CborValue);
 Notes:
 
 - `ContextItem` is the provider-ish item timeline Tau reasons about.
+- `ToolCallItem::name` is already the strict Tau-visible tool name. Provider
+  names that cannot be normalized to a valid `ToolName` are rejected before
+  becoming transcript items.
 - `Reasoning`, `Compaction`, and `UnknownProviderItem` are opaque payloads.
 - Embedded `ContextItem::Compaction` is preserved as output, but is not a
   transcript boundary.
@@ -107,9 +110,9 @@ durable transcript truth, but its shape is still central to the model.
 struct SessionPromptCreated {
     session_prompt_id: SessionPromptId,
     session_id: SessionId,
-    instructions: String,
+    system_prompt: String,
+    // Fully materialized history for this turn.
     context_items: Vec<ContextItem>,
-    context_item_prefix: Option<PromptItemPrefix>,
     tools: Vec<ToolDefinition>,
     tools_ref: Option<PromptToolsRef>,
     model: Option<ModelId>,
@@ -117,11 +120,6 @@ struct SessionPromptCreated {
     tool_choice: ToolChoice,
     originator: PromptOriginator,
     previous_response_candidate: Option<PreviousResponseCandidate>,
-}
-
-struct PromptItemPrefix {
-    base_session_prompt_id: SessionPromptId,
-    item_count: usize,
 }
 
 struct PreviousResponseCandidate {
@@ -134,8 +132,8 @@ struct PreviousResponseCandidate {
 Rules:
 
 - `context_items` must be sufficient even when the candidate is ignored.
+- `context_items` is the full effective history for the turn, not a suffix.
 - The candidate is only an optimization hint.
-- Prefix compression is item-based, not message-based.
 - Runtime validity of `previous_response_id` remains agent-side state rather
   than part of the shared prompt type model.
 
@@ -177,6 +175,11 @@ struct SessionCompacted {
 
 Operational-only events such as `ToolRequest`, `SessionPromptQueued`, and
 progress events stay out of the durable transcript model.
+
+The bus-level runtime `ToolResult` event may still carry extra operational
+fields such as `tool_name`, `result`, `display`, and `originator` for UI
+rendering and tool plumbing. `ToolResultFact` above is the narrower durable
+completed-tool fact shape the projection reasons about.
 
 ## Fold State
 

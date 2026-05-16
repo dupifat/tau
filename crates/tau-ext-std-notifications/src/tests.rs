@@ -1,7 +1,10 @@
 use std::io::Cursor;
 use std::sync::Once;
 
-use tau_proto::{AgentResponseFinished, Event, FrameReader, FrameWriter, UiPromptSubmitted};
+use tau_proto::{
+    AgentResponseFinished, AgentStopReason, ContentPart, ContextItem, ContextRole, Event,
+    FrameReader, FrameWriter, MessageItem, ToolCallItem, UiPromptSubmitted,
+};
 use tracing_subscriber::EnvFilter;
 
 use super::*;
@@ -127,6 +130,46 @@ fn immediate_idle_agent_summary_config_frame() -> Frame {
     })))
 }
 
+fn assistant_finished_response(
+    session_prompt_id: &str,
+    text: &str,
+    originator: tau_proto::PromptOriginator,
+) -> AgentResponseFinished {
+    AgentResponseFinished {
+        session_prompt_id: session_prompt_id.into(),
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+            content: vec![ContentPart::Text {
+                text: text.to_owned(),
+            }],
+            phase: None,
+        })],
+        stop_reason: AgentStopReason::EndTurn,
+        originator,
+        usage: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    }
+}
+
+fn tool_call_finished_response(
+    session_prompt_id: &str,
+    tool_call: ToolCallItem,
+    originator: tau_proto::PromptOriginator,
+) -> AgentResponseFinished {
+    AgentResponseFinished {
+        session_prompt_id: session_prompt_id.into(),
+        output_items: vec![ContextItem::ToolCall(tool_call)],
+        stop_reason: AgentStopReason::ToolCalls,
+        originator,
+        usage: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    }
+}
+
 /// Test marker for "we're past the lifecycle handshake". The hello /
 /// subscribe / ready messages are point-to-point `Frame::Message`s
 /// (filtered out by `EventReader`), so reading from `EventReader`
@@ -150,24 +193,11 @@ fn emits_start_and_end_user_var_in_order() {
         }))
         .expect("write");
     writer
-        .write_event(&Event::AgentResponseFinished(AgentResponseFinished {
-            session_prompt_id: "sp-0".into(),
-            text: Some("done".into()),
-            tool_calls: Vec::new(),
-            input_tokens: None,
-            cached_tokens: None,
-            output_tokens: None,
-            thinking: None,
-            token_usage: None,
-            originator: tau_proto::PromptOriginator::User,
-
-            backend: None,
-            response_id: None,
-            phase: None,
-            reasoning_items: Vec::new(),
-            compacted_input_items: Vec::new(),
-            ws_pool_delta: None,
-        }))
+        .write_event(&Event::AgentResponseFinished(assistant_finished_response(
+            "sp-0",
+            "done",
+            tau_proto::PromptOriginator::User,
+        )))
         .expect("write");
     // Explicit disconnect so the loop exits without waiting on
     // the (otherwise long) idle deadline triggered by the
@@ -207,7 +237,7 @@ fn emits_start_and_end_user_var_in_order() {
 /// `AgentResponseFinished` that has empty `tool_calls`.
 #[test]
 fn mid_turn_finish_with_tool_calls_does_not_emit_end_sound() {
-    use tau_proto::{AgentToolCall, CborValue, ToolNameMaybe};
+    use tau_proto::CborValue;
     let mut input = Vec::new();
     let mut writer = EventWriter::new(&mut input);
     writer
@@ -221,30 +251,16 @@ fn mid_turn_finish_with_tool_calls_does_not_emit_end_sound() {
     // Mid-turn finish: text=None, tool_calls non-empty. No
     // notification should fire.
     writer
-        .write_event(&Event::AgentResponseFinished(AgentResponseFinished {
-            session_prompt_id: "sp-0".into(),
-            text: None,
-            tool_calls: vec![AgentToolCall {
-                id: "call-1".into(),
-                name: ToolNameMaybe::from_raw("shell"),
+        .write_event(&Event::AgentResponseFinished(tool_call_finished_response(
+            "sp-0",
+            ToolCallItem {
+                call_id: "call-1".into(),
+                name: tau_proto::ToolName::new("shell"),
                 tool_type: tau_proto::ToolType::Function,
                 arguments: CborValue::Null,
-                display: None,
-            }],
-            input_tokens: None,
-            cached_tokens: None,
-            output_tokens: None,
-            thinking: Some("planning".into()),
-            token_usage: None,
-            originator: tau_proto::PromptOriginator::User,
-
-            backend: None,
-            response_id: None,
-            phase: None,
-            reasoning_items: Vec::new(),
-            compacted_input_items: Vec::new(),
-            ws_pool_delta: None,
-        }))
+            },
+            tau_proto::PromptOriginator::User,
+        )))
         .expect("write");
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
@@ -282,24 +298,11 @@ fn idle_timeout_defaults_to_static_notification() {
     let mut input = Vec::new();
     let mut writer = EventWriter::new(&mut input);
     writer
-        .write_event(&Event::AgentResponseFinished(AgentResponseFinished {
-            session_prompt_id: "sp-0".into(),
-            text: Some("done".into()),
-            tool_calls: Vec::new(),
-            input_tokens: None,
-            cached_tokens: None,
-            output_tokens: None,
-            thinking: None,
-            token_usage: None,
-            originator: tau_proto::PromptOriginator::User,
-
-            backend: None,
-            response_id: None,
-            phase: None,
-            reasoning_items: Vec::new(),
-            compacted_input_items: Vec::new(),
-            ws_pool_delta: None,
-        }))
+        .write_event(&Event::AgentResponseFinished(assistant_finished_response(
+            "sp-0",
+            "done",
+            tau_proto::PromptOriginator::User,
+        )))
         .expect("write");
     writer.flush().expect("flush");
 
@@ -358,24 +361,11 @@ fn idle_timeout_requests_summary_when_enabled_then_falls_back() {
         .write_frame(&immediate_idle_agent_summary_config_frame())
         .expect("write");
     writer
-        .write_event(&Event::AgentResponseFinished(AgentResponseFinished {
-            session_prompt_id: "sp-0".into(),
-            text: Some("done".into()),
-            tool_calls: Vec::new(),
-            input_tokens: None,
-            cached_tokens: None,
-            output_tokens: None,
-            thinking: None,
-            token_usage: None,
-            originator: tau_proto::PromptOriginator::User,
-
-            backend: None,
-            response_id: None,
-            phase: None,
-            reasoning_items: Vec::new(),
-            compacted_input_items: Vec::new(),
-            ws_pool_delta: None,
-        }))
+        .write_event(&Event::AgentResponseFinished(assistant_finished_response(
+            "sp-0",
+            "done",
+            tau_proto::PromptOriginator::User,
+        )))
         .expect("write");
     writer.flush().expect("flush");
 
@@ -454,24 +444,11 @@ fn summary_result_populates_notification_body() {
         .write_frame(&immediate_idle_agent_summary_config_frame())
         .expect("write");
     writer
-        .write_event(&Event::AgentResponseFinished(AgentResponseFinished {
-            session_prompt_id: "sp-0".into(),
-            text: Some("done".into()),
-            tool_calls: Vec::new(),
-            input_tokens: None,
-            cached_tokens: None,
-            output_tokens: None,
-            thinking: None,
-            token_usage: None,
-            originator: tau_proto::PromptOriginator::User,
-
-            backend: None,
-            response_id: None,
-            phase: None,
-            reasoning_items: Vec::new(),
-            compacted_input_items: Vec::new(),
-            ws_pool_delta: None,
-        }))
+        .write_event(&Event::AgentResponseFinished(assistant_finished_response(
+            "sp-0",
+            "done",
+            tau_proto::PromptOriginator::User,
+        )))
         .expect("write");
     writer.flush().expect("flush");
 
@@ -543,24 +520,11 @@ fn prompt_draft_extends_idle_deadline() {
 
     // Arm the idle deadline.
     writer
-        .write_event(&Event::AgentResponseFinished(AgentResponseFinished {
-            session_prompt_id: "sp-0".into(),
-            text: Some("done".into()),
-            tool_calls: Vec::new(),
-            input_tokens: None,
-            cached_tokens: None,
-            output_tokens: None,
-            thinking: None,
-            token_usage: None,
-            originator: tau_proto::PromptOriginator::User,
-
-            backend: None,
-            response_id: None,
-            phase: None,
-            reasoning_items: Vec::new(),
-            compacted_input_items: Vec::new(),
-            ws_pool_delta: None,
-        }))
+        .write_event(&Event::AgentResponseFinished(assistant_finished_response(
+            "sp-0",
+            "done",
+            tau_proto::PromptOriginator::User,
+        )))
         .expect("write");
     writer.flush().expect("flush");
 
@@ -648,24 +612,11 @@ fn prompt_draft_during_waiting_summary_does_not_cancel() {
         .write_frame(&immediate_idle_agent_summary_config_frame())
         .expect("write");
     writer
-        .write_event(&Event::AgentResponseFinished(AgentResponseFinished {
-            session_prompt_id: "sp-0".into(),
-            text: Some("done".into()),
-            tool_calls: Vec::new(),
-            input_tokens: None,
-            cached_tokens: None,
-            output_tokens: None,
-            thinking: None,
-            token_usage: None,
-            originator: tau_proto::PromptOriginator::User,
-
-            backend: None,
-            response_id: None,
-            phase: None,
-            reasoning_items: Vec::new(),
-            compacted_input_items: Vec::new(),
-            ws_pool_delta: None,
-        }))
+        .write_event(&Event::AgentResponseFinished(assistant_finished_response(
+            "sp-0",
+            "done",
+            tau_proto::PromptOriginator::User,
+        )))
         .expect("write");
     writer.flush().expect("flush");
 
@@ -761,24 +712,11 @@ fn idle_command_runs_with_title_body_and_env() {
     }));
     writer.write_frame(&configure_frame(cfg)).expect("write");
     writer
-        .write_event(&Event::AgentResponseFinished(AgentResponseFinished {
-            session_prompt_id: "sp-0".into(),
-            text: Some("done".into()),
-            tool_calls: Vec::new(),
-            input_tokens: None,
-            cached_tokens: None,
-            output_tokens: None,
-            thinking: None,
-            token_usage: None,
-            originator: tau_proto::PromptOriginator::User,
-
-            backend: None,
-            response_id: None,
-            phase: None,
-            reasoning_items: Vec::new(),
-            compacted_input_items: Vec::new(),
-            ws_pool_delta: None,
-        }))
+        .write_event(&Event::AgentResponseFinished(assistant_finished_response(
+            "sp-0",
+            "done",
+            tau_proto::PromptOriginator::User,
+        )))
         .expect("write");
     writer.flush().expect("flush");
 
@@ -871,24 +809,11 @@ fn user_prompt_during_idle_window_cancels_text_notification() {
     let mut input = Vec::new();
     let mut writer = EventWriter::new(&mut input);
     writer
-        .write_event(&Event::AgentResponseFinished(AgentResponseFinished {
-            session_prompt_id: "sp-0".into(),
-            text: Some("done".into()),
-            tool_calls: Vec::new(),
-            input_tokens: None,
-            cached_tokens: None,
-            output_tokens: None,
-            thinking: None,
-            token_usage: None,
-            originator: tau_proto::PromptOriginator::User,
-
-            backend: None,
-            response_id: None,
-            phase: None,
-            reasoning_items: Vec::new(),
-            compacted_input_items: Vec::new(),
-            ws_pool_delta: None,
-        }))
+        .write_event(&Event::AgentResponseFinished(assistant_finished_response(
+            "sp-0",
+            "done",
+            tau_proto::PromptOriginator::User,
+        )))
         .expect("write");
     writer
         .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
@@ -935,7 +860,7 @@ fn user_prompt_during_idle_window_cancels_text_notification() {
 /// chime, since the user isn't seeing them.
 #[test]
 fn sub_agent_prompts_and_responses_are_ignored() {
-    use tau_proto::{AgentPromptSubmitted, AgentToolCall, CborValue, ToolNameMaybe};
+    use tau_proto::{AgentPromptSubmitted, CborValue, ToolName};
     let mut input = Vec::new();
     let mut writer = EventWriter::new(&mut input);
 
@@ -951,30 +876,16 @@ fn sub_agent_prompts_and_responses_are_ignored() {
 
     // Main agent emits a delegate tool_call (mid-turn).
     writer
-        .write_event(&Event::AgentResponseFinished(AgentResponseFinished {
-            session_prompt_id: "sp-main".into(),
-            text: None,
-            tool_calls: vec![AgentToolCall {
-                id: "delegate-call".into(),
-                name: ToolNameMaybe::from_raw("delegate"),
+        .write_event(&Event::AgentResponseFinished(tool_call_finished_response(
+            "sp-main",
+            ToolCallItem {
+                call_id: "delegate-call".into(),
+                name: ToolName::new("delegate"),
                 tool_type: tau_proto::ToolType::Function,
                 arguments: CborValue::Null,
-                display: None,
-            }],
-            input_tokens: None,
-            cached_tokens: None,
-            output_tokens: None,
-            thinking: None,
-            token_usage: None,
-            originator: tau_proto::PromptOriginator::User,
-
-            backend: None,
-            response_id: None,
-            phase: None,
-            reasoning_items: Vec::new(),
-            compacted_input_items: Vec::new(),
-            ws_pool_delta: None,
-        }))
+            },
+            tau_proto::PromptOriginator::User,
+        )))
         .expect("write");
 
     // Sub-agent activity — must not clear idle, fire chimes, or
@@ -1000,49 +911,23 @@ fn sub_agent_prompts_and_responses_are_ignored() {
         }))
         .expect("write");
     writer
-        .write_event(&Event::AgentResponseFinished(AgentResponseFinished {
-            session_prompt_id: "sp-side".into(),
-            text: Some("delegated answer".into()),
-            tool_calls: Vec::new(),
-            input_tokens: None,
-            cached_tokens: None,
-            output_tokens: None,
-            thinking: None,
-            token_usage: None,
-            originator: tau_proto::PromptOriginator::Extension {
+        .write_event(&Event::AgentResponseFinished(assistant_finished_response(
+            "sp-side",
+            "delegated answer",
+            tau_proto::PromptOriginator::Extension {
                 name: "core-delegate".into(),
                 query_id: "q1".into(),
             },
-
-            backend: None,
-            response_id: None,
-            phase: None,
-            reasoning_items: Vec::new(),
-            compacted_input_items: Vec::new(),
-            ws_pool_delta: None,
-        }))
+        )))
         .expect("write");
 
     // Main agent finally finishes the user's turn → end sound.
     writer
-        .write_event(&Event::AgentResponseFinished(AgentResponseFinished {
-            session_prompt_id: "sp-main".into(),
-            text: Some("done".into()),
-            tool_calls: Vec::new(),
-            input_tokens: None,
-            cached_tokens: None,
-            output_tokens: None,
-            thinking: None,
-            token_usage: None,
-            originator: tau_proto::PromptOriginator::User,
-
-            backend: None,
-            response_id: None,
-            phase: None,
-            reasoning_items: Vec::new(),
-            compacted_input_items: Vec::new(),
-            ws_pool_delta: None,
-        }))
+        .write_event(&Event::AgentResponseFinished(assistant_finished_response(
+            "sp-main",
+            "done",
+            tau_proto::PromptOriginator::User,
+        )))
         .expect("write");
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
@@ -1095,24 +980,11 @@ fn duplicate_ui_prompt_submitted_during_same_turn_emits_one_start_sound() {
         }))
         .expect("write");
     writer
-        .write_event(&Event::AgentResponseFinished(AgentResponseFinished {
-            session_prompt_id: "sp-0".into(),
-            text: Some("done".into()),
-            tool_calls: Vec::new(),
-            input_tokens: None,
-            cached_tokens: None,
-            output_tokens: None,
-            thinking: None,
-            token_usage: None,
-            originator: tau_proto::PromptOriginator::User,
-
-            backend: None,
-            response_id: None,
-            phase: None,
-            reasoning_items: Vec::new(),
-            compacted_input_items: Vec::new(),
-            ws_pool_delta: None,
-        }))
+        .write_event(&Event::AgentResponseFinished(assistant_finished_response(
+            "sp-0",
+            "done",
+            tau_proto::PromptOriginator::User,
+        )))
         .expect("write");
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");

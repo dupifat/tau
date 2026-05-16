@@ -1,5 +1,8 @@
 use tau_config::settings::PromptCacheRetention;
-use tau_proto::{ContentBlock, ConversationMessage, ConversationRole};
+use tau_proto::{
+    ContentPart, ContextItem, ContextRole, MessageItem, OpaqueProviderItem, ToolCallItem,
+    ToolResultItem, ToolResultStatus,
+};
 
 use super::*;
 use crate::common::{LlmError, PreviousResponse};
@@ -23,8 +26,7 @@ fn build_request_includes_prompt_cache_fields_when_configured() {
     };
     let request = PromptPayload {
         system_prompt: "system",
-        messages: &[],
-        compacted_input_items: &[],
+        context_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -60,8 +62,7 @@ fn build_request_includes_service_tier_when_configured() {
     };
     let request = PromptPayload {
         system_prompt: "system",
-        messages: &[],
-        compacted_input_items: &[],
+        context_items: &[],
         tools: &[],
         params: tau_proto::ModelParams {
             service_tier: Some(tau_proto::ServiceTier::Fast),
@@ -98,8 +99,7 @@ fn build_request_omits_prompt_cache_fields_without_seed_or_retention() {
     };
     let request = PromptPayload {
         system_prompt: "system",
-        messages: &[],
-        compacted_input_items: &[],
+        context_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -127,8 +127,7 @@ fn build_request_first_turn_replays_full_history_without_chain() {
     let messages = vec![user_text("hello"), assistant_text("hi there")];
     let request = PromptPayload {
         system_prompt: "sys",
-        messages: &messages,
-        compacted_input_items: &[],
+        context_items: &messages,
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -162,8 +161,7 @@ fn build_compact_request_omits_store_field() {
     let messages = vec![user_text("hello")];
     let request = PromptPayload {
         system_prompt: "sys",
-        messages: &messages,
-        compacted_input_items: &[],
+        context_items: &messages,
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -204,14 +202,13 @@ fn build_request_chain_turn_sends_delta_and_previous_response_id() {
     ];
     let request = PromptPayload {
         system_prompt: "sys",
-        messages: &messages,
-        compacted_input_items: &[],
+        context_items: &messages,
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
         previous_response: Some(PreviousResponse {
             id: "resp_abc",
-            message_index: 2,
+            next_item_index: 2,
             transport: Some(tau_proto::AgentBackendTransport::HttpSse),
         }),
         originator: &tau_proto::PromptOriginator::User,
@@ -245,14 +242,13 @@ fn build_request_chain_with_oob_index_falls_back_to_full_replay() {
     let messages = vec![user_text("only")];
     let request = PromptPayload {
         system_prompt: "sys",
-        messages: &messages,
-        compacted_input_items: &[],
+        context_items: &messages,
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
         previous_response: Some(PreviousResponse {
             id: "resp_abc",
-            message_index: 99,
+            next_item_index: 99,
             transport: Some(tau_proto::AgentBackendTransport::HttpSse),
         }),
         originator: &tau_proto::PromptOriginator::User,
@@ -312,14 +308,13 @@ fn build_request_chain_turn_still_emits_prompt_cache_key() {
     ];
     let request = PromptPayload {
         system_prompt: "sys",
-        messages: &messages,
-        compacted_input_items: &[],
+        context_items: &messages,
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
         previous_response: Some(PreviousResponse {
             id: "resp_abc",
-            message_index: 2,
+            next_item_index: 2,
             transport: Some(tau_proto::AgentBackendTransport::HttpSse),
         }),
         originator: &tau_proto::PromptOriginator::User,
@@ -349,8 +344,7 @@ fn build_request_prompt_cache_key_differs_for_extension_originator() {
     };
     let user_request = PromptPayload {
         system_prompt: "sys",
-        messages: &[],
-        compacted_input_items: &[],
+        context_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -361,8 +355,7 @@ fn build_request_prompt_cache_key_differs_for_extension_originator() {
     };
     let ext_request = PromptPayload {
         system_prompt: "sys",
-        messages: &[],
-        compacted_input_items: &[],
+        context_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -398,8 +391,7 @@ fn build_request_share_user_cache_key_pins_extension_to_user_bucket() {
     };
     let shared_request = PromptPayload {
         system_prompt: "sys",
-        messages: &[],
-        compacted_input_items: &[],
+        context_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
@@ -433,13 +425,12 @@ fn build_request_cache_shared_extension_matches_user_wire_body() {
     let messages = [user_text("summarize")];
     let previous_response = Some(PreviousResponse {
         id: "resp_parent",
-        message_index: 0,
+        next_item_index: 0,
         transport: Some(tau_proto::AgentBackendTransport::HttpSse),
     });
     let user_request = PromptPayload {
         system_prompt: "sys",
-        messages: &messages,
-        compacted_input_items: &[],
+        context_items: &messages,
         tools: std::slice::from_ref(&tool),
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
@@ -450,8 +441,7 @@ fn build_request_cache_shared_extension_matches_user_wire_body() {
     };
     let shared_ext_request = PromptPayload {
         system_prompt: "sys",
-        messages: &messages,
-        compacted_input_items: &[],
+        context_items: &messages,
         tools: std::slice::from_ref(&tool),
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
@@ -490,8 +480,7 @@ fn build_request_emits_tool_choice_none_while_keeping_tools_declared() {
     };
     let request = PromptPayload {
         system_prompt: "sys",
-        messages: &[],
-        compacted_input_items: &[],
+        context_items: &[],
         tools: std::slice::from_ref(&tool),
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::None,
@@ -544,28 +533,47 @@ fn encrypted_reasoning_test_config() -> ResponsesConfig {
     }
 }
 
-fn user_text(text: &str) -> ConversationMessage {
-    ConversationMessage {
-        role: ConversationRole::User,
-        content: vec![ContentBlock::Text { text: text.into() }],
+fn user_text(text: &str) -> ContextItem {
+    ContextItem::Message(MessageItem {
+        role: ContextRole::User,
+        content: vec![ContentPart::Text { text: text.into() }],
         phase: None,
-    }
+    })
 }
 
-fn assistant_text(text: &str) -> ConversationMessage {
-    ConversationMessage {
-        role: ConversationRole::Assistant,
-        content: vec![ContentBlock::Text { text: text.into() }],
+fn assistant_text(text: &str) -> ContextItem {
+    ContextItem::Message(MessageItem {
+        role: ContextRole::Assistant,
+        content: vec![ContentPart::Text { text: text.into() }],
         phase: None,
-    }
+    })
 }
 
-fn assistant_text_with_phase(text: &str, phase: tau_proto::MessagePhase) -> ConversationMessage {
-    ConversationMessage {
-        role: ConversationRole::Assistant,
-        content: vec![ContentBlock::Text { text: text.into() }],
+fn assistant_text_with_phase(text: &str, phase: tau_proto::MessagePhase) -> ContextItem {
+    ContextItem::Message(MessageItem {
+        role: ContextRole::Assistant,
+        content: vec![ContentPart::Text { text: text.into() }],
         phase: Some(phase),
-    }
+    })
+}
+
+fn assistant_tool_call(
+    id: &str,
+    name: &str,
+    tool_type: tau_proto::ToolType,
+    input: tau_proto::CborValue,
+) -> ContextItem {
+    ContextItem::ToolCall(ToolCallItem {
+        call_id: id.into(),
+        name: tau_proto::ToolName::new(name),
+        tool_type,
+        arguments: input,
+    })
+}
+
+fn reasoning_item(item: &str) -> ContextItem {
+    let value: serde_json::Value = serde_json::from_str(item).expect("reasoning item json");
+    ContextItem::Reasoning(OpaqueProviderItem(crate::common::json_to_cbor(&value)))
 }
 
 /// When `supports_phase` is on, every assistant `message` item must
@@ -583,8 +591,7 @@ fn build_request_stamps_phase_on_assistant_messages_when_supported() {
     ];
     let request = PromptPayload {
         system_prompt: "sys",
-        messages: &messages,
-        compacted_input_items: &[],
+        context_items: &messages,
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -622,8 +629,7 @@ fn build_request_omits_phase_when_unsupported() {
     )];
     let request = PromptPayload {
         system_prompt: "sys",
-        messages: &messages,
-        compacted_input_items: &[],
+        context_items: &messages,
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -655,28 +661,19 @@ fn build_request_omits_phase_when_unsupported() {
 #[test]
 fn build_request_stamps_phase_on_pre_tool_call_text_flush() {
     let config = phase_test_config();
-    let messages = vec![ConversationMessage {
-        role: ConversationRole::Assistant,
-        content: vec![
-            ContentBlock::Text {
-                text: "thinking out loud".into(),
-            },
-            ContentBlock::ToolUse {
-                id: "call-1".into(),
-                name: "shell".into(),
-                tool_type: tau_proto::ToolType::Function,
-                input: tau_proto::CborValue::Null,
-            },
-            ContentBlock::Text {
-                text: "trailing".into(),
-            },
-        ],
-        phase: Some(tau_proto::MessagePhase::Commentary),
-    }];
+    let messages = vec![
+        assistant_text_with_phase("thinking out loud", tau_proto::MessagePhase::Commentary),
+        assistant_tool_call(
+            "call-1",
+            "shell",
+            tau_proto::ToolType::Function,
+            tau_proto::CborValue::Null,
+        ),
+        assistant_text_with_phase("trailing", tau_proto::MessagePhase::Commentary),
+    ];
     let request = PromptPayload {
         system_prompt: "sys",
-        messages: &messages,
-        compacted_input_items: &[],
+        context_items: &messages,
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -768,8 +765,7 @@ fn build_request_emits_include_when_encrypted_reasoning_supported() {
     let config = encrypted_reasoning_test_config();
     let request = PromptPayload {
         system_prompt: "sys",
-        messages: &[],
-        compacted_input_items: &[],
+        context_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -793,8 +789,7 @@ fn build_request_omits_include_when_encrypted_reasoning_unsupported() {
     let config = chain_test_config();
     let request = PromptPayload {
         system_prompt: "sys",
-        messages: &[],
-        compacted_input_items: &[],
+        context_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -829,22 +824,13 @@ fn build_request_replays_reasoning_item_as_top_level_input() {
         "encrypted_content": "OPAQUE-BLOB"
     })
     .to_string();
-    let messages = vec![ConversationMessage {
-        role: ConversationRole::Assistant,
-        content: vec![
-            ContentBlock::Reasoning {
-                item: reasoning_blob,
-            },
-            ContentBlock::Text {
-                text: "here's the answer".into(),
-            },
-        ],
-        phase: None,
-    }];
+    let messages = vec![
+        reasoning_item(&reasoning_blob),
+        assistant_text("here's the answer"),
+    ];
     let request = PromptPayload {
         system_prompt: "sys",
-        messages: &messages,
-        compacted_input_items: &[],
+        context_items: &messages,
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -891,30 +877,22 @@ fn build_request_emits_custom_tool_definition_and_round_trips_custom_tool_output
         }),
     };
     let messages = vec![
-        ConversationMessage {
-            role: ConversationRole::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: "call-patch".into(),
-                name: "apply_patch".into(),
-                tool_type: tau_proto::ToolType::Custom,
-                input: tau_proto::CborValue::Text("*** Begin Patch\n*** End Patch".into()),
-            }],
-            phase: None,
-        },
-        ConversationMessage {
-            role: ConversationRole::User,
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: "call-patch".into(),
-                content: "ok".into(),
-                is_error: false,
-            }],
-            phase: None,
-        },
+        assistant_tool_call(
+            "call-patch",
+            "apply_patch",
+            tau_proto::ToolType::Custom,
+            tau_proto::CborValue::Text("*** Begin Patch\n*** End Patch".into()),
+        ),
+        ContextItem::ToolResult(ToolResultItem {
+            call_id: "call-patch".into(),
+            tool_type: tau_proto::ToolType::Custom,
+            status: ToolResultStatus::Success,
+            output: tau_proto::CborValue::Text("ok".into()),
+        }),
     ];
     let request = PromptPayload {
         system_prompt: "sys",
-        messages: &messages,
-        compacted_input_items: &[],
+        context_items: &messages,
         tools: std::slice::from_ref(&tool),
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
@@ -974,47 +952,46 @@ fn apply_event_accumulates_custom_tool_input_deltas() {
     });
     apply_event(&mut state, &done, &mut |_, _| {}).expect("done");
 
-    assert_eq!(state.tool_calls.len(), 1);
-    assert_eq!(state.tool_calls[0].tool_type, tau_proto::ToolType::Custom);
-    assert_eq!(state.tool_calls[0].id, "call_patch");
-    assert_eq!(state.tool_calls[0].name, "apply_patch");
-    assert_eq!(state.tool_calls[0].arguments_json, "*** Begin Patch");
+    let items = state.into_output_items();
+    assert_eq!(items.len(), 1);
+    let tau_proto::ContextItem::ToolCall(call) = &items[0] else {
+        panic!("expected custom tool call item");
+    };
+    assert_eq!(call.tool_type, tau_proto::ToolType::Custom);
+    assert_eq!(call.call_id.as_str(), "call_patch");
+    assert_eq!(call.name.as_str(), "apply_patch");
+    assert_eq!(
+        call.arguments,
+        tau_proto::CborValue::Text("*** Begin Patch".into())
+    );
 }
 
 #[test]
 fn build_request_chain_keeps_custom_tool_output_type_from_prior_history() {
     let config = chain_test_config();
     let messages = vec![
-        ConversationMessage {
-            role: ConversationRole::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: "call-custom".into(),
-                name: "apply_patch".into(),
-                tool_type: tau_proto::ToolType::Custom,
-                input: tau_proto::CborValue::Text("patch body".into()),
-            }],
-            phase: None,
-        },
-        ConversationMessage {
-            role: ConversationRole::User,
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: "call-custom".into(),
-                content: "ok".into(),
-                is_error: false,
-            }],
-            phase: None,
-        },
+        assistant_tool_call(
+            "call-custom",
+            "apply_patch",
+            tau_proto::ToolType::Custom,
+            tau_proto::CborValue::Text("patch body".into()),
+        ),
+        ContextItem::ToolResult(ToolResultItem {
+            call_id: "call-custom".into(),
+            tool_type: tau_proto::ToolType::Custom,
+            status: ToolResultStatus::Success,
+            output: tau_proto::CborValue::Text("ok".into()),
+        }),
     ];
     let request = PromptPayload {
         system_prompt: "sys",
-        messages: &messages,
-        compacted_input_items: &[],
+        context_items: &messages,
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
         previous_response: Some(PreviousResponse {
             id: "resp_prev",
-            message_index: 1,
+            next_item_index: 1,
             transport: Some(tau_proto::AgentBackendTransport::HttpSse),
         }),
         originator: &tau_proto::PromptOriginator::User,
@@ -1055,7 +1032,10 @@ fn apply_event_captures_reasoning_only_on_output_item_done() {
     });
     apply_event(&mut state, &added, &mut |_, _| {}).expect("added");
     assert!(
-        state.reasoning_items.is_empty(),
+        state
+            .output_items
+            .iter()
+            .all(|item| matches!(item, crate::common::OutputItemAccumulator::Empty)),
         "`added` carries no encrypted_content — capturing here would persist an empty husk"
     );
     let done = serde_json::json!({
@@ -1069,8 +1049,12 @@ fn apply_event_captures_reasoning_only_on_output_item_done() {
         }
     });
     apply_event(&mut state, &done, &mut |_, _| {}).expect("done");
-    assert_eq!(state.reasoning_items.len(), 1);
-    let parsed: serde_json::Value = serde_json::from_str(&state.reasoning_items[0]).expect("json");
+    let items = state.into_output_items();
+    assert_eq!(items.len(), 1);
+    let tau_proto::ContextItem::Reasoning(item) = &items[0] else {
+        panic!("expected reasoning item");
+    };
+    let parsed = crate::common::cbor_to_json(&item.0);
     assert_eq!(parsed["id"], "rs_done");
     assert_eq!(parsed["encrypted_content"], "SEALED");
 }
@@ -1089,8 +1073,7 @@ fn ws_envelope_adds_type_and_drops_stream() {
     let config = chain_test_config();
     let request = PromptPayload {
         system_prompt: "sys",
-        messages: &[],
-        compacted_input_items: &[],
+        context_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -1126,14 +1109,13 @@ fn ws_prewarm_envelope_sets_generate_false_and_drops_previous_response() {
     let messages = vec![user_text("AGENTS.md context")];
     let request = PromptPayload {
         system_prompt: "sys",
-        messages: &messages,
-        compacted_input_items: &[],
+        context_items: &messages,
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
         previous_response: Some(PreviousResponse {
             id: "resp_previous",
-            message_index: 1,
+            next_item_index: 1,
             transport: Some(tau_proto::AgentBackendTransport::HttpSse),
         }),
         originator: &tau_proto::PromptOriginator::User,
@@ -1176,6 +1158,190 @@ fn apply_event_text_delta_accumulates_and_notifies() {
     }
     assert_eq!(state.text, "hello, world");
     assert_eq!(updates, vec!["hel", "hello, ", "hello, world"]);
+}
+
+#[test]
+fn apply_event_preserves_incremental_output_item_order() {
+    let mut state = crate::common::StreamState::new();
+    let mut on_update = |_: &str, _: Option<&str>| {};
+
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "type": "reasoning",
+                "id": "rs_ordered",
+                "encrypted_content": "OPAQUE",
+            },
+        }),
+        &mut on_update,
+    )
+    .expect("reasoning done");
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "type": "response.output_item.added",
+            "output_index": 1,
+            "item": {
+                "type": "message",
+                "role": "assistant",
+                "phase": "commentary",
+            },
+        }),
+        &mut on_update,
+    )
+    .expect("message added");
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "type": "response.output_text.delta",
+            "output_index": 1,
+            "delta": "checking",
+        }),
+        &mut on_update,
+    )
+    .expect("text delta");
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "type": "response.output_item.added",
+            "output_index": 2,
+            "item": {
+                "type": "function_call",
+                "call_id": "call_read",
+                "name": "read",
+            },
+        }),
+        &mut on_update,
+    )
+    .expect("tool added");
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "type": "response.function_call_arguments.done",
+            "output_index": 2,
+            "arguments": "{\"path\":\"Cargo.toml\"}",
+        }),
+        &mut on_update,
+    )
+    .expect("tool args done");
+
+    let items = state.into_output_items();
+    assert_eq!(items.len(), 3);
+    assert!(matches!(items[0], tau_proto::ContextItem::Reasoning(_)));
+    let tau_proto::ContextItem::Message(message) = &items[1] else {
+        panic!("expected message item");
+    };
+    assert_eq!(message.phase, Some(tau_proto::MessagePhase::Commentary));
+    assert!(matches!(
+        &message.content[0],
+        tau_proto::ContentPart::Text { text } if text == "checking"
+    ));
+    let tau_proto::ContextItem::ToolCall(call) = &items[2] else {
+        panic!("expected tool call item");
+    };
+    assert_eq!(call.call_id.as_str(), "call_read");
+    assert_eq!(call.name.as_str(), "read");
+    assert_eq!(
+        crate::common::cbor_to_json(&call.arguments),
+        serde_json::json!({ "path": "Cargo.toml" })
+    );
+}
+
+/// Some Responses streams with tool calls commit assistant message
+/// text only on `response.output_item.done`, without earlier
+/// `response.output_text.delta` events. Persist that message in item
+/// order so commentary immediately before a tool call is not dropped.
+#[test]
+fn apply_event_output_item_done_hydrates_message_text_before_tool_call() {
+    let mut state = crate::common::StreamState::new();
+    let mut updates: Vec<String> = Vec::new();
+    let mut on_update = |text: &str, _: Option<&str>| updates.push(text.to_owned());
+
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "type": "message",
+                "role": "assistant",
+                "phase": "commentary",
+                "content": [{
+                    "type": "output_text",
+                    "text": "I'll inspect the file first.",
+                }],
+            },
+        }),
+        &mut on_update,
+    )
+    .expect("message done");
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "type": "response.output_item.done",
+            "output_index": 1,
+            "item": {
+                "type": "function_call",
+                "call_id": "call_read",
+                "name": "read",
+                "arguments": "{\"path\":\"Cargo.toml\"}",
+            },
+        }),
+        &mut on_update,
+    )
+    .expect("tool done");
+
+    assert_eq!(updates, vec!["I'll inspect the file first."]);
+    let items = state.into_output_items();
+    assert_eq!(items.len(), 2);
+    let tau_proto::ContextItem::Message(message) = &items[0] else {
+        panic!("expected message item before tool call");
+    };
+    assert_eq!(message.phase, Some(tau_proto::MessagePhase::Commentary));
+    assert!(matches!(
+        &message.content[0],
+        tau_proto::ContentPart::Text { text } if text == "I'll inspect the file first."
+    ));
+    let tau_proto::ContextItem::ToolCall(call) = &items[1] else {
+        panic!("expected tool call item");
+    };
+    assert_eq!(call.call_id.as_str(), "call_read");
+    assert_eq!(call.name.as_str(), "read");
+}
+
+#[test]
+fn apply_event_completed_does_not_harvest_response_output() {
+    let mut state = crate::common::StreamState::new();
+    let mut on_update = |_: &str, _: Option<&str>| {};
+
+    let done = apply_event(
+        &mut state,
+        &serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp_final",
+                "output": [{
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "must not be harvested",
+                    }],
+                }],
+            },
+        }),
+        &mut on_update,
+    )
+    .expect("completed");
+
+    assert!(done);
+    assert_eq!(state.response_id.as_deref(), Some("resp_final"));
+    assert_eq!(state.text, "");
+    assert!(state.into_output_items().is_empty());
 }
 
 #[test]
@@ -1231,10 +1397,20 @@ fn apply_event_function_call_assembles_tool_call() {
     )
     .expect("ok");
 
-    assert_eq!(state.tool_calls.len(), 1);
-    assert_eq!(state.tool_calls[0].id, "call_a");
-    assert_eq!(state.tool_calls[0].name, "shell");
-    assert_eq!(state.tool_calls[0].arguments_json, "{\"cmd\":\"ls\"}");
+    let items = state.into_output_items();
+    assert_eq!(items.len(), 1);
+    let tau_proto::ContextItem::ToolCall(call) = &items[0] else {
+        panic!("expected function tool call item");
+    };
+    assert_eq!(call.call_id.as_str(), "call_a");
+    assert_eq!(call.name.as_str(), "shell");
+    assert_eq!(
+        call.arguments,
+        tau_proto::CborValue::Map(vec![(
+            tau_proto::CborValue::Text("cmd".into()),
+            tau_proto::CborValue::Text("ls".into())
+        )])
+    );
 }
 
 #[test]

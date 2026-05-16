@@ -1,68 +1,28 @@
 use super::*;
 
 #[test]
-fn format_session_entry_tree_preview_hides_call_id_and_shows_skill_name() {
-    let skill_request = SessionEntry::ToolActivity(ToolActivityRecord {
-        call_id: "call_HC8dStLuLeEjHCxFZsBx6jfV".into(),
-        tool_name: tau_proto::ToolName::new("skill"),
-        outcome: ToolActivityOutcome::Requested {
+fn format_session_entry_tree_preview_shows_grouped_tool_results() {
+    let result = SessionEntry::ToolResults {
+        items: vec![tau_proto::ToolResultItem {
+            call_id: "call_ugly".into(),
             tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Map(vec![(
-                CborValue::Text("query".to_owned()),
-                CborValue::Text("jujutsu".to_owned()),
-            )]),
-        },
-    });
+            status: tau_proto::ToolResultStatus::Success,
+            output: CborValue::Text("hello".to_owned()),
+        }],
+    };
     assert_eq!(
-        format_session_entry(&skill_request),
-        "tool.request skill jujutsu"
+        format_session_entry(&result),
+        "tool.result call_ugly -> hello"
     );
 
-    let skill_search = SessionEntry::ToolActivity(ToolActivityRecord {
-        call_id: "call_search".into(),
-        tool_name: tau_proto::ToolName::new("skill"),
-        outcome: ToolActivityOutcome::Requested {
+    let multibyte_result = SessionEntry::ToolResults {
+        items: vec![tau_proto::ToolResultItem {
+            call_id: "call_utf8".into(),
             tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Map(vec![(
-                CborValue::Text("query".to_owned()),
-                CborValue::Text(" commit  git commit ".to_owned()),
-            )]),
-        },
-    });
-    assert_eq!(
-        format_session_entry(&skill_search),
-        "tool.request skill commit git"
-    );
-
-    let read_request = SessionEntry::ToolActivity(ToolActivityRecord {
-        call_id: "call_ugly".into(),
-        tool_name: tau_proto::ToolName::new("read"),
-        outcome: ToolActivityOutcome::Requested {
-            tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Map(vec![(
-                CborValue::Text("path".to_owned()),
-                CborValue::Text("foo.txt".to_owned()),
-            )]),
-        },
-    });
-    assert_eq!(format_session_entry(&read_request), "tool.request read");
-
-    let result = SessionEntry::ToolActivity(ToolActivityRecord {
-        call_id: "call_ugly".into(),
-        tool_name: tau_proto::ToolName::new("read"),
-        outcome: ToolActivityOutcome::Result {
-            result: CborValue::Text("hello".to_owned()),
-        },
-    });
-    assert_eq!(format_session_entry(&result), "tool.result read -> hello");
-
-    let multibyte_result = SessionEntry::ToolActivity(ToolActivityRecord {
-        call_id: "call_utf8".into(),
-        tool_name: tau_proto::ToolName::new("skill"),
-        outcome: ToolActivityOutcome::Result {
-            result: CborValue::Text("é".repeat(81)),
-        },
-    });
+            status: tau_proto::ToolResultStatus::Success,
+            output: CborValue::Text("é".repeat(81)),
+        }],
+    };
     let formatted = format_session_entry(&multibyte_result);
     assert!(formatted.ends_with("..."));
 }
@@ -98,7 +58,7 @@ fn session_and_policy_lines_are_printable() {
     let sessions_dir = tau_config::settings::sessions_dir_of(&sp);
     let sl = session_lines(&sessions_dir, "s1").expect("lines");
     assert!(sl.iter().any(|l| l.contains("user: hello")));
-    assert!(sl.iter().any(|l| l.contains("tool.request echo")));
+    assert!(sl.iter().any(|l| l.contains("tool.result call-1 -> hello")));
     let sll = session_list_lines(&sessions_dir).expect("list");
     assert!(sll.iter().any(|l| l.contains("s1 (5 entries)")));
     let pl = policy_lines(sp.join("policy.cbor")).expect("policy");

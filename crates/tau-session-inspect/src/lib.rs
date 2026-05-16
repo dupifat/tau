@@ -9,10 +9,10 @@
 use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
-use tau_core::{
-    PolicyStore, SessionEntry, SessionStore, SessionStoreError, SessionTree, ToolActivityOutcome,
+use tau_core::{PolicyStore, SessionEntry, SessionStore, SessionStoreError, SessionTree};
+use tau_proto::{
+    CborValue, ContentPart, ContextItem, EventSelector, ToolCallItem, ToolResultStatus,
 };
-use tau_proto::{CborValue, EventSelector};
 
 /// Errors from the read-only inspection paths.
 #[derive(Debug)]
@@ -152,46 +152,42 @@ pub fn policy_lines(path: impl AsRef<Path>) -> Result<Vec<String>, InspectError>
 #[must_use]
 pub fn format_session_entry(entry: &SessionEntry) -> String {
     match entry {
-        SessionEntry::UserMessage { text } => format!("user: {text}"),
-        SessionEntry::CompactedSummary { summary, .. } => {
-            let preview = if summary.len() > 80 {
-                format!("{}...", &summary[..80])
-            } else {
-                summary.clone()
-            };
-            format!("compacted: {preview}")
+        SessionEntry::UserInput { items } => {
+            format!("user: {}", first_message_text(items).unwrap_or_default())
         }
-        SessionEntry::AgentMessage { text, .. } => {
-            // `text` is now Option<String> — tool-only turns with
-            // reasoning persist as an AgentMessage with text=None.
-            // Render the empty case as "agent: (no text)" so a session
-            // inspector still surfaces the entry rather than a phantom
-            // blank line.
-            let body = text.as_deref().unwrap_or("(no text)");
+        SessionEntry::Compaction { replacement_window } => {
+            format!("compacted: {} item(s)", replacement_window.len())
+        }
+        SessionEntry::AssistantResponse { output_items, .. } => {
+            let body =
+                assistant_output_preview(output_items).unwrap_or_else(|| "(no text)".to_owned());
             format!("agent: {body}")
         }
-        SessionEntry::ToolActivity(a) => match &a.outcome {
-            ToolActivityOutcome::Requested { arguments, .. } => {
-                if a.tool_name.as_str() == "skill" {
-                    let query = cbor_query_label(arguments, "query");
-                    if query.is_empty() {
-                        "tool.request skill".to_owned()
-                    } else {
-                        format!("tool.request skill {query}")
-                    }
-                } else {
-                    format!("tool.request {}", a.tool_name)
-                }
-            }
-            ToolActivityOutcome::Result { result } => {
-                let text = cbor_to_text(result);
-                let preview = truncate_chars(&text, 80);
-                format!("tool.result {} -> {preview}", a.tool_name)
-            }
-            ToolActivityOutcome::Error { message, .. } => {
-                format!("tool.error {} -> {message}", a.tool_name)
-            }
-        },
+        SessionEntry::ToolResults { items } => {
+            if items.is_empty() {
+                return "tool.result (empty)".to_owned();
+            };
+            items
+                .iter()
+                .map(format_tool_result_item)
+                .collect::<Vec<_>>()
+                .join("; ")
+        }
+    }
+}
+
+fn format_tool_result_item(item: &tau_proto::ToolResultItem) -> String {
+    match &item.status {
+        ToolResultStatus::Success => {
+            let preview = truncate_chars(&cbor_to_text(&item.output), 80);
+            format!("tool.result {} -> {preview}", item.call_id)
+        }
+        ToolResultStatus::Error { message } => {
+            format!("tool.error {} -> {message}", item.call_id)
+        }
+        ToolResultStatus::Cancelled { reason } => {
+            format!("tool.cancelled {} -> {reason}", item.call_id)
+        }
     }
 }
 
@@ -202,36 +198,56 @@ pub fn latest_agent_preview(session: &SessionTree) -> Option<String> {
         .into_iter()
         .rev()
         .find_map(|e| match e {
-            SessionEntry::AgentMessage { text, .. } => text.clone(),
-            SessionEntry::CompactedSummary { .. } => None,
+            SessionEntry::AssistantResponse { output_items, .. } => {
+                assistant_output_preview(output_items)
+            }
+            SessionEntry::Compaction { .. } => None,
             _ => None,
         })
 }
 
-fn cbor_query_label(map: &CborValue, key: &str) -> String {
-    let CborValue::Map(entries) = map else {
-        return String::new();
-    };
-    let Some(value) = entries.iter().find_map(|(k, v)| match k {
-        CborValue::Text(k) if k == key => Some(v),
+fn assistant_output_preview(items: &[ContextItem]) -> Option<String> {
+    let parts = items
+        .iter()
+        .filter_map(|item| match item {
+            ContextItem::Message(_) => first_message_text(std::slice::from_ref(item)),
+            ContextItem::ToolCall(call) => Some(tool_call_preview(call)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    (!parts.is_empty()).then_some(parts.join(" "))
+}
+
+fn tool_call_preview(call: &ToolCallItem) -> String {
+    let args = match call.arguments {
+        CborValue::Map(ref entries) => entries.iter().find_map(|(key, value)| match (key, value) {
+            (CborValue::Text(key), CborValue::Text(value))
+                if matches!(key.as_str(), "path" | "pattern" | "command" | "task_name") =>
+            {
+                Some(value.clone())
+            }
+            _ => None,
+        }),
         _ => None,
-    }) else {
-        return String::new();
     };
-    match value {
-        CborValue::Text(s) => normalized_query_label(s),
-        _ => String::new(),
+    match args {
+        Some(args) if !args.is_empty() => format!("tool.call {} {args}", call.name),
+        _ => format!("tool.call {}", call.name),
     }
 }
 
-fn normalized_query_label(query: &str) -> String {
-    let mut terms = Vec::new();
-    for term in query.split_whitespace().map(str::to_lowercase) {
-        if !terms.iter().any(|existing| existing == &term) {
-            terms.push(term);
+fn first_message_text(items: &[ContextItem]) -> Option<String> {
+    items.iter().find_map(|item| match item {
+        ContextItem::Message(message) => {
+            let mut text = String::new();
+            for part in &message.content {
+                let ContentPart::Text { text: part } = part;
+                text.push_str(part);
+            }
+            (!text.is_empty()).then_some(text)
         }
-    }
-    terms.join(" ")
+        _ => None,
+    })
 }
 
 fn truncate_chars(text: &str, max_chars: usize) -> String {
@@ -275,5 +291,78 @@ fn cbor_to_text(v: &CborValue) -> String {
         }
         CborValue::Tag(_, inner) => cbor_to_text(inner),
         _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tau_proto::{ContextRole, MessageItem, ToolType};
+
+    use super::*;
+
+    fn assistant_message(text: impl Into<String>) -> ContextItem {
+        ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+            content: vec![ContentPart::Text { text: text.into() }],
+            phase: None,
+        })
+    }
+
+    #[test]
+    fn assistant_preview_represents_multiple_messages_and_tool_calls_in_order() {
+        let output_items = vec![
+            assistant_message("first"),
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "call-1".into(),
+                name: tau_proto::ToolName::new("read"),
+                tool_type: ToolType::Function,
+                arguments: CborValue::Map(vec![(
+                    CborValue::Text("path".into()),
+                    CborValue::Text("src/main.rs".into()),
+                )]),
+            }),
+            assistant_message("second"),
+        ];
+
+        assert_eq!(
+            assistant_output_preview(&output_items).as_deref(),
+            Some("first tool.call read src/main.rs second")
+        );
+        assert_eq!(
+            format_session_entry(&SessionEntry::AssistantResponse {
+                provider_response_id: None,
+                backend: None,
+                output_items,
+                usage: None,
+            }),
+            "agent: first tool.call read src/main.rs second"
+        );
+    }
+
+    #[test]
+    fn tool_results_preview_includes_every_result_in_round() {
+        let entry = SessionEntry::ToolResults {
+            items: vec![
+                tau_proto::ToolResultItem {
+                    call_id: "call-1".into(),
+                    tool_type: ToolType::Function,
+                    status: ToolResultStatus::Success,
+                    output: CborValue::Text("ok".into()),
+                },
+                tau_proto::ToolResultItem {
+                    call_id: "call-2".into(),
+                    tool_type: ToolType::Function,
+                    status: ToolResultStatus::Error {
+                        message: "failed".into(),
+                    },
+                    output: CborValue::Null,
+                },
+            ],
+        };
+
+        assert_eq!(
+            format_session_entry(&entry),
+            "tool.result call-1 -> ok; tool.error call-2 -> failed"
+        );
     }
 }

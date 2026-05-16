@@ -46,6 +46,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 writer.write_frame(&Frame::Event(Event::ToolResult(ToolResult {
                     call_id: invoke.call_id,
                     tool_name: invoke.tool_name,
+                    tool_type: tau_proto::ToolType::Function,
                     result: match invoke.arguments {
                         CborValue::Null => CborValue::Text("null".to_owned()),
                         value => value,

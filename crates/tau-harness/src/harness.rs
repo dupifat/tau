@@ -10,19 +10,19 @@ use std::time::{Duration, Instant};
 
 use tau_core::{
     Connection, ConnectionMetadata, ConnectionOrigin, DefaultSubscriptionPolicy, EventBus,
-    PolicyStore, RouteError, SessionStore, ToolRegistry, ToolRouteError,
+    PolicyStore, RouteError, SessionStore, SessionStoreError, ToolRegistry, ToolRouteError,
 };
 use tau_proto::{
-    AgentCacheMissDiagnostic, AgentResponseFinished, AgentTokenUsage, AgentToolCall, CborValue,
-    ClientKind, Disconnect, Event, EventSelector, ExtensionName, Frame, HarnessContextUsageChanged,
-    HarnessModelSelected, Message, ModelId, PreviousResponseRef, PromptMessagePrefix,
-    PromptOriginator, PromptSystemPromptRef, PromptToolsRef, SessionCompactionRequested, SessionId,
+    AgentCacheMissDiagnostic, AgentResponseFinished, AgentStopReason, AgentTokenUsage, CborValue,
+    ClientKind, ContentPart, ContextItem, ContextRole, Disconnect, Event, EventSelector,
+    ExtensionName, Frame, HarnessContextUsageChanged, HarnessModelSelected, Message, MessageItem,
+    ModelId, PreviousResponseCandidate, PromptOriginator, SessionCompactionRequested, SessionId,
     SessionPromptCreated, SessionPromptId, SessionPromptPrewarmRequested, SessionPromptQueued,
-    TokenUsageStats, ToolCallId, ToolChoice, ToolDefinition, ToolError, ToolName, ToolRegister,
-    ToolRequest, UiCancelPrompt,
+    TokenUsageStats, ToolCallId, ToolCallItem, ToolCancelled, ToolChoice, ToolDefinition,
+    ToolError, ToolName, ToolRegister, ToolRequest, ToolType, UiCancelPrompt,
 };
 
-use crate::conversation::{Conversation, ConversationId, ConversationTurnState};
+use crate::conversation::{Conversation, ConversationId, ConversationTurnState, PendingCancel};
 use crate::daemon::InteractionOutcome;
 use crate::debug_log::DebugEventLog;
 use crate::dedup::{
@@ -60,6 +60,21 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 const AUTO_COMPACTION_CONTEXT_PERCENT: u8 = 90;
 
+#[derive(Clone, Debug)]
+pub(crate) struct AgentToolCall {
+    pub(crate) id: ToolCallId,
+    pub(crate) name: ToolName,
+    pub(crate) tool_type: tau_proto::ToolType,
+    pub(crate) arguments: CborValue,
+    pub(crate) display: Option<tau_proto::ToolDisplay>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PendingTool {
+    pub(crate) name: ToolName,
+    pub(crate) tool_type: ToolType,
+}
+
 fn hex_bytes(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -68,6 +83,65 @@ fn hex_bytes(bytes: &[u8]) -> String {
         out.push(HEX[(byte & 0x0f) as usize] as char);
     }
     out
+}
+
+pub(crate) fn assistant_text_from_output_items(output_items: &[ContextItem]) -> Option<String> {
+    let text = output_items
+        .iter()
+        .filter_map(|item| match item {
+            ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content,
+                ..
+            }) => Some(
+                content
+                    .iter()
+                    .map(|part| match part {
+                        ContentPart::Text { text } => text.as_str(),
+                    })
+                    .collect::<String>(),
+            ),
+            _ => None,
+        })
+        .collect::<String>();
+    (!text.is_empty()).then_some(text)
+}
+
+pub(crate) fn tool_calls_from_output_items(output_items: &[ContextItem]) -> Vec<AgentToolCall> {
+    output_items
+        .iter()
+        .filter_map(|item| match item {
+            ContextItem::ToolCall(call) => Some(AgentToolCall {
+                id: call.call_id.clone(),
+                name: call.name.clone(),
+                tool_type: call.tool_type,
+                arguments: call.arguments.clone(),
+                display: None,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn response_requests_tool_calls(response: &AgentResponseFinished) -> bool {
+    if response.stop_reason.requests_tool_calls() {
+        return true;
+    }
+    if response.stop_reason != AgentStopReason::EndTurn {
+        return false;
+    }
+    response
+        .output_items
+        .iter()
+        .any(|item| matches!(item, ContextItem::ToolCall(_)))
+}
+
+fn compaction_items_from_output_items(output_items: &[ContextItem]) -> Vec<ContextItem> {
+    output_items
+        .iter()
+        .filter(|item| matches!(item, ContextItem::Compaction(_)))
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]
@@ -84,8 +158,7 @@ pub(crate) const HARNESS_CONNECTION_ID: &str = "__harness__";
 #[derive(Clone, Debug)]
 pub(crate) struct PromptCacheDiagnosticContext {
     pub(crate) model: Option<ModelId>,
-    pub(crate) previous_response: Option<PreviousResponseRef>,
-    pub(crate) message_prefix_count: Option<usize>,
+    pub(crate) previous_response: Option<PreviousResponseCandidate>,
     pub(crate) originator: PromptOriginator,
     pub(crate) tool_choice: ToolChoice,
     pub(crate) request_fingerprint: [u8; 32],
@@ -156,10 +229,10 @@ pub(crate) struct Harness {
     /// conversation) to attribute incoming `ToolResult` / `ToolError`
     /// / `ToolProgress` events back to the originating session.
     pub(crate) tool_conversations: std::collections::HashMap<ToolCallId, ConversationId>,
-    /// `call_id` → tool name for in-flight calls. Used for lifecycle
-    /// messages and debug formatting where the result event itself
-    /// only carries the id.
-    pub(crate) pending_tool_names: std::collections::HashMap<ToolCallId, ToolName>,
+    /// `call_id` → pending tool metadata for in-flight calls. Used to
+    /// enrich terminal runtime events before they are folded into
+    /// durable transcript facts.
+    pub(crate) pending_tools: std::collections::HashMap<ToolCallId, PendingTool>,
     /// `call_id` → connection id of the extension currently servicing
     /// the call. Needed to route cancellation requests back to the
     /// right provider.
@@ -192,24 +265,19 @@ pub(crate) struct Harness {
     /// Monotonic counter used to mint synthetic `sp-N`
     /// `SessionPromptId`s when dispatching prompts to the agent.
     pub(crate) next_session_prompt_id: u64,
-    /// Monotonic counter used to mint synthetic `ToolCallId`s when
-    /// the agent emits a tool call with an empty id. See
-    /// `synthesize_call_id` for why.
-    pub(crate) next_synthetic_call_id: u64,
     /// Maps session_prompt_id → owning conversation for in-flight
     /// prompts. The conversation knows its `session_id`, so older
     /// `prompt_sessions[spid]` lookups become two hops:
     /// `prompt_conversations[spid]` → `conversations[cid].session_id`.
     pub(crate) prompt_conversations: std::collections::HashMap<SessionPromptId, ConversationId>,
     /// Materialized full `session.prompt_created` payloads by id.
-    /// Later compressed prompts reference these for their message
-    /// prefix; request/response helpers expose the same materialized
-    /// form to extensions that joined late or missed the base event.
+    /// New prompts are emitted fully materialized; snapshots remain so
+    /// late joiners and legacy `tools_ref` events can still be served.
     pub(crate) prompt_snapshots: std::collections::HashMap<SessionPromptId, SessionPromptCreated>,
     /// Per-prompt fields needed to explain a low provider cache hit
     /// after the final usage report arrives. Kept outside
-    /// `prompt_snapshots` because snapshots are materialized and drop
-    /// compression metadata like `message_prefix`.
+    /// `prompt_snapshots` because diagnostics need derived send-time
+    /// metadata like the previous-response candidate.
     pub(crate) prompt_cache_diagnostics:
         std::collections::HashMap<SessionPromptId, PromptCacheDiagnosticContext>,
     /// All in-flight conversations keyed by `ConversationId`. The
@@ -493,7 +561,7 @@ impl Harness {
             store,
             current_session_id: eager_session_id.into(),
             tool_conversations: std::collections::HashMap::new(),
-            pending_tool_names: std::collections::HashMap::new(),
+            pending_tools: std::collections::HashMap::new(),
             pending_tool_providers: std::collections::HashMap::new(),
             event_log: EventLog::new(),
             client_writers: std::collections::HashMap::new(),
@@ -502,7 +570,6 @@ impl Harness {
             extensions,
             extension_order,
             next_session_prompt_id: 0,
-            next_synthetic_call_id: 0,
             prompt_conversations: std::collections::HashMap::new(),
             prompt_snapshots: std::collections::HashMap::new(),
             prompt_cache_diagnostics: std::collections::HashMap::new(),
@@ -726,7 +793,7 @@ impl Harness {
             store,
             current_session_id: eager_session_id.into(),
             tool_conversations: std::collections::HashMap::new(),
-            pending_tool_names: std::collections::HashMap::new(),
+            pending_tools: std::collections::HashMap::new(),
             pending_tool_providers: std::collections::HashMap::new(),
             event_log: EventLog::new(),
             client_writers: std::collections::HashMap::new(),
@@ -735,7 +802,6 @@ impl Harness {
             extensions,
             extension_order,
             next_session_prompt_id: 0,
-            next_synthetic_call_id: 0,
             prompt_conversations: std::collections::HashMap::new(),
             prompt_snapshots: std::collections::HashMap::new(),
             prompt_cache_diagnostics: std::collections::HashMap::new(),
@@ -1051,23 +1117,6 @@ impl Harness {
         prompt: &SessionPromptCreated,
     ) -> Option<SessionPromptCreated> {
         let mut materialized = prompt.clone();
-        if let Some(system_prompt_ref) = &prompt.system_prompt_ref {
-            let base = self
-                .prompt_snapshots
-                .get(&system_prompt_ref.base_session_prompt_id)?;
-            materialized.system_prompt = base.system_prompt.clone();
-            materialized.system_prompt_ref = None;
-        }
-        if let Some(prefix) = &prompt.message_prefix {
-            let base = self.prompt_snapshots.get(&prefix.base_session_prompt_id)?;
-            if base.messages.len() < prefix.message_count {
-                return None;
-            }
-            let mut messages = base.messages[..prefix.message_count].to_vec();
-            messages.extend(prompt.messages.clone());
-            materialized.messages = messages;
-            materialized.message_prefix = None;
-        }
         if let Some(tools_ref) = &prompt.tools_ref {
             let base = self
                 .prompt_snapshots
@@ -1151,14 +1200,29 @@ impl Harness {
             log.log_published_event(source_id.as_ref(), &event, recorded_at);
         }
         let session_id = sync_head_for.as_ref().map(|s| s.session_id.clone());
-        let folded_node_id = self.persist_session_event(
+        let folded_node_id = match self.persist_session_event(
             source,
             &event,
             transient,
             parent_for_fold,
             session_id.as_ref(),
             recorded_at,
-        );
+        ) {
+            Ok(folded_node_id) => folded_node_id,
+            Err(error) => {
+                tracing::warn!(
+                    target: "tau_harness",
+                    event = %event.name(),
+                    %error,
+                    "dropping event rejected by session store"
+                );
+                self.emit_info(&format!(
+                    "event {} rejected by session store: {error}",
+                    event.name()
+                ));
+                return;
+            }
+        };
         if let Event::SessionPromptCreated(prompt) = &event {
             self.note_session_prompt_created(prompt);
         }
@@ -1250,24 +1314,32 @@ impl Harness {
         parent_node_id: Option<Option<tau_proto::NodeId>>,
         session_id_override: Option<&SessionId>,
         recorded_at: tau_proto::UnixMicros,
-    ) -> Option<tau_proto::NodeId> {
-        if transient {
-            return None;
+    ) -> Result<Option<tau_proto::NodeId>, SessionStoreError> {
+        if transient
+            && !matches!(
+                event,
+                Event::ToolResult(_) | Event::ToolError(_) | Event::ToolCancelled(_)
+            )
+        {
+            return Ok(None);
         }
-        let session_id = session_id_override
+        let Some(session_id) = session_id_override
             .cloned()
-            .or_else(|| self.session_id_for_event(event))?;
+            .or_else(|| self.session_id_for_event(event))
+        else {
+            return Ok(None);
+        };
         let source = source.map(tau_proto::ConnectionId::from);
-        self.store
+        Ok(self
+            .store
             .append_session_event_at(
                 session_id.as_str(),
                 source,
                 parent_node_id,
                 event.clone(),
                 recorded_at,
-            )
-            .ok()
-            .and_then(|outcome| outcome.folded_node_id)
+            )?
+            .folded_node_id)
     }
 
     fn session_id_for_event(&self, event: &Event) -> Option<SessionId> {
@@ -1304,6 +1376,7 @@ impl Harness {
             Event::ToolRequest(request) => self.session_id_for_tool_call(&request.call_id),
             Event::ToolResult(result) => self.session_id_for_tool_call(&result.call_id),
             Event::ToolError(error) => self.session_id_for_tool_call(&error.call_id),
+            Event::ToolCancelled(cancelled) => self.session_id_for_tool_call(&cancelled.call_id),
             Event::ToolProgress(progress) => self.session_id_for_tool_call(&progress.call_id),
             Event::ShellCommandFinished(finished) => Some(finished.session_id.clone()),
             Event::ExtAgentsMdAvailable(_) | Event::ExtensionContextReady(_) => {
@@ -1655,6 +1728,7 @@ impl Harness {
                         let error = ToolError {
                             call_id: request.call_id,
                             tool_name,
+                            tool_type: request.tool_type,
                             message: "no live provider available".to_owned(),
                             details: None,
                             display: None,
@@ -1676,8 +1750,9 @@ impl Harness {
             Event::ToolResult(mut result) => {
                 if let Some(cid) = self.tool_conversations.get(&result.call_id).cloned() {
                     let call_id = result.call_id.to_string();
-                    if let Some(tool_name) = self.pending_tool_names.get(&result.call_id).cloned() {
-                        result.tool_name = tool_name;
+                    if let Some(tool) = self.pending_tools.get(&result.call_id) {
+                        result.tool_name = tool.name.clone();
+                        result.tool_type = tool.tool_type;
                     }
                     // Collapse byte-identical large results into a
                     // pointer back to the first call_id that produced
@@ -1708,8 +1783,9 @@ impl Harness {
             Event::ToolError(mut error) => {
                 if let Some(cid) = self.tool_conversations.get(&error.call_id).cloned() {
                     let call_id = error.call_id.to_string();
-                    if let Some(tool_name) = self.pending_tool_names.get(&error.call_id).cloned() {
-                        error.tool_name = tool_name;
+                    if let Some(tool) = self.pending_tools.get(&error.call_id) {
+                        error.tool_name = tool.name.clone();
+                        error.tool_type = tool.tool_type;
                     }
                     self.dedup_tool_error(&cid, &mut error);
                     self.publish_for_conversation_from(
@@ -2464,45 +2540,116 @@ impl Harness {
         let Some(conv) = self.conversations.get_mut(&cid) else {
             return;
         };
-        let Some(prompt_id) = conv.in_flight_prompt.take() else {
-            self.emit_info("no in-flight prompt to cancel");
+        if matches!(conv.turn_state, ConversationTurnState::Idle) {
+            self.emit_info("no active turn to cancel");
+            return;
+        }
+        let prompt_id = conv.in_flight_prompt.clone();
+        conv.pending_cancel = Some(PendingCancel {
+            reason: "cancelled by user".to_owned(),
+        });
+        conv.pending_prompts.clear();
+
+        if let Some(prompt_id) = prompt_id {
+            self.publish_event(
+                None,
+                Event::UiCancelPrompt(UiCancelPrompt {
+                    session_id: session_id.clone(),
+                    session_prompt_id: Some(prompt_id),
+                }),
+            );
+        }
+        self.apply_pending_cancel_for_conversation(&cid);
+    }
+
+    fn apply_pending_cancel_for_conversation(&mut self, cid: &ConversationId) {
+        let Some(cancel) = self
+            .conversations
+            .get(cid)
+            .and_then(|conv| conv.pending_cancel.clone())
+        else {
             return;
         };
-        self.canceled_prompts.insert(prompt_id.clone());
-        self.prompt_conversations.remove(&prompt_id);
-        conv.pending_prompts.clear();
-        conv.turn_state = ConversationTurnState::Idle;
+        let Some(turn_state) = self
+            .conversations
+            .get(cid)
+            .map(|conv| conv.turn_state.clone())
+        else {
+            return;
+        };
+        match turn_state {
+            ConversationTurnState::Idle => {
+                if let Some(conv) = self.conversations.get_mut(cid) {
+                    conv.pending_cancel = None;
+                    conv.pending_prompts.clear();
+                }
+            }
+            ConversationTurnState::AgentThinking { .. } => {
+                self.emit_info("cancelling current prompt");
+            }
+            ConversationTurnState::Compacting => {
+                self.emit_info("cancelling current compaction");
+            }
+            ConversationTurnState::ToolsRunning { remaining_calls } => {
+                self.cancel_remaining_tool_calls(cid, remaining_calls, &cancel.reason);
+                if let Some(conv) = self.conversations.get_mut(cid) {
+                    conv.pending_cancel = None;
+                    conv.pending_prompts.clear();
+                    conv.in_flight_prompt = None;
+                    conv.turn_state = ConversationTurnState::Idle;
+                }
+                self.emit_info("cancelled current turn");
+                self.try_advance_queue();
+            }
+        }
+    }
 
-        let pending_call_ids: std::collections::HashSet<ToolCallId> = self
+    fn cancel_remaining_tool_calls(
+        &mut self,
+        cid: &ConversationId,
+        remaining_calls: Vec<ToolCallId>,
+        _reason: &str,
+    ) {
+        let remaining: std::collections::HashSet<ToolCallId> =
+            remaining_calls.iter().cloned().collect();
+        let queued: Vec<(ToolCallId, ToolName, ToolType)> = self
             .pending_tool_invocations
             .iter()
-            .filter_map(|(call_cid, call, _)| {
-                if call_cid == &cid {
-                    Some(call.id.clone())
-                } else {
-                    None
-                }
-            })
+            .filter(|(call_cid, call, _)| call_cid == cid && remaining.contains(&call.id))
+            .map(|(_, call, _)| (call.id.clone(), call.name.clone(), call.tool_type))
             .collect();
         self.pending_tool_invocations
-            .retain(|(call_cid, _, _)| call_cid != &cid);
-        for call_id in pending_call_ids {
-            self.clear_tool_call_tracking(call_id.as_str());
+            .retain(|(call_cid, call, _)| call_cid != cid || !remaining.contains(&call.id));
+
+        let mut to_cancel = queued;
+        for call_id in remaining_calls {
+            if to_cancel
+                .iter()
+                .any(|(queued_id, _, _)| queued_id == &call_id)
+            {
+                continue;
+            }
+            let Some(tool) = self.pending_tools.get(&call_id).cloned() else {
+                continue;
+            };
+            to_cancel.push((call_id, tool.name, tool.tool_type));
         }
 
-        self.emit_info("cancelled current prompt");
-        self.publish_event(
-            None,
-            // Targetless cancel: legacy `/cancel` semantics. The
-            // agent aborts whatever it's currently retry-sleeping
-            // on; the harness has already cleared the default
-            // conversation above.
-            Event::UiCancelPrompt(UiCancelPrompt {
-                session_id: session_id.clone(),
-                session_prompt_id: None,
-            }),
-        );
-        self.try_advance_queue();
+        for (call_id, tool_name, tool_type) in to_cancel {
+            self.publish_for_conversation(
+                cid,
+                Event::ToolCancelled(ToolCancelled {
+                    call_id: call_id.clone(),
+                    tool_name,
+                    tool_type,
+                }),
+            );
+            self.in_flight_tool_kinds.remove(&call_id);
+            self.clear_tool_call_tracking(call_id.as_str());
+        }
+        if let Some(conv) = self.conversations.get_mut(cid) {
+            conv.tools_in_flight = 0;
+        }
     }
 
     fn handle_disconnect(&mut self, connection_id: &str) {
@@ -2546,14 +2693,13 @@ impl Harness {
             .collect();
 
         for call_id in failed_call_ids {
-            let tool_name = self
-                .pending_tool_names
-                .get(&call_id)
-                .cloned()
-                .unwrap_or_else(|| ToolName::new("unknown_tool"));
+            let Some(tool) = self.pending_tools.get(&call_id).cloned() else {
+                continue;
+            };
             let error = ToolError {
                 call_id: call_id.clone(),
-                tool_name,
+                tool_name: tool.name,
+                tool_type: tool.tool_type,
                 message: "tool provider disconnected".to_owned(),
                 details: None,
                 display: None,
@@ -2679,8 +2825,13 @@ impl Harness {
             request.call_id.clone(),
             self.default_conversation_id.clone(),
         );
-        self.pending_tool_names
-            .insert(request.call_id.clone(), request.tool_name.clone());
+        self.pending_tools.insert(
+            request.call_id.clone(),
+            PendingTool {
+                name: request.tool_name.clone(),
+                tool_type: request.tool_type,
+            },
+        );
     }
 
     /// Releases the conversation/name/provider mappings for a
@@ -2689,7 +2840,7 @@ impl Harness {
     /// longer be able to attribute the durable record.
     pub(crate) fn clear_tool_call_tracking(&mut self, call_id: &str) {
         self.tool_conversations.remove(call_id);
-        self.pending_tool_names.remove(call_id);
+        self.pending_tools.remove(call_id);
         self.pending_tool_providers.remove(call_id);
     }
 
@@ -3179,7 +3330,7 @@ impl Harness {
             return;
         };
         let prompt_context = assemble_prompt_context_from(tree, conv.head);
-        if prompt_context.messages.is_empty() && prompt_context.compacted_input_items.is_empty() {
+        if prompt_context.context_items.is_empty() {
             self.emit_info("nothing to compact yet");
             return;
         }
@@ -3513,7 +3664,7 @@ impl Harness {
         }
         self.pending_tool_invocations.clear();
         self.tool_conversations.clear();
-        self.pending_tool_names.clear();
+        self.pending_tools.clear();
         self.pending_tool_providers.clear();
         self.prompt_conversations.clear();
         self.pending_compactions.clear();
@@ -3709,7 +3860,7 @@ impl Harness {
         };
         let head = conv.head;
         let tree = self.store.session(session_id.as_str());
-        let messages = tree
+        let context_items = tree
             .map(|t| assemble_conversation_from(t, head))
             .unwrap_or_default();
         let tools = self.gather_tool_definitions();
@@ -3720,7 +3871,7 @@ impl Harness {
         let event = Event::SessionPromptPrewarmRequested(SessionPromptPrewarmRequested {
             session_id: session_id.clone(),
             system_prompt,
-            messages,
+            context_items,
             tools,
             model: Some(model),
             model_params: self.selected_params,
@@ -3873,11 +4024,9 @@ impl Harness {
         let prompt_context = tree
             .map(|t| assemble_prompt_context_from(t, head))
             .unwrap_or_else(|| crate::prompt::AssembledPromptContext {
-                compacted_input_items: Vec::new(),
-                messages: Vec::new(),
+                context_items: Vec::new(),
             });
-        let messages = prompt_context.messages;
-        let compacted_input_items = prompt_context.compacted_input_items;
+        let context_items = prompt_context.context_items;
         let tools = self.gather_tool_definitions();
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
@@ -3896,9 +4045,9 @@ impl Harness {
             tool_choice,
         );
         // Stateful-chain hint: if the prior turn for this conversation
-        // produced a `response_id` AND the anchor is still consistent
+        // produced a provider response id AND the anchor is still consistent
         // (same model selected, anchor node still on the path to
-        // current head, message_count not larger than the assembled
+        // current head, item_count not larger than the assembled
         // count, and the request body's non-input fields haven't
         // drifted) we let the next turn run as a delta call. Otherwise
         // drop the anchor — the chain is busted and full replay is
@@ -3912,14 +4061,14 @@ impl Harness {
             let anchor = conv.chain_anchor.as_ref();
             if let Some(a) = anchor {
                 let model_ok = self.selected_model.as_ref() == Some(&a.model);
-                let count_ok = a.message_count <= messages.len();
+                let count_ok = a.message_count <= context_items.len();
                 let tree_ok = tree.is_some_and(|t| anchor_is_ancestor(t, a.head, conv.head));
                 let fingerprint_ok = a.request_fingerprint == request_fingerprint.digest;
                 if model_ok && count_ok && tree_ok && fingerprint_ok {
-                    Some(tau_proto::PreviousResponseRef {
-                        id: a.response_id.clone(),
-                        message_index: a.message_count,
-                        transport: Some(a.transport),
+                    Some(tau_proto::PreviousResponseCandidate {
+                        provider_response_id: a.response_id.clone(),
+                        next_item_index: a.message_count,
+                        backend: a.backend.clone(),
                     })
                 } else {
                     tracing::debug!(
@@ -3931,7 +4080,7 @@ impl Harness {
                         current_model = ?self.selected_model,
                         model_ok,
                         anchor_message_count = a.message_count,
-                        current_message_count = messages.len(),
+                        current_message_count = context_items.len(),
                         count_ok,
                         anchor_head = ?a.head,
                         current_head = ?conv.head,
@@ -3990,56 +4139,6 @@ impl Harness {
         // racing the response.
         self.prompt_fingerprints
             .insert(session_prompt_id.clone(), request_fingerprint);
-        let base_prompt = self
-            .conversations
-            .get(cid)
-            .and_then(|c| c.last_prompt_id.as_ref())
-            .and_then(|base_id| {
-                self.prompt_snapshots
-                    .get(base_id)
-                    .map(|base| (base_id, base))
-            });
-        let (system_prompt, system_prompt_ref) = base_prompt
-            .as_ref()
-            .and_then(|(base_id, base)| {
-                (system_prompt == base.system_prompt).then(|| {
-                    (
-                        String::new(),
-                        Some(PromptSystemPromptRef {
-                            base_session_prompt_id: (*base_id).clone(),
-                        }),
-                    )
-                })
-            })
-            .unwrap_or((system_prompt, None));
-        let (messages, message_prefix) = base_prompt
-            .as_ref()
-            .and_then(|(base_id, base)| {
-                messages.starts_with(&base.messages).then(|| {
-                    let prefix_len = base.messages.len();
-                    (
-                        messages[prefix_len..].to_vec(),
-                        Some(PromptMessagePrefix {
-                            base_session_prompt_id: (*base_id).clone(),
-                            message_count: prefix_len,
-                        }),
-                    )
-                })
-            })
-            .unwrap_or((messages, None));
-        let (tools, tools_ref) = base_prompt
-            .as_ref()
-            .and_then(|(base_id, base)| {
-                (tools == base.tools).then(|| {
-                    (
-                        Vec::new(),
-                        Some(PromptToolsRef {
-                            base_session_prompt_id: (*base_id).clone(),
-                        }),
-                    )
-                })
-            })
-            .unwrap_or((tools, None));
         let is_compaction_request = self.pending_compactions.contains_key(cid);
         if !is_compaction_request {
             self.prompt_cache_diagnostics.insert(
@@ -4047,7 +4146,6 @@ impl Harness {
                 PromptCacheDiagnosticContext {
                     model: model.clone(),
                     previous_response: previous_response.clone(),
-                    message_prefix_count: message_prefix.as_ref().map(|p| p.message_count),
                     originator: originator.clone(),
                     tool_choice,
                     request_fingerprint: request_fingerprint.digest,
@@ -4058,25 +4156,22 @@ impl Harness {
             session_prompt_id: session_prompt_id.clone(),
             session_id,
             system_prompt,
-            system_prompt_ref,
-            messages,
-            message_prefix,
-            compacted_input_items,
+            context_items,
             tools,
-            tools_ref,
+            tools_ref: None,
             model,
             model_params: self.selected_params,
             tool_choice,
             originator,
             share_user_cache_key,
             ctx_id,
-            previous_response,
+            previous_response_candidate: previous_response,
         };
         let event = if is_compaction_request {
             Event::SessionCompactionRequested(SessionCompactionRequested {
                 prompt: SessionPromptCreated {
                     ctx_id: None,
-                    previous_response: None,
+                    previous_response_candidate: None,
                     ..prompt
                 },
             })
@@ -4175,8 +4270,14 @@ impl Harness {
             return;
         };
         let (Some(input_tokens), Some(cached_tokens), Some(previous_input_tokens)) = (
-            response.input_tokens,
-            response.cached_tokens,
+            response
+                .usage
+                .as_ref()
+                .map(|usage| usage.prompt_sent_tokens),
+            response
+                .usage
+                .as_ref()
+                .map(|usage| usage.prompt_cached_tokens),
             previous_input_tokens,
         ) else {
             return;
@@ -4202,9 +4303,9 @@ impl Harness {
             Event::AgentCacheMissDiagnostic(AgentCacheMissDiagnostic {
                 session_prompt_id: response.session_prompt_id.clone(),
                 model: context.model,
-                previous_response_id: previous_response.id,
-                previous_response_message_index: previous_response.message_index,
-                message_prefix_count: context.message_prefix_count,
+                previous_response_id: previous_response.provider_response_id,
+                previous_response_message_index: previous_response.next_item_index,
+                message_prefix_count: None,
                 originator: context.originator,
                 tool_choice: context.tool_choice,
                 prompt_cache_key: None,
@@ -4224,6 +4325,9 @@ impl Harness {
         summary_cid: ConversationId,
         response: AgentResponseFinished,
     ) -> Result<(), HarnessError> {
+        let requested_tool_calls = response_requests_tool_calls(&response);
+        let replacement_window = compaction_items_from_output_items(&response.output_items);
+        let text = assistant_text_from_output_items(&response.output_items);
         let Some(pending) = self.pending_compactions.remove(&summary_cid) else {
             return Ok(());
         };
@@ -4262,31 +4366,23 @@ impl Harness {
             self.update_context_usage(None, None);
         }
 
-        let (outcome, message) = if !response.tool_calls.is_empty() {
+        let (outcome, message) = if requested_tool_calls {
             (
                 tau_proto::SessionCompactionOutcome::Failed,
                 Some("tool call attempted".to_owned()),
             )
-        } else if !response.compacted_input_items.is_empty() {
-            let summary = response
-                .text
-                .as_deref()
-                .map(str::trim)
-                .filter(|text| !text.is_empty())
-                .unwrap_or("Conversation compacted.");
+        } else if !replacement_window.is_empty() {
             self.publish_for_conversation(
                 &pending.target_cid,
                 Event::SessionCompacted(tau_proto::SessionCompacted {
                     session_id: pending.session_id.clone(),
                     originator: pending.originator.clone(),
-                    summary: summary.to_owned(),
-                    compacted_input_items: response.compacted_input_items.clone(),
+                    replacement_window: replacement_window.clone(),
                 }),
             );
             (tau_proto::SessionCompactionOutcome::Succeeded, None)
         } else {
-            let message = response
-                .text
+            let message = text
                 .as_deref()
                 .map(str::trim)
                 .filter(|text| !text.is_empty() && *text != "Conversation compacted.")
@@ -4320,6 +4416,21 @@ impl Harness {
         &mut self,
         mut response: AgentResponseFinished,
     ) -> Result<(), HarnessError> {
+        let mut tool_calls = tool_calls_from_output_items(&response.output_items);
+        let mut requested_tool_calls = response_requests_tool_calls(&response);
+        let assistant_text = assistant_text_from_output_items(&response.output_items);
+        let input_tokens = response
+            .usage
+            .as_ref()
+            .map(|usage| usage.prompt_sent_tokens);
+        let cached_tokens = response
+            .usage
+            .as_ref()
+            .map(|usage| usage.prompt_cached_tokens);
+        let output_tokens = response
+            .usage
+            .as_ref()
+            .map(|usage| usage.response_received_tokens);
         if self.canceled_prompts.remove(&response.session_prompt_id) {
             self.prompt_conversations
                 .remove(response.session_prompt_id.as_str());
@@ -4330,10 +4441,10 @@ impl Harness {
             return Ok(());
         }
         let response_cid = self.conversation_for_prompt(&response.session_prompt_id);
-        if (response.input_tokens.is_some() || response.cached_tokens.is_some())
+        if (input_tokens.is_some() || cached_tokens.is_some())
             && response_cid.as_ref() == Some(&self.default_conversation_id)
         {
-            self.update_context_usage(response.input_tokens, response.cached_tokens);
+            self.update_context_usage(input_tokens, cached_tokens);
         }
         // Per-conversation usage: separate from the global tracker
         // because side conversations shouldn't clobber the user's
@@ -4345,7 +4456,7 @@ impl Harness {
                 .get(cid)
                 .and_then(|conv| conv.context_input_tokens);
             self.maybe_emit_cache_miss_diagnostic(&response, previous_input_tokens);
-            self.update_conversation_context_usage(cid, response.input_tokens);
+            self.update_conversation_context_usage(cid, input_tokens);
             self.emit_delegate_progress(cid);
         }
         // Dedupe: under at-least-once delivery the agent may resend a
@@ -4369,16 +4480,16 @@ impl Harness {
         let turn_model = self.prompt_models.remove(&response.session_prompt_id);
         let turn_fingerprint = self.prompt_fingerprints.remove(&response.session_prompt_id);
         if let Some(ref model) = turn_model {
-            let sent_tokens = response.input_tokens.unwrap_or(0);
-            let cached_tokens = response.cached_tokens.unwrap_or(0);
-            let received_tokens = response.output_tokens.unwrap_or(0);
+            let sent_tokens = input_tokens.unwrap_or(0);
+            let cached_tokens = cached_tokens.unwrap_or(0);
+            let received_tokens = output_tokens.unwrap_or(0);
             self.current_session_state
                 .token_usage
                 .add_sent(model, sent_tokens, cached_tokens);
             self.current_session_state
                 .token_usage
                 .add_received(model, received_tokens);
-            response.token_usage = Some(AgentTokenUsage {
+            response.usage = Some(AgentTokenUsage {
                 model: Some(model.clone()),
                 prompt_sent_tokens: sent_tokens,
                 prompt_cached_tokens: cached_tokens,
@@ -4388,19 +4499,29 @@ impl Harness {
         }
         // Stamp the live-header `display` descriptor on each tool
         // call so renderers don't need per-tool string knowledge.
-        // Calls whose name failed to validate (`ToolNameMaybe::Invalid`)
-        // get no descriptor — they fail synchronously at dispatch time
-        // and never produce a running block.
-        for call in &mut response.tool_calls {
+        for call in &mut tool_calls {
             if call.display.is_some() {
                 continue;
             }
-            if let tau_proto::ToolNameMaybe::Valid(ref name) = call.name {
-                call.display = build_tool_args_display(name.as_str(), &call.arguments);
-            }
+            call.display = build_tool_args_display(call.name.as_str(), &call.arguments);
         }
         if self.pending_compactions.contains_key(&cid) {
             return self.finish_pending_compaction(cid, response);
+        }
+        if requested_tool_calls && tool_calls.is_empty() {
+            self.emit_info(&format!(
+                "agent response {} reported tool calls but contained none; treating it as end_turn",
+                response.session_prompt_id
+            ));
+            requested_tool_calls = false;
+        }
+        if requested_tool_calls
+            && let Some(call) = tool_calls.iter().find(|call| call.id.as_str().is_empty())
+        {
+            return Err(HarnessError::Participant(format!(
+                "agent response {} contained tool call {} with empty call_id",
+                response.session_prompt_id, call.name
+            )));
         }
         let is_non_tool_ext_query = self.conversations.get(&cid).is_some_and(|conv| {
             matches!(
@@ -4408,6 +4529,41 @@ impl Harness {
                 tau_proto::PromptOriginator::Extension { .. }
             ) && conv.parent_tool_call_id.is_none()
         });
+
+        let mut normalized_calls: Vec<(AgentToolCall, tau_proto::ToolSideEffects)> = Vec::new();
+        if requested_tool_calls {
+            normalized_calls = tool_calls
+                .iter()
+                .map(|call| {
+                    let call = call.clone();
+                    let kind = self.resolve_tool_kind_for_call(&call);
+                    (call, kind)
+                })
+                .collect();
+            let mut normalized_calls_iter = normalized_calls.iter();
+            response.output_items = response
+                .output_items
+                .into_iter()
+                .map(|item| match item {
+                    ContextItem::ToolCall(_) => {
+                        let (call, _) = normalized_calls_iter
+                            .next()
+                            .expect("tool-call normalization count should match output items");
+                        ContextItem::ToolCall(ToolCallItem {
+                            call_id: call.id.clone(),
+                            name: call.name.clone(),
+                            tool_type: call.tool_type,
+                            arguments: call.arguments.clone(),
+                        })
+                    }
+                    item => item,
+                })
+                .collect();
+            tool_calls = normalized_calls
+                .iter()
+                .map(|(call, _)| call.clone())
+                .collect();
+        }
 
         // Publish via the owning conversation's branch — when text is
         // present the SessionTree fold appends an `AgentMessage` as a
@@ -4424,15 +4580,12 @@ impl Harness {
         // pins this conversation's current head + assembled message
         // count so the next `send_prompt_to_agent_for` can send a
         // delta instead of replaying the full transcript.
-        if let (Some(response_id), Some(model), Some(request_fingerprint)) =
-            (response.response_id.clone(), turn_model, turn_fingerprint)
-        {
-            let transport = response
-                .backend
-                .as_ref()
-                .map_or(tau_proto::AgentBackendTransport::HttpSse, |backend| {
-                    backend.transport
-                });
+        if let (Some(response_id), Some(model), Some(request_fingerprint), Some(backend)) = (
+            response.provider_response_id.clone(),
+            turn_model,
+            turn_fingerprint,
+            response.backend.clone(),
+        ) {
             let (conv_head, conv_session) = self
                 .conversations
                 .get(&cid)
@@ -4449,7 +4602,7 @@ impl Harness {
                     head: conv_head.flatten(),
                     model,
                     message_count,
-                    transport,
+                    backend,
                     request_fingerprint: request_fingerprint.digest,
                     request_fingerprint_parts: request_fingerprint.parts,
                 });
@@ -4474,23 +4627,23 @@ impl Harness {
             ref name,
             ref query_id,
         } = response.originator
-            && (response.tool_calls.is_empty() || is_non_tool_ext_query)
+            && (!requested_tool_calls || is_non_tool_ext_query)
         {
             let source = self
                 .conversations
                 .get(&cid)
                 .and_then(|c| c.source_connection.clone());
-            let error = if is_non_tool_ext_query && !response.tool_calls.is_empty() {
+            let error = if is_non_tool_ext_query && requested_tool_calls {
                 Some(format!(
                     "non-tool extension query attempted to call {} tool(s); refusing to execute",
-                    response.tool_calls.len()
+                    tool_calls.len()
                 ))
             } else {
                 None
             };
             let result = tau_proto::ExtAgentQueryResult {
                 query_id: query_id.clone(),
-                text: response.text.clone().unwrap_or_default(),
+                text: assistant_text.clone().unwrap_or_default(),
                 error,
             };
             if let Some(source) = source {
@@ -4519,7 +4672,7 @@ impl Harness {
             return Ok(());
         }
 
-        if !response.tool_calls.is_empty() {
+        if requested_tool_calls {
             // Tool calls to execute — agent stays busy. After all
             // tools complete, maybe_complete_agent_turn drains any
             // prompts queued via `pending_prompts` (publishing one
@@ -4535,25 +4688,29 @@ impl Harness {
             // conversation history as an empty `call_id` which the
             // OpenAI Responses API rejects with
             // `input[N].call_id: empty string`. Fix it at the boundary.
-            let normalized_calls: Vec<(AgentToolCall, tau_proto::ToolSideEffects)> = response
-                .tool_calls
-                .iter()
-                .map(|call| {
-                    let mut call = call.clone();
-                    if call.id.as_str().is_empty() {
-                        call.id = self.synthesize_call_id();
-                    }
-                    let kind = self.resolve_tool_kind_for_call(&call);
-                    (call, kind)
-                })
-                .collect();
-
             let remaining_calls: Vec<ToolCallId> = normalized_calls
                 .iter()
                 .map(|(call, _)| call.id.clone())
                 .collect();
+            for (call, _) in &normalized_calls {
+                self.pending_tools.insert(
+                    call.id.clone(),
+                    PendingTool {
+                        name: call.name.clone(),
+                        tool_type: call.tool_type,
+                    },
+                );
+            }
             if let Some(conv) = self.conversations.get_mut(&cid) {
                 conv.turn_state = ConversationTurnState::ToolsRunning { remaining_calls };
+            }
+            if self
+                .conversations
+                .get(&cid)
+                .is_some_and(|conv| conv.pending_cancel.is_some())
+            {
+                self.apply_pending_cancel_for_conversation(&cid);
+                return Ok(());
             }
             // Enqueue in the order the agent emitted them. Dispatch is
             // done by `drain_pending_tool_invocations`, which respects
@@ -4654,21 +4811,6 @@ impl Harness {
         if let Some(entry) = self.extensions.get_mut(connection_id) {
             entry.state = new_state;
         }
-    }
-
-    /// Mint a fresh synthetic `ToolCallId` for a hallucinated tool
-    /// call that arrived with an empty id.
-    ///
-    /// The id has to be non-empty for two reasons:
-    /// - the harness uses it as a map key in `in_flight_tool_kinds` /
-    ///   `pending_tool_sessions`, and two empty ids would collide;
-    /// - the next prompt we send to the model includes the rejection as a
-    ///   `tool_use`/`tool_result` pair, and the OpenAI Responses API rejects
-    ///   empty `call_id` strings outright.
-    fn synthesize_call_id(&mut self) -> ToolCallId {
-        let id = format!("harness-synth-{}", self.next_synthetic_call_id);
-        self.next_synthetic_call_id += 1;
-        id.into()
     }
 
     /// Returns the side-effect class of a tool name.
@@ -4908,24 +5050,7 @@ impl Harness {
         cid: &ConversationId,
         call: &AgentToolCall,
     ) -> Result<(), HarnessError> {
-        // Agent output is untrusted — hallucinated or streaming-
-        // artifact tool calls can arrive with empty or otherwise
-        // invalid names. The wire type `ToolNameMaybe` preserves both
-        // classes; here we pick the validated arm for the happy path
-        // and route everything else to `reject_invalid_tool_call` with
-        // a synthetic error the agent sees on its next turn.
-        let tool_name = match &call.name {
-            tau_proto::ToolNameMaybe::Valid(name) => name.clone(),
-            tau_proto::ToolNameMaybe::Invalid(raw) => {
-                self.reject_invalid_tool_call(
-                    cid,
-                    &call.id,
-                    &call.arguments,
-                    format!("invalid tool name {raw:?}: must be non-empty and match [a-zA-Z0-9_]+"),
-                )?;
-                return Ok(());
-            }
-        };
+        let tool_name = call.name.clone();
 
         let Some((internal_tool_name, visible_tool_name)) =
             self.resolve_enabled_tool_name_for_current_role(&tool_name)
@@ -4937,8 +5062,13 @@ impl Harness {
             };
             let call_id: ToolCallId = call.id.clone();
             self.tool_conversations.insert(call_id.clone(), cid.clone());
-            self.pending_tool_names
-                .insert(call_id.clone(), tool_name.clone());
+            self.pending_tools.insert(
+                call_id.clone(),
+                PendingTool {
+                    name: tool_name.clone(),
+                    tool_type: call.tool_type,
+                },
+            );
             self.bump_tools_started_for(cid);
             let request = ToolRequest {
                 call_id: call_id.clone(),
@@ -4953,6 +5083,7 @@ impl Harness {
                 Event::ToolError(ToolError {
                     call_id: call_id.clone(),
                     tool_name,
+                    tool_type: call.tool_type,
                     message: message.to_owned(),
                     details: None,
                     display: None,
@@ -4975,8 +5106,13 @@ impl Harness {
         // publish path persists the `ToolRequest` into the session
         // log and folds it into the SessionTree via `apply_event`.
         self.tool_conversations.insert(call_id.clone(), cid.clone());
-        self.pending_tool_names
-            .insert(call_id.clone(), visible_tool_name.clone());
+        self.pending_tools.insert(
+            call_id.clone(),
+            PendingTool {
+                name: visible_tool_name.clone(),
+                tool_type: call.tool_type,
+            },
+        );
         self.bump_tools_started_for(cid);
         let published_request = ToolRequest {
             call_id: call_id.clone(),
@@ -5006,6 +5142,7 @@ impl Harness {
                 let error = ToolError {
                     call_id: call_id.clone(),
                     tool_name: visible_tool_name,
+                    tool_type: call.tool_type,
                     message: "no live provider available".to_owned(),
                     details: None,
                     display: None,
@@ -5018,69 +5155,6 @@ impl Harness {
             Err(error) => return Err(HarnessError::ToolRoute(error)),
         }
 
-        Ok(())
-    }
-
-    /// Synthesize a matched `ToolRequest` + `ToolError` pair for a
-    /// tool call whose name couldn't be accepted as a `ToolName` (e.g.
-    /// empty string from a hallucinated streaming response), publish
-    /// both so they fold into the session tree, and drive the turn
-    /// state machine forward.
-    ///
-    /// We use a placeholder `invalid_tool` name because
-    /// `ToolError::tool_name` is a validated `ToolName`; the actual
-    /// offending string is surfaced via the error message so the agent
-    /// sees it in its next conversation turn.
-    ///
-    /// Publishing the `Requested` alongside the `Error` is
-    /// load-bearing: `assemble_conversation` renders `Requested` as a
-    /// `ContentBlock::ToolUse` and `Error` as a matching
-    /// `ContentBlock::ToolResult`. Without the `Requested`, the next
-    /// prompt would include a `function_call_output` with no
-    /// corresponding `function_call`, which the OpenAI Responses API
-    /// rejects with "No tool call found for function call output with
-    /// call_id …".
-    fn reject_invalid_tool_call(
-        &mut self,
-        cid: &ConversationId,
-        call_id: &str,
-        arguments: &CborValue,
-        message: String,
-    ) -> Result<(), HarnessError> {
-        let placeholder = ToolName::new("invalid_tool");
-        let call_id_owned: ToolCallId = call_id.to_owned().into();
-        // Seed the conversation mapping so `session_id_for_event`
-        // attributes both the synthetic request and the synthetic
-        // error to this conversation's session. A rejected call never
-        // reached the normal dispatch path that would have inserted
-        // these entries.
-        self.tool_conversations
-            .insert(call_id_owned.clone(), cid.clone());
-        self.pending_tool_names
-            .insert(call_id_owned.clone(), placeholder.clone());
-        self.publish_for_conversation(
-            cid,
-            Event::ToolRequest(ToolRequest {
-                call_id: call_id_owned.clone(),
-                tool_name: placeholder.clone(),
-                tool_type: tau_proto::ToolType::Function,
-                arguments: arguments.clone(),
-                originator: tau_proto::PromptOriginator::User,
-            }),
-        );
-        self.publish_for_conversation(
-            cid,
-            Event::ToolError(ToolError {
-                call_id: call_id_owned,
-                tool_name: placeholder,
-                message,
-                details: None,
-                display: None,
-                originator: tau_proto::PromptOriginator::User,
-            }),
-        );
-        self.on_tool_call_complete(call_id);
-        self.clear_tool_call_tracking(call_id);
         Ok(())
     }
 }
@@ -5126,11 +5200,12 @@ impl Harness {
                     let is_final = matches!(
                         frame.as_ref(),
                         Frame::Event(Event::AgentResponseFinished(r))
-                            if r.tool_calls.is_empty() && r.originator.is_user()
+                            if tool_calls_from_output_items(&r.output_items).is_empty()
+                                && r.originator.is_user()
                     );
                     let final_text =
                         if let Frame::Event(Event::AgentResponseFinished(r)) = frame.as_ref() {
-                            r.text.clone()
+                            assistant_text_from_output_items(&r.output_items)
                         } else {
                             None
                         };
@@ -5203,9 +5278,9 @@ impl Harness {
         }
         out.push('\n');
 
-        out.push_str("================ MESSAGES ================\n");
+        out.push_str("================ CONTEXT ITEMS ================\n");
         out.push_str(
-            &serde_json::to_string_pretty(&prompt.messages)
+            &serde_json::to_string_pretty(&prompt.context_items)
                 .map_err(|e| HarnessError::Participant(e.to_string()))?,
         );
         out.push_str("\n\n");
@@ -5238,33 +5313,6 @@ impl Harness {
             cursor = entry.seq + 1;
             if let Event::SessionPromptCreated(prompt) = entry.event {
                 let mut materialized = prompt.clone();
-                if let Some(system_prompt_ref) = &prompt.system_prompt_ref {
-                    let base = snapshots
-                        .get(&system_prompt_ref.base_session_prompt_id)
-                        .ok_or_else(|| {
-                            HarnessError::Participant(
-                                "prompt system prompt base missing".to_owned(),
-                            )
-                        })?;
-                    materialized.system_prompt = base.system_prompt.clone();
-                    materialized.system_prompt_ref = None;
-                }
-                if let Some(prefix) = &prompt.message_prefix {
-                    let base = snapshots
-                        .get(&prefix.base_session_prompt_id)
-                        .ok_or_else(|| {
-                            HarnessError::Participant("prompt prefix base missing".to_owned())
-                        })?;
-                    if base.messages.len() < prefix.message_count {
-                        return Err(HarnessError::Participant(
-                            "prompt prefix base too short".to_owned(),
-                        ));
-                    }
-                    let mut messages = base.messages[..prefix.message_count].to_vec();
-                    messages.extend(prompt.messages.clone());
-                    materialized.messages = messages;
-                    materialized.message_prefix = None;
-                }
                 if let Some(tools_ref) = &prompt.tools_ref {
                     let base = snapshots
                         .get(&tools_ref.base_session_prompt_id)

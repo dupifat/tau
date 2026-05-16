@@ -10,8 +10,8 @@ use tau_core::{
     EventBus, RoutedFrame, SessionStore, ToolRegistry, memory_connection,
 };
 use tau_proto::{
-    ClientKind, ConnectionId, Event, EventName, EventSelector, Frame, FrameReader, FrameWriter,
-    SessionPromptCreated,
+    ClientKind, ConnectionId, ContentPart, ContextItem, ContextRole, Event, EventName,
+    EventSelector, Frame, FrameReader, FrameWriter, MessageItem, SessionPromptCreated,
 };
 use tempfile::TempDir;
 
@@ -76,6 +76,27 @@ fn stream_connection(
     );
     let reader = FrameReader::new(BufReader::new(stream));
     (connection, reader)
+}
+
+fn assistant_text_from_output_items(output_items: &[ContextItem]) -> String {
+    output_items
+        .iter()
+        .filter_map(|item| match item {
+            ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content,
+                ..
+            }) => Some(
+                content
+                    .iter()
+                    .map(|part| match part {
+                        ContentPart::Text { text } => text.as_str(),
+                    })
+                    .collect::<String>(),
+            ),
+            _ => None,
+        })
+        .collect()
 }
 
 /// End-to-end vertical slice: real `tau-agent` and `tau-ext-shell`
@@ -195,23 +216,20 @@ fn deterministic_agent_and_tool_complete_one_vertical_slice() {
     assert!(registered_tool_names.iter().any(|name| name == "echo"));
     assert!(registered_tool_names.iter().any(|name| name == "read"));
 
-    // Send a SessionPromptCreated to the agent (new protocol).
-    use tau_proto::{ContentBlock, ConversationMessage, ConversationRole, ToolDefinition};
+    // Send a SessionPromptCreated to the agent.
+    use tau_proto::ToolDefinition;
 
     let prompt = SessionPromptCreated {
         session_prompt_id: "sp-1".into(),
         session_id: "session-1".into(),
         system_prompt: "You are helpful.".to_owned(),
-        system_prompt_ref: None,
-        messages: vec![ConversationMessage {
-            role: ConversationRole::User,
-            content: vec![ContentBlock::Text {
+        context_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::User,
+            content: vec![ContentPart::Text {
                 text: "hello".to_owned(),
             }],
             phase: None,
-        }],
-        message_prefix: None,
-        compacted_input_items: Vec::new(),
+        })],
         tools: vec![ToolDefinition {
             name: tau_proto::ToolName::new("echo"),
             model_visible_name: None,
@@ -226,7 +244,7 @@ fn deterministic_agent_and_tool_complete_one_vertical_slice() {
         tool_choice: tau_proto::ToolChoice::default(),
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
-        previous_response: None,
+        previous_response_candidate: None,
         share_user_cache_key: false,
     };
     let _ = bus.send_to(
@@ -245,8 +263,13 @@ fn deterministic_agent_and_tool_complete_one_vertical_slice() {
             break r;
         }
     };
-    assert!(response.text.as_deref().unwrap_or("").contains("no model"));
-    assert!(response.tool_calls.is_empty());
+    assert!(assistant_text_from_output_items(&response.output_items).contains("no model"));
+    assert!(
+        response
+            .output_items
+            .iter()
+            .all(|item| !matches!(item, ContextItem::ToolCall(_)))
+    );
 
     bus.send_to(
         &agent_id,

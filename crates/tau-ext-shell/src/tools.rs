@@ -38,6 +38,7 @@ pub(crate) fn execute_tool(
         return vec![Event::ToolResult(ToolResult {
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
+            tool_type: tau_proto::ToolType::Function,
             result: invoke.arguments,
             display: None,
             originator: tau_proto::PromptOriginator::User,
@@ -77,6 +78,7 @@ pub(crate) fn execute_tool(
             Ok(ToolOutput { result, display }) => events.push(Event::ToolResult(ToolResult {
                 call_id: invoke.call_id,
                 tool_name: invoke.tool_name,
+                tool_type: tau_proto::ToolType::Function,
                 result,
                 display: Some(display),
                 originator: tau_proto::PromptOriginator::User,
@@ -88,6 +90,7 @@ pub(crate) fn execute_tool(
             }) => events.push(Event::ToolError(ToolError {
                 call_id: invoke.call_id,
                 tool_name: invoke.tool_name,
+                tool_type: tau_proto::ToolType::Function,
                 message,
                 details: details.map(|details| *details),
                 display: Some(*display),
@@ -100,6 +103,7 @@ pub(crate) fn execute_tool(
     vec![Event::ToolError(ToolError {
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
+        tool_type: tau_proto::ToolType::Function,
         message: "unknown tool".to_owned(),
         details: None,
         display: None,
@@ -121,6 +125,7 @@ fn wrap_pure(
         Ok(ToolOutput { result, display }) => vec![Event::ToolResult(ToolResult {
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
+            tool_type: tau_proto::ToolType::Function,
             result,
             display: Some(display),
             originator: tau_proto::PromptOriginator::User,
@@ -132,6 +137,7 @@ fn wrap_pure(
         }) => vec![Event::ToolError(ToolError {
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
+            tool_type: tau_proto::ToolType::Function,
             message,
             details: details.map(|details| *details).or(fallback_details),
             display: Some(*display),

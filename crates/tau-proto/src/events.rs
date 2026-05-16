@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AgentTokenUsage, CborValue, DiffSummary, ExtensionName, ModelId, SessionId, SessionPromptId,
-    SkillName, ToolCallId, ToolName, ToolNameMaybe,
+    SkillName, ToolCallId, ToolName,
 };
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -1112,7 +1112,6 @@ pub struct ToolSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Whether this is a JSON-schema function tool or a freeform custom tool.
-    #[serde(default, skip_serializing_if = "ToolType::is_default")]
     pub tool_type: ToolType,
     /// JSON Schema describing the tool's input parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1202,7 +1201,6 @@ pub struct ToolUnregister {
 pub struct ToolRequest {
     pub call_id: ToolCallId,
     pub tool_name: ToolName,
-    #[serde(default, skip_serializing_if = "ToolType::is_default")]
     pub tool_type: ToolType,
     pub arguments: CborValue,
     /// Who started the prompt that produced this tool call. The
@@ -1231,12 +1229,12 @@ pub struct ToolInvoke {
 pub struct ToolResult {
     pub call_id: ToolCallId,
     pub tool_name: ToolName,
+    pub tool_type: ToolType,
     pub result: CborValue,
     /// Optional UI display descriptor populated by the tool. When
     /// present, lets the renderer paint a uniform tool block without
-    /// inspecting `result`'s tool-specific shape. `None` for older
-    /// logs and tools that haven't migrated yet — the renderer falls
-    /// back to a minimal generic block.
+    /// inspecting `result`'s tool-specific shape. This is operational
+    /// display metadata, not transcript truth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<ToolDisplay>,
     /// Echo of the originating [`ToolRequest::originator`]. Tool
@@ -1253,6 +1251,7 @@ pub struct ToolResult {
 pub struct ToolError {
     pub call_id: ToolCallId,
     pub tool_name: ToolName,
+    pub tool_type: ToolType,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<CborValue>,
@@ -1461,6 +1460,7 @@ pub struct ToolCancel {
 pub struct ToolCancelled {
     pub call_id: ToolCallId,
     pub tool_name: ToolName,
+    pub tool_type: ToolType,
 }
 
 // ---------------------------------------------------------------------------
@@ -1948,22 +1948,6 @@ impl PromptOriginator {
     }
 }
 
-/// Reference to a message prefix carried by an earlier prompt.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct PromptMessagePrefix {
-    /// Prompt whose materialized messages contain the prefix.
-    pub base_session_prompt_id: SessionPromptId,
-    /// Number of leading messages to copy from the base prompt.
-    pub message_count: usize,
-}
-
-/// Reference to a system prompt carried by an earlier prompt.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct PromptSystemPromptRef {
-    /// Prompt whose materialized system prompt contains the full text.
-    pub base_session_prompt_id: SessionPromptId,
-}
-
 /// Reference to tool definitions carried by an earlier prompt.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PromptToolsRef {
@@ -1980,25 +1964,10 @@ pub struct PromptToolsRef {
 pub struct SessionPromptCreated {
     pub session_prompt_id: SessionPromptId,
     pub session_id: SessionId,
-    /// System prompt, or empty when [`Self::system_prompt_ref`] is set.
+    /// System prompt sent alongside the item timeline.
     pub system_prompt: String,
-    /// Optional reference to a full system prompt from an earlier prompt.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system_prompt_ref: Option<PromptSystemPromptRef>,
-    /// Conversation messages, or only the suffix when
-    /// [`Self::message_prefix`] is set.
-    pub messages: Vec<ConversationMessage>,
-    /// Optional reference to leading messages from an earlier prompt.
-    /// When set, handlers materialize the full message list as:
-    /// `base.messages[..message_count] + messages`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message_prefix: Option<PromptMessagePrefix>,
-    /// Opaque Responses-API input items returned by a prior
-    /// provider-side compaction pass. These items form the canonical
-    /// next prompt prefix and must be forwarded back to the provider
-    /// unchanged.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub compacted_input_items: Vec<String>,
+    /// Fully materialized context items for this turn.
+    pub context_items: Vec<ContextItem>,
     /// Tool definitions, or empty when [`Self::tools_ref`] is set.
     pub tools: Vec<ToolDefinition>,
     /// Optional reference to full tool definitions from an earlier prompt.
@@ -2042,24 +2011,19 @@ pub struct SessionPromptCreated {
     /// the rest of the chain by spid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ctx_id: Option<String>,
-    /// Hint for backends that support stateful chaining (currently the
-    /// OpenAI Codex Responses API): the most recent
-    /// [`AgentResponseFinished::response_id`] from this conversation
-    /// and the index in `messages` where the new turn's content
-    /// begins. Backends that don't support stateful chaining ignore
-    /// this and replay the full `messages` slice; the Responses
-    /// backend slices `messages[message_index..]` and sets
-    /// `previous_response_id` + `store: true` on the upstream call.
-    /// `None` when no chain has been established yet, or when an
-    /// edit / model switch / error invalidated the prior chain.
+    /// Hint for backends that support stateful chaining: the most
+    /// recent provider response id from this conversation and the item
+    /// index where the new turn's content begins. Backends that do not
+    /// support chaining ignore this and use the full materialized
+    /// `context_items` payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub previous_response: Option<PreviousResponseRef>,
+    pub previous_response_candidate: Option<PreviousResponseCandidate>,
 }
 
 /// The harness assembled a provider-side compaction request and
 /// assigned it an ID.
 ///
-/// Compaction reuses the same prefix-compression and materialization
+/// Compaction reuses the same prompt-delivery and materialization
 /// scheme as [`SessionPromptCreated`], but it is a distinct agent
 /// operation with its own event name so consumers do not need to infer
 /// alternate semantics from a mode flag on a normal prompt event.
@@ -2080,7 +2044,7 @@ pub struct SessionCompactionRequested {
 pub struct SessionPromptPrewarmRequested {
     pub session_id: SessionId,
     pub system_prompt: String,
-    pub messages: Vec<ConversationMessage>,
+    pub context_items: Vec<ContextItem>,
     pub tools: Vec<ToolDefinition>,
     /// Currently selected model as `"provider/model_id"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2142,37 +2106,30 @@ pub struct SessionCompactionFinished {
 /// prior events from disk. Instead, prompt assembly treats this event as a
 /// history reset point and replays only the summary plus the entries that
 /// follow it on the current branch.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SessionCompacted {
     pub session_id: SessionId,
     /// Conversation that owns this durable compaction summary. UIs use
     /// this to hide sub-agent compaction results from the main transcript.
     #[serde(default)]
     pub originator: PromptOriginator,
-    pub summary: String,
-    /// Canonical opaque Responses-API input items returned by the
-    /// provider's compaction endpoint.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub compacted_input_items: Vec<String>,
+    pub replacement_window: Vec<ContextItem>,
 }
 
 /// Reference to a prior turn's response, used to enable stateful
 /// chaining on backends that support it. See
-/// [`SessionPromptCreated::previous_response`].
+/// [`SessionPromptCreated::previous_response_candidate`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct PreviousResponseRef {
+pub struct PreviousResponseCandidate {
     /// `response.id` returned by the provider on the most recent
     /// successful turn for this conversation.
-    pub id: String,
-    /// Index in [`SessionPromptCreated::messages`] where messages
+    pub provider_response_id: String,
+    /// Index in [`SessionPromptCreated::context_items`] where items
     /// added since the prior response begin. Backends slicing for a
-    /// delta call use `messages[message_index..]`.
-    pub message_index: usize,
-    /// Transport that produced `id`, when known. Codex response ids can be
-    /// transport-scoped, so the agent uses this to avoid sending a WS-origin
-    /// id over HTTP after the socket that owned it died.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transport: Option<AgentBackendTransport>,
+    /// delta call use `context_items[next_item_index..]`.
+    pub next_item_index: usize,
+    /// Backend that produced `provider_response_id`, when known.
+    pub backend: AgentBackend,
 }
 
 // ---------------------------------------------------------------------------
@@ -2210,68 +2167,42 @@ pub struct AgentResponseUpdated {
     pub originator: PromptOriginator,
 }
 
-/// One tool call the agent wants to make.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct AgentToolCall {
-    pub id: ToolCallId,
-    /// Model-produced name. Kept as [`ToolNameMaybe`] so that a
-    /// single hallucinated / malformed name doesn't fail decode of
-    /// the entire batch; the harness matches on the variant at
-    /// dispatch time and rejects `Invalid` with a synthetic
-    /// `ToolError` while letting sibling calls run.
-    pub name: ToolNameMaybe,
-    #[serde(default, skip_serializing_if = "ToolType::is_default")]
-    pub tool_type: ToolType,
-    pub arguments: CborValue,
-    /// Pre-rendered live-header descriptor stamped by the harness
-    /// before publishing so UIs can render the running block (e.g.
-    /// `grep "foo" in src …`) without per-tool string knowledge.
-    /// `None` on the wire from the agent driver; the harness fills
-    /// it in by inspecting `name` + `arguments` once the call has
-    /// been accepted. Subscribers that don't render UI ignore it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display: Option<ToolDisplay>,
+/// The agent finished processing a prompt.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStopReason {
+    /// The model completed the turn without requesting any tool work.
+    #[default]
+    EndTurn,
+    /// The model stopped because it emitted tool calls that Tau should run.
+    ToolCalls,
+    /// The response represents a compaction window rather than a normal turn.
+    Compaction,
+    /// The turn ended with an error message synthesized by Tau.
+    Error,
 }
 
-/// The agent finished processing a prompt.
+impl AgentStopReason {
+    #[must_use]
+    pub const fn requests_tool_calls(self) -> bool {
+        matches!(self, Self::ToolCalls)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentResponseFinished {
     pub session_prompt_id: SessionPromptId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_calls: Vec<AgentToolCall>,
+    pub output_items: Vec<ContextItem>,
+    pub stop_reason: AgentStopReason,
     /// Echo of [`SessionPromptCreated::originator`]. The agent must
     /// copy this from the prompt; the harness routes the response
     /// based on it.
     #[serde(default)]
     pub originator: PromptOriginator,
-    /// Input tokens consumed by the final request, if the provider
-    /// reported usage.
+    /// Provider-reported usage for this response, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_tokens: Option<u64>,
-    /// Cached input tokens consumed by the final request, if the
-    /// provider reported them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cached_tokens: Option<u64>,
-    /// Output tokens produced by the final request, if the provider
-    /// reported them. Includes reasoning tokens on backends that
-    /// generate hidden chain-of-thought (o-series, GPT-5), which both
-    /// the OpenAI Responses and Chat Completions APIs roll into the
-    /// top-level output count.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_tokens: Option<u64>,
-    /// Final accumulated provider-supplied reasoning summary, if the
-    /// provider exposed one. Persisted with the assistant turn but
-    /// never replayed into later prompts.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<String>,
-    /// Session-scoped token usage snapshot after this response
-    /// completed. Filled in by the harness (which knows the qualified
-    /// `provider/model` id and the running session totals) before the
-    /// event is re-published; agents emit `None` here.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token_usage: Option<AgentTokenUsage>,
+    pub usage: Option<AgentTokenUsage>,
     /// Which LLM backend handled this turn. Recorded once per turn
     /// (instead of in a trace line) so offline inspection of the
     /// event log can correlate cache-miss / retry patterns with the
@@ -2281,41 +2212,10 @@ pub struct AgentResponseFinished {
     /// agent-side resolution failure or the in-process echo agent).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<AgentBackend>,
-    /// Provider-supplied `response.id` for this turn, when the
-    /// backend exposed one. Used by the harness to thread a
-    /// `previous_response_id` into the next `SessionPromptCreated`
-    /// so the upstream call can run in stateful-chain mode (smaller
-    /// request body, server-side reasoning continuity). `None` for
-    /// backends that don't expose response ids (Chat Completions)
-    /// and for error turns. The backend descriptor carries transport
-    /// and stale-chain recovery metadata so the harness can decide how
-    /// later prompts may chain from this id.
+    /// Provider-supplied response id for this turn, when the backend
+    /// exposed one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub response_id: Option<String>,
-    /// Provider-supplied assistant-phase label captured for this
-    /// turn. `Some(_)` only when the backend supports the Codex
-    /// `phase` field on assistant `message` items (see
-    /// [`MessagePhase`]) and the model emitted one. Persisted with
-    /// the turn so later prompts can echo it back, preventing the
-    /// "early stopping" behavior the OpenAI deployment checklist
-    /// warns about.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase: Option<MessagePhase>,
-    /// Provider-supplied reasoning output items, in stream order. Each
-    /// entry is the raw JSON of one `reasoning` item — including its
-    /// `id` and `encrypted_content` — captured when the backend ran
-    /// with `include: ["reasoning.encrypted_content"]` on the request
-    /// (currently the Codex Responses backend, gated on its
-    /// `supports_encrypted_reasoning` flag). The harness persists
-    /// these blobs and replays them verbatim on later full-transcript
-    /// turns so the model's reasoning continuity survives a broken
-    /// chain — same role as Pi's `thinkingSignature` blob.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub reasoning_items: Vec<String>,
-    /// Opaque Responses-API input items returned by a standalone
-    /// provider compaction call. Empty on normal generation turns.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub compacted_input_items: Vec<String>,
+    pub provider_response_id: Option<String>,
     /// Per-turn delta of the agent's Codex WS pool counters. `Some(_)`
     /// only for Responses-backend turns where the WS path was
     /// attempted (i.e. `cfg.supports_websocket` and the per-session
@@ -2441,57 +2341,113 @@ pub enum AgentBackendTransport {
 }
 
 // ---------------------------------------------------------------------------
-// Conversation types (used in SessionPromptCreated)
+// Item-based conversation types
 // ---------------------------------------------------------------------------
 
-/// Role of a participant in the conversation history.
+/// Role of a participant in one message item.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ConversationRole {
+pub enum ContextRole {
+    System,
+    Developer,
     User,
     Assistant,
 }
 
-/// One block of content within a conversation message.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// One content part inside a message item.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum ContentBlock {
-    Text {
-        text: String,
-    },
-    ToolUse {
-        id: ToolCallId,
-        /// Same untrusted-LLM-output contract as
-        /// `AgentToolCall::name`. See [`ToolNameMaybe`].
-        name: ToolNameMaybe,
-        #[serde(default, skip_serializing_if = "ToolType::is_default")]
-        tool_type: ToolType,
-        input: CborValue,
-    },
-    ToolResult {
-        tool_use_id: ToolCallId,
-        content: String,
-        #[serde(default)]
-        is_error: bool,
-    },
-    /// One provider-supplied reasoning output item, stored as the raw
-    /// JSON the API emitted (item id + `encrypted_content` + optional
-    /// summary). The harness treats the payload as opaque and replays
-    /// it verbatim as a top-level `input` item on later turns, which
-    /// is how Codex `gpt-5.3-codex+` preserves model reasoning state
-    /// across requests when the chain is broken (reconnect, fork,
-    /// fingerprint mismatch). Same shape as Pi's `thinkingSignature`
-    /// — opaque blob, forward-compatible against schema drift.
-    ///
-    /// Assistant role only; appears before any `Text`/`ToolUse` blocks
-    /// from the same response.
-    Reasoning {
-        /// Raw JSON of the provider's `reasoning` output item. Tau
-        /// never parses fields out of this — backends that don't
-        /// understand the source provider's schema (e.g. Chat
-        /// Completions replaying Codex history) simply drop it.
-        item: String,
-    },
+pub enum ContentPart {
+    Text { text: String },
+}
+
+/// Opaque provider-owned payload preserved without interpretation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct OpaqueProviderItem(pub CborValue);
+
+/// One message item in the prompt or assistant output timeline.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MessageItem {
+    pub role: ContextRole,
+    pub content: Vec<ContentPart>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<MessagePhase>,
+}
+
+/// One tool call item in the prompt or assistant output timeline.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolCallItem {
+    pub call_id: ToolCallId,
+    pub name: ToolName,
+    pub tool_type: ToolType,
+    pub arguments: CborValue,
+}
+
+/// Terminal status for one tool result item.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResultStatus {
+    Success,
+    Error { message: String },
+    Cancelled { reason: String },
+}
+
+/// One tool result item in the prompt timeline.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolResultItem {
+    pub call_id: ToolCallId,
+    pub tool_type: ToolType,
+    pub status: ToolResultStatus,
+    pub output: CborValue,
+}
+
+/// One item in Tau's prompt/response timeline.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+pub enum ContextItem {
+    Message(MessageItem),
+    ToolCall(ToolCallItem),
+    ToolResult(ToolResultItem),
+    Reasoning(OpaqueProviderItem),
+    Compaction(OpaqueProviderItem),
+    UnknownProviderItem(OpaqueProviderItem),
+}
+
+/// Transcript node projected from durable facts.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+pub enum TranscriptNode {
+    UserInput(UserInputNode),
+    AssistantResponse(AssistantResponseNode),
+    ToolResults(ToolResultsNode),
+    Compaction(CompactionNode),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UserInputNode {
+    pub items: Vec<ContextItem>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AssistantResponseNode {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_response_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<AgentBackend>,
+    pub output_items: Vec<ContextItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<AgentTokenUsage>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolResultsNode {
+    pub items: Vec<ToolResultItem>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CompactionNode {
+    pub replacement_window: Vec<ContextItem>,
 }
 
 /// Assistant-message phase label, mirroring the OpenAI Codex
@@ -2531,25 +2487,6 @@ impl MessagePhase {
     }
 }
 
-/// One message in the conversation history.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ConversationMessage {
-    pub role: ConversationRole,
-    pub content: Vec<ContentBlock>,
-    /// Assistant-only: the `phase` label the provider attached to
-    /// this turn, when one was captured. Echoed back on outgoing
-    /// requests so the model retains its read of "this prior turn
-    /// was commentary vs. final" — the OpenAI deployment checklist
-    /// flags missing phase on history as a cause of early stopping
-    /// on `gpt-5.3-codex` and later.
-    ///
-    /// `None` for user messages and for assistant turns produced by
-    /// providers that do not emit phase; the Responses backend
-    /// substitutes `final_answer` on the wire in that case.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase: Option<MessagePhase>,
-}
-
 /// A tool definition available for the agent to use.
 ///
 /// This is outbound (harness → LLM in the prompt), so the harness
@@ -2562,7 +2499,6 @@ pub struct ToolDefinition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Whether this is a JSON-schema function tool or a freeform custom tool.
-    #[serde(default, skip_serializing_if = "ToolType::is_default")]
     pub tool_type: ToolType,
     /// JSON Schema describing the tool's input parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2818,12 +2754,20 @@ impl Event {
     pub const fn defaults_to_transient(&self) -> bool {
         matches!(
             self,
-            Self::AgentResponseUpdated(_)
+            Self::ToolRequest(_)
+                | Self::ToolError(_)
+                | Self::ToolCancelled(_)
+                | Self::AgentResponseUpdated(_)
+                | Self::AgentPromptSubmitted(_)
                 | Self::ToolProgress(_)
                 | Self::ToolDelegateProgress(_)
                 | Self::ShellCommandProgress(_)
+                | Self::SessionPromptQueued(_)
                 | Self::SessionCompactionStarted(_)
                 | Self::SessionCompactionFinished(_)
+                | Self::SessionCompactionRequested(_)
+                | Self::SessionPromptCreated(_)
+                | Self::SessionPromptPrewarmRequested(_)
                 | Self::UiCompactRequest(_)
                 | Self::UiPromptDraft(_)
         )

@@ -8,12 +8,13 @@
 
 use super::*;
 use crate::dedup::{DEDUP_MARKER, DEFAULT_THRESHOLD_BYTES};
+use crate::harness::PendingTool;
 
 /// Drive a single `ToolResult` through the harness's normal intake
 /// path (registers the call_id with `tool_conversations`,
-/// `pending_tool_names`, and a `ToolsRunning` turn state, then sends
+/// `pending_tools`, and a `ToolsRunning` turn state, then sends
 /// the result via `handle_extension_event`). Returns the recorded
-/// `ToolActivityOutcome` for the call from the session tree.
+/// `ToolResultItem` for the call from the session tree.
 fn run_tool_result(
     h: &mut Harness,
     session_id: &str,
@@ -21,23 +22,25 @@ fn run_tool_result(
     call_id: &str,
     tool_name: &str,
     result: CborValue,
-) -> ToolActivityOutcome {
+) -> ToolResultItem {
     let call_id_typed: ToolCallId = call_id.into();
     let name = ToolName::new(tool_name);
+    seed_assistant_tool_round(h, cid, &[(call_id, tool_name)]);
     h.tool_conversations
         .insert(call_id_typed.clone(), cid.clone());
-    h.pending_tool_names
-        .insert(call_id_typed.clone(), name.clone());
-    if let Some(conv) = h.conversations.get_mut(cid) {
-        conv.turn_state = ConversationTurnState::ToolsRunning {
-            remaining_calls: vec![call_id_typed.clone()],
-        };
-    }
+    h.pending_tools.insert(
+        call_id_typed.clone(),
+        PendingTool {
+            name: name.clone(),
+            tool_type: tau_proto::ToolType::Function,
+        },
+    );
     h.handle_extension_event(
         "shell",
         Frame::Event(Event::ToolResult(ToolResult {
             call_id: call_id_typed.clone(),
             tool_name: name,
+            tool_type: tau_proto::ToolType::Function,
             result,
             display: None,
             originator: tau_proto::PromptOriginator::User,
@@ -50,12 +53,13 @@ fn run_tool_result(
         .iter()
         .rev()
         .find_map(|node| match &node.entry {
-            SessionEntry::ToolActivity(rec) if rec.call_id.as_str() == call_id => {
-                Some(rec.outcome.clone())
-            }
+            SessionEntry::ToolResults { items } => items
+                .iter()
+                .find(|item| item.call_id.as_str() == call_id)
+                .cloned(),
             _ => None,
         })
-        .expect("recorded outcome for call_id")
+        .expect("recorded result item for call_id")
 }
 
 /// Like [`run_tool_result`] but for `ToolError`.
@@ -67,23 +71,25 @@ fn run_tool_error(
     tool_name: &str,
     message: String,
     details: Option<CborValue>,
-) -> ToolActivityOutcome {
+) -> ToolResultItem {
     let call_id_typed: ToolCallId = call_id.into();
     let name = ToolName::new(tool_name);
+    seed_assistant_tool_round(h, cid, &[(call_id, tool_name)]);
     h.tool_conversations
         .insert(call_id_typed.clone(), cid.clone());
-    h.pending_tool_names
-        .insert(call_id_typed.clone(), name.clone());
-    if let Some(conv) = h.conversations.get_mut(cid) {
-        conv.turn_state = ConversationTurnState::ToolsRunning {
-            remaining_calls: vec![call_id_typed.clone()],
-        };
-    }
+    h.pending_tools.insert(
+        call_id_typed.clone(),
+        PendingTool {
+            name: name.clone(),
+            tool_type: tau_proto::ToolType::Function,
+        },
+    );
     h.handle_extension_event(
         "shell",
         Frame::Event(Event::ToolError(tau_proto::ToolError {
             call_id: call_id_typed.clone(),
             tool_name: name,
+            tool_type: tau_proto::ToolType::Function,
             message,
             details,
             display: None,
@@ -97,12 +103,13 @@ fn run_tool_error(
         .iter()
         .rev()
         .find_map(|node| match &node.entry {
-            SessionEntry::ToolActivity(rec) if rec.call_id.as_str() == call_id => {
-                Some(rec.outcome.clone())
-            }
+            SessionEntry::ToolResults { items } => items
+                .iter()
+                .find(|item| item.call_id.as_str() == call_id)
+                .cloned(),
             _ => None,
         })
-        .expect("recorded outcome for call_id")
+        .expect("recorded result item for call_id")
 }
 
 /// Two large identical results land on the same conversation's
@@ -119,17 +126,13 @@ fn cross_turn_identical_result_collapses_to_pointer() {
 
     let first = run_tool_result(&mut h, "s1", &cid, "call_first", "read", big.clone());
     assert!(
-        matches!(&first, ToolActivityOutcome::Result { result } if result == &big),
+        matches!(&first, ToolResultItem { status: ToolResultStatus::Success, output, .. } if output == &big),
         "first occurrence is recorded verbatim, got: {first:?}"
     );
 
     let second = run_tool_result(&mut h, "s1", &cid, "call_second", "read", big.clone());
-    let ToolActivityOutcome::Result {
-        result: dedup_result,
-    } = second
-    else {
-        panic!("second occurrence should still be a Result outcome");
-    };
+    assert_eq!(second.status, ToolResultStatus::Success);
+    let dedup_result = second.output;
     let CborValue::Text(text) = &dedup_result else {
         panic!("deduped result should be a CborValue::Text pointer; got: {dedup_result:?}");
     };
@@ -174,12 +177,10 @@ fn small_results_below_threshold_are_not_deduped() {
     let first = run_tool_result(&mut h, "s1", &cid, "call_a", "shell", small.clone());
     let second = run_tool_result(&mut h, "s1", &cid, "call_b", "shell", small.clone());
 
-    let ToolActivityOutcome::Result { result: r1 } = first else {
-        unreachable!()
-    };
-    let ToolActivityOutcome::Result { result: r2 } = second else {
-        unreachable!()
-    };
+    assert_eq!(first.status, ToolResultStatus::Success);
+    assert_eq!(second.status, ToolResultStatus::Success);
+    let r1 = first.output;
+    let r2 = second.output;
     assert_eq!(r1, small);
     assert_eq!(
         r2, small,
@@ -217,9 +218,8 @@ fn pointer_entries_are_not_themselves_dedup_anchors() {
         .result_dedup = crate::dedup::ResultDedupMap::new();
 
     let third = run_tool_result(&mut h, "s1", &cid, "call_third", "read", big.clone());
-    let ToolActivityOutcome::Result { result } = third else {
-        unreachable!()
-    };
+    assert_eq!(third.status, ToolResultStatus::Success);
+    let result = third.output;
     let CborValue::Text(text) = &result else {
         panic!("third occurrence should still dedup; got: {result:?}");
     };
@@ -256,10 +256,10 @@ fn identical_errors_collapse_but_distinct_details_stay() {
         long_msg.clone(),
         Some(CborValue::Text("stderr block X".to_owned())),
     );
-    let ToolActivityOutcome::Error { message: m1, .. } = first else {
+    let ToolResultStatus::Error { message: m1 } = &first.status else {
         unreachable!()
     };
-    assert_eq!(m1, long_msg, "first error recorded verbatim");
+    assert_eq!(*m1, long_msg, "first error recorded verbatim");
 
     let second = run_tool_error(
         &mut h,
@@ -270,11 +270,7 @@ fn identical_errors_collapse_but_distinct_details_stay() {
         long_msg.clone(),
         Some(CborValue::Text("stderr block X".to_owned())),
     );
-    let ToolActivityOutcome::Error {
-        message: m2,
-        details: d2,
-    } = second
-    else {
+    let ToolResultStatus::Error { message: m2 } = &second.status else {
         unreachable!()
     };
     assert!(
@@ -282,7 +278,7 @@ fn identical_errors_collapse_but_distinct_details_stay() {
         "identical second error must dedup to a pointer; got message: {m2:?}",
     );
     assert!(
-        d2.is_none(),
+        second.output == CborValue::Null,
         "deduped error should drop the details payload"
     );
 
@@ -295,11 +291,11 @@ fn identical_errors_collapse_but_distinct_details_stay() {
         long_msg.clone(),
         Some(CborValue::Text("stderr block Y — different".to_owned())),
     );
-    let ToolActivityOutcome::Error { message: m3, .. } = third else {
+    let ToolResultStatus::Error { message: m3 } = &third.status else {
         unreachable!()
     };
     assert_eq!(
-        m3, long_msg,
+        *m3, long_msg,
         "different details means the model needs the full content; must NOT dedup",
     );
 
@@ -322,6 +318,8 @@ fn dedup_map_rebuilds_on_session_restore() {
         let cid = h.default_conversation_id.clone();
         let _ = run_tool_result(&mut h, "s1", &cid, "call_pre_restore", "read", big.clone());
         h.shutdown().expect("shutdown");
+        drop(h);
+        wait_for_session_unlock(&sp, "s1");
     }
 
     // New harness pointing at the same state dir + session id —
@@ -340,9 +338,8 @@ fn dedup_map_rebuilds_on_session_restore() {
     );
 
     let post = run_tool_result(&mut h, "s1", &cid, "call_post_restore", "read", big.clone());
-    let ToolActivityOutcome::Result { result } = post else {
-        unreachable!()
-    };
+    assert_eq!(post.status, ToolResultStatus::Success);
+    let result = post.output;
     let CborValue::Text(text) = &result else {
         panic!("post-restore identical result should dedup; got: {result:?}");
     };
@@ -379,9 +376,8 @@ fn new_session_reset_does_not_dedup_against_previous_branch() {
     );
 
     let after = run_tool_result(&mut h, "s1", &cid, "call_after_new", "ls", big.clone());
-    let ToolActivityOutcome::Result { result } = after else {
-        unreachable!()
-    };
+    assert_eq!(after.status, ToolResultStatus::Success);
+    let result = after.output;
     assert_eq!(
         result, big,
         "first result after /new must not dedup against an older branch that the model cannot see",
@@ -436,9 +432,8 @@ fn dedup_is_scoped_to_a_single_branch() {
     );
 
     let side_outcome = run_tool_result(&mut h, "s1", &side_cid, "call_side", "read", big.clone());
-    let ToolActivityOutcome::Result { result } = side_outcome else {
-        unreachable!()
-    };
+    assert_eq!(side_outcome.status, ToolResultStatus::Success);
+    let result = side_outcome.output;
     assert_eq!(
         result, big,
         "side conversation's first identical result must NOT dedup against the default \
@@ -471,6 +466,7 @@ fn dedup_refuses_to_self_point() {
     let mut replay = ToolResult {
         call_id: "call_solo".into(),
         tool_name: ToolName::new("read"),
+        tool_type: tau_proto::ToolType::Function,
         result: big.clone(),
         display: None,
         originator: tau_proto::PromptOriginator::User,

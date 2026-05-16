@@ -6,11 +6,11 @@
 use std::io::BufRead;
 
 use serde::{Deserialize, Serialize};
-use tau_proto::{ContentBlock, ConversationMessage, ConversationRole, ToolDefinition};
+use tau_proto::{ContentPart, ContextItem, ContextRole, ToolDefinition};
 
 use crate::common::{
-    LlmError, PromptPayload, StreamState, ToolCallAccumulator, cbor_to_json, effort_wire,
-    mix_originator_into_cache_key, prompt_cache_key_for, verbosity_wire,
+    LlmError, PromptPayload, StreamState, cbor_to_json, effort_wire, mix_originator_into_cache_key,
+    prompt_cache_key_for, verbosity_wire,
 };
 
 /// Configuration for the OpenAI-compatible backend.
@@ -185,33 +185,27 @@ fn apply_stream_choice(
         on_update(&state.text, state.thinking.as_deref());
     }
 
-    // Accumulate text content.
+    // Accumulate text content into a synthesized message item.
     if let Some(content) = choice.delta.content {
-        state.text.push_str(&content);
+        state.append_chat_message_delta(&content);
         on_update(&state.text, state.thinking.as_deref());
     }
 
-    // Accumulate tool calls.
+    // Accumulate tool calls into synthesized tool-call items. Chat
+    // Completions exposes `tool_calls[N]` indexes rather than provider
+    // output item indexes, so `StreamState` maps them onto item slots.
     if let Some(tool_calls) = choice.delta.tool_calls {
         for tc in tool_calls {
             let index = tc.index.unwrap_or(0) as usize;
-
-            // Extend the list if needed.
-            while state.tool_calls.len() <= index {
-                state.tool_calls.push(ToolCallAccumulator {
-                    id: String::new(),
-                    name: String::new(),
-                    tool_type: tau_proto::ToolType::Function,
-                    arguments_json: String::new(),
-                });
-            }
-
-            let acc = &mut state.tool_calls[index];
+            let tool_type = if matches!(tc.r#type.as_deref(), Some("custom")) || tc.custom.is_some()
+            {
+                tau_proto::ToolType::Custom
+            } else {
+                tau_proto::ToolType::Function
+            };
+            let acc = state.chat_tool_call_at_mut(index, tool_type);
             if let Some(id) = tc.id {
                 acc.id = id;
-            }
-            if matches!(tc.r#type.as_deref(), Some("custom")) || tc.custom.is_some() {
-                acc.tool_type = tau_proto::ToolType::Custom;
             }
             if let Some(function) = tc.function {
                 if let Some(name) = function.name {
@@ -312,8 +306,20 @@ fn build_request(
         });
     }
 
-    for msg in request.messages {
-        convert_message(msg, &mut messages);
+    let mut context_index = 0;
+    while context_index < request.context_items.len() {
+        if let ContextItem::ToolCall(_) = &request.context_items[context_index] {
+            let mut tool_calls = Vec::new();
+            while let Some(ContextItem::ToolCall(call)) = request.context_items.get(context_index) {
+                tool_calls.push(convert_tool_call(call));
+                context_index += 1;
+            }
+            push_tool_calls(&mut messages, tool_calls);
+            continue;
+        }
+
+        convert_context_item(&request.context_items[context_index], &mut messages);
+        context_index += 1;
     }
 
     let tools: Vec<serde_json::Value> = request.tools.iter().map(convert_tool_definition).collect();
@@ -371,112 +377,106 @@ fn build_request(
     }
 }
 
-fn convert_message(msg: &ConversationMessage, out: &mut Vec<ApiMessage>) {
-    match msg.role {
-        ConversationRole::User => {
-            for block in &msg.content {
-                match block {
-                    ContentBlock::Text { text } => {
-                        out.push(ApiMessage {
-                            role: "user".to_owned(),
-                            content: Some(text.clone()),
-                            tool_calls: None,
-                            tool_call_id: None,
-                            name: None,
-                        });
-                    }
-                    ContentBlock::ToolResult {
-                        tool_use_id,
-                        content,
-                        ..
-                    } => {
-                        out.push(ApiMessage {
-                            role: "tool".to_owned(),
-                            content: Some(content.clone()),
-                            tool_calls: None,
-                            tool_call_id: Some(tool_use_id.to_string()),
-                            name: None,
-                        });
-                    }
-                    ContentBlock::ToolUse { .. } => {}
-                    // Reasoning items are Codex-Responses specific. The
-                    // Chat Completions API has no slot for them, so they
-                    // get dropped on conversion. A cross-backend session
-                    // (e.g. user mid-flight switches to a Chat
-                    // Completions model) silently loses reasoning
-                    // continuity — same outcome as the chain breaking.
-                    ContentBlock::Reasoning { .. } => {}
+fn convert_context_item(item: &ContextItem, out: &mut Vec<ApiMessage>) {
+    match item {
+        ContextItem::Message(msg) => match msg.role {
+            ContextRole::System | ContextRole::Developer => {}
+            ContextRole::User => {
+                let text = msg
+                    .content
+                    .iter()
+                    .map(|part| match part {
+                        ContentPart::Text { text } => text.as_str(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !text.is_empty() {
+                    out.push(ApiMessage {
+                        role: "user".to_owned(),
+                        content: Some(text),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    });
                 }
             }
-        }
-        ConversationRole::Assistant => {
-            let mut text_parts = Vec::new();
-            let mut tool_calls = Vec::new();
-
-            for block in &msg.content {
-                match block {
-                    ContentBlock::Text { text } => {
-                        text_parts.push(text.clone());
-                    }
-                    ContentBlock::ToolUse {
-                        id,
-                        name,
-                        tool_type,
-                        input,
-                    } => {
-                        let tool_call = match tool_type {
-                            tau_proto::ToolType::Function => {
-                                let args_json = cbor_to_json(input);
-                                serde_json::json!({
-                                    "id": id,
-                                    "type": "function",
-                                    "function": {
-                                        "name": name.as_str(),
-                                        "arguments": serde_json::to_string(&args_json).unwrap_or_default(),
-                                    }
-                                })
-                            }
-                            tau_proto::ToolType::Custom => serde_json::json!({
-                                "id": id,
-                                "type": "custom",
-                                "custom": {
-                                    "name": name.as_str(),
-                                    "input": match input {
-                                        tau_proto::CborValue::Text(text) => text.clone(),
-                                        other => serde_json::to_string(&cbor_to_json(other)).unwrap_or_default(),
-                                    },
-                                }
-                            }),
-                        };
-                        tool_calls.push(tool_call);
-                    }
-                    ContentBlock::ToolResult { .. } => {}
-                    // Reasoning items are Codex-Responses specific; the
-                    // Chat Completions wire has no equivalent slot. See
-                    // user-role match above for the cross-backend
-                    // tradeoff this implies.
-                    ContentBlock::Reasoning { .. } => {}
+            ContextRole::Assistant => {
+                let text_parts = msg
+                    .content
+                    .iter()
+                    .map(|part| match part {
+                        ContentPart::Text { text } => text.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                if !text_parts.is_empty() {
+                    out.push(ApiMessage {
+                        role: "assistant".to_owned(),
+                        content: Some(text_parts.join("\n")),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    });
                 }
             }
-
-            let content = if text_parts.is_empty() {
-                None
-            } else {
-                Some(text_parts.join("\n"))
+        },
+        ContextItem::ToolCall(call) => push_tool_calls(out, vec![convert_tool_call(call)]),
+        ContextItem::ToolResult(result) => {
+            let content = match &result.output {
+                tau_proto::CborValue::Text(text) => text.clone(),
+                other => serde_json::to_string(&cbor_to_json(other)).unwrap_or_default(),
             };
-
             out.push(ApiMessage {
-                role: "assistant".to_owned(),
-                content,
-                tool_calls: if tool_calls.is_empty() {
-                    None
-                } else {
-                    Some(tool_calls)
-                },
-                tool_call_id: None,
+                role: "tool".to_owned(),
+                content: Some(content),
+                tool_calls: None,
+                tool_call_id: Some(result.call_id.to_string()),
                 name: None,
             });
         }
+        ContextItem::Reasoning(_)
+        | ContextItem::Compaction(_)
+        | ContextItem::UnknownProviderItem(_) => {}
+    }
+}
+
+fn push_tool_calls(out: &mut Vec<ApiMessage>, tool_calls: Vec<serde_json::Value>) {
+    if tool_calls.is_empty() {
+        return;
+    }
+
+    out.push(ApiMessage {
+        role: "assistant".to_owned(),
+        content: None,
+        tool_calls: Some(tool_calls),
+        tool_call_id: None,
+        name: None,
+    });
+}
+
+fn convert_tool_call(call: &tau_proto::ToolCallItem) -> serde_json::Value {
+    match call.tool_type {
+        tau_proto::ToolType::Function => {
+            let args_json = cbor_to_json(&call.arguments);
+            serde_json::json!({
+                "id": call.call_id,
+                "type": "function",
+                "function": {
+                    "name": call.name.as_str(),
+                    "arguments": serde_json::to_string(&args_json).unwrap_or_default(),
+                }
+            })
+        }
+        tau_proto::ToolType::Custom => serde_json::json!({
+            "id": call.call_id,
+            "type": "custom",
+            "custom": {
+                "name": call.name.as_str(),
+                "input": match &call.arguments {
+                    tau_proto::CborValue::Text(text) => text.clone(),
+                    other => serde_json::to_string(&cbor_to_json(other)).unwrap_or_default(),
+                },
+            }
+        }),
     }
 }
 

@@ -15,6 +15,8 @@ fn build_system_prompt_includes_skills() {
     let prompt = build_system_prompt(&skills, "/tmp/work");
     assert!(prompt.contains("<available_skills>"));
     assert!(prompt.contains("<name>brave-search</name>"));
+    assert!(prompt.contains("<description>Web search via Brave API</description>"));
+
     assert!(prompt.contains("Web search via Brave API"));
     assert!(!prompt.contains("Current date:"));
     assert!(prompt.contains("Current working directory: /tmp/work"));
@@ -84,10 +86,10 @@ fn skill_tool_reads_file_content() {
     // Directly invoke the skill tool handler.
     append_user_message_via_event(&mut h, "s1", "load skill");
     let cid_for_state = h.default_conversation_id.clone();
-    seed_tools_running(&mut h, &cid_for_state, vec!["call-skill".into()]);
+    seed_assistant_tool_round(&mut h, &cid_for_state, &[("call-skill", "skill")]);
     let call = AgentToolCall {
         id: "call-skill".into(),
-        name: "skill".into(),
+        name: tau_proto::ToolName::new("skill"),
         tool_type: tau_proto::ToolType::Function,
         arguments: CborValue::Map(vec![(
             CborValue::Text("query".to_owned()),
@@ -98,26 +100,7 @@ fn skill_tool_reads_file_content() {
     let cid = h.default_conversation_id.clone();
     h.handle_skill_tool_call(&cid, &call).expect("skill call");
 
-    // Verify the tool result was persisted.
-    let branch = h.store.session("s1").expect("session").current_branch();
-    let has_skill_result = branch.iter().any(|entry| {
-        matches!(
-            entry,
-            SessionEntry::ToolActivity(ToolActivityRecord {
-                outcome: ToolActivityOutcome::Result { .. },
-                ..
-            })
-        )
-    });
-    assert!(has_skill_result, "expected skill tool result in session");
-    let events = h.store.session_events("s1").expect("session events");
-    assert!(
-        events.iter().any(|entry| matches!(
-            &entry.event,
-            Event::ToolResult(result) if result.call_id.as_str() == "call-skill"
-        )),
-        "expected skill tool result in durable session event log"
-    );
+    // Verify the tool result was folded into the item-model transcript.
     let result = latest_tool_result(&h, "s1", "call-skill");
     assert_eq!(
         cbor_text_field(&result, "description").as_deref(),
@@ -133,10 +116,10 @@ fn skill_tool_returns_error_for_missing_query() {
     let mut h = echo_harness(&sp).expect("start");
     append_user_message_via_event(&mut h, "s1", "load skill");
     let cid_for_state = h.default_conversation_id.clone();
-    seed_tools_running(&mut h, &cid_for_state, vec!["call-missing".into()]);
+    seed_assistant_tool_round(&mut h, &cid_for_state, &[("call-missing", "skill")]);
     let call = AgentToolCall {
         id: "call-missing".into(),
-        name: "skill".into(),
+        name: tau_proto::ToolName::new("skill"),
         tool_type: tau_proto::ToolType::Function,
         arguments: CborValue::Map(vec![(
             CborValue::Text("action".to_owned()),
@@ -147,15 +130,8 @@ fn skill_tool_returns_error_for_missing_query() {
     let cid = h.default_conversation_id.clone();
     h.handle_skill_tool_call(&cid, &call).expect("skill call");
 
-    let events = h.store.session_events("s1").expect("session events");
-    let err = events
-        .iter()
-        .find_map(|entry| match &entry.event {
-            Event::ToolError(e) if e.call_id.as_str() == "call-missing" => Some(e),
-            _ => None,
-        })
-        .expect("tool error");
-    assert!(err.message.contains("missing required argument: query"));
+    let err = latest_tool_error(&h, "s1", "call-missing");
+    assert!(err.contains("missing required argument: query"));
 }
 
 #[test]
@@ -165,12 +141,12 @@ fn skill_tool_rejects_malformed_search_content() {
 
     let mut h = echo_harness(&sp).expect("start");
     let cid = h.default_conversation_id.clone();
-    seed_tools_running(&mut h, &cid, vec!["call-bad-bool".into()]);
+    seed_assistant_tool_round(&mut h, &cid, &[("call-bad-bool", "skill")]);
     h.handle_skill_tool_call(
         &cid,
         &AgentToolCall {
             id: "call-bad-bool".into(),
-            name: "skill".into(),
+            name: tau_proto::ToolName::new("skill"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(vec![
                 (
@@ -188,7 +164,7 @@ fn skill_tool_rejects_malformed_search_content() {
     .expect("skill call");
 
     let err = latest_tool_error(&h, "s1", "call-bad-bool");
-    assert!(err.message.contains("search_content must be a boolean"));
+    assert!(err.contains("search_content must be a boolean"));
 }
 
 #[test]
@@ -272,7 +248,7 @@ fn skill_tool_search_matches_name_description_and_optional_content() {
     let cid = h.default_conversation_id.clone();
     let call_search = |query: &str, search_content: bool, id: &str| AgentToolCall {
         id: id.into(),
-        name: "skill".into(),
+        name: tau_proto::ToolName::new("skill"),
         tool_type: tau_proto::ToolType::Function,
         arguments: CborValue::Map(vec![
             (
@@ -356,7 +332,7 @@ fn skill_tool_search_matches_name_description_and_optional_content() {
     };
 
     // Description match: KW only appears in zqx-alpha's description.
-    seed_tools_running(&mut h, &cid, vec!["call-1".into()]);
+    seed_assistant_tool_round(&mut h, &cid, &[("call-1", "skill")]);
     h.handle_skill_tool_call(&cid, &call_search(KW, false, "call-1"))
         .expect("search 1");
     assert_eq!(read_loaded_name(&h, "call-1"), "zqx-alpha");
@@ -366,7 +342,7 @@ fn skill_tool_search_matches_name_description_and_optional_content() {
 
     // Default scope must NOT search content: BODY_KW appears only in
     // alpha and beta bodies. With search_content=false → no hits.
-    seed_tools_running(&mut h, &cid, vec!["call-2".into()]);
+    seed_assistant_tool_round(&mut h, &cid, &[("call-2", "skill")]);
     h.handle_skill_tool_call(&cid, &call_search(BODY_KW, false, "call-2"))
         .expect("search 2");
     let empty: Vec<String> = Vec::new();
@@ -379,26 +355,26 @@ fn skill_tool_search_matches_name_description_and_optional_content() {
 
     // Opt into content search: now alpha and beta both match,
     // sorted alphabetically.
-    seed_tools_running(&mut h, &cid, vec!["call-3".into()]);
+    seed_assistant_tool_round(&mut h, &cid, &[("call-3", "skill")]);
     h.handle_skill_tool_call(&cid, &call_search(BODY_KW, true, "call-3"))
         .expect("search 3");
     assert_eq!(read_matches(&h, "call-3"), vec!["zqx-alpha", "zqx-beta"]);
 
     // Frontmatter is stripped before content search.
-    seed_tools_running(&mut h, &cid, vec!["call-4".into()]);
+    seed_assistant_tool_round(&mut h, &cid, &[("call-4", "skill")]);
     h.handle_skill_tool_call(&cid, &call_search(YAML_ONLY_KW, true, "call-4"))
         .expect("search 4");
     let empty: Vec<String> = Vec::new();
     assert_eq!(read_matches(&h, "call-4"), empty);
 
     // Name match works case-insensitively and ignores padding.
-    seed_tools_running(&mut h, &cid, vec!["call-5".into()]);
+    seed_assistant_tool_round(&mut h, &cid, &[("call-5", "skill")]);
     h.handle_skill_tool_call(&cid, &call_search(" ZQX-ALPHA ", false, "call-5"))
         .expect("search 5");
     assert_eq!(read_loaded_name(&h, "call-5"), "zqx-alpha");
 
     // Trailing punctuation is ignored while the hyphenated name is preserved.
-    seed_tools_running(&mut h, &cid, vec!["call-6".into()]);
+    seed_assistant_tool_round(&mut h, &cid, &[("call-6", "skill")]);
     h.handle_skill_tool_call(&cid, &call_search(" ZQX-ALPHA. ", false, "call-6"))
         .expect("search 6");
     assert_eq!(read_loaded_name(&h, "call-6"), "zqx-alpha");
@@ -475,7 +451,7 @@ fn skill_tool_search_accepts_multiple_terms_and_ranks_by_matched_terms() {
     let cid = h.default_conversation_id.clone();
     let call_search = |query: &str, id: &str| AgentToolCall {
         id: id.into(),
-        name: "skill".into(),
+        name: tau_proto::ToolName::new("skill"),
         tool_type: tau_proto::ToolType::Function,
         arguments: CborValue::Map(vec![(
             CborValue::Text("query".to_owned()),
@@ -529,7 +505,7 @@ fn skill_tool_search_accepts_multiple_terms_and_ranks_by_matched_terms() {
             .collect()
     };
 
-    seed_tools_running(&mut h, &cid, vec!["call-multi".into()]);
+    seed_assistant_tool_round(&mut h, &cid, &[("call-multi", "skill")]);
     h.handle_skill_tool_call(&cid, &call_search(&format!("{T1} {T2}"), "call-multi"))
         .expect("multi search");
     let records = read_match_records(&h, "call-multi");
@@ -540,7 +516,7 @@ fn skill_tool_search_accepts_multiple_terms_and_ranks_by_matched_terms() {
          gamma matches none and must be filtered out",
     );
 
-    seed_tools_running(&mut h, &cid, vec!["call-dedup".into()]);
+    seed_assistant_tool_round(&mut h, &cid, &[("call-dedup", "skill")]);
     h.handle_skill_tool_call(&cid, &call_search(" zqxalpha  ZQXALPHA ", "call-dedup"))
         .expect("dedup search");
     assert_eq!(
@@ -550,7 +526,7 @@ fn skill_tool_search_accepts_multiple_terms_and_ranks_by_matched_terms() {
     );
 
     // A single matching skill is loaded directly.
-    seed_tools_running(&mut h, &cid, vec!["call-single".into()]);
+    seed_assistant_tool_round(&mut h, &cid, &[("call-single", "skill")]);
     h.handle_skill_tool_call(&cid, &call_search(T2, "call-single"))
         .expect("single term");
     let events = h.store.session_events("s1").expect("events");
@@ -573,12 +549,12 @@ fn skill_tool_search_accepts_multiple_terms_and_ranks_by_matched_terms() {
 
     // Empty query should error rather than silently returning every
     // skill.
-    seed_tools_running(&mut h, &cid, vec!["call-empty".into()]);
+    seed_assistant_tool_round(&mut h, &cid, &[("call-empty", "skill")]);
     h.handle_skill_tool_call(
         &cid,
         &AgentToolCall {
             id: "call-empty".into(),
-            name: "skill".into(),
+            name: tau_proto::ToolName::new("skill"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(vec![(
                 CborValue::Text("query".to_owned()),
@@ -625,7 +601,7 @@ fn skill_tool_load_truncates_large_skill_content() {
     );
 
     let cid = h.default_conversation_id.clone();
-    seed_tools_running(&mut h, &cid, vec!["call-large".into()]);
+    seed_assistant_tool_round(&mut h, &cid, &[("call-large", "skill")]);
     h.handle_skill_tool_call(&cid, &skill_call("zqx-large", false, "call-large"))
         .expect("skill call");
 
@@ -664,7 +640,7 @@ fn skill_tool_errors_when_frontmatter_exceeds_read_limit() {
     );
 
     let cid = h.default_conversation_id.clone();
-    seed_tools_running(&mut h, &cid, vec!["call-frontmatter".into()]);
+    seed_assistant_tool_round(&mut h, &cid, &[("call-frontmatter", "skill")]);
     h.handle_skill_tool_call(
         &cid,
         &skill_call("zqx-frontmatter", false, "call-frontmatter"),
@@ -672,7 +648,7 @@ fn skill_tool_errors_when_frontmatter_exceeds_read_limit() {
     .expect("skill call");
 
     let err = latest_tool_error(&h, "s1", "call-frontmatter");
-    assert!(err.message.contains("frontmatter closing fence"));
+    assert!(err.contains("frontmatter closing fence"));
 }
 
 #[test]
@@ -696,7 +672,7 @@ fn skill_tool_search_caps_match_output() {
     }
 
     let cid = h.default_conversation_id.clone();
-    seed_tools_running(&mut h, &cid, vec!["call-limit".into()]);
+    seed_assistant_tool_round(&mut h, &cid, &[("call-limit", "skill")]);
     h.handle_skill_tool_call(&cid, &skill_call("zqxlimit", false, "call-limit"))
         .expect("skill call");
 
@@ -723,10 +699,10 @@ fn skill_tool_loads_exact_single_term_match_even_with_other_hits() {
         .expect("write skill");
         path
     };
-    let exact_path = make_skill("zqxexact", "the exact skill");
-    let other_path = make_skill("zqxother", "mentions zqxexact too");
 
     let mut h = echo_harness(&sp).expect("start");
+    let exact_path = make_skill("zqxexact", "the exact skill");
+    let other_path = make_skill("zqxother", "mentions zqxexact too");
     h.discovered_skills.clear();
     for (name, desc, path) in [
         ("zqxexact", "the exact skill", exact_path),
@@ -744,12 +720,12 @@ fn skill_tool_loads_exact_single_term_match_even_with_other_hits() {
     }
 
     let cid = h.default_conversation_id.clone();
-    seed_tools_running(&mut h, &cid, vec!["call-exact".into()]);
+    seed_assistant_tool_round(&mut h, &cid, &[("call-exact", "skill")]);
     h.handle_skill_tool_call(
         &cid,
         &AgentToolCall {
             id: "call-exact".into(),
-            name: "skill".into(),
+            name: tau_proto::ToolName::new("skill"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(vec![(
                 CborValue::Text("query".to_owned()),
@@ -760,21 +736,7 @@ fn skill_tool_loads_exact_single_term_match_even_with_other_hits() {
     )
     .expect("skill call");
 
-    let events = h.store.session_events("s1").expect("events");
-    let loaded_name = events
-        .iter()
-        .rev()
-        .find_map(|entry| match &entry.event {
-            Event::ToolResult(r) if r.call_id.as_str() == "call-exact" => Some(r.result.clone()),
-            _ => None,
-        })
-        .and_then(|result| match result {
-            CborValue::Map(entries) => entries.into_iter().find_map(|(k, v)| match (k, v) {
-                (CborValue::Text(k), CborValue::Text(v)) if k == "name" => Some(v),
-                _ => None,
-            }),
-            _ => None,
-        })
+    let loaded_name = cbor_text_field(&latest_tool_result(&h, "s1", "call-exact"), "name")
         .expect("loaded skill name");
     assert_eq!(loaded_name, "zqxexact");
 }
@@ -799,7 +761,7 @@ fn skill_tool_search_result_includes_guidance_and_matched_fields() {
     }
 
     let cid = h.default_conversation_id.clone();
-    seed_tools_running(&mut h, &cid, vec!["call-guidance".into()]);
+    seed_assistant_tool_round(&mut h, &cid, &[("call-guidance", "skill")]);
     h.handle_skill_tool_call(&cid, &skill_call("zqxguidance", false, "call-guidance"))
         .expect("skill call");
 
@@ -1002,7 +964,7 @@ fn duplicate_extension_skill_keeps_first_source_but_allows_refresh() {
 fn skill_call(query: &str, search_content: bool, id: &str) -> AgentToolCall {
     AgentToolCall {
         id: id.into(),
-        name: "skill".into(),
+        name: tau_proto::ToolName::new("skill"),
         tool_type: tau_proto::ToolType::Function,
         arguments: CborValue::Map(vec![
             (
@@ -1020,25 +982,35 @@ fn skill_call(query: &str, search_content: bool, id: &str) -> AgentToolCall {
 
 fn latest_tool_result(h: &Harness, session_id: &str, call_id: &str) -> CborValue {
     h.store
-        .session_events(session_id)
-        .expect("events")
+        .session(session_id)
+        .expect("session")
+        .nodes()
         .iter()
         .rev()
-        .find_map(|entry| match &entry.event {
-            Event::ToolResult(r) if r.call_id.as_str() == call_id => Some(r.result.clone()),
+        .find_map(|node| match &node.entry {
+            SessionEntry::ToolResults { items } => items
+                .iter()
+                .find(|item| item.call_id.as_str() == call_id)
+                .map(|item| item.output.clone()),
             _ => None,
         })
         .expect("tool result")
 }
 
-fn latest_tool_error(h: &Harness, session_id: &str, call_id: &str) -> tau_proto::ToolError {
+fn latest_tool_error(h: &Harness, session_id: &str, call_id: &str) -> String {
     h.store
-        .session_events(session_id)
-        .expect("events")
+        .session(session_id)
+        .expect("session")
+        .nodes()
         .iter()
         .rev()
-        .find_map(|entry| match &entry.event {
-            Event::ToolError(e) if e.call_id.as_str() == call_id => Some(e.clone()),
+        .find_map(|node| match &node.entry {
+            SessionEntry::ToolResults { items } => items.iter().find_map(|item| {
+                (item.call_id.as_str() == call_id).then(|| match &item.status {
+                    ToolResultStatus::Error { message } => Some(message.clone()),
+                    _ => None,
+                })?
+            }),
             _ => None,
         })
         .expect("tool error")
@@ -1050,6 +1022,16 @@ fn cbor_text_field(map: &CborValue, field: &str) -> Option<String> {
     };
     entries.iter().find_map(|(k, v)| match (k, v) {
         (CborValue::Text(k), CborValue::Text(v)) if k == field => Some(v.clone()),
+        _ => None,
+    })
+}
+
+fn cbor_array_field(map: &CborValue, field: &str) -> Option<Vec<CborValue>> {
+    let CborValue::Map(entries) = map else {
+        return None;
+    };
+    entries.iter().find_map(|(k, v)| match (k, v) {
+        (CborValue::Text(k), CborValue::Array(v)) if k == field => Some(v.clone()),
         _ => None,
     })
 }
@@ -1069,20 +1051,7 @@ fn cbor_u64_field(map: &CborValue, field: &str) -> Option<u64> {
         return None;
     };
     entries.iter().find_map(|(k, v)| match (k, v) {
-        (CborValue::Text(k), CborValue::Integer(v)) if k == field => {
-            let n: i128 = (*v).into();
-            u64::try_from(n).ok()
-        }
-        _ => None,
-    })
-}
-
-fn cbor_array_field(map: &CborValue, field: &str) -> Option<Vec<CborValue>> {
-    let CborValue::Map(entries) = map else {
-        return None;
-    };
-    entries.iter().find_map(|(k, v)| match (k, v) {
-        (CborValue::Text(k), CborValue::Array(v)) if k == field => Some(v.clone()),
+        (CborValue::Text(k), CborValue::Integer(v)) if k == field => (*v).try_into().ok(),
         _ => None,
     })
 }
@@ -1194,7 +1163,7 @@ fn aliased_tool_name_is_advertised_and_routed_via_internal_tool() {
         &cid,
         &AgentToolCall {
             id: "call-alias".into(),
-            name: "shell".into(),
+            name: tau_proto::ToolName::new("shell"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(Vec::new()),
             display: None,
@@ -1212,13 +1181,20 @@ fn aliased_tool_name_is_advertised_and_routed_via_internal_tool() {
         "expected internal tool invoke; got: {routed:?}"
     );
 
-    let events = h.store.session_events("s1").expect("session events");
+    seed_assistant_tool_round(&mut h, &cid, &[("call-alias", "shell")]);
+    let session = h.store.session("s1").expect("session");
     assert!(
-        events.iter().any(|entry| matches!(
-            &entry.event,
-            Event::ToolRequest(request)
-                if request.call_id.as_str() == "call-alias" && request.tool_name == "shell"
+        session.nodes().iter().any(|node| matches!(
+            &node.entry,
+            SessionEntry::AssistantResponse { output_items, .. }
+                if output_items.iter().any(|item| {
+                    matches!(
+                        item,
+                        ContextItem::ToolCall(call)
+                            if call.call_id.as_str() == "call-alias" && call.name == "shell"
+                    )
+                })
         )),
-        "expected persisted visible tool name; got: {events:?}"
+        "expected assistant transcript to retain the visible tool name"
     );
 }

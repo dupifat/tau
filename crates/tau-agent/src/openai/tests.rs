@@ -17,8 +17,7 @@ fn build_request_includes_prompt_cache_fields_when_configured() {
     };
     let request = PromptPayload {
         system_prompt: "system",
-        messages: &[],
-        compacted_input_items: &[],
+        context_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -50,8 +49,7 @@ fn build_request_includes_service_tier_when_configured() {
     };
     let request = PromptPayload {
         system_prompt: "system",
-        messages: &[],
-        compacted_input_items: &[],
+        context_items: &[],
         tools: &[],
         params: tau_proto::ModelParams {
             service_tier: Some(tau_proto::ServiceTier::Fast),
@@ -83,8 +81,7 @@ fn build_request_omits_prompt_cache_fields_without_seed_or_retention() {
     };
     let request = PromptPayload {
         system_prompt: "system",
-        messages: &[],
-        compacted_input_items: &[],
+        context_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -117,8 +114,7 @@ fn build_request_includes_llama_cpp_cache_prompt_when_configured() {
     };
     let request = PromptPayload {
         system_prompt: "system",
-        messages: &[],
-        compacted_input_items: &[],
+        context_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -155,8 +151,7 @@ fn build_request_sets_parallel_tool_calls_when_tools_offered() {
     };
     let request = PromptPayload {
         system_prompt: "system",
-        messages: &[],
-        compacted_input_items: &[],
+        context_items: &[],
         tools: std::slice::from_ref(&tool),
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -186,8 +181,7 @@ fn build_request_omits_parallel_tool_calls_without_tools() {
     };
     let request = PromptPayload {
         system_prompt: "system",
-        messages: &[],
-        compacted_input_items: &[],
+        context_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -225,8 +219,7 @@ fn build_request_uses_model_visible_tool_name_when_present() {
     };
     let request = PromptPayload {
         system_prompt: "system",
-        messages: &[],
-        compacted_input_items: &[],
+        context_items: &[],
         tools: std::slice::from_ref(&tool),
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -239,6 +232,86 @@ fn build_request_uses_model_visible_tool_name_when_present() {
     let body = serde_json::to_value(build_request(&config, &request, true)).expect("serialize");
 
     assert_eq!(body["tools"][0]["function"]["name"], "shell");
+}
+
+/// Chat Completions requires one assistant message with the complete
+/// `tool_calls` array, followed immediately by the matching `tool`
+/// messages. Parallel Tau tool-call items therefore must not serialize
+/// as separate assistant messages before their tool results.
+#[test]
+fn build_request_groups_parallel_tool_call_history_in_one_assistant_message() {
+    let config = OpenAiConfig {
+        base_url: "https://api.openai.com/v1".into(),
+        api_key: "test".into(),
+        model_id: "gpt-5".into(),
+        supports_reasoning_effort: false,
+        supports_verbosity: false,
+        supports_prompt_cache_key: false,
+        prompt_cache_retention: None,
+        supports_llama_cpp_cache: false,
+    };
+    let context_items = vec![
+        tau_proto::ContextItem::ToolCall(tau_proto::ToolCallItem {
+            call_id: "call_read".into(),
+            name: tau_proto::ToolName::new("read"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: tau_proto::CborValue::Map(vec![(
+                tau_proto::CborValue::Text("path".to_owned()),
+                tau_proto::CborValue::Text("Cargo.toml".to_owned()),
+            )]),
+        }),
+        tau_proto::ContextItem::ToolCall(tau_proto::ToolCallItem {
+            call_id: "call_list".into(),
+            name: tau_proto::ToolName::new("list"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: tau_proto::CborValue::Map(vec![(
+                tau_proto::CborValue::Text("path".to_owned()),
+                tau_proto::CborValue::Text("crates".to_owned()),
+            )]),
+        }),
+        tau_proto::ContextItem::ToolResult(tau_proto::ToolResultItem {
+            call_id: "call_read".into(),
+            tool_type: tau_proto::ToolType::Function,
+            status: tau_proto::ToolResultStatus::Success,
+            output: tau_proto::CborValue::Text("workspace manifest".to_owned()),
+        }),
+        tau_proto::ContextItem::ToolResult(tau_proto::ToolResultItem {
+            call_id: "call_list".into(),
+            tool_type: tau_proto::ToolType::Function,
+            status: tau_proto::ToolResultStatus::Success,
+            output: tau_proto::CborValue::Text("tau-agent".to_owned()),
+        }),
+    ];
+    let request = PromptPayload {
+        system_prompt: "",
+        context_items: &context_items,
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        previous_response: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &tau_proto::SessionId::new("test-session"),
+        share_user_cache_key: false,
+    };
+
+    let body = serde_json::to_value(build_request(&config, &request, true)).expect("serialize");
+    let messages = body["messages"].as_array().expect("messages array");
+
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0]["role"], "assistant");
+    assert_eq!(
+        messages[0]["tool_calls"]
+            .as_array()
+            .expect("assistant tool_calls")
+            .len(),
+        2
+    );
+    assert_eq!(messages[0]["tool_calls"][0]["id"], "call_read");
+    assert_eq!(messages[0]["tool_calls"][1]["id"], "call_list");
+    assert_eq!(messages[1]["role"], "tool");
+    assert_eq!(messages[1]["tool_call_id"], "call_read");
+    assert_eq!(messages[2]["role"], "tool");
+    assert_eq!(messages[2]["tool_call_id"], "call_list");
 }
 
 /// `ToolChoice::None` must serialize as `tool_choice: "none"` while
@@ -268,8 +341,7 @@ fn build_request_emits_tool_choice_none_while_keeping_tools_declared() {
     };
     let request = PromptPayload {
         system_prompt: "system",
-        messages: &[],
-        compacted_input_items: &[],
+        context_items: &[],
         tools: std::slice::from_ref(&tool),
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::None,
@@ -314,8 +386,7 @@ fn build_request_prompt_cache_key_differs_for_extension_originator() {
     };
     let user_request = PromptPayload {
         system_prompt: "system",
-        messages: &[],
-        compacted_input_items: &[],
+        context_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -326,8 +397,7 @@ fn build_request_prompt_cache_key_differs_for_extension_originator() {
     };
     let ext_request = PromptPayload {
         system_prompt: "system",
-        messages: &[],
-        compacted_input_items: &[],
+        context_items: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::default(),
@@ -366,6 +436,62 @@ fn stream_choice_accumulates_reasoning_content_as_thinking() {
     assert_eq!(state.text, "");
     assert_eq!(state.thinking.as_deref(), Some("thinking"));
     assert_eq!(updates, vec![("".to_owned(), Some("thinking".to_owned()))]);
+}
+
+#[test]
+fn stream_choice_accumulates_output_items_in_synthesized_order() {
+    let mut state = StreamState::new();
+    let mut updates = Vec::new();
+
+    apply_stream_choice(
+        &mut state,
+        StreamChoice {
+            delta: StreamDelta {
+                content: Some("I will read it.".to_owned()),
+                reasoning_content: None,
+                tool_calls: None,
+            },
+        },
+        &mut |text, thinking| updates.push((text.to_owned(), thinking.map(str::to_owned))),
+    );
+    apply_stream_choice(
+        &mut state,
+        StreamChoice {
+            delta: StreamDelta {
+                content: None,
+                reasoning_content: None,
+                tool_calls: Some(vec![StreamToolCall {
+                    index: Some(0),
+                    id: Some("call_read".to_owned()),
+                    r#type: Some("function".to_owned()),
+                    function: Some(StreamFunction {
+                        name: Some("read".to_owned()),
+                        arguments: Some("{\"path\":\"Cargo.toml\"}".to_owned()),
+                    }),
+                    custom: None,
+                }]),
+            },
+        },
+        &mut |text, thinking| updates.push((text.to_owned(), thinking.map(str::to_owned))),
+    );
+
+    assert_eq!(updates, vec![("I will read it.".to_owned(), None)]);
+    let items = state.into_output_items();
+    assert_eq!(items.len(), 2);
+    assert!(matches!(
+        &items[0],
+        tau_proto::ContextItem::Message(tau_proto::MessageItem { content, .. })
+            if matches!(&content[0], tau_proto::ContentPart::Text { text } if text == "I will read it.")
+    ));
+    let tau_proto::ContextItem::ToolCall(call) = &items[1] else {
+        panic!("expected tool call item");
+    };
+    assert_eq!(call.call_id.as_str(), "call_read");
+    assert_eq!(call.name.as_str(), "read");
+    assert_eq!(
+        crate::common::cbor_to_json(&call.arguments),
+        serde_json::json!({ "path": "Cargo.toml" })
+    );
 }
 
 #[test]

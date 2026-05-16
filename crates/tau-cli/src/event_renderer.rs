@@ -5,7 +5,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
-use tau_proto::{CborValue, Event};
+use tau_proto::{
+    CborValue, ContentPart, ContextItem, ContextRole, Event, MessageItem, ToolCallItem,
+};
 
 use crate::build_banner;
 use crate::tool_render::{
@@ -401,6 +403,85 @@ fn push_status_chip(
     }
     themed.push(style, text.into());
     *needs_space = true;
+}
+
+fn assistant_text_from_output_items(output_items: &[ContextItem]) -> Option<String> {
+    let text = output_items
+        .iter()
+        .filter_map(|item| match item {
+            ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content,
+                ..
+            }) => Some(
+                content
+                    .iter()
+                    .map(|part| match part {
+                        ContentPart::Text { text } => text.as_str(),
+                    })
+                    .collect::<String>(),
+            ),
+            _ => None,
+        })
+        .collect::<String>();
+    (!text.is_empty()).then_some(text)
+}
+
+fn assistant_text_from_message_item(message: &MessageItem) -> Option<String> {
+    if message.role != ContextRole::Assistant {
+        return None;
+    }
+    let text = message
+        .content
+        .iter()
+        .map(|part| match part {
+            ContentPart::Text { text } => text.as_str(),
+        })
+        .collect::<String>();
+    (!text.is_empty()).then_some(text)
+}
+
+fn tool_calls_from_output_items(output_items: &[ContextItem]) -> Vec<ToolCallItem> {
+    output_items
+        .iter()
+        .filter_map(|item| match item {
+            ContextItem::ToolCall(call) => Some(call.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn cbor_text_field(arguments: &CborValue, key: &str) -> Option<String> {
+    let CborValue::Map(entries) = arguments else {
+        return None;
+    };
+    entries
+        .iter()
+        .find_map(|(entry_key, value)| match (entry_key, value) {
+            (CborValue::Text(entry_key), CborValue::Text(value)) if entry_key == key => {
+                Some(value.clone())
+            }
+            _ => None,
+        })
+}
+
+fn tool_display_from_call(call: &ToolCallItem) -> tau_proto::ToolDisplay {
+    let args = match call.name.as_str() {
+        "read" | "write" | "edit" | "ls" => cbor_text_field(&call.arguments, "path"),
+        "grep" | "glob" => cbor_text_field(&call.arguments, "pattern"),
+        "shell" => cbor_text_field(&call.arguments, "command"),
+        "delegate" => cbor_text_field(&call.arguments, "task_name"),
+        _ => cbor_text_field(&call.arguments, "path")
+            .or_else(|| cbor_text_field(&call.arguments, "pattern"))
+            .or_else(|| cbor_text_field(&call.arguments, "query")),
+    }
+    .unwrap_or_default();
+    tau_proto::ToolDisplay {
+        args,
+        status: tau_proto::ToolDisplayStatus::InProgress,
+        status_text: "…".to_owned(),
+        ..Default::default()
+    }
 }
 
 impl EventRenderer {
@@ -1188,9 +1269,9 @@ impl EventRenderer {
         if let Event::AgentResponseFinished(finished) = event
             && !finished.originator.is_user()
         {
-            for call in &finished.tool_calls {
+            for call in tool_calls_from_output_items(&finished.output_items) {
                 self.tool_calls.insert(
-                    call.id.to_string(),
+                    call.call_id.to_string(),
                     ToolCallState {
                         is_sub_agent: true,
                         ..ToolCallState::default()
@@ -1401,9 +1482,10 @@ impl EventRenderer {
                 }
 
                 // Finalize the thinking block above the response.
-                // Prefer the finished event's payload if it carries
-                // one; fall back to whatever streaming captured.
-                let thinking = finished.thinking.clone().or(prompt_state.thinking_text);
+                // The item-model finish event no longer carries a
+                // separate thinking string; use the latest streamed
+                // snapshot if one was captured.
+                let thinking = prompt_state.thinking_text;
                 if let Some(tbid) = prompt_state.thinking_block_id {
                     self.handle.remove_block(tbid);
                 }
@@ -1424,20 +1506,16 @@ impl EventRenderer {
                     self.handle.remove_block(bid);
                 }
 
-                let text = finished.text.as_deref().unwrap_or("");
-                if !text.is_empty() {
+                let full_assistant_text = assistant_text_from_output_items(&finished.output_items);
+                if let Some(text) = full_assistant_text.as_deref() {
                     if finished.originator.is_user()
                         && let Ok(mut context) = self.editor_context.lock()
                     {
                         context.last_agent_response = Some(text.to_owned());
                         context.active_prompt = None;
                     }
-                    self.handle.print_output(
-                        "agent-response",
-                        themed_block(&self.theme, names::AGENT_RESPONSE, text),
-                    );
                 }
-                if let Some(usage) = finished.token_usage.clone() {
+                if let Some(usage) = finished.usage.clone() {
                     let previous_usage = self.token_stats_history.last().map(|entry| &entry.usage);
                     let block = if self.show_token_stats {
                         render_token_stats_block(
@@ -1466,14 +1544,15 @@ impl EventRenderer {
                 // the user sees one line per delegation rather than
                 // a flood of nested invocations.
                 if finished.originator.is_user() {
-                    let summary_block_id = if finished.tool_calls.is_empty() {
+                    let tool_calls = tool_calls_from_output_items(&finished.output_items);
+                    let summary_block_id = if tool_calls.is_empty() {
                         self.prompt_tool_summary = None;
                         None
                     } else if matches!(
                         self.show_tools,
                         tau_config::settings::ShowTools::SummarizePrompt
                     ) {
-                        let total_delta = finished.tool_calls.len() as u64;
+                        let total_delta = tool_calls.len() as u64;
                         let id = if let Some(id) = self.prompt_tool_summary {
                             if let Some(summary) = self.tool_summaries.get_mut(&id) {
                                 summary.total += total_delta;
@@ -1495,7 +1574,7 @@ impl EventRenderer {
                         Some(id)
                     } else {
                         let summary = ToolSummaryDisplay {
-                            total: finished.tool_calls.len() as u64,
+                            total: tool_calls.len() as u64,
                             ..ToolSummaryDisplay::default()
                         };
                         let block = self.render_summary_block(&summary);
@@ -1504,24 +1583,40 @@ impl EventRenderer {
                         self.tool_summaries.insert(id, summary);
                         Some(id)
                     };
-                    for call in &finished.tool_calls {
-                        let display = format_tool_call(call.name.as_str(), call.display.as_ref());
-                        let block = self.render_tool_history_block(&display);
-                        let id = self
-                            .handle
-                            .new_block(format!("tool-call:{}:{}", call.name, call.id), block);
-                        self.handle.push_above_active(id);
-                        self.tool_calls.insert(
-                            call.id.to_string(),
-                            ToolCallState {
-                                block_id: Some(id),
-                                live_display: Some(display),
-                                summary_block_id,
-                                ..ToolCallState::default()
-                            },
-                        );
+                    for item in &finished.output_items {
+                        match item {
+                            ContextItem::Message(message) => {
+                                if let Some(text) = assistant_text_from_message_item(message) {
+                                    self.handle.print_output(
+                                        "agent-response",
+                                        themed_block(&self.theme, names::AGENT_RESPONSE, text),
+                                    );
+                                }
+                            }
+                            ContextItem::ToolCall(call) => {
+                                let display_payload = tool_display_from_call(call);
+                                let display =
+                                    format_tool_call(call.name.as_str(), Some(&display_payload));
+                                let block = self.render_tool_history_block(&display);
+                                let id = self.handle.new_block(
+                                    format!("tool-call:{}:{}", call.name, call.call_id),
+                                    block,
+                                );
+                                self.handle.push_history(id);
+                                self.tool_calls.insert(
+                                    call.call_id.to_string(),
+                                    ToolCallState {
+                                        block_id: Some(id),
+                                        live_display: Some(display),
+                                        summary_block_id,
+                                        ..ToolCallState::default()
+                                    },
+                                );
+                            }
+                            _ => {}
+                        }
                     }
-                    if !finished.tool_calls.is_empty() {
+                    if !finished.output_items.is_empty() {
                         self.handle.redraw();
                     }
                 }
@@ -1573,9 +1668,7 @@ impl EventRenderer {
                 if prior.is_sub_agent {
                     return;
                 }
-                if let Some(bid) = prior.block_id {
-                    self.handle.remove_block(bid);
-                }
+                let existing_block_id = prior.block_id;
                 let last_progress = prior.delegate_last_progress;
                 let display = if result.tool_name.as_str() == "delegate" {
                     let descriptor = build_delegate_completion_display(
@@ -1608,16 +1701,27 @@ impl EventRenderer {
                 );
                 if let Some(diff) = diff {
                     let block = self.render_diff_history_block(&display, &diff);
-                    let bid = self.handle.print_output("tool-diff", block);
+                    let bid = if let Some(bid) = existing_block_id {
+                        self.handle.set_block(bid, block);
+                        self.handle.redraw();
+                        bid
+                    } else {
+                        self.handle.print_output("tool-diff", block)
+                    };
                     self.diff_blocks.push(DiffBlockEntry {
                         block_id: bid,
                         display,
                         diff,
                     });
                 } else {
-                    let bid = self
-                        .handle
-                        .print_output("tool-result", self.render_tool_history_block(&display));
+                    let block = self.render_tool_history_block(&display);
+                    let bid = if let Some(bid) = existing_block_id {
+                        self.handle.set_block(bid, block);
+                        self.handle.redraw();
+                        bid
+                    } else {
+                        self.handle.print_output("tool-result", block)
+                    };
                     self.tool_history.push(ToolBlockEntry {
                         block_id: bid,
                         display,
@@ -1630,9 +1734,7 @@ impl EventRenderer {
                 if prior.is_sub_agent {
                     return;
                 }
-                if let Some(bid) = prior.block_id {
-                    self.handle.remove_block(bid);
-                }
+                let existing_block_id = prior.block_id;
                 let last_progress = prior.delegate_last_progress;
                 let cbor = error.details.as_ref();
                 let display = if error.tool_name.as_str() == "delegate" {
@@ -1656,9 +1758,14 @@ impl EventRenderer {
                     None,
                     true,
                 );
-                let bid = self
-                    .handle
-                    .print_output("tool-error", self.render_tool_history_block(&display));
+                let block = self.render_tool_history_block(&display);
+                let bid = if let Some(bid) = existing_block_id {
+                    self.handle.set_block(bid, block);
+                    self.handle.redraw();
+                    bid
+                } else {
+                    self.handle.print_output("tool-error", block)
+                };
                 self.tool_history.push(ToolBlockEntry {
                     block_id: bid,
                     display,

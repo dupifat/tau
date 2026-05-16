@@ -1,4 +1,5 @@
 use super::*;
+use crate::harness::PendingTool;
 
 /// Regression: when an interceptor is registered on
 /// `ui.prompt_submitted` (e.g. `tau-ext-test-dummy`'s tao→tau
@@ -10,7 +11,7 @@ use super::*;
 /// run only after the user message commits.
 #[test]
 fn ext_agent_query_defers_dispatch_when_publish_is_intercepted() {
-    use tau_proto::{ExtensionName, ToolNameMaybe};
+    use tau_proto::ExtensionName;
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -69,26 +70,27 @@ fn ext_agent_query_defers_dispatch_when_publish_is_intercepted() {
 
     h.handle_agent_response_finished(AgentResponseFinished {
         session_prompt_id: main_spid,
-        text: None,
-        tool_calls: vec![AgentToolCall {
-            id: "main-call".into(),
-            name: ToolNameMaybe::from_raw("delegate"),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "main-call".into(),
+            name: ToolName::new("delegate"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(Vec::new()),
-            display: None,
-        }],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        })],
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        usage: match (None, None, None) {
+            (None, None, None) => None,
+            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input_tokens.unwrap_or(0),
+                prompt_cached_tokens: cached_tokens.unwrap_or(0),
+                response_received_tokens: output_tokens.unwrap_or(0),
+                stats: Default::default(),
+            }),
+        },
         originator: tau_proto::PromptOriginator::User,
 
         backend: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     })
     .expect("main response");
@@ -129,18 +131,23 @@ fn ext_agent_query_defers_dispatch_when_publish_is_intercepted() {
         .expect("side prompt must dispatch after intercept resolves");
     let prompt = read_prompt_created(&h, &side_spid);
     assert!(
-        !prompt.messages.is_empty(),
-        "side prompt must contain the delegated user instruction; got empty messages",
+        !prompt.context_items.is_empty(),
+        "side prompt must contain the delegated user instruction; got empty context items",
     );
-    let saw_instruction = prompt.messages.iter().any(|message| {
-        message.content.iter().any(|block| {
-            matches!(block, tau_proto::ContentBlock::Text { text } if text == "side instruction")
-        })
+    let saw_instruction = prompt.context_items.iter().any(|item| {
+        matches!(
+            item,
+            ContextItem::Message(MessageItem {
+                role: ContextRole::User,
+                content,
+                ..
+            }) if content.iter().any(|part| matches!(part, ContentPart::Text { text } if text == "side instruction"))
+        )
     });
     assert!(
         saw_instruction,
         "side prompt must contain `side instruction`; got {:?}",
-        prompt.messages,
+        prompt.context_items,
     );
 
     h.shutdown().expect("shutdown");
@@ -504,16 +511,29 @@ fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
     let tool_name = ToolName::new("read");
 
     h.tool_conversations.insert(call_id.clone(), cid.clone());
-    h.pending_tool_names
-        .insert(call_id.clone(), tool_name.clone());
+    h.pending_tools.insert(
+        call_id.clone(),
+        PendingTool {
+            name: tool_name.clone(),
+            tool_type: tau_proto::ToolType::Function,
+        },
+    );
     h.publish_for_conversation(
         &cid,
-        Event::ToolRequest(tau_proto::ToolRequest {
-            call_id: call_id.clone(),
-            tool_name: tool_name.clone(),
-            tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Map(Vec::new()),
+        Event::AgentResponseFinished(AgentResponseFinished {
+            session_prompt_id: "sp-main".into(),
+            output_items: vec![ContextItem::ToolCall(ToolCallItem {
+                call_id: call_id.clone(),
+                name: tool_name.clone(),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+            })],
+            stop_reason: tau_proto::AgentStopReason::ToolCalls,
+            usage: None,
             originator: tau_proto::PromptOriginator::User,
+            backend: None,
+            provider_response_id: None,
+            ws_pool_delta: None,
         }),
     );
 
@@ -537,6 +557,7 @@ fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
         Frame::Event(Event::ToolResult(ToolResult {
             call_id: call_id.clone(),
             tool_name: tool_name.clone(),
+            tool_type: tau_proto::ToolType::Function,
             result: CborValue::Text("ok".to_owned()),
             display: None,
             originator: tau_proto::PromptOriginator::User,
@@ -560,9 +581,10 @@ fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
     let has_result = tree.current_branch().iter().any(|entry| {
         matches!(
             entry,
-            SessionEntry::ToolActivity(activity)
-                if activity.call_id == call_id
-                    && matches!(activity.outcome, ToolActivityOutcome::Result { .. })
+            SessionEntry::ToolResults { items }
+                if items.iter().any(|item|
+                    item.call_id == call_id && item.status == ToolResultStatus::Success
+                )
         )
     });
     assert!(
@@ -633,8 +655,13 @@ fn interception_drop_of_session_compacted_is_overridden() {
     let compacted = Event::SessionCompacted(tau_proto::SessionCompacted {
         session_id: "s1".into(),
         originator: tau_proto::PromptOriginator::User,
-        summary: "Conversation compacted.".to_owned(),
-        compacted_input_items: vec!["{}".to_owned()],
+        replacement_window: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+            content: vec![ContentPart::Text {
+                text: "Conversation compacted.".to_owned(),
+            }],
+            phase: None,
+        })],
     });
     h.publish_event(None, compacted.clone());
     h.handle_extension_event(
@@ -753,7 +780,15 @@ fn interception_user_prompt_dispatch_waits_for_commit() {
     assert!(
         matches!(
             &entry.entry,
-            SessionEntry::UserMessage { text } if text == "real question"
+            SessionEntry::UserInput { items }
+                if matches!(
+                    items.as_slice(),
+                    [ContextItem::Message(MessageItem {
+                        role: ContextRole::User,
+                        content,
+                        ..
+                    })] if matches!(content.as_slice(), [ContentPart::Text { text }] if text == "real question")
+                )
         ),
         "c.head points at the just-committed user prompt"
     );
@@ -817,7 +852,15 @@ fn interception_mutating_prompt_reaches_agent() {
     assert!(
         matches!(
             &entry.entry,
-            SessionEntry::UserMessage { text } if text == "I love Tau"
+            SessionEntry::UserInput { items }
+                if matches!(
+                    items.as_slice(),
+                    [ContextItem::Message(MessageItem {
+                        role: ContextRole::User,
+                        content,
+                        ..
+                    })] if matches!(content.as_slice(), [ContentPart::Text { text }] if text == "I love Tau")
+                )
         ),
         "the agent will see the *interceptor-mutated* text, not the user's typo"
     );

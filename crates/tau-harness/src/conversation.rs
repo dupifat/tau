@@ -20,8 +20,8 @@ use std::collections::VecDeque;
 
 use tau_core::NodeId;
 use tau_proto::{
-    AgentBackendTransport, ConnectionId, ModelId, ModelParams, PromptOriginator, SessionId,
-    SessionPromptId, ToolCallId, ToolChoice, ToolDefinition,
+    AgentBackend, ConnectionId, ModelId, ModelParams, PromptOriginator, SessionId, SessionPromptId,
+    ToolCallId, ToolChoice, ToolDefinition,
 };
 
 use crate::dedup::ResultDedupMap;
@@ -138,7 +138,7 @@ impl std::borrow::Borrow<str> for ConversationId {
 /// agent extension serializes its own consumption of
 /// `SessionPromptCreated` events. State per conversation is what gates
 /// dispatch of the *next* prompt for that conversation.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) enum ConversationTurnState {
     #[default]
     Idle,
@@ -150,6 +150,11 @@ pub(crate) enum ConversationTurnState {
     ToolsRunning {
         remaining_calls: Vec<ToolCallId>,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PendingCancel {
+    pub(crate) reason: String,
 }
 
 /// One in-flight conversation tracked by the harness.
@@ -187,6 +192,12 @@ pub(crate) struct Conversation {
     /// conversations dispatch independently; the agent extension
     /// serializes its own consumption of `SessionPromptCreated`.
     pub(crate) pending_prompts: VecDeque<String>,
+    /// Pending user/control-plane request to stop this conversation at
+    /// the next stable turn boundary. Stored like queued prompts so
+    /// races between provider responses and UI cancel events are
+    /// resolved by the conversation state machine instead of by the UI
+    /// boundary.
+    pub(crate) pending_cancel: Option<PendingCancel>,
     /// Most recent materialized prompt emitted for this conversation.
     /// The next prompt can reference its message prefix instead of
     /// repeating the full conversation history.
@@ -259,10 +270,11 @@ pub(crate) struct ChainAnchor {
     /// `messages[message_count..]` to get the new content the upstream
     /// API hasn't seen yet.
     pub(crate) message_count: usize,
-    /// Transport that produced `response_id`. Codex chain ids can be scoped to
-    /// a transport (and WS ids are effectively socket-local), so the agent uses
-    /// this metadata to avoid invalid cross-transport chaining.
-    pub(crate) transport: AgentBackendTransport,
+    /// Backend that produced `response_id`. The next prompt reuses
+    /// this verbatim in `previous_response_candidate` so the agent can
+    /// decide whether the candidate is compatible with the chosen
+    /// transport and provider connection state.
+    pub(crate) backend: AgentBackend,
     /// Blake3 fingerprint of `(system_prompt, tools, model_params,
     /// tool_choice)` as observed when the anchor was minted. Codex rejects
     /// (or silently misinterprets) a chained request whose non-input fields
@@ -292,6 +304,7 @@ impl Conversation {
             source_connection,
             in_flight_prompt: None,
             pending_prompts: VecDeque::new(),
+            pending_cancel: None,
             last_prompt_id: None,
             next_ctx_id: None,
             turn_state: ConversationTurnState::Idle,

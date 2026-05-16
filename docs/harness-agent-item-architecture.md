@@ -76,8 +76,6 @@ That prompt request must:
 
 - carry the full effective context in item form
 - remain correct even if `previous_response_id` optimization is ignored
-- support prompt compression with item-prefix refs rather than message-prefix
-  refs
 
 `previous_response_id` is therefore always a hint layered on top of a complete,
 materializable prompt.
@@ -90,8 +88,14 @@ These remain durable transcript inputs:
 - `SessionUserMessageInjected`
 - `SessionPromptSteered`
 - `AgentResponseFinished`
-- terminal `ToolResult`
+- terminal tool-result facts
 - `SessionCompacted`
+
+The runtime bus `ToolResult` event may still include extra operational metadata
+such as `tool_name`, display descriptors, or originator echoes. The durable
+transcript input is the narrower completed tool-result fact needed to
+reconstruct `ToolResultsNode`, not necessarily the full renderer-facing event
+payload.
 
 These should be transient/non-durable:
 
@@ -137,7 +141,7 @@ Rules:
 - persist `AgentResponseFinished` immediately once provider output is valid
 - if it has no tool calls, the turn ends
 - if it has tool calls, open one pending round for that conversation
-- persist each terminal `ToolResult` as it arrives
+- persist each completed tool-result fact as it arrives
 - when the round becomes terminal, emit one `ToolResultsNode`
 - only after that may the follow-up prompt be assembled
 
@@ -155,15 +159,15 @@ Examples:
 - unavailable tool
 - disabled tool
 - locally rejected tool execution
-- invalid Tau-visible tool name with otherwise valid model output
+- valid Tau-visible tool name that cannot be routed to an enabled tool
 
 Those cases still commit the assistant response and produce terminal error tool
 results.
 
 Structurally malformed provider output is different. Missing/empty call ids,
-duplicate call ids, or output that cannot be correlated into valid transcript
-items must not commit as successful assistant responses. The transcript should
-remain at the previous stable node.
+duplicate call ids, invalid Tau-visible tool names, or output that cannot be
+correlated into valid transcript items must not commit as successful assistant
+responses. The transcript should remain at the previous stable node.
 
 ## Tool Result Identity
 
@@ -239,7 +243,7 @@ Rules:
 - the candidate may be ignored safely
 - compaction boundaries break chaining
 - transport/runtime liveness may invalidate the candidate
-- tools, system instructions, and model parameters do not by themselves break
+- tools, system prompts, and model parameters do not by themselves break
   the chain
 
 The current implementation is more conservative here; that behavior is not the

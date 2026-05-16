@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn into_tool_calls_drops_nameless_accumulator_artifacts() {
+fn into_output_items_drops_nameless_accumulator_artifacts() {
     // The streaming paths eagerly extend `tool_calls` from
     // argument-delta events so the index stays addressable. If
     // the matching name-carrying event never arrives (partial
@@ -9,37 +9,25 @@ fn into_tool_calls_drops_nameless_accumulator_artifacts() {
     // nameless. Shipping it downstream would trigger a visible
     // `invalid_tool` rejection in the harness and confuse the
     // model, which never intended a second tool call.
-    let state = StreamState {
-        text: String::new(),
-        tool_calls: vec![
-            ToolCallAccumulator {
-                id: String::new(),
-                name: String::new(),
-                tool_type: tau_proto::ToolType::Function,
-                arguments_json: String::from("{\"stray\": \"delta\"}"),
-            },
-            ToolCallAccumulator {
-                id: "call_real".into(),
-                name: "shell".into(),
-                tool_type: tau_proto::ToolType::Function,
-                arguments_json: "{\"command\":\"ls\"}".into(),
-            },
-        ],
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        response_id: None,
-        phase: None,
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
-        stale_chain_fallback: false,
-    };
+    let mut state = StreamState::new();
+    state
+        .tool_call_at_mut(0, tau_proto::ToolType::Function)
+        .arguments_json
+        .push_str("{\"stray\": \"delta\"}");
+    {
+        let call = state.tool_call_at_mut(1, tau_proto::ToolType::Function);
+        call.id = "call_real".into();
+        call.name = "shell".into();
+        call.arguments_json = "{\"command\":\"ls\"}".into();
+    }
 
-    let calls = state.into_tool_calls();
-    assert_eq!(calls.len(), 1, "nameless accumulator must be dropped");
-    assert_eq!(calls[0].id.as_str(), "call_real");
-    assert_eq!(calls[0].name.as_str(), "shell");
+    let items = state.into_output_items();
+    assert_eq!(items.len(), 1, "nameless accumulator must be dropped");
+    let tau_proto::ContextItem::ToolCall(call) = &items[0] else {
+        panic!("expected tool call item");
+    };
+    assert_eq!(call.call_id.as_str(), "call_real");
+    assert_eq!(call.name.as_str(), "shell");
 }
 
 #[test]

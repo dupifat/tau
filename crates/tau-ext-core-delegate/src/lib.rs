@@ -69,6 +69,7 @@ where
                         writer.write_frame(&Frame::Event(Event::ToolError(ToolError {
                             call_id,
                             tool_name,
+                            tool_type: tau_proto::ToolType::Function,
                             message: error,
                             details: None,
                             display: None,
@@ -84,6 +85,7 @@ where
                         writer.write_frame(&Frame::Event(Event::ToolResult(ToolResult {
                             call_id,
                             tool_name,
+                            tool_type: tau_proto::ToolType::Function,
                             result: CborValue::Text(result.text),
                             display: None,
                             originator: tau_proto::PromptOriginator::User,
@@ -131,6 +133,7 @@ fn handle_tool_invoke<W: Write>(
         writer.write_frame(&Frame::Event(Event::ToolError(ToolError {
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
+            tool_type: tau_proto::ToolType::Function,
             message: "unknown tool".to_owned(),
             details: None,
             display: None,
@@ -151,6 +154,7 @@ fn handle_tool_invoke<W: Write>(
             writer.write_frame(&Frame::Event(Event::ToolError(ToolError {
                 call_id: invoke.call_id,
                 tool_name: invoke.tool_name,
+                tool_type: tau_proto::ToolType::Function,
                 message,
                 details: Some(invoke.arguments),
                 display: None,

@@ -8,7 +8,7 @@ pub mod common;
 pub(crate) mod openai;
 mod responses;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::error::Error;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -18,9 +18,9 @@ use std::time::{Duration, Instant};
 use backon::BackoffBuilder;
 use tau_config::settings;
 use tau_proto::{
-    Ack, AgentPromptSubmitted, AgentResponseFinished, AgentResponseUpdated, ClientKind, Event,
-    EventName, EventSelector, Frame, FrameReader, FrameWriter, Hello, Message, PROTOCOL_VERSION,
-    Ready, Subscribe,
+    Ack, AgentPromptSubmitted, AgentResponseFinished, AgentResponseUpdated, AgentStopReason,
+    ClientKind, ContextItem, Event, EventName, EventSelector, Frame, FrameReader, FrameWriter,
+    Hello, Message, PROTOCOL_VERSION, Ready, Subscribe,
 };
 
 /// `tracing` target for events emitted from the agent. Matches the
@@ -29,58 +29,43 @@ use tau_proto::{
 /// the harness hands the agent.
 pub const LOG_TARGET: &str = "agent";
 
-fn materialize_prompt(
-    prompt: &tau_proto::SessionPromptCreated,
-    snapshots: &HashMap<tau_proto::SessionPromptId, tau_proto::SessionPromptCreated>,
-) -> Result<tau_proto::SessionPromptCreated, String> {
+fn materialize_prompt(prompt: &tau_proto::SessionPromptCreated) -> tau_proto::SessionPromptCreated {
     let mut materialized = prompt.clone();
-    if let Some(system_prompt_ref) = &prompt.system_prompt_ref {
-        let base = snapshots
-            .get(&system_prompt_ref.base_session_prompt_id)
-            .ok_or_else(|| {
-                format!(
-                    "missing prompt system prompt base {}",
-                    system_prompt_ref.base_session_prompt_id
-                )
-            })?;
-        materialized.system_prompt = base.system_prompt.clone();
-        materialized.system_prompt_ref = None;
+    materialized.tools_ref = None;
+    materialized
+}
+
+fn simple_finished(
+    session_prompt_id: tau_proto::SessionPromptId,
+    originator: tau_proto::PromptOriginator,
+    text: impl Into<String>,
+) -> AgentResponseFinished {
+    AgentResponseFinished {
+        session_prompt_id,
+        output_items: vec![common::assistant_text_item(text)],
+        stop_reason: AgentStopReason::EndTurn,
+        originator,
+        usage: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
     }
-    if let Some(prefix) = &prompt.message_prefix {
-        let base = snapshots
-            .get(&prefix.base_session_prompt_id)
-            .ok_or_else(|| {
-                format!(
-                    "missing prompt prefix base {}",
-                    prefix.base_session_prompt_id
-                )
-            })?;
-        if base.messages.len() < prefix.message_count {
-            return Err(format!(
-                "prompt prefix base {} has only {} messages, need {}",
-                prefix.base_session_prompt_id,
-                base.messages.len(),
-                prefix.message_count
-            ));
-        }
-        let mut messages = base.messages[..prefix.message_count].to_vec();
-        messages.extend(prompt.messages.clone());
-        materialized.messages = messages;
-        materialized.message_prefix = None;
+}
+
+fn stop_reason_from_output_items(output_items: &[ContextItem]) -> AgentStopReason {
+    if output_items
+        .iter()
+        .any(|item| matches!(item, ContextItem::Compaction(_)))
+    {
+        AgentStopReason::Compaction
+    } else if output_items
+        .iter()
+        .any(|item| matches!(item, ContextItem::ToolCall(_)))
+    {
+        AgentStopReason::ToolCalls
+    } else {
+        AgentStopReason::EndTurn
     }
-    if let Some(tools_ref) = &prompt.tools_ref {
-        let base = snapshots
-            .get(&tools_ref.base_session_prompt_id)
-            .ok_or_else(|| {
-                format!(
-                    "missing prompt tools base {}",
-                    tools_ref.base_session_prompt_id
-                )
-            })?;
-        materialized.tools = base.tools.clone();
-        materialized.tools_ref = None;
-    }
-    Ok(materialized)
 }
 
 /// Runs the agent on stdin/stdout.
@@ -168,8 +153,6 @@ where
     // a still-queued side conv that the harness has already given
     // up on.
     let mut canceled_spids: HashSet<tau_proto::SessionPromptId> = HashSet::new();
-    let mut prompt_snapshots: HashMap<tau_proto::SessionPromptId, tau_proto::SessionPromptCreated> =
-        HashMap::new();
 
     loop {
         let frame = match deferred.pop_front() {
@@ -190,36 +173,7 @@ where
             Frame::Event(Event::SessionCompactionRequested(request)) => {
                 let session_prompt_id = request.prompt.session_prompt_id.clone();
 
-                let prompt = match materialize_prompt(&request.prompt, &prompt_snapshots) {
-                    Ok(prompt) => prompt,
-                    Err(error) => {
-                        writer.write_frame(&Frame::Event(Event::AgentResponseFinished(
-                            AgentResponseFinished {
-                                session_prompt_id: session_prompt_id.clone(),
-                                text: Some(error),
-                                tool_calls: Vec::new(),
-                                input_tokens: None,
-                                cached_tokens: None,
-                                output_tokens: None,
-                                thinking: None,
-                                token_usage: None,
-                                originator: request.prompt.originator.clone(),
-                                backend: None,
-                                response_id: None,
-                                phase: None,
-                                reasoning_items: Vec::new(),
-                                compacted_input_items: Vec::new(),
-                                ws_pool_delta: None,
-                            },
-                        )))?;
-                        writer.flush()?;
-                        if let Some(id) = log_id {
-                            writer.write_frame(&Frame::Message(Message::Ack(Ack { up_to: id })))?;
-                            writer.flush()?;
-                        }
-                        continue;
-                    }
-                };
+                let prompt = materialize_prompt(&request.prompt);
 
                 if canceled_spids.remove(&session_prompt_id) {
                     tracing::info!(
@@ -228,23 +182,11 @@ where
                         "skipping compaction request — already canceled by harness",
                     );
                     writer.write_frame(&Frame::Event(Event::AgentResponseFinished(
-                        AgentResponseFinished {
-                            session_prompt_id: session_prompt_id.clone(),
-                            text: Some("(cancelled by harness)".to_owned()),
-                            tool_calls: Vec::new(),
-                            input_tokens: None,
-                            cached_tokens: None,
-                            output_tokens: None,
-                            thinking: None,
-                            token_usage: None,
-                            originator: prompt.originator.clone(),
-                            backend: None,
-                            response_id: None,
-                            phase: None,
-                            reasoning_items: Vec::new(),
-                            compacted_input_items: Vec::new(),
-                            ws_pool_delta: None,
-                        },
+                        simple_finished(
+                            session_prompt_id.clone(),
+                            prompt.originator.clone(),
+                            "(cancelled by harness)",
+                        ),
                     )))?;
                     writer.flush()?;
                     if let Some(id) = log_id {
@@ -306,23 +248,7 @@ where
                             None => "no model specified".to_owned(),
                         };
                         writer.write_frame(&Frame::Event(Event::AgentResponseFinished(
-                            AgentResponseFinished {
-                                session_prompt_id,
-                                text: Some(msg),
-                                tool_calls: Vec::new(),
-                                input_tokens: None,
-                                cached_tokens: None,
-                                output_tokens: None,
-                                thinking: None,
-                                token_usage: None,
-                                originator: prompt.originator.clone(),
-                                backend: None,
-                                response_id: None,
-                                phase: None,
-                                reasoning_items: Vec::new(),
-                                compacted_input_items: Vec::new(),
-                                ws_pool_delta: None,
-                            },
+                            simple_finished(session_prompt_id, prompt.originator.clone(), msg),
                         )))?;
                         writer.flush()?;
                     }
@@ -331,37 +257,7 @@ where
             Frame::Event(Event::SessionPromptCreated(prompt)) => {
                 let session_prompt_id = prompt.session_prompt_id.clone();
 
-                let prompt = match materialize_prompt(&prompt, &prompt_snapshots) {
-                    Ok(prompt) => prompt,
-                    Err(error) => {
-                        writer.write_frame(&Frame::Event(Event::AgentResponseFinished(
-                            AgentResponseFinished {
-                                session_prompt_id: session_prompt_id.clone(),
-                                text: Some(error),
-                                tool_calls: Vec::new(),
-                                input_tokens: None,
-                                cached_tokens: None,
-                                output_tokens: None,
-                                thinking: None,
-                                token_usage: None,
-                                originator: prompt.originator.clone(),
-                                backend: None,
-                                response_id: None,
-                                phase: None,
-                                reasoning_items: Vec::new(),
-                                compacted_input_items: Vec::new(),
-                                ws_pool_delta: None,
-                            },
-                        )))?;
-                        writer.flush()?;
-                        if let Some(id) = log_id {
-                            writer.write_frame(&Frame::Message(Message::Ack(Ack { up_to: id })))?;
-                            writer.flush()?;
-                        }
-                        continue;
-                    }
-                };
-                prompt_snapshots.insert(session_prompt_id.clone(), prompt.clone());
+                let prompt = materialize_prompt(&prompt);
 
                 // Drop a prompt the harness asked us to cancel before
                 // we could even dequeue it. Two ways this triggers:
@@ -380,23 +276,11 @@ where
                         "skipping prompt — already canceled by harness",
                     );
                     writer.write_frame(&Frame::Event(Event::AgentResponseFinished(
-                        AgentResponseFinished {
-                            session_prompt_id: session_prompt_id.clone(),
-                            text: Some("(cancelled by harness)".to_owned()),
-                            tool_calls: Vec::new(),
-                            input_tokens: None,
-                            cached_tokens: None,
-                            output_tokens: None,
-                            thinking: None,
-                            token_usage: None,
-                            originator: prompt.originator.clone(),
-                            backend: None,
-                            response_id: None,
-                            phase: None,
-                            reasoning_items: Vec::new(),
-                            compacted_input_items: Vec::new(),
-                            ws_pool_delta: None,
-                        },
+                        simple_finished(
+                            session_prompt_id.clone(),
+                            prompt.originator.clone(),
+                            "(cancelled by harness)",
+                        ),
                     )))?;
                     writer.flush()?;
                     if let Some(id) = log_id {
@@ -469,24 +353,7 @@ where
                             None => "no model specified".to_owned(),
                         };
                         writer.write_frame(&Frame::Event(Event::AgentResponseFinished(
-                            AgentResponseFinished {
-                                session_prompt_id,
-                                text: Some(msg),
-                                tool_calls: Vec::new(),
-                                input_tokens: None,
-                                cached_tokens: None,
-                                output_tokens: None,
-                                thinking: None,
-                                token_usage: None,
-                                originator: prompt.originator.clone(),
-                                // No backend ran: model failed to resolve.
-                                backend: None,
-                                response_id: None,
-                                phase: None,
-                                reasoning_items: Vec::new(),
-                                compacted_input_items: Vec::new(),
-                                ws_pool_delta: None,
-                            },
+                            simple_finished(session_prompt_id, prompt.originator.clone(), msg),
                         )))?;
                         writer.flush()?;
                     }
@@ -939,8 +806,7 @@ fn request_for_transport<'a>(
     common::PromptPayload {
         previous_response,
         system_prompt: request.system_prompt,
-        messages: request.messages,
-        compacted_input_items: request.compacted_input_items,
+        context_items: request.context_items,
         tools: request.tools,
         params: request.params,
         tool_choice: request.tool_choice,
@@ -1015,8 +881,7 @@ fn handle_prewarm(
 
     let request = common::PromptPayload {
         system_prompt: &prewarm.system_prompt,
-        messages: &prewarm.messages,
-        compacted_input_items: &[],
+        context_items: &prewarm.context_items,
         tools: &prewarm.tools,
         params: prewarm.model_params,
         tool_choice: prewarm.tool_choice,
@@ -1055,19 +920,17 @@ fn handle_prompt<W: Write>(
 ) -> Result<(), Box<dyn Error>> {
     let request = common::PromptPayload {
         system_prompt: &prompt.system_prompt,
-        messages: &prompt.messages,
-        compacted_input_items: &prompt.compacted_input_items,
+        context_items: &prompt.context_items,
         tools: &prompt.tools,
         params: prompt.model_params,
         tool_choice: prompt.tool_choice,
-        previous_response: prompt
-            .previous_response
-            .as_ref()
-            .map(|p| common::PreviousResponse {
-                id: p.id.as_str(),
-                message_index: p.message_index,
-                transport: p.transport,
-            }),
+        previous_response: prompt.previous_response_candidate.as_ref().map(|p| {
+            common::PreviousResponse {
+                id: p.provider_response_id.as_str(),
+                next_item_index: p.next_item_index,
+                transport: Some(p.backend.transport),
+            }
+        }),
         originator: &prompt.originator,
         share_user_cache_key: prompt.share_user_cache_key,
         session_id: &prompt.session_id,
@@ -1125,6 +988,7 @@ fn handle_prompt<W: Write>(
                 backend.descriptor(transport_taken, state.stale_chain_fallback);
             finish_stream(
                 session_prompt_id,
+                &prompt.session_id,
                 &prompt.originator,
                 &backend_descriptor,
                 state,
@@ -1136,6 +1000,7 @@ fn handle_prompt<W: Write>(
             let backend_descriptor = backend.descriptor(transport_taken, false);
             finish_error(
                 session_prompt_id,
+                &prompt.session_id,
                 &prompt.originator,
                 &backend_descriptor,
                 error,
@@ -1156,8 +1021,7 @@ fn handle_compaction_request<W: Write>(
 ) -> Result<(), Box<dyn Error>> {
     let request = common::PromptPayload {
         system_prompt: &prompt.system_prompt,
-        messages: &prompt.messages,
-        compacted_input_items: &prompt.compacted_input_items,
+        context_items: &prompt.context_items,
         tools: &prompt.tools,
         params: prompt.model_params,
         tool_choice: prompt.tool_choice,
@@ -1174,10 +1038,11 @@ fn handle_compaction_request<W: Write>(
             writer,
             retry_ctx,
             |_writer| {
-                responses::responses_compact(cfg, &request).map(|items| common::StreamState {
-                    text: "Conversation compacted.".to_owned(),
-                    compacted_input_items: items,
-                    ..common::StreamState::new()
+                responses::responses_compact(cfg, &request).map(|items| {
+                    let mut state = common::StreamState::new();
+                    state.append_chat_message_delta("Conversation compacted.");
+                    state.compacted_input_items = items;
+                    state
                 })
             },
         ),
@@ -1189,6 +1054,7 @@ fn handle_compaction_request<W: Write>(
     match result {
         Ok(state) => finish_stream(
             session_prompt_id,
+            &prompt.session_id,
             &prompt.originator,
             &backend_descriptor,
             state,
@@ -1197,6 +1063,7 @@ fn handle_compaction_request<W: Write>(
         )?,
         Err(error) => finish_error(
             session_prompt_id,
+            &prompt.session_id,
             &prompt.originator,
             &backend_descriptor,
             error,
@@ -1224,16 +1091,73 @@ fn compute_ws_pool_delta(
     }
 }
 
+fn maybe_debug_write_provider_response(
+    session_id: &str,
+    response: &AgentResponseFinished,
+    provider_terminal_event: Option<&serde_json::Value>,
+) {
+    let Some(backend) = response.backend.as_ref() else {
+        return;
+    };
+    if !matches!(backend.kind, tau_proto::AgentBackendKind::Responses) {
+        return;
+    }
+    let Some(dir) = responses::debug_provider_request_dir(session_id) else {
+        return;
+    };
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(
+            target: LOG_TARGET,
+            session_id,
+            session_prompt_id = %response.session_prompt_id,
+            "failed to create provider response debug dir: {error}",
+        );
+        return;
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    let transport_label = match backend.transport {
+        tau_proto::AgentBackendTransport::HttpSse => "http-sse",
+        tau_proto::AgentBackendTransport::Websocket => "websocket",
+    };
+    let path = dir.join(format!(
+        "{ts}-{}-{transport_label}-response.json",
+        response.session_prompt_id
+    ));
+    let metadata = serde_json::json!({
+        "session_id": session_id,
+        "session_prompt_id": response.session_prompt_id,
+        "transport": transport_label,
+        "backend": backend,
+        "provider_response_id": response.provider_response_id,
+        "usage": response.usage,
+        "agent_response_finished": response,
+        "provider_terminal_event": provider_terminal_event,
+    });
+    if let Err(error) = serde_json::to_vec_pretty(&metadata)
+        .map_err(std::io::Error::other)
+        .and_then(|bytes| std::fs::write(path, bytes))
+    {
+        tracing::warn!(
+            target: LOG_TARGET,
+            session_id,
+            session_prompt_id = %response.session_prompt_id,
+            "failed to write provider response debug log: {error}",
+        );
+    }
+}
+
 fn finish_stream<W: Write>(
     session_prompt_id: &str,
+    session_id: &str,
     originator: &tau_proto::PromptOriginator,
     backend: &tau_proto::AgentBackend,
     state: common::StreamState,
     ws_pool_delta: Option<tau_proto::WsPoolDelta>,
     writer: &mut FrameWriter<BufWriter<W>>,
 ) -> Result<(), Box<dyn Error>> {
-    let text_empty = state.text.is_empty();
-    let text_content = state.text.clone();
     let input_tokens = state.input_tokens;
     let cached_tokens = state.cached_tokens;
     let output_tokens = state.output_tokens;
@@ -1245,78 +1169,51 @@ fn finish_stream<W: Write>(
         output_tokens,
         "agent response token usage"
     );
-    let thinking = state.thinking.clone();
-    let response_id = state.response_id.clone();
-    let phase = state.phase;
-    let mut state = state;
-    let reasoning_items = std::mem::take(&mut state.reasoning_items);
-    let compacted_input_items = std::mem::take(&mut state.compacted_input_items);
-    let tool_calls = state.into_tool_calls();
-    let thinking_empty = thinking.as_ref().is_none_or(|thinking| thinking.is_empty());
-    let text = if text_empty {
-        if !tool_calls.is_empty() || !thinking_empty {
-            None
-        } else {
-            Some("(agent returned an empty response)".to_owned())
-        }
-    } else {
-        Some(text_content)
+    let usage = state.usage();
+    let provider_response_id = state.response_id.clone();
+    let mut output_items = state.into_output_items();
+    if output_items.is_empty() {
+        output_items.push(common::assistant_text_item(
+            "(agent returned an empty response)",
+        ));
+    }
+    let finished = AgentResponseFinished {
+        session_prompt_id: session_prompt_id.into(),
+        stop_reason: stop_reason_from_output_items(&output_items),
+        output_items,
+        originator: originator.clone(),
+        usage,
+        backend: Some(backend.clone()),
+        provider_response_id,
+        ws_pool_delta,
     };
-    writer.write_frame(&Frame::Event(Event::AgentResponseFinished(
-        AgentResponseFinished {
-            session_prompt_id: session_prompt_id.into(),
-            text,
-            tool_calls,
-            input_tokens,
-            cached_tokens,
-            output_tokens,
-            thinking,
-            // Built by the harness on the way out — see
-            // handle_agent_response_finished. Agents have no view of
-            // the qualified provider/model id or the running session
-            // totals, so leaving this None on the wire avoids a
-            // half-built struct that downstream consumers might trust.
-            token_usage: None,
-            originator: originator.clone(),
-            backend: Some(backend.clone()),
-            response_id,
-            phase,
-            reasoning_items,
-            compacted_input_items,
-            ws_pool_delta,
-        },
-    )))?;
+    maybe_debug_write_provider_response(session_id, &finished, None);
+    writer.write_frame(&Frame::Event(Event::AgentResponseFinished(finished)))?;
     writer.flush()?;
     Ok(())
 }
 
 fn finish_error<W: Write>(
     session_prompt_id: &str,
+    session_id: &str,
     originator: &tau_proto::PromptOriginator,
     backend: &tau_proto::AgentBackend,
     error: common::LlmError,
     ws_pool_delta: Option<tau_proto::WsPoolDelta>,
     writer: &mut FrameWriter<BufWriter<W>>,
 ) -> Result<(), Box<dyn Error>> {
-    writer.write_frame(&Frame::Event(Event::AgentResponseFinished(
-        AgentResponseFinished {
-            session_prompt_id: session_prompt_id.into(),
-            text: Some(format!("LLM error: {error}")),
-            tool_calls: Vec::new(),
-            input_tokens: None,
-            cached_tokens: None,
-            output_tokens: None,
-            thinking: None,
-            token_usage: None,
-            originator: originator.clone(),
-            backend: Some(backend.clone()),
-            response_id: None,
-            phase: None,
-            reasoning_items: Vec::new(),
-            compacted_input_items: Vec::new(),
-            ws_pool_delta,
-        },
-    )))?;
+    let finished = AgentResponseFinished {
+        session_prompt_id: session_prompt_id.into(),
+        output_items: vec![common::assistant_text_item(format!("LLM error: {error}"))],
+        stop_reason: AgentStopReason::Error,
+        originator: originator.clone(),
+        usage: None,
+        backend: Some(backend.clone()),
+        provider_response_id: None,
+        ws_pool_delta,
+    };
+    maybe_debug_write_provider_response(session_id, &finished, None);
+    writer.write_frame(&Frame::Event(Event::AgentResponseFinished(finished)))?;
     writer.flush()?;
     Ok(())
 }
@@ -1333,7 +1230,18 @@ where
     R: Read,
     W: Write,
 {
-    use tau_proto::{AgentToolCall, CborValue, ContentBlock, ConversationRole};
+    use tau_proto::{
+        CborValue, ContentPart, ContextItem, ContextRole, MessageItem, OpaqueProviderItem,
+        ToolCallItem, ToolName,
+    };
+
+    fn cbor_result_text(value: &CborValue) -> String {
+        match value {
+            CborValue::Text(text) => text.clone(),
+            other => serde_json::to_string(&crate::common::cbor_to_json(other))
+                .unwrap_or_else(|_| String::new()),
+        }
+    }
 
     let mut reader = FrameReader::new(BufReader::new(reader));
     let mut writer = FrameWriter::new(BufWriter::new(writer));
@@ -1356,8 +1264,6 @@ where
     writer.flush()?;
 
     let mut next_call = 1_u64;
-    let mut prompt_snapshots: HashMap<tau_proto::SessionPromptId, tau_proto::SessionPromptCreated> =
-        HashMap::new();
 
     loop {
         let Some(frame) = reader.read_frame()? else {
@@ -1367,32 +1273,7 @@ where
         match inner {
             Frame::Event(Event::SessionCompactionRequested(request)) => {
                 let spid = request.prompt.session_prompt_id.clone();
-                let prompt = match materialize_prompt(&request.prompt, &prompt_snapshots) {
-                    Ok(prompt) => prompt,
-                    Err(error) => {
-                        writer.write_frame(&Frame::Event(Event::AgentResponseFinished(
-                            AgentResponseFinished {
-                                session_prompt_id: spid,
-                                text: Some(error),
-                                tool_calls: Vec::new(),
-                                input_tokens: None,
-                                cached_tokens: None,
-                                output_tokens: None,
-                                thinking: None,
-                                token_usage: None,
-                                originator: request.prompt.originator.clone(),
-                                backend: None,
-                                response_id: None,
-                                phase: None,
-                                reasoning_items: Vec::new(),
-                                compacted_input_items: Vec::new(),
-                                ws_pool_delta: None,
-                            },
-                        )))?;
-                        writer.flush()?;
-                        continue;
-                    }
-                };
+                let prompt = materialize_prompt(&request.prompt);
                 writer.write_frame(&Frame::Event(Event::AgentPromptSubmitted(
                     AgentPromptSubmitted {
                         session_prompt_id: spid.clone(),
@@ -1402,32 +1283,27 @@ where
                 writer.write_frame(&Frame::Event(Event::AgentResponseFinished(
                     AgentResponseFinished {
                         session_prompt_id: spid,
-                        text: Some("Conversation compacted.".to_owned()),
-                        tool_calls: Vec::new(),
-                        input_tokens: None,
-                        cached_tokens: None,
-                        output_tokens: None,
-                        thinking: None,
-                        token_usage: None,
+                        output_items: vec![ContextItem::Compaction(OpaqueProviderItem(
+                            CborValue::Map(vec![
+                                (
+                                    CborValue::Text("type".to_owned()),
+                                    CborValue::Text("message".to_owned()),
+                                ),
+                                (
+                                    CborValue::Text("role".to_owned()),
+                                    CborValue::Text("assistant".to_owned()),
+                                ),
+                                (
+                                    CborValue::Text("text".to_owned()),
+                                    CborValue::Text("Conversation compacted.".to_owned()),
+                                ),
+                            ]),
+                        ))],
+                        stop_reason: tau_proto::AgentStopReason::Compaction,
                         originator: prompt.originator.clone(),
+                        usage: None,
                         backend: None,
-                        response_id: None,
-                        phase: None,
-                        reasoning_items: Vec::new(),
-                        compacted_input_items: vec![
-                            serde_json::json!({
-                                "type": "message",
-                                "role": "assistant",
-                                "status": "completed",
-                                "content": [{
-                                    "type": "output_text",
-                                    "text": "Conversation compacted.",
-                                    "annotations": [],
-                                    "logprobs": []
-                                }]
-                            })
-                            .to_string(),
-                        ],
+                        provider_response_id: None,
                         ws_pool_delta: None,
                     },
                 )))?;
@@ -1435,33 +1311,7 @@ where
             }
             Frame::Event(Event::SessionPromptCreated(prompt)) => {
                 let spid = prompt.session_prompt_id.clone();
-                let prompt = match materialize_prompt(&prompt, &prompt_snapshots) {
-                    Ok(prompt) => prompt,
-                    Err(error) => {
-                        writer.write_frame(&Frame::Event(Event::AgentResponseFinished(
-                            AgentResponseFinished {
-                                session_prompt_id: spid,
-                                text: Some(error),
-                                tool_calls: Vec::new(),
-                                input_tokens: None,
-                                cached_tokens: None,
-                                output_tokens: None,
-                                thinking: None,
-                                token_usage: None,
-                                originator: prompt.originator.clone(),
-                                backend: None,
-                                response_id: None,
-                                phase: None,
-                                reasoning_items: Vec::new(),
-                                compacted_input_items: Vec::new(),
-                                ws_pool_delta: None,
-                            },
-                        )))?;
-                        writer.flush()?;
-                        continue;
-                    }
-                };
-                prompt_snapshots.insert(spid.clone(), prompt.clone());
+                let prompt = materialize_prompt(&prompt);
                 writer.write_frame(&Frame::Event(Event::AgentPromptSubmitted(
                     AgentPromptSubmitted {
                         session_prompt_id: spid.clone(),
@@ -1470,55 +1320,51 @@ where
                 )))?;
 
                 // If last message is a tool result, return it as text.
-                let is_tool_result = prompt.messages.last().is_some_and(|m| {
-                    m.role == ConversationRole::User
-                        && m.content
-                            .iter()
-                            .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
-                });
+                let is_tool_result = prompt
+                    .context_items
+                    .last()
+                    .is_some_and(|item| matches!(item, ContextItem::ToolResult(_)));
                 if is_tool_result {
                     let text = prompt
-                        .messages
+                        .context_items
                         .last()
-                        .and_then(|m| {
-                            m.content.iter().find_map(|b| match b {
-                                ContentBlock::ToolResult { content, .. } => Some(content.clone()),
-                                _ => None,
-                            })
+                        .and_then(|item| match item {
+                            ContextItem::ToolResult(result) => {
+                                Some(cbor_result_text(&result.output))
+                            }
+                            _ => None,
                         })
                         .unwrap_or_default();
                     writer.write_frame(&Frame::Event(Event::AgentResponseFinished(
                         AgentResponseFinished {
                             session_prompt_id: spid,
-                            text: Some(text),
-                            tool_calls: Vec::new(),
-                            input_tokens: None,
-                            cached_tokens: None,
-                            output_tokens: None,
-                            thinking: None,
-                            token_usage: None,
+                            output_items: vec![ContextItem::Message(MessageItem {
+                                role: ContextRole::Assistant,
+                                content: vec![ContentPart::Text { text }],
+                                phase: None,
+                            })],
+                            stop_reason: tau_proto::AgentStopReason::EndTurn,
                             originator: prompt.originator.clone(),
+                            usage: None,
                             // Echo agent never calls a real LLM backend.
                             backend: None,
-                            response_id: None,
-                            phase: None,
-                            reasoning_items: Vec::new(),
-                            compacted_input_items: Vec::new(),
+                            provider_response_id: None,
                             ws_pool_delta: None,
                         },
                     )))?;
                 } else {
                     // Find user text and make a tool call.
                     let user_text = prompt
-                        .messages
+                        .context_items
                         .iter()
                         .rev()
-                        .find(|m| m.role == ConversationRole::User)
-                        .and_then(|m| {
-                            m.content.iter().find_map(|b| match b {
-                                ContentBlock::Text { text } => Some(text.clone()),
-                                _ => None,
-                            })
+                        .find_map(|item| match item {
+                            ContextItem::Message(message) if message.role == ContextRole::User => {
+                                message.content.iter().find_map(|part| match part {
+                                    ContentPart::Text { text } => Some(text.clone()),
+                                })
+                            }
+                            _ => None,
                         })
                         .unwrap_or_default();
 
@@ -1526,54 +1372,44 @@ where
                     next_call += 1;
 
                     let tool_call = if let Some(path) = user_text.strip_prefix("read ") {
-                        AgentToolCall {
-                            id: call_id.into(),
-                            name: "read".into(),
+                        ToolCallItem {
+                            call_id: call_id.into(),
+                            name: ToolName::new("read"),
                             tool_type: tau_proto::ToolType::Function,
                             arguments: CborValue::Map(vec![(
                                 CborValue::Text("path".to_owned()),
                                 CborValue::Text(path.trim().to_owned()),
                             )]),
-                            display: None,
                         }
                     } else if let Some(cmd) = user_text.strip_prefix("shell ") {
-                        AgentToolCall {
-                            id: call_id.into(),
-                            name: "shell".into(),
+                        ToolCallItem {
+                            call_id: call_id.into(),
+                            name: ToolName::new("shell"),
                             tool_type: tau_proto::ToolType::Function,
                             arguments: CborValue::Map(vec![(
                                 CborValue::Text("command".to_owned()),
                                 CborValue::Text(cmd.trim().to_owned()),
                             )]),
-                            display: None,
                         }
                     } else {
-                        AgentToolCall {
-                            id: call_id.into(),
-                            name: "echo".into(),
+                        ToolCallItem {
+                            call_id: call_id.into(),
+                            name: ToolName::new("echo"),
                             tool_type: tau_proto::ToolType::Function,
                             arguments: CborValue::Text(user_text),
-                            display: None,
                         }
                     };
 
                     writer.write_frame(&Frame::Event(Event::AgentResponseFinished(
                         AgentResponseFinished {
                             session_prompt_id: spid,
-                            text: None,
-                            tool_calls: vec![tool_call],
-                            input_tokens: None,
-                            cached_tokens: None,
-                            output_tokens: None,
-                            thinking: None,
-                            token_usage: None,
+                            output_items: vec![ContextItem::ToolCall(tool_call)],
+                            stop_reason: tau_proto::AgentStopReason::ToolCalls,
                             originator: prompt.originator.clone(),
+                            usage: None,
                             // Echo agent never calls a real LLM backend.
                             backend: None,
-                            response_id: None,
-                            phase: None,
-                            reasoning_items: Vec::new(),
-                            compacted_input_items: Vec::new(),
+                            provider_response_id: None,
                             ws_pool_delta: None,
                         },
                     )))?;

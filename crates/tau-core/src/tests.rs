@@ -1,7 +1,8 @@
 use tau_proto::{
-    AgentResponseFinished, CborValue, ClientKind, ConnectionId, Event, EventName, EventSelector,
-    Frame, PromptOriginator, SessionPromptSteered, SessionUserMessageInjected, ToolRegister,
-    ToolRequest, ToolResult, ToolSideEffects, ToolSpec, ToolType, UiNavigateTree,
+    AgentResponseFinished, CborValue, ClientKind, ConnectionId, ContentPart, ContextItem,
+    ContextRole, Event, EventName, EventSelector, Frame, MessageItem, PromptOriginator,
+    SessionPromptSteered, SessionUserMessageInjected, ToolCallItem, ToolRegister, ToolRequest,
+    ToolResult, ToolResultStatus, ToolSideEffects, ToolSpec, ToolType, UiNavigateTree,
     UiPromptSubmitted,
 };
 use tempfile::TempDir;
@@ -12,8 +13,8 @@ use crate::connection::{
 };
 use crate::memory::{MemoryInbox, MemorySink, memory_connection};
 use crate::policy::{DefaultSubscriptionPolicy, PolicyStore, SubscriptionApproval};
-use crate::session::{NodeId, SessionEntry, ToolActivityOutcome, ToolActivityRecord};
-use crate::session_store::{SessionStore, list_session_metas};
+use crate::session::{NodeId, SessionEntry};
+use crate::session_store::{SessionStore, SessionStoreError, list_session_metas};
 use crate::tool_registry::{ToolRegistry, ToolRegistryWarning};
 
 /// Helper used by the SessionStore-focused unit tests below: append
@@ -45,30 +46,90 @@ fn store_agent_message(store: &mut SessionStore, session_id: &str, text: &str) -
         .append_session_event(
             session_id,
             None,
-            Event::AgentResponseFinished(AgentResponseFinished {
-                session_prompt_id: format!("sp-{session_id}-{text}").into(),
-                text: Some(text.to_owned()),
-                tool_calls: Vec::new(),
-                input_tokens: None,
-                cached_tokens: None,
-                output_tokens: None,
-                thinking: None,
-                token_usage: None,
-                originator: tau_proto::PromptOriginator::User,
-
-                backend: None,
-                response_id: None,
-                phase: None,
-                reasoning_items: Vec::new(),
-                compacted_input_items: Vec::new(),
-                ws_pool_delta: None,
-            }),
+            Event::AgentResponseFinished(agent_response_text(
+                &format!("sp-{session_id}-{text}"),
+                text,
+            )),
         )
         .expect("append session event");
     store
         .session(session_id)
         .and_then(|t| t.head())
         .expect("head after append")
+}
+
+fn assistant_message_item(text: &str) -> ContextItem {
+    ContextItem::Message(MessageItem {
+        role: ContextRole::Assistant,
+        content: vec![ContentPart::Text {
+            text: text.to_owned(),
+        }],
+        phase: None,
+    })
+}
+
+fn user_message_item(text: &str) -> ContextItem {
+    ContextItem::Message(MessageItem {
+        role: ContextRole::User,
+        content: vec![ContentPart::Text {
+            text: text.to_owned(),
+        }],
+        phase: None,
+    })
+}
+
+fn agent_response_text(session_prompt_id: &str, text: &str) -> AgentResponseFinished {
+    AgentResponseFinished {
+        session_prompt_id: session_prompt_id.into(),
+        output_items: vec![assistant_message_item(text)],
+        stop_reason: tau_proto::AgentStopReason::EndTurn,
+        originator: tau_proto::PromptOriginator::User,
+        usage: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    }
+}
+
+fn agent_response_tool_call(session_prompt_id: &str, call_id: &str) -> AgentResponseFinished {
+    AgentResponseFinished {
+        session_prompt_id: session_prompt_id.into(),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: call_id.into(),
+            name: tau_proto::ToolName::new("read"),
+            tool_type: ToolType::Function,
+            arguments: CborValue::Null,
+        })],
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        originator: tau_proto::PromptOriginator::User,
+        usage: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    }
+}
+
+fn agent_response_tool_calls(session_prompt_id: &str, call_ids: &[&str]) -> AgentResponseFinished {
+    AgentResponseFinished {
+        session_prompt_id: session_prompt_id.into(),
+        output_items: call_ids
+            .iter()
+            .map(|call_id| {
+                ContextItem::ToolCall(ToolCallItem {
+                    call_id: (*call_id).into(),
+                    name: tau_proto::ToolName::new("read"),
+                    tool_type: ToolType::Function,
+                    arguments: CborValue::Null,
+                })
+            })
+            .collect(),
+        stop_reason: tau_proto::AgentStopReason::ToolCalls,
+        originator: tau_proto::PromptOriginator::User,
+        usage: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    }
 }
 
 #[test]
@@ -124,24 +185,9 @@ fn directed_events_ignore_subscriptions_but_still_use_visibility_filters() {
         .send_to(
             &ui_id,
             Some(&tool_id),
-            Frame::Event(Event::AgentResponseFinished(AgentResponseFinished {
-                session_prompt_id: "sp-1".into(),
-                text: Some("hidden".to_owned()),
-                tool_calls: Vec::new(),
-                input_tokens: None,
-                cached_tokens: None,
-                output_tokens: None,
-                thinking: None,
-                token_usage: None,
-                originator: tau_proto::PromptOriginator::User,
-
-                backend: None,
-                response_id: None,
-                phase: None,
-                reasoning_items: Vec::new(),
-                compacted_input_items: Vec::new(),
-                ws_pool_delta: None,
-            })),
+            Frame::Event(Event::AgentResponseFinished(agent_response_text(
+                "sp-1", "hidden",
+            ))),
         )
         .expect("directed route should succeed");
     assert_eq!(blocked.blocked_by_filter, vec![ui_id.clone()]);
@@ -181,6 +227,7 @@ fn connection_abstraction_is_transport_independent_for_in_memory_clients() {
     let first_report = bus.publish(Frame::Event(Event::ToolResult(tau_proto::ToolResult {
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new("echo"),
+        tool_type: ToolType::Function,
         result: CborValue::Text("done".to_owned()),
         display: None,
         originator: tau_proto::PromptOriginator::User,
@@ -188,47 +235,12 @@ fn connection_abstraction_is_transport_independent_for_in_memory_clients() {
     assert_eq!(first_report.delivered_to, vec![tool_id.clone()]);
 
     let second_report = bus.publish(Frame::Event(Event::AgentResponseFinished(
-        AgentResponseFinished {
-            session_prompt_id: "sp-1".into(),
-            text: Some("done".to_owned()),
-            tool_calls: Vec::new(),
-            input_tokens: None,
-            cached_tokens: None,
-            output_tokens: None,
-            thinking: None,
-            token_usage: None,
-            originator: tau_proto::PromptOriginator::User,
-
-            backend: None,
-            response_id: None,
-            phase: None,
-            reasoning_items: Vec::new(),
-            compacted_input_items: Vec::new(),
-            ws_pool_delta: None,
-        },
+        agent_response_text("sp-1", "done"),
     )));
     assert_eq!(second_report.delivered_to, vec![agent_id.clone()]);
 
     assert_eq!(tool_inbox.snapshot().len(), 1);
     assert_eq!(agent_inbox.snapshot().len(), 1);
-}
-
-#[test]
-fn requested_tool_activity_defaults_missing_tool_type_for_old_sessions() {
-    let outcome: ToolActivityOutcome = serde_json::from_value(serde_json::json!({
-        "Requested": {
-            "arguments": null
-        }
-    }))
-    .expect("deserialize old requested outcome");
-
-    assert_eq!(
-        outcome,
-        ToolActivityOutcome::Requested {
-            tool_type: ToolType::Function,
-            arguments: CborValue::Null,
-        }
-    );
 }
 
 #[test]
@@ -564,12 +576,9 @@ fn next_event_id_is_cached_across_appends_and_reopen() {
     assert_eq!(outcome.id.get(), 16);
 }
 
-/// `AgentResponseFinished.phase` must survive the session-event
-/// fold into `SessionEntry::AgentMessage`. The next prompt-assembly
-/// pass needs the value to echo it back on the wire — without this,
-/// every turn after a compaction (or a stale-chain fallback) would
-/// drop the label and re-trigger the early-stopping bug the OpenAI
-/// deployment checklist warns about.
+/// `AgentResponseFinished.output_items` must survive the session-event
+/// fold intact so prompt assembly can replay the exact assistant item
+/// order and message metadata on later turns.
 #[test]
 fn session_tree_captures_phase_from_agent_response_finished() {
     use tau_proto::MessagePhase;
@@ -583,19 +592,18 @@ fn session_tree_captures_phase_from_agent_response_finished() {
     }));
     tree.apply_event(&Event::AgentResponseFinished(AgentResponseFinished {
         session_prompt_id: "sp-1".into(),
-        text: Some("draft response".to_owned()),
-        tool_calls: Vec::new(),
-        input_tokens: None,
-        cached_tokens: None,
-        output_tokens: None,
-        thinking: None,
-        token_usage: None,
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+            content: vec![ContentPart::Text {
+                text: "draft response".to_owned(),
+            }],
+            phase: Some(MessagePhase::Commentary),
+        })],
+        stop_reason: tau_proto::AgentStopReason::EndTurn,
         originator: tau_proto::PromptOriginator::User,
+        usage: None,
         backend: None,
-        response_id: None,
-        phase: Some(MessagePhase::Commentary),
-        reasoning_items: Vec::new(),
-        compacted_input_items: Vec::new(),
+        provider_response_id: None,
         ws_pool_delta: None,
     }));
 
@@ -605,11 +613,21 @@ fn session_tree_captures_phase_from_agent_response_finished() {
         .last()
         .expect("at least one entry");
     match last {
-        SessionEntry::AgentMessage { phase, text, .. } => {
-            assert_eq!(text.as_deref(), Some("draft response"));
-            assert_eq!(*phase, Some(MessagePhase::Commentary));
+        SessionEntry::AssistantResponse { output_items, .. } => {
+            assert_eq!(output_items.len(), 1);
+            let ContextItem::Message(message) = &output_items[0] else {
+                panic!("expected assistant message item");
+            };
+            assert_eq!(message.role, ContextRole::Assistant);
+            assert_eq!(
+                message.content,
+                vec![ContentPart::Text {
+                    text: "draft response".to_owned(),
+                }]
+            );
+            assert_eq!(message.phase, Some(MessagePhase::Commentary));
         }
-        other => panic!("expected AgentMessage, got {other:?}"),
+        other => panic!("expected AssistantResponse, got {other:?}"),
     }
 }
 
@@ -625,13 +643,13 @@ fn session_tree_captures_compacted_summary() {
     tree.apply_event(&Event::SessionCompacted(tau_proto::SessionCompacted {
         session_id: "session-1".into(),
         originator: tau_proto::PromptOriginator::User,
-        summary: "summary text".to_owned(),
-        compacted_input_items: Vec::new(),
+        replacement_window: vec![assistant_message_item("summary text")],
     }));
 
     assert!(matches!(
         tree.current_branch().last(),
-        Some(SessionEntry::CompactedSummary { summary, .. }) if summary == "summary text"
+        Some(SessionEntry::Compaction { replacement_window })
+            if replacement_window == &vec![assistant_message_item("summary text")]
     ));
 }
 
@@ -655,14 +673,14 @@ fn session_tree_persists_across_reopen() {
     assert_eq!(
         tree.current_branch(),
         vec![
-            &SessionEntry::UserMessage {
-                text: "hello".to_owned(),
+            &SessionEntry::UserInput {
+                items: vec![user_message_item("hello")],
             },
-            &SessionEntry::AgentMessage {
-                text: Some("hi there".to_owned()),
-                thinking: None,
-                phase: None,
-                reasoning_items: Vec::new(),
+            &SessionEntry::AssistantResponse {
+                provider_response_id: None,
+                backend: None,
+                output_items: vec![assistant_message_item("hi there")],
+                usage: None,
             },
         ]
     );
@@ -776,11 +794,11 @@ fn session_tree_supports_branching() {
     assert_eq!(
         tree.current_branch(),
         vec![
-            &SessionEntry::UserMessage {
-                text: "hello".to_owned(),
+            &SessionEntry::UserInput {
+                items: vec![user_message_item("hello")],
             },
-            &SessionEntry::UserMessage {
-                text: "goodbye".to_owned(),
+            &SessionEntry::UserInput {
+                items: vec![user_message_item("goodbye")],
             },
         ]
     );
@@ -797,7 +815,7 @@ fn session_tree_supports_branching() {
 }
 
 #[test]
-fn session_tree_associates_tool_activity() {
+fn session_tree_groups_terminal_tool_results_under_assistant_response() {
     let tempdir = TempDir::new().expect("tempdir should exist");
     let store_path = tempdir.path().join("state");
 
@@ -807,9 +825,31 @@ fn session_tree_associates_tool_activity() {
         .append_session_event(
             "session-1",
             None,
+            Event::AgentResponseFinished(AgentResponseFinished {
+                session_prompt_id: "sp-tools".into(),
+                output_items: vec![ContextItem::ToolCall(ToolCallItem {
+                    call_id: "call-1".into(),
+                    name: tau_proto::ToolName::new("read"),
+                    tool_type: ToolType::Function,
+                    arguments: CborValue::Null,
+                })],
+                stop_reason: tau_proto::AgentStopReason::ToolCalls,
+                originator: tau_proto::PromptOriginator::User,
+                usage: None,
+                backend: None,
+                provider_response_id: None,
+                ws_pool_delta: None,
+            }),
+        )
+        .expect("assistant response should persist");
+    store
+        .append_session_event(
+            "session-1",
+            None,
             Event::ToolResult(ToolResult {
                 call_id: "call-1".into(),
                 tool_name: tau_proto::ToolName::new("read"),
+                tool_type: ToolType::Function,
                 result: CborValue::Text("README".to_owned()),
                 display: None,
                 originator: tau_proto::PromptOriginator::User,
@@ -822,16 +862,212 @@ fn session_tree_associates_tool_activity() {
         .session("session-1")
         .expect("session should reload");
     let branch = tree.current_branch();
-    assert_eq!(branch.len(), 2);
+    assert_eq!(branch.len(), 3);
     assert_eq!(
-        *branch[1],
-        SessionEntry::ToolActivity(ToolActivityRecord {
-            call_id: "call-1".into(),
-            tool_name: tau_proto::ToolName::new("read"),
-            outcome: ToolActivityOutcome::Result {
-                result: CborValue::Text("README".to_owned()),
-            },
-        })
+        *branch[2],
+        SessionEntry::ToolResults {
+            items: vec![tau_proto::ToolResultItem {
+                call_id: "call-1".into(),
+                tool_type: ToolType::Function,
+                status: ToolResultStatus::Success,
+                output: CborValue::Text("README".to_owned()),
+            }],
+        }
+    );
+}
+
+#[test]
+fn session_store_rejects_duplicate_tool_call_ids_before_persisting() {
+    // Regression for the item-model migration: malformed provider output
+    // must not be appended to the durable log before validation, because
+    // replay would otherwise panic on the corrupted event.
+    let tempdir = TempDir::new().expect("tempdir should exist");
+    let store_path = tempdir.path().join("state");
+    let mut store = SessionStore::open(&store_path).expect("store should open");
+    store_user_message(&mut store, "session-1", "use tools");
+
+    let error = store
+        .append_session_event(
+            "session-1",
+            None,
+            Event::AgentResponseFinished(AgentResponseFinished {
+                session_prompt_id: "sp-duplicate".into(),
+                output_items: vec![
+                    ContextItem::ToolCall(ToolCallItem {
+                        call_id: "call-1".into(),
+                        name: tau_proto::ToolName::new("read"),
+                        tool_type: ToolType::Function,
+                        arguments: CborValue::Null,
+                    }),
+                    ContextItem::ToolCall(ToolCallItem {
+                        call_id: "call-1".into(),
+                        name: tau_proto::ToolName::new("read"),
+                        tool_type: ToolType::Function,
+                        arguments: CborValue::Null,
+                    }),
+                ],
+                stop_reason: tau_proto::AgentStopReason::ToolCalls,
+                originator: tau_proto::PromptOriginator::User,
+                usage: None,
+                backend: None,
+                provider_response_id: None,
+                ws_pool_delta: None,
+            }),
+        )
+        .expect_err("duplicate call id should be rejected");
+
+    assert!(matches!(error, SessionStoreError::InvalidEvent { .. }));
+    assert_eq!(
+        store
+            .session_events("session-1")
+            .expect("events should load")
+            .len(),
+        1,
+        "invalid response must not be appended after the user prompt"
+    );
+    assert_eq!(
+        store
+            .session("session-1")
+            .expect("session should exist")
+            .current_branch()
+            .len(),
+        1,
+        "invalid response must not mutate the cached tree"
+    );
+}
+
+#[test]
+fn session_store_rejects_tool_call_ids_reused_while_round_is_open_before_persisting() {
+    // Reusing a call id while the earlier round is still unresolved is
+    // ambiguous for terminal result matching, so reject it before the
+    // malformed assistant response reaches the durable log.
+    let tempdir = TempDir::new().expect("tempdir should exist");
+    let store_path = tempdir.path().join("state");
+    let mut store = SessionStore::open(&store_path).expect("store should open");
+    store_user_message(&mut store, "session-1", "use tools");
+    store
+        .append_session_event(
+            "session-1",
+            None,
+            Event::AgentResponseFinished(agent_response_tool_call("sp-1", "call-1")),
+        )
+        .expect("first tool call should persist");
+
+    let error = store
+        .append_session_event(
+            "session-1",
+            None,
+            Event::AgentResponseFinished(agent_response_tool_call("sp-2", "call-1")),
+        )
+        .expect_err("call id reused while open should be rejected");
+
+    assert!(matches!(error, SessionStoreError::InvalidEvent { .. }));
+    assert_eq!(
+        store
+            .session_events("session-1")
+            .expect("events should load")
+            .len(),
+        2,
+        "response reusing an open call id must not be appended"
+    );
+}
+
+#[test]
+fn session_store_rejects_duplicate_terminal_tool_result_before_persisting() {
+    // A tool call may have exactly one terminal fact. Reject duplicates
+    // before append so the durable log cannot contain facts the replay
+    // projection would collapse or overwrite.
+    let tempdir = TempDir::new().expect("tempdir should exist");
+    let store_path = tempdir.path().join("state");
+    let mut store = SessionStore::open(&store_path).expect("store should open");
+    store_user_message(&mut store, "session-1", "use tools");
+    store
+        .append_session_event(
+            "session-1",
+            None,
+            Event::AgentResponseFinished(agent_response_tool_calls(
+                "sp-tools",
+                &["call-1", "call-2"],
+            )),
+        )
+        .expect("assistant response should persist");
+    store
+        .append_session_event(
+            "session-1",
+            None,
+            Event::ToolResult(ToolResult {
+                call_id: "call-1".into(),
+                tool_name: tau_proto::ToolName::new("read"),
+                tool_type: ToolType::Function,
+                result: CborValue::Text("first".to_owned()),
+                display: None,
+                originator: tau_proto::PromptOriginator::User,
+            }),
+        )
+        .expect("first terminal result should persist");
+
+    let error = store
+        .append_session_event(
+            "session-1",
+            None,
+            Event::ToolResult(ToolResult {
+                call_id: "call-1".into(),
+                tool_name: tau_proto::ToolName::new("read"),
+                tool_type: ToolType::Function,
+                result: CborValue::Text("duplicate".to_owned()),
+                display: None,
+                originator: tau_proto::PromptOriginator::User,
+            }),
+        )
+        .expect_err("duplicate terminal result should be rejected");
+
+    assert!(matches!(error, SessionStoreError::InvalidEvent { .. }));
+    assert_eq!(
+        store
+            .session_events("session-1")
+            .expect("events should load")
+            .len(),
+        3,
+        "duplicate terminal result must not be appended"
+    );
+
+    store
+        .append_session_event(
+            "session-1",
+            None,
+            Event::ToolResult(ToolResult {
+                call_id: "call-2".into(),
+                tool_name: tau_proto::ToolName::new("read"),
+                tool_type: ToolType::Function,
+                result: CborValue::Text("second".to_owned()),
+                display: None,
+                originator: tau_proto::PromptOriginator::User,
+            }),
+        )
+        .expect("other call should still complete the round");
+
+    let branch = store
+        .session("session-1")
+        .expect("session should exist")
+        .current_branch();
+    assert_eq!(
+        **branch.last().expect("tool results node"),
+        SessionEntry::ToolResults {
+            items: vec![
+                tau_proto::ToolResultItem {
+                    call_id: "call-1".into(),
+                    tool_type: ToolType::Function,
+                    status: ToolResultStatus::Success,
+                    output: CborValue::Text("first".to_owned()),
+                },
+                tau_proto::ToolResultItem {
+                    call_id: "call-2".into(),
+                    tool_type: ToolType::Function,
+                    status: ToolResultStatus::Success,
+                    output: CborValue::Text("second".to_owned()),
+                },
+            ],
+        }
     );
 }
 

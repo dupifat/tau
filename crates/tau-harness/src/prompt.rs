@@ -1,9 +1,9 @@
 //! Building blocks for the per-turn prompt: the system prompt body, the
 //! AGENTS.md context message, and the conversation assembly that turns a
-//! [`tau_core::SessionTree`] into provider-shaped [`ConversationMessage`]s.
+//! [`tau_core::SessionTree`] into item-based prompt context.
 
-use tau_core::{SessionEntry, ToolActivityOutcome};
-use tau_proto::{CborValue, ContentBlock, ConversationMessage, ConversationRole};
+use tau_core::SessionEntry;
+use tau_proto::{CborValue, ContextItem};
 
 use crate::dedup::DEDUP_MARKER;
 use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill};
@@ -153,156 +153,48 @@ pub(crate) fn chrono_free_date() -> String {
     format!("{y}-{:02}-{:02}", m + 1, remaining + 1)
 }
 
-/// Converts the branch ending at `head` into LLM conversation
-/// messages. Each conversation tracks its own head; with multiple
+/// Converts the branch ending at `head` into LLM prompt context
+/// items. Each conversation tracks its own head; with multiple
 /// side conversations interleaving tree mutations (one delegate's
 /// teardown snapping `tree.head` to the default conv, another
 /// delegate's tool result arriving moments later), `tree.head()` is
 /// not reliable as the prompt-assembly cursor — use the conv's own
 /// head instead.
 pub(crate) struct AssembledPromptContext {
-    pub(crate) compacted_input_items: Vec<String>,
-    pub(crate) messages: Vec<ConversationMessage>,
+    pub(crate) context_items: Vec<ContextItem>,
 }
 
 pub(crate) fn assemble_conversation_from(
     tree: &tau_core::SessionTree,
     head: Option<tau_core::NodeId>,
-) -> Vec<ConversationMessage> {
-    assemble_prompt_context_from(tree, head).messages
+) -> Vec<ContextItem> {
+    assemble_prompt_context_from(tree, head).context_items
 }
 
 pub(crate) fn assemble_prompt_context_from(
     tree: &tau_core::SessionTree,
     head: Option<tau_core::NodeId>,
 ) -> AssembledPromptContext {
-    let mut messages: Vec<ConversationMessage> = Vec::new();
-    let mut compacted_input_items: Vec<String> = Vec::new();
+    let mut context_items: Vec<ContextItem> = Vec::new();
 
     for entry in tree.branch_from(head) {
         match entry {
-            SessionEntry::UserMessage { text } => {
-                messages.push(ConversationMessage {
-                    role: ConversationRole::User,
-                    content: vec![ContentBlock::Text { text: text.clone() }],
-                    phase: None,
-                });
+            SessionEntry::UserInput { items } => {
+                context_items.extend(items.iter().cloned());
             }
-            SessionEntry::CompactedSummary {
-                summary,
-                input_items,
-            } => {
-                messages.clear();
-                compacted_input_items = input_items.clone();
-                if compacted_input_items.is_empty() {
-                    messages.push(ConversationMessage {
-                        role: ConversationRole::Assistant,
-                        content: vec![ContentBlock::Text {
-                            text: format!("Summary of earlier conversation:\n{summary}"),
-                        }],
-                        phase: None,
-                    });
-                }
+            SessionEntry::AssistantResponse { output_items, .. } => {
+                context_items.extend(output_items.iter().cloned());
             }
-            SessionEntry::AgentMessage {
-                text,
-                thinking: _,
-                phase,
-                reasoning_items,
-            } => {
-                // `thinking` is intentionally NOT replayed: provider
-                // reasoning summaries are for human inspection only,
-                // never fed back into later turns as plain assistant
-                // text. See `TAU_VISIBLE_THINKING_IMPLEMENTATION_PLAN.md`.
-                //
-                // `reasoning_items` *are* replayed — they're the
-                // backend's opaque `reasoning` output items (id +
-                // `encrypted_content`) that preserve the model's
-                // reasoning continuity across a broken chain. Each
-                // becomes a `ContentBlock::Reasoning` block on this
-                // assistant message; the responses backend emits
-                // them as top-level `input[]` items before the
-                // message/function_call items from the same turn.
-                //
-                // `phase` *is* replayed — the Codex deployment
-                // checklist warns that omitting it on history causes
-                // early stopping on `gpt-5.3-codex` and later. The
-                // Responses backend echoes it (or defaults to
-                // `final_answer`) when its `supports_phase` flag is
-                // on.
-                let mut content: Vec<ContentBlock> = reasoning_items
-                    .iter()
-                    .map(|item| ContentBlock::Reasoning { item: item.clone() })
-                    .collect();
-                if let Some(text) = text {
-                    content.push(ContentBlock::Text { text: text.clone() });
-                }
-                messages.push(ConversationMessage {
-                    role: ConversationRole::Assistant,
-                    content,
-                    phase: *phase,
-                });
+            SessionEntry::ToolResults { items } => {
+                context_items.extend(items.iter().cloned().map(ContextItem::ToolResult));
             }
-            SessionEntry::ToolActivity(activity) => match &activity.outcome {
-                ToolActivityOutcome::Requested {
-                    tool_type,
-                    arguments,
-                } => {
-                    // Tool use goes into the preceding assistant message.
-                    // If there's no assistant message yet, create one.
-                    let needs_new = messages
-                        .last()
-                        .is_none_or(|m| m.role != ConversationRole::Assistant);
-                    if needs_new {
-                        messages.push(ConversationMessage {
-                            role: ConversationRole::Assistant,
-                            content: Vec::new(),
-                            phase: None,
-                        });
-                    }
-                    if let Some(last) = messages.last_mut() {
-                        last.content.push(ContentBlock::ToolUse {
-                            id: activity.call_id.clone(),
-                            name: activity.tool_name.clone().into(),
-                            tool_type: *tool_type,
-                            input: arguments.clone(),
-                        });
-                    }
-                }
-                ToolActivityOutcome::Result { result } => {
-                    messages.push(ConversationMessage {
-                        role: ConversationRole::User,
-                        content: vec![ContentBlock::ToolResult {
-                            tool_use_id: activity.call_id.clone(),
-                            content: cbor_to_text(result),
-                            is_error: false,
-                        }],
-                        phase: None,
-                    });
-                }
-                ToolActivityOutcome::Error { message, details } => {
-                    let content = match details {
-                        Some(d) => format!("{message}\n{}", cbor_to_text(d)),
-                        None => message.clone(),
-                    };
-                    messages.push(ConversationMessage {
-                        role: ConversationRole::User,
-                        content: vec![ContentBlock::ToolResult {
-                            tool_use_id: activity.call_id.clone(),
-                            content,
-                            is_error: true,
-                        }],
-                        phase: None,
-                    });
-                }
-            },
+            SessionEntry::Compaction { replacement_window } => {
+                context_items = replacement_window.clone();
+            }
         }
     }
 
-    AssembledPromptContext {
-        compacted_input_items,
-        messages,
-    }
+    AssembledPromptContext { context_items }
 }
 
 /// Extract a boolean value from a CBOR map by key.
@@ -317,6 +209,7 @@ pub(crate) fn cbor_map_bool(map: &CborValue, key: &str) -> Option<bool> {
 }
 
 /// Converts a CBOR value to human-readable text for tool results.
+#[cfg(test)]
 pub(crate) fn cbor_to_text(v: &tau_proto::CborValue) -> String {
     use tau_proto::CborValue;
     match v {
@@ -354,9 +247,21 @@ pub(crate) fn cbor_to_text(v: &tau_proto::CborValue) -> String {
 
 #[cfg(test)]
 mod tests {
-    use tau_proto::{Event, ToolError, ToolRequest};
+    use tau_proto::{
+        ContentPart, ContextItem, ContextRole, Event, MessageItem, ToolError, ToolResultStatus,
+    };
 
     use super::*;
+
+    fn assistant_message(text: &str) -> ContextItem {
+        ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+            content: vec![ContentPart::Text {
+                text: text.to_owned(),
+            }],
+            phase: None,
+        })
+    }
 
     #[test]
     fn build_system_prompt_includes_cwd() {
@@ -371,7 +276,7 @@ mod tests {
         let skills = std::collections::HashMap::new();
         let prompt = build_system_prompt(&skills, "/tmp/work");
         assert!(prompt.contains("parallel"));
-        assert!(prompt.contains("sequentially"));
+        assert!(prompt.contains("make all independent tool calls in parallel"));
     }
 
     #[test]
@@ -399,13 +304,23 @@ mod tests {
             originator: tau_proto::PromptOriginator::default(),
             ctx_id: None,
         }));
-        tree.apply_event(&Event::ToolRequest(ToolRequest {
-            call_id: "call-1".into(),
-            tool_name: tau_proto::ToolName::new("shell"),
-            tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Null,
-            originator: tau_proto::PromptOriginator::User,
-        }));
+        tree.apply_event(&Event::AgentResponseFinished(
+            tau_proto::AgentResponseFinished {
+                session_prompt_id: "sp-tools".into(),
+                output_items: vec![ContextItem::ToolCall(tau_proto::ToolCallItem {
+                    call_id: "call-1".into(),
+                    name: tau_proto::ToolName::new("shell"),
+                    tool_type: tau_proto::ToolType::Function,
+                    arguments: CborValue::Null,
+                })],
+                stop_reason: tau_proto::AgentStopReason::ToolCalls,
+                originator: tau_proto::PromptOriginator::User,
+                usage: None,
+                backend: None,
+                provider_response_id: None,
+                ws_pool_delta: None,
+            },
+        ));
         let details = CborValue::Map(vec![
             (
                 CborValue::Text("stdout".to_owned()),
@@ -423,35 +338,42 @@ mod tests {
         tree.apply_event(&Event::ToolError(ToolError {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new("shell"),
+            tool_type: tau_proto::ToolType::Function,
             message: "command exited with status 1".to_owned(),
             details: Some(details),
             display: None,
             originator: tau_proto::PromptOriginator::User,
         }));
 
-        let messages = assemble_conversation_from(&tree, tree.head());
-        let tool_result = messages
+        let items = assemble_conversation_from(&tree, tree.head());
+        let tool_result = items
             .iter()
-            .flat_map(|m| &m.content)
-            .find_map(|b| match b {
-                ContentBlock::ToolResult {
-                    content, is_error, ..
-                } if *is_error => Some(content.clone()),
+            .find_map(|item| match item {
+                ContextItem::ToolResult(result)
+                    if matches!(result.status, ToolResultStatus::Error { .. }) =>
+                {
+                    Some(result)
+                }
                 _ => None,
             })
             .expect("error tool result should be present");
 
+        let ToolResultStatus::Error { message } = &tool_result.status else {
+            panic!("expected error tool result status")
+        };
+        let detail_text = cbor_to_text(&tool_result.output);
+
         assert!(
-            tool_result.contains("command exited with status 1"),
-            "missing message: {tool_result}"
+            message.contains("command exited with status 1"),
+            "missing message: {message}"
         );
         assert!(
-            tool_result.contains("patch 73cbb9ff failed to apply"),
-            "missing stderr: {tool_result}"
+            detail_text.contains("patch 73cbb9ff failed to apply"),
+            "missing stderr: {detail_text}"
         );
         assert!(
-            tool_result.contains("compiling"),
-            "missing stdout: {tool_result}"
+            detail_text.contains("compiling"),
+            "missing stdout: {detail_text}"
         );
     }
 
@@ -472,27 +394,31 @@ mod tests {
         tree.apply_event(&Event::AgentResponseFinished(
             tau_proto::AgentResponseFinished {
                 session_prompt_id: "sp-1".into(),
-                text: Some("draft answer".to_owned()),
-                tool_calls: Vec::new(),
-                input_tokens: None,
-                cached_tokens: None,
-                output_tokens: None,
-                thinking: None,
-                token_usage: None,
+                output_items: vec![ContextItem::Message(MessageItem {
+                    role: ContextRole::Assistant,
+                    content: vec![ContentPart::Text {
+                        text: "draft answer".to_owned(),
+                    }],
+                    phase: Some(tau_proto::MessagePhase::Commentary),
+                })],
+                stop_reason: tau_proto::AgentStopReason::EndTurn,
                 originator: tau_proto::PromptOriginator::User,
+                usage: None,
                 backend: None,
-                response_id: None,
-                phase: Some(tau_proto::MessagePhase::Commentary),
-                reasoning_items: Vec::new(),
-                compacted_input_items: Vec::new(),
+                provider_response_id: None,
                 ws_pool_delta: None,
             },
         ));
 
-        let messages = assemble_conversation_from(&tree, tree.head());
-        let assistant = messages
+        let items = assemble_conversation_from(&tree, tree.head());
+        let assistant = items
             .iter()
-            .find(|m| matches!(m.role, tau_proto::ConversationRole::Assistant))
+            .find_map(|item| match item {
+                ContextItem::Message(message) if message.role == ContextRole::Assistant => {
+                    Some(message)
+                }
+                _ => None,
+            })
             .expect("assistant message");
         assert_eq!(assistant.phase, Some(tau_proto::MessagePhase::Commentary));
     }
@@ -509,27 +435,26 @@ mod tests {
         tree.apply_event(&Event::AgentResponseFinished(
             tau_proto::AgentResponseFinished {
                 session_prompt_id: "sp-1".into(),
-                text: Some("first answer".to_owned()),
-                tool_calls: Vec::new(),
-                input_tokens: None,
-                cached_tokens: None,
-                output_tokens: None,
-                thinking: None,
-                token_usage: None,
+                output_items: vec![assistant_message("first answer")],
+                stop_reason: tau_proto::AgentStopReason::EndTurn,
                 originator: tau_proto::PromptOriginator::User,
+                usage: None,
                 backend: None,
-                response_id: None,
-                phase: None,
-                reasoning_items: Vec::new(),
-                compacted_input_items: Vec::new(),
+                provider_response_id: None,
                 ws_pool_delta: None,
             },
         ));
         tree.apply_event(&Event::SessionCompacted(tau_proto::SessionCompacted {
             session_id: "session-1".into(),
             originator: tau_proto::PromptOriginator::User,
-            summary: "- User is debugging compaction\n- Keep edits focused".to_owned(),
-            compacted_input_items: Vec::new(),
+            replacement_window: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: "Summary of earlier conversation:\n- User is debugging compaction\n- Keep edits focused"
+                        .to_owned(),
+                }],
+                phase: None,
+            })],
         }));
         tree.apply_event(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
             text: "continue".to_owned(),
@@ -538,17 +463,19 @@ mod tests {
             ctx_id: None,
         }));
 
-        let messages = assemble_conversation_from(&tree, tree.head());
-        assert_eq!(messages.len(), 2, "pre-compaction history must be dropped");
+        let items = assemble_conversation_from(&tree, tree.head());
+        assert_eq!(items.len(), 2, "pre-compaction history must be dropped");
         assert!(matches!(
-            &messages[0].content[0],
-            ContentBlock::Text { text }
-                if text.contains("Summary of earlier conversation:")
-                    && text.contains("debugging compaction")
+            &items[0],
+            ContextItem::Message(MessageItem { content, .. })
+                if matches!(&content[0], ContentPart::Text { text }
+                    if text.contains("Summary of earlier conversation:")
+                        && text.contains("debugging compaction"))
         ));
         assert!(matches!(
-            &messages[1].content[0],
-            ContentBlock::Text { text } if text == "continue"
+            &items[1],
+            ContextItem::Message(MessageItem { content, .. })
+                if matches!(&content[0], ContentPart::Text { text } if text == "continue")
         ));
     }
 
@@ -578,41 +505,28 @@ mod tests {
         tree.apply_event(&Event::AgentResponseFinished(
             tau_proto::AgentResponseFinished {
                 session_prompt_id: "sp-1".into(),
-                text: Some("here's what I found".to_owned()),
-                tool_calls: Vec::new(),
-                input_tokens: None,
-                cached_tokens: None,
-                output_tokens: None,
-                thinking: None,
-                token_usage: None,
+                output_items: vec![
+                    ContextItem::Reasoning(
+                        serde_json::from_str(&blob).expect("opaque reasoning item"),
+                    ),
+                    assistant_message("here's what I found"),
+                ],
+                stop_reason: tau_proto::AgentStopReason::EndTurn,
                 originator: tau_proto::PromptOriginator::User,
+                usage: None,
                 backend: None,
-                response_id: None,
-                phase: None,
-                reasoning_items: vec![blob.clone()],
-                compacted_input_items: Vec::new(),
+                provider_response_id: None,
                 ws_pool_delta: None,
             },
         ));
 
-        let messages = assemble_conversation_from(&tree, tree.head());
-        let assistant = messages
-            .iter()
-            .find(|m| matches!(m.role, tau_proto::ConversationRole::Assistant))
-            .expect("assistant message");
-        assert_eq!(
-            assistant.content.len(),
-            2,
-            "expected reasoning + text on the assembled assistant message"
-        );
-        match &assistant.content[0] {
-            ContentBlock::Reasoning { item } => assert_eq!(item, &blob),
-            other => panic!("expected Reasoning block first, got {other:?}"),
-        }
-        match &assistant.content[1] {
-            ContentBlock::Text { text } => assert_eq!(text, "here's what I found"),
-            other => panic!("expected Text block after Reasoning, got {other:?}"),
-        }
+        let items = assemble_conversation_from(&tree, tree.head());
+        assert!(matches!(&items[1], ContextItem::Reasoning(_)));
+        assert!(matches!(
+            &items[2],
+            ContextItem::Message(MessageItem { content, .. })
+                if matches!(&content[0], ContentPart::Text { text } if text == "here's what I found")
+        ));
     }
 
     /// Tool-only turn (no message text) with reasoning_items must
@@ -640,32 +554,20 @@ mod tests {
         tree.apply_event(&Event::AgentResponseFinished(
             tau_proto::AgentResponseFinished {
                 session_prompt_id: "sp-1".into(),
-                text: None,
-                tool_calls: Vec::new(),
-                input_tokens: None,
-                cached_tokens: None,
-                output_tokens: None,
-                thinking: None,
-                token_usage: None,
+                output_items: vec![ContextItem::Reasoning(
+                    serde_json::from_str(&blob).expect("opaque reasoning item"),
+                )],
+                stop_reason: tau_proto::AgentStopReason::EndTurn,
                 originator: tau_proto::PromptOriginator::User,
+                usage: None,
                 backend: None,
-                response_id: None,
-                phase: None,
-                reasoning_items: vec![blob.clone()],
-                compacted_input_items: Vec::new(),
+                provider_response_id: None,
                 ws_pool_delta: None,
             },
         ));
 
-        let messages = assemble_conversation_from(&tree, tree.head());
-        let assistant = messages
-            .iter()
-            .find(|m| matches!(m.role, tau_proto::ConversationRole::Assistant))
-            .expect("assistant message");
-        assert_eq!(assistant.content.len(), 1);
-        assert!(
-            matches!(&assistant.content[0], ContentBlock::Reasoning { item } if item == &blob),
-            "tool-only turn must still surface reasoning on replay"
-        );
+        let items = assemble_conversation_from(&tree, tree.head());
+        assert_eq!(items.len(), 2);
+        assert!(matches!(&items[1], ContextItem::Reasoning(_)));
     }
 }

@@ -6,21 +6,22 @@
 
 use std::io::{BufReader, BufWriter};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use tau_core::{
     Connection, ConnectionMetadata, ConnectionOrigin, ConnectionSendError, ConnectionSink,
-    RoutedFrame, SessionEntry, ToolActivityOutcome, ToolActivityRecord,
+    RoutedFrame, SessionEntry,
 };
 use tau_proto::{
-    AgentResponseFinished, AgentResponseUpdated, AgentToolCall, CborValue, Disconnect, Event,
-    EventSelector, ExtAgentQuery, Frame, FrameReader, FrameWriter, Intercept, InterceptAction,
-    InterceptReply, InterceptionPriority, Message, SessionCompactionRequested,
-    SessionPromptCreated, SessionPromptId, SessionPromptQueued, Subscribe, ToolCallId, ToolName,
-    ToolResult, ToolSideEffects, ToolSpec, UiPromptDraft, UiPromptSubmitted,
+    AgentResponseFinished, AgentResponseUpdated, CborValue, ContentPart, ContextItem, ContextRole,
+    Disconnect, Event, EventSelector, ExtAgentQuery, Frame, FrameReader, FrameWriter, Intercept,
+    InterceptAction, InterceptReply, InterceptionPriority, Message, MessageItem,
+    SessionCompactionRequested, SessionPromptCreated, SessionPromptId, SessionPromptQueued,
+    Subscribe, ToolCallId, ToolCallItem, ToolName, ToolResult, ToolResultItem, ToolResultStatus,
+    ToolSideEffects, ToolSpec, UiPromptDraft, UiPromptSubmitted,
 };
 use tau_session_inspect::{
     default_session_id, format_session_entry, open_session_store, policy_lines, session_lines,
@@ -28,7 +29,7 @@ use tau_session_inspect::{
 };
 use tempfile::TempDir;
 
-use super::{HARNESS_CONNECTION_ID, Harness};
+use super::{AgentToolCall, HARNESS_CONNECTION_ID, Harness};
 use crate::conversation::ConversationTurnState;
 use crate::daemon::{
     ServeOptions, bind_listener, run_daemon_with_echo, run_embedded_message_with_echo,
@@ -74,11 +75,12 @@ fn echo_harness_for(
     session_id: &str,
     state_dir: impl Into<PathBuf>,
 ) -> Result<Harness, HarnessError> {
-    echo_harness_with_dirs(
-        session_id,
-        state_dir,
-        tau_config::settings::TauDirs::default(),
-    )
+    let state_dir = state_dir.into();
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(state_dir.join("config")),
+        state_dir: Some(state_dir.join("runtime")),
+    };
+    echo_harness_with_dirs(session_id, state_dir, dirs)
 }
 
 fn echo_harness_with_dirs(
@@ -155,6 +157,43 @@ fn seed_tools_running(
     };
 }
 
+/// Seed the transcript and turn state as if the assistant had just
+/// emitted one or more tool calls for this conversation.
+fn seed_assistant_tool_round(
+    h: &mut Harness,
+    cid: &crate::conversation::ConversationId,
+    calls: &[(&str, &str)],
+) {
+    h.publish_for_conversation(
+        cid,
+        Event::AgentResponseFinished(AgentResponseFinished {
+            session_prompt_id: "sp-seeded-tools".into(),
+            output_items: calls
+                .iter()
+                .map(|(call_id, tool_name)| {
+                    ContextItem::ToolCall(ToolCallItem {
+                        call_id: (*call_id).into(),
+                        name: ToolName::new(*tool_name),
+                        tool_type: tau_proto::ToolType::Function,
+                        arguments: CborValue::Map(Vec::new()),
+                    })
+                })
+                .collect(),
+            stop_reason: tau_proto::AgentStopReason::ToolCalls,
+            usage: None,
+            originator: tau_proto::PromptOriginator::User,
+            backend: None,
+            provider_response_id: None,
+            ws_pool_delta: None,
+        }),
+    );
+    seed_tools_running(
+        h,
+        cid,
+        calls.iter().map(|(call_id, _)| (*call_id).into()).collect(),
+    );
+}
+
 /// Pumps the harness event loop until the named tool call's result
 /// or error is received and handled. Panics on timeout.
 fn drive_harness_until_call_completes(h: &mut Harness, target_call_id: &str) {
@@ -187,6 +226,23 @@ fn drive_harness_until_call_completes(h: &mut Harness, target_call_id: &str) {
             }
             HarnessEvent::NewClient(_) => {}
         }
+    }
+}
+
+fn wait_for_session_unlock(state_dir: &Path, session_id: &str) {
+    let sessions_dir = tau_config::settings::sessions_dir_of(state_dir);
+    let started = Instant::now();
+    loop {
+        let locked =
+            tau_core::session_is_locked(&sessions_dir, session_id).expect("session lock probe");
+        if !locked {
+            return;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timed out waiting for session `{session_id}` lock to clear"
+        );
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 

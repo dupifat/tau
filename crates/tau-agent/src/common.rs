@@ -5,17 +5,14 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tau_proto::{
-    AgentBackendTransport, AgentToolCall, CborValue, ConversationMessage, PromptOriginator,
-    SessionId, ToolDefinition,
+    AgentBackendTransport, AgentTokenUsage, CborValue, ContentPart, ContextItem, ContextRole,
+    MessageItem, OpaqueProviderItem, PromptOriginator, SessionId, ToolCallItem, ToolDefinition,
 };
 
 /// The parts of a prompt needed by an LLM backend client.
 pub struct PromptPayload<'a> {
     pub system_prompt: &'a str,
-    pub messages: &'a [ConversationMessage],
-    /// Opaque Responses-API input items produced by a prior
-    /// provider-side compaction pass.
-    pub compacted_input_items: &'a [String],
+    pub context_items: &'a [ContextItem],
     pub tools: &'a [ToolDefinition],
     /// Per-prompt model knobs (effort / verbosity / thinking-summary).
     /// Each field is honored only when the backend's config reports
@@ -27,12 +24,12 @@ pub struct PromptPayload<'a> {
     /// in either case so the prompt-cache prefix stays stable.
     pub tool_choice: tau_proto::ToolChoice,
     /// Hint from the harness for stateful chaining: the previous
-    /// turn's `response_id` and the index in `messages` where new
+    /// turn's `response_id` and the index in `context_items` where new
     /// content for this turn begins. Backends that don't support
     /// stateful chaining (Chat Completions) ignore this and replay
-    /// the full `messages` slice. The Responses backend slices
-    /// `messages[index..]` and sets `previous_response_id` +
-    /// `store: true` on the upstream call.
+    /// the full item slice. The Responses backend slices
+    /// `context_items[index..]` and sets `previous_response_id` on
+    /// the upstream call.
     pub previous_response: Option<PreviousResponse<'a>>,
     /// Who originated this prompt — the interactive user, or an
     /// extension-side sub-agent query (most notably `core-delegate`).
@@ -60,7 +57,7 @@ pub struct PromptPayload<'a> {
 #[derive(Clone, Copy)]
 pub struct PreviousResponse<'a> {
     pub id: &'a str,
-    pub message_index: usize,
+    pub next_item_index: usize,
     pub transport: Option<AgentBackendTransport>,
 }
 
@@ -163,10 +160,34 @@ fn usage_limit_retry_after(body: &str) -> Option<Duration> {
     Some(Duration::from_secs(resets_at.saturating_sub(now)))
 }
 
+/// One provider output item as it is incrementally assembled from a
+/// streaming response. This is intentionally item-shaped: final
+/// `AgentResponseFinished.output_items` must be a projection of the
+/// stream's item timeline, not a late re-bucketing of text/reasoning/tool
+/// calls.
+#[derive(Clone, Debug)]
+pub enum OutputItemAccumulator {
+    Empty,
+    Message(MessageAccumulator),
+    ToolCall(ToolCallAccumulator),
+    Reasoning(OpaqueProviderItem),
+    UnknownProviderItem(OpaqueProviderItem),
+}
+
+/// Accumulates one assistant message item across text deltas.
+#[derive(Clone, Debug, Default)]
+pub struct MessageAccumulator {
+    pub text: String,
+    pub phase: Option<tau_proto::MessagePhase>,
+}
+
 /// Accumulated streaming state shared by both backends.
 pub struct StreamState {
+    /// Concatenated visible assistant text, kept for the existing
+    /// `AgentResponseUpdated.text` wire shape. The durable final output
+    /// is assembled from `output_items` instead.
     pub text: String,
-    pub tool_calls: Vec<ToolCallAccumulator>,
+    pub output_items: Vec<OutputItemAccumulator>,
     pub input_tokens: Option<u64>,
     pub cached_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
@@ -179,36 +200,59 @@ pub struct StreamState {
     /// populated by the Responses backend; the Chat Completions
     /// backend leaves this `None`.
     pub response_id: Option<String>,
-    /// Provider-supplied `phase` label on the assistant `message`
-    /// output item (`commentary` vs. `final_answer`). Only populated
-    /// by the Responses backend when its `supports_phase` flag is on
-    /// and the model emitted one. Surfaced on
-    /// [`tau_proto::AgentResponseFinished`] so the harness persists
-    /// it for later replay.
-    pub phase: Option<tau_proto::MessagePhase>,
-    /// Raw JSON of each `reasoning` output item observed on this
-    /// stream, in arrival order. Captured from `response.output_item.done`
-    /// events when the request body asked for
-    /// `include: ["reasoning.encrypted_content"]` (currently the
-    /// Codex Responses backend's `supports_encrypted_reasoning` path).
-    /// The strings are stored verbatim — backends don't parse fields
-    /// out of them — and are surfaced on `AgentResponseFinished` so
-    /// the harness can replay them on subsequent turns.
-    pub reasoning_items: Vec<String>,
     /// Opaque Responses-API input items returned by a standalone
     /// compaction call.
     pub compacted_input_items: Vec<String>,
     /// A stale `previous_response_id` was rejected and this successful stream
     /// came from the full-replay retry.
     pub stale_chain_fallback: bool,
+    /// Chat Completions streams tool-call indexes separately from the
+    /// assistant message content. This maps each chat `tool_calls[N]`
+    /// index to the synthesized item slot that owns it.
+    chat_tool_item_indices: Vec<Option<usize>>,
+    /// Synthesized item slot for Chat Completions text content.
+    chat_message_item_index: Option<usize>,
 }
 
 /// Accumulates one tool call across streaming chunks.
+#[derive(Clone, Debug)]
 pub struct ToolCallAccumulator {
     pub id: String,
     pub name: String,
     pub tool_type: tau_proto::ToolType,
     pub arguments_json: String,
+}
+
+impl ToolCallAccumulator {
+    pub fn new(tool_type: tau_proto::ToolType) -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            tool_type,
+            arguments_json: String::new(),
+        }
+    }
+
+    fn into_context_item(self) -> Option<ContextItem> {
+        if self.name.is_empty() {
+            return None;
+        }
+        let arguments = match self.tool_type {
+            tau_proto::ToolType::Function => {
+                let args: serde_json::Value =
+                    serde_json::from_str(&self.arguments_json).unwrap_or(serde_json::Value::Null);
+                json_to_cbor(&args)
+            }
+            tau_proto::ToolType::Custom => CborValue::Text(self.arguments_json),
+        };
+        let name = tau_proto::ToolName::try_new(self.name)?;
+        Some(ContextItem::ToolCall(ToolCallItem {
+            call_id: self.id.into(),
+            name,
+            tool_type: self.tool_type,
+            arguments,
+        }))
+    }
 }
 
 impl Default for StreamState {
@@ -221,52 +265,213 @@ impl StreamState {
     pub fn new() -> Self {
         Self {
             text: String::new(),
-            tool_calls: Vec::new(),
+            output_items: Vec::new(),
             input_tokens: None,
             cached_tokens: None,
             output_tokens: None,
             thinking: None,
             response_id: None,
-            phase: None,
-            reasoning_items: Vec::new(),
             compacted_input_items: Vec::new(),
             stale_chain_fallback: false,
+            chat_tool_item_indices: Vec::new(),
+            chat_message_item_index: None,
         }
     }
 
-    /// Returns the final tool calls with parsed arguments.
-    ///
-    /// Accumulators with an empty `name` are dropped as stream
-    /// artifacts. Both the Responses and Chat Completions paths
-    /// eagerly extend `tool_calls` from argument-delta events so the
-    /// index stays addressable; if the matching `output_item.added`
-    /// (or `function.name` delta) never arrives, the slot stays
-    /// nameless. Shipping it downstream would surface as an
-    /// `invalid_tool` rejection in the harness, but the real fix is
-    /// to not manufacture the call in the first place.
-    pub fn into_tool_calls(self) -> Vec<AgentToolCall> {
-        self.tool_calls
-            .into_iter()
-            .filter(|tc| !tc.name.is_empty())
-            .map(|tc| {
-                let arguments = match tc.tool_type {
-                    tau_proto::ToolType::Function => {
-                        let args: serde_json::Value = serde_json::from_str(&tc.arguments_json)
-                            .unwrap_or(serde_json::Value::Null);
-                        json_to_cbor(&args)
-                    }
-                    tau_proto::ToolType::Custom => CborValue::Text(tc.arguments_json),
-                };
-                AgentToolCall {
-                    id: tc.id.into(),
-                    name: tc.name.into(),
-                    tool_type: tc.tool_type,
-                    arguments,
-                    display: None,
-                }
-            })
-            .collect()
+    fn ensure_output_len(&mut self, output_index: usize) {
+        while self.output_items.len() <= output_index {
+            self.output_items.push(OutputItemAccumulator::Empty);
+        }
     }
+
+    pub fn message_at_mut(&mut self, output_index: usize) -> &mut MessageAccumulator {
+        self.ensure_output_len(output_index);
+        if !matches!(
+            self.output_items[output_index],
+            OutputItemAccumulator::Message(_)
+        ) {
+            self.output_items[output_index] =
+                OutputItemAccumulator::Message(MessageAccumulator::default());
+        }
+        let OutputItemAccumulator::Message(message) = &mut self.output_items[output_index] else {
+            unreachable!("message slot was just initialized");
+        };
+        message
+    }
+
+    pub fn append_message_delta_at(&mut self, output_index: usize, delta: &str) {
+        self.message_at_mut(output_index).text.push_str(delta);
+        self.refresh_text();
+    }
+
+    pub fn set_message_text_at(&mut self, output_index: usize, text: &str) {
+        self.message_at_mut(output_index).text = text.to_owned();
+        self.refresh_text();
+    }
+
+    pub fn set_message_phase_at(
+        &mut self,
+        output_index: usize,
+        phase: Option<tau_proto::MessagePhase>,
+    ) {
+        if let Some(phase) = phase {
+            self.message_at_mut(output_index).phase = Some(phase);
+        }
+    }
+
+    pub fn append_chat_message_delta(&mut self, delta: &str) {
+        let output_index = match self.chat_message_item_index {
+            Some(output_index) => output_index,
+            None => {
+                let output_index = self.output_items.len();
+                self.output_items
+                    .push(OutputItemAccumulator::Message(MessageAccumulator::default()));
+                self.chat_message_item_index = Some(output_index);
+                output_index
+            }
+        };
+        self.append_message_delta_at(output_index, delta);
+    }
+
+    pub fn tool_call_at_mut(
+        &mut self,
+        output_index: usize,
+        tool_type: tau_proto::ToolType,
+    ) -> &mut ToolCallAccumulator {
+        self.ensure_output_len(output_index);
+        if !matches!(
+            self.output_items[output_index],
+            OutputItemAccumulator::ToolCall(_)
+        ) {
+            self.output_items[output_index] =
+                OutputItemAccumulator::ToolCall(ToolCallAccumulator::new(tool_type));
+        }
+        let OutputItemAccumulator::ToolCall(call) = &mut self.output_items[output_index] else {
+            unreachable!("tool-call slot was just initialized");
+        };
+        call.tool_type = tool_type;
+        call
+    }
+
+    pub fn chat_tool_call_at_mut(
+        &mut self,
+        tool_call_index: usize,
+        tool_type: tau_proto::ToolType,
+    ) -> &mut ToolCallAccumulator {
+        while self.chat_tool_item_indices.len() <= tool_call_index {
+            self.chat_tool_item_indices.push(None);
+        }
+        let output_index = match self.chat_tool_item_indices[tool_call_index] {
+            Some(output_index) => output_index,
+            None => {
+                let output_index = self.output_items.len();
+                self.output_items
+                    .push(OutputItemAccumulator::ToolCall(ToolCallAccumulator::new(
+                        tool_type,
+                    )));
+                self.chat_tool_item_indices[tool_call_index] = Some(output_index);
+                output_index
+            }
+        };
+        self.tool_call_at_mut(output_index, tool_type)
+    }
+
+    pub fn set_reasoning_item_json_at(&mut self, output_index: usize, item: &str) {
+        if let Some(item) = opaque_item_from_json(item) {
+            self.ensure_output_len(output_index);
+            self.output_items[output_index] = OutputItemAccumulator::Reasoning(item);
+        }
+    }
+
+    fn refresh_text(&mut self) {
+        self.text.clear();
+        for item in &self.output_items {
+            if let OutputItemAccumulator::Message(message) = item {
+                self.text.push_str(&message.text);
+            }
+        }
+    }
+
+    /// Returns the final assistant output items in provider item order.
+    ///
+    /// Tool-call accumulators with an empty `name` are dropped as stream
+    /// artifacts. The streaming paths eagerly create slots from
+    /// argument-delta events so the index stays addressable; if the
+    /// matching name-carrying event never arrives, shipping it
+    /// downstream would surface as an `invalid_tool` rejection in the
+    /// harness even though the model never committed a valid call.
+    pub fn into_output_items(self) -> Vec<ContextItem> {
+        let mut items = Vec::new();
+
+        for item in self.output_items {
+            match item {
+                OutputItemAccumulator::Empty => {}
+                OutputItemAccumulator::Message(message) => {
+                    if !message.text.is_empty() {
+                        items.push(assistant_text_item_with_phase(message.text, message.phase));
+                    }
+                }
+                OutputItemAccumulator::ToolCall(call) => {
+                    if let Some(item) = call.into_context_item() {
+                        items.push(item);
+                    }
+                }
+                OutputItemAccumulator::Reasoning(item) => items.push(ContextItem::Reasoning(item)),
+                OutputItemAccumulator::UnknownProviderItem(item) => {
+                    items.push(ContextItem::UnknownProviderItem(item));
+                }
+            }
+        }
+
+        if items.is_empty() && !self.text.is_empty() {
+            items.push(assistant_text_item(self.text));
+        }
+
+        for item in self.compacted_input_items {
+            if let Some(item) = opaque_item_from_json(&item) {
+                items.push(ContextItem::Compaction(item));
+            }
+        }
+
+        items
+    }
+
+    pub fn usage(&self) -> Option<AgentTokenUsage> {
+        let input = self.input_tokens.unwrap_or(0);
+        let cached = self.cached_tokens.unwrap_or(0);
+        let output = self.output_tokens.unwrap_or(0);
+        if input == 0 && cached == 0 && output == 0 {
+            None
+        } else {
+            Some(AgentTokenUsage {
+                model: None,
+                prompt_sent_tokens: input,
+                prompt_cached_tokens: cached,
+                response_received_tokens: output,
+                stats: Default::default(),
+            })
+        }
+    }
+}
+
+pub fn assistant_text_item(text: impl Into<String>) -> ContextItem {
+    assistant_text_item_with_phase(text.into(), None)
+}
+
+pub fn assistant_text_item_with_phase(
+    text: impl Into<String>,
+    phase: Option<tau_proto::MessagePhase>,
+) -> ContextItem {
+    ContextItem::Message(MessageItem {
+        role: ContextRole::Assistant,
+        content: vec![ContentPart::Text { text: text.into() }],
+        phase,
+    })
+}
+
+fn opaque_item_from_json(item: &str) -> Option<OpaqueProviderItem> {
+    let value: serde_json::Value = serde_json::from_str(item).ok()?;
+    Some(OpaqueProviderItem(json_to_cbor(&value)))
 }
 
 /// Maps `Effort` to the wire string the OpenAI Responses /

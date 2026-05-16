@@ -247,9 +247,11 @@ a prompt outright.
 ### `std-notifications` — idle and turn notifications
 
 Plays a sound on prompt submit and on the final response of a turn. After
-`idle_seconds` of inactivity following a final response (default 60s) it asks
-the agent for a one-sentence summary and emits a desktop notification — useful
-when a long task finishes while you're in another window.
+`idle_seconds` of inactivity following a final response (default 60s) it emits
+a desktop notification with a static "Waiting for user input" body — useful
+when a long task finishes while you're in another window. Set
+`config.idle_agent_summary: true` to restore the old behavior that asks the
+agent for a one-sentence idle summary before notifying.
 
 ### `core-delegate` — sub-task delegation
 

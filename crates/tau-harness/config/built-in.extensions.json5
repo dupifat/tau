@@ -36,7 +36,7 @@
         suffix: ["ext", "ext-std-notifications"],
         role: "tool",
         enable: true,
-        config: { idle_seconds: 60 },
+        config: { idle_seconds: 60, idle_agent_summary: false },
     },
     {
         name: "std-websearch-exa",

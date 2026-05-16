@@ -8,16 +8,16 @@
 //! - final `agent.response_finished` (only when `tool_calls` is empty) →
 //!   `user-notification = protoss-upgrade-complete`
 //! - After `idle_seconds` (default 60) of inactivity following a final response
-//!   → an `ExtAgentQuery` side-prompt to the agent asking for a one-sentence
-//!   summary; when the matching `ExtAgentQueryResult` arrives (or a 10s
-//!   fallback timer expires) → `user-text-notification = {"urgency": "normal",
-//!   "title": "Agent idle: <host>:<cwd>", "body": "<summary or fallback>",
-//!   "app_name": "tau"}`. `app_name` follows the schema
-//!   `user-text-notification.sh` emits so downstream consumers can use it as
-//!   the desktop notification's source-app indicator instead of us baking it
-//!   into the title. The idle timer resets on every user-originated
-//!   `ui.prompt_submitted` / `agent.prompt_submitted`. Tunable via the
-//!   extension's `config.idle_seconds` field in `harness.json5`.
+//!   → `user-text-notification = {"urgency": "normal", "title": "Agent idle:
+//!   <host>:<cwd>", "body": "Waiting for user input", "app_name": "tau"}`. If
+//!   `config.idle_agent_summary` is true, the extension first sends an
+//!   `ExtAgentQuery` side-prompt asking for a one-sentence summary and uses the
+//!   result as the body, falling back to the static text after 10s. `app_name`
+//!   follows the schema `user-text-notification.sh` emits so downstream
+//!   consumers can use it as the desktop notification's source-app indicator
+//!   instead of us baking it into the title. The idle timer resets on every
+//!   user-originated `ui.prompt_submitted` / `agent.prompt_submitted`. Tunable
+//!   via the extension's `config.idle_seconds` field in `harness.json5`.
 //!
 //! The downstream tooling (typically a terminal multiplexer status
 //! line or a `user-notification.sh` consumer wired to a sound file)
@@ -125,8 +125,9 @@ fn build_title() -> String {
 
 /// Phase of the idle-watch state machine. `WaitingIdle` is the base
 /// "agent finished, count down to nudge" state. When it elapses we
-/// send a side-query to the agent for a one-sentence summary and
-/// transition to `WaitingSummary`; whichever of (result, timeout)
+/// either emit the static idle text immediately, or — if
+/// `idle_agent_summary` is enabled — send a side-query to the agent
+/// and transition to `WaitingSummary`; whichever of (result, timeout)
 /// arrives first decides what body the user sees.
 enum IdleState {
     WaitingIdle { deadline: Instant },
@@ -151,6 +152,11 @@ struct ExtConfig {
     /// wire format is integer seconds; for sub-second test windows
     /// the test entry points take a `Duration` directly.
     idle_seconds: Option<u64>,
+    /// Whether an idle notification should ask the agent for a
+    /// one-sentence conversation summary before notifying. Disabled by
+    /// default to avoid extra agent turns and context replay while the
+    /// user is idle.
+    idle_agent_summary: bool,
     /// Optional argv to invoke whenever the extension would normally
     /// emit the OSC text notification (idle-summary or fallback). The
     /// command runs *in addition to* the OSC, never instead of it,
@@ -233,7 +239,7 @@ where
     W: Write,
 {
     let mut writer = FrameWriter::new(BufWriter::new(writer));
-    // Live config — only `idle_command` actually rides on it past
+    // Live config — fields other than `idle_seconds` ride on it past
     // the parse: `idle_seconds` is reflected into the local
     // `idle_duration` Duration so we keep sub-second test precision
     // (the wire schema is integer seconds, which is fine for users
@@ -329,6 +335,7 @@ where
                                     target: LOG_TARGET,
                                     idle_seconds = idle_duration.as_secs(),
                                     has_idle_command = cfg.idle_command.is_some(),
+                                    idle_agent_summary = cfg.idle_agent_summary,
                                     "applied config",
                                 );
                                 config = cfg;
@@ -491,27 +498,44 @@ where
             }
             Err(mpsc::RecvTimeoutError::Timeout) => match idle.take() {
                 Some(IdleState::WaitingIdle { .. }) => {
-                    let query_id = format!("idle-{next_query_id}");
-                    next_query_id += 1;
-                    tracing::info!(
-                        target: LOG_TARGET,
-                        query_id = %query_id,
-                        "idle deadline elapsed, requesting agent summary",
-                    );
-                    writer.write_frame(&Frame::Event(Event::ExtAgentQuery(ExtAgentQuery {
-                        query_id: query_id.clone(),
-                        instruction: SUMMARY_INSTRUCTION.to_owned(),
-                        // Notifications doesn't implement a tool —
-                        // these fields are only meaningful for the
-                        // `delegate` flow.
-                        tool_call_id: None,
-                        task_name: None,
-                    })))?;
-                    writer.flush()?;
-                    idle = Some(IdleState::WaitingSummary {
-                        query_id,
-                        deadline: Instant::now() + summary_timeout,
-                    });
+                    if config.idle_agent_summary {
+                        let query_id = format!("idle-{next_query_id}");
+                        next_query_id += 1;
+                        tracing::info!(
+                            target: LOG_TARGET,
+                            query_id = %query_id,
+                            "idle deadline elapsed, requesting agent summary",
+                        );
+                        writer.write_frame(&Frame::Event(Event::ExtAgentQuery(ExtAgentQuery {
+                            query_id: query_id.clone(),
+                            instruction: SUMMARY_INSTRUCTION.to_owned(),
+                            // Notifications doesn't implement a tool —
+                            // these fields are only meaningful for the
+                            // `delegate` flow.
+                            tool_call_id: None,
+                            task_name: None,
+                        })))?;
+                        writer.flush()?;
+                        idle = Some(IdleState::WaitingSummary {
+                            query_id,
+                            deadline: Instant::now() + summary_timeout,
+                        });
+                    } else {
+                        tracing::info!(
+                            target: LOG_TARGET,
+                            "idle deadline elapsed, emitting static text notification",
+                        );
+                        let title = build_title();
+                        writer.write_frame(&Frame::Event(summary_text_event_with(
+                            &title,
+                            FALLBACK_BODY,
+                        )))?;
+                        writer.flush()?;
+                        spawn_idle_command(&config, &title, FALLBACK_BODY);
+                        if input_closed {
+                            break;
+                        }
+                    }
                 }
                 Some(IdleState::WaitingSummary { .. }) => {
                     tracing::info!(

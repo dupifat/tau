@@ -37,7 +37,11 @@ the sounds or perturb the idle state machine.
 ## Idle text notification
 
 After `idle_seconds` (default 60) of inactivity following a final
-agent response:
+agent response, the extension fires the `user-text-notification`
+user-var with the static "Waiting for user input" body.
+
+If `idle_agent_summary` is set to `true`, the extension uses the old
+summary path instead:
 
 1. The extension sends an `extension.agent_query` to the harness
    asking the agent for a one-sentence summary of the conversation
@@ -61,9 +65,10 @@ The idle deadline resets on:
   the UI; the deadline jumps back by `idle_seconds` so the
   notification doesn't fire mid-sentence while the user is
   composing. Only applies in the `WaitingIdle` state; an
-  in-flight side-query summary (`WaitingSummary`) is left alone
-  because we don't currently have a way to cancel the agent's
-  in-flight prompt without billing for it.
+  in-flight side-query summary (`WaitingSummary`, only possible when
+  `idle_agent_summary` is enabled) is left alone because we don't
+  currently have a way to cancel the agent's in-flight prompt without
+  billing for it.
 
 ## Text-notification payload schema
 
@@ -100,6 +105,11 @@ surface typos to the user.
         // Idle window (seconds) before the extension nudges the
         // user. Default: 60.
         idle_seconds: 60,
+
+        // Ask the agent for a one-sentence idle summary before
+        // notifying. Default: false; the default notification body is
+        // the static "Waiting for user input" text.
+        idle_agent_summary: false,
 
         // Optional argv to invoke when the text notification
         // would normally fire (idle summary or fallback). The

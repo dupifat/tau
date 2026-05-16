@@ -120,6 +120,13 @@ fn configure_frame(config: tau_proto::CborValue) -> Frame {
     Frame::Message(Message::Configure(tau_proto::Configure { config }))
 }
 
+fn immediate_idle_agent_summary_config_frame() -> Frame {
+    configure_frame(tau_proto::json_to_cbor(&serde_json::json!({
+        "idle_seconds": 0,
+        "idle_agent_summary": true,
+    })))
+}
+
 /// Test marker for "we're past the lifecycle handshake". The hello /
 /// subscribe / ready messages are point-to-point `Frame::Message`s
 /// (filtered out by `EventReader`), so reading from `EventReader`
@@ -267,13 +274,11 @@ fn mid_turn_finish_with_tool_calls_does_not_emit_end_sound() {
 /// After AgentResponseFinished we should see the end-sound OSC
 /// and then, after the configured idle window expires with no
 /// further input, the text-notification OSC carrying a JSON
-/// payload that mirrors `user-text-notification.sh`.
-/// Idle window elapsing must trigger an `ExtAgentQuery` to the
-/// agent for a one-sentence summary. When no result arrives
-/// within the summary timeout, the extension falls back to the
-/// static [`FALLBACK_BODY`] so the user still gets nudged.
+/// payload that mirrors `user-text-notification.sh`. By default
+/// the extension does not ask the agent for a summary; it emits the
+/// static [`FALLBACK_BODY`] immediately when the idle window elapses.
 #[test]
-fn idle_timeout_requests_summary_then_falls_back() {
+fn idle_timeout_defaults_to_static_notification() {
     let mut input = Vec::new();
     let mut writer = EventWriter::new(&mut input);
     writer
@@ -318,20 +323,8 @@ fn idle_timeout_requests_summary_then_falls_back() {
     assert_eq!(osc.name, SOUND_VAR_NAME);
     assert_eq!(osc.value, VALUE_AGENT_END);
 
-    // Then, after the (short) idle window, the side-query for a
-    // summary.
-    let query = reader.read_event().expect("read").expect("ext-query event");
-    let Event::ExtAgentQuery(query) = query else {
-        panic!("expected ExtAgentQuery, got {query:?}");
-    };
-    assert!(
-        !query.query_id.is_empty(),
-        "extension must mint a non-empty query_id",
-    );
-    assert!(query.instruction.contains("summarize") || query.instruction.contains("Summarize"));
-
-    // Then, after the (short) summary timeout with no response,
-    // the static fallback text notification.
+    // Then, after the (short) idle window, the static fallback text
+    // notification. There must be no intervening ExtAgentQuery.
     let fallback = reader.read_event().expect("read").expect("fallback event");
     let Event::Osc1337SetUserVar(osc) = fallback else {
         panic!("expected fallback OSC, got {fallback:?}");
@@ -350,6 +343,79 @@ fn idle_timeout_requests_summary_then_falls_back() {
     );
     assert_eq!(payload["body"], FALLBACK_BODY);
     assert_eq!(payload["app_name"], NOTIFY_APP_NAME);
+}
+
+/// When `idle_agent_summary` is enabled, idle window elapsing must
+/// trigger an `ExtAgentQuery` to the agent for a one-sentence summary.
+/// When no result arrives within the summary timeout, the extension
+/// falls back to the static [`FALLBACK_BODY`] so the user still gets
+/// nudged.
+#[test]
+fn idle_timeout_requests_summary_when_enabled_then_falls_back() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&immediate_idle_agent_summary_config_frame())
+        .expect("write");
+    writer
+        .write_event(&Event::AgentResponseFinished(AgentResponseFinished {
+            session_prompt_id: "sp-0".into(),
+            text: Some("done".into()),
+            tool_calls: Vec::new(),
+            input_tokens: None,
+            cached_tokens: None,
+            output_tokens: None,
+            thinking: None,
+            token_usage: None,
+            originator: tau_proto::PromptOriginator::User,
+
+            backend: None,
+            response_id: None,
+            phase: None,
+            reasoning_items: Vec::new(),
+            compacted_input_items: Vec::new(),
+            ws_pool_delta: None,
+        }))
+        .expect("write");
+    writer.flush().expect("flush");
+
+    let mut output = Vec::new();
+    run_with_idle_and_summary_timeout(
+        Cursor::new(input),
+        &mut output,
+        Duration::from_millis(50),
+        Duration::from_millis(50),
+    )
+    .expect("run");
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    drain_lifecycle(&mut reader);
+
+    let end = reader.read_event().expect("read").expect("end event");
+    let Event::Osc1337SetUserVar(osc) = end else {
+        panic!("expected end sound OSC");
+    };
+    assert_eq!(osc.name, SOUND_VAR_NAME);
+    assert_eq!(osc.value, VALUE_AGENT_END);
+
+    let query = reader.read_event().expect("read").expect("ext-query event");
+    let Event::ExtAgentQuery(query) = query else {
+        panic!("expected ExtAgentQuery, got {query:?}");
+    };
+    assert!(
+        !query.query_id.is_empty(),
+        "extension must mint a non-empty query_id",
+    );
+    assert!(query.instruction.contains("summarize") || query.instruction.contains("Summarize"));
+
+    let fallback = reader.read_event().expect("read").expect("fallback event");
+    let Event::Osc1337SetUserVar(osc) = fallback else {
+        panic!("expected fallback OSC, got {fallback:?}");
+    };
+    assert_eq!(osc.name, TEXT_VAR_NAME);
+    let payload: serde_json::Value =
+        serde_json::from_str(&osc.value).expect("fallback payload is JSON");
+    assert_eq!(payload["body"], FALLBACK_BODY);
 }
 
 /// When a matching `ExtAgentQueryResult` arrives before the
@@ -384,6 +450,9 @@ fn summary_result_populates_notification_body() {
 
     drain_lifecycle(&mut reader);
 
+    writer
+        .write_frame(&immediate_idle_agent_summary_config_frame())
+        .expect("write");
     writer
         .write_event(&Event::AgentResponseFinished(AgentResponseFinished {
             session_prompt_id: "sp-0".into(),
@@ -500,7 +569,7 @@ fn prompt_draft_extends_idle_deadline() {
 
     // Send several drafts ~100ms apart. Each one resets the
     // 200ms idle deadline; if the extension honors them
-    // correctly no `ExtAgentQuery` should fire during this
+    // correctly no text notification should fire during this
     // window.
     for i in 0..5 {
         writer
@@ -514,16 +583,18 @@ fn prompt_draft_extends_idle_deadline() {
     }
 
     // Stop typing. The next event the extension emits must be
-    // the side-query — and crucially, the elapsed time before
-    // it fires must be >= the original 200ms (because we kept
-    // resetting the deadline) plus the final ~200ms wait.
+    // the static text notification — and crucially, the elapsed
+    // time before it fires must be at least the original 200ms
+    // (because we kept resetting the deadline) plus the final
+    // ~200ms wait.
     let started = Instant::now();
-    let query = reader.read_event().expect("read").expect("query");
+    let text = reader.read_event().expect("read").expect("text");
     let elapsed = started.elapsed();
-    let Event::ExtAgentQuery(_) = query else {
-        panic!("expected ExtAgentQuery, got {query:?}");
+    let Event::Osc1337SetUserVar(osc) = text else {
+        panic!("expected text notification OSC, got {text:?}");
     };
-    // Without the deadline reset, the query would have fired
+    assert_eq!(osc.name, TEXT_VAR_NAME);
+    // Without the deadline reset, the notification would have fired
     // at idle_duration (200ms) into the typing window — i.e.
     // ~300ms before we started timing — so the read here would
     // return ~immediately. With the reset, the most recent
@@ -532,8 +603,8 @@ fn prompt_draft_extends_idle_deadline() {
     // 30ms is a deliberately loose lower bound so CI jitter
     // doesn't flake the test.
     assert!(
-        elapsed >= Duration::from_millis(30),
-        "ExtAgentQuery fired too soon ({elapsed:?}); idle deadline wasn't reset",
+        Duration::from_millis(30) <= elapsed,
+        "notification fired too soon ({elapsed:?}); idle deadline wasn't reset",
     );
 
     // Disconnect to let the extension exit.
@@ -573,6 +644,9 @@ fn prompt_draft_during_waiting_summary_does_not_cancel() {
 
     drain_lifecycle(&mut reader);
 
+    writer
+        .write_frame(&immediate_idle_agent_summary_config_frame())
+        .expect("write");
     writer
         .write_event(&Event::AgentResponseFinished(AgentResponseFinished {
             session_prompt_id: "sp-0".into(),
@@ -708,11 +782,10 @@ fn idle_command_runs_with_title_body_and_env() {
         .expect("write");
     writer.flush().expect("flush");
 
-    // Drain: end-sound, ExtAgentQuery, fallback OSC. We don't
-    // care about the exact contents — what we want is the
-    // command to run as a side effect.
+    // Drain: end-sound, static fallback OSC. We don't care about
+    // the exact contents — what we want is the command to run as a
+    // side effect.
     let _ = reader.read_event().expect("read").expect("end");
-    let _ = reader.read_event().expect("read").expect("query");
     let _ = reader.read_event().expect("read").expect("fallback");
 
     // The command runs in a detached thread; poll the output

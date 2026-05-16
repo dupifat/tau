@@ -43,7 +43,7 @@ fn builtins() -> Vec<BuiltinExtension> {
             "ext-std-notifications",
             "tool",
             true,
-            serde_json::json!({ "idle_seconds": 60 }),
+            serde_json::json!({ "idle_seconds": 60, "idle_agent_summary": false }),
         ),
     ]
 }

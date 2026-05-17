@@ -13,7 +13,7 @@ pub mod resolve;
 #[cfg(test)]
 mod tests;
 
-use std::io;
+use std::io::{self, Write as _};
 use std::sync::{Arc, Mutex};
 
 pub use completion::{ArgCompleter, CommandName, CompletionData, CompletionItem, SlashCommand};
@@ -63,6 +63,10 @@ pub struct HighTerm {
     /// open. Reused across opens; content swapped to empty when the
     /// menu is hidden.
     menu_block_id: Option<BlockId>,
+    /// Submitted prompt history used by prompt-history search. Seeded
+    /// from persistent history at startup and extended with submitted
+    /// prompts from this process.
+    prompt_history: Vec<String>,
 }
 
 impl HighTerm {
@@ -97,8 +101,9 @@ impl HighTerm {
         bindings: impl IntoIterator<Item = (String, String)>,
         input_history: impl IntoIterator<Item = String>,
     ) -> io::Result<(Self, TermHandle, CompletionData)> {
+        let input_history: Vec<String> = input_history.into_iter().collect();
         let (mut term, handle) = tau_cli_term_raw::Term::new(left_prompt, cursor_shape)?;
-        term.seed_input_history(input_history);
+        term.seed_input_history(input_history.clone());
         term.set_bindings(bindings);
         let handle_clone = handle.clone();
         let data = CompletionData::new();
@@ -113,6 +118,10 @@ impl HighTerm {
                 editor_context: Arc::new(Mutex::new(EditorContext::default())),
                 external_editor,
                 menu_block_id: None,
+                prompt_history: input_history
+                    .into_iter()
+                    .filter(|entry| !entry.is_empty())
+                    .collect(),
             },
             handle_clone,
             data_clone,
@@ -139,6 +148,7 @@ impl HighTerm {
                 editor_context: Arc::new(Mutex::new(EditorContext::default())),
                 external_editor: None,
                 menu_block_id: None,
+                prompt_history: Vec::new(),
             },
             data_clone,
         )
@@ -199,6 +209,9 @@ impl HighTerm {
                 RawEvent::BackTab => return Ok(Event::BackTab),
 
                 RawEvent::Line(line) => {
+                    if !line.is_empty() {
+                        self.prompt_history.push(line.clone());
+                    }
                     self.sync_menu_block();
                     self.handle.redraw();
                     return Ok(Event::Line(line));
@@ -291,11 +304,16 @@ impl HighTerm {
             &self.handle,
             self.editor_context.clone(),
             self.external_editor.as_deref(),
+            &self.prompt_history,
             action,
         ) {
             Ok(Some(PromptShellResult::Replace(new_text))) => {
                 let cursor = new_text.len();
                 self.handle.set_buffer(new_text, cursor);
+            }
+            Ok(Some(PromptShellResult::ReplacePreservingUndo(new_text))) => {
+                let cursor = new_text.len();
+                self.handle.set_buffer_preserving_undo(new_text, cursor);
             }
             Ok(Some(PromptShellResult::Insert(text))) => {
                 let mut buffer = self.handle.get_buffer();
@@ -348,6 +366,7 @@ struct PromptShellCommand {
 enum PromptShellAction {
     Insert(PromptShellCommand),
     Edit(PromptShellCommand),
+    HistorySearch(PromptShellCommand),
     FastToggle,
     RoleCycle,
     PromptNext,
@@ -366,6 +385,7 @@ pub struct EditorContext {
 enum PromptShellResult {
     Insert(String),
     Replace(String),
+    ReplacePreservingUndo(String),
     FastToggle,
     RoleCycle,
     History(isize),
@@ -397,6 +417,7 @@ impl PromptShellAction {
         match name {
             "shell-prompt-insert" => Some(Self::Insert(command)),
             "shell-prompt-edit" => Some(Self::Edit(command)),
+            "prompt-history-search" => Some(Self::HistorySearch(command)),
             _ => None,
         }
     }
@@ -407,6 +428,7 @@ fn run_prompt_shell_action(
     handle: &TermHandle,
     editor_context: Arc<Mutex<EditorContext>>,
     external_editor: Option<&str>,
+    prompt_history: &[String],
     action: PromptShellAction,
 ) -> Result<Option<PromptShellResult>, String> {
     let shell = match &action {
@@ -416,7 +438,9 @@ fn run_prompt_shell_action(
         PromptShellAction::PromptRedo => return Ok(Some(PromptShellResult::Redo)),
         PromptShellAction::FastToggle => return Ok(Some(PromptShellResult::FastToggle)),
         PromptShellAction::RoleCycle => return Ok(Some(PromptShellResult::RoleCycle)),
-        PromptShellAction::Insert(shell) | PromptShellAction::Edit(shell) => shell,
+        PromptShellAction::Insert(shell)
+        | PromptShellAction::Edit(shell)
+        | PromptShellAction::HistorySearch(shell) => shell,
     };
     let current = trim_prompt_newlines(&handle.get_buffer()).to_owned();
     let cursor = handle.get_cursor();
@@ -425,9 +449,9 @@ fn run_prompt_shell_action(
         .suffix(".tau.md")
         .tempfile()
         .map_err(|e| format!("could not create tempfile: {e}"))?;
-    let file_text = match action {
+    let file_text = match &action {
         PromptShellAction::Edit(_) => append_prompt_trailer(&current, &editor_context),
-        PromptShellAction::Insert(_) => current.clone(),
+        PromptShellAction::Insert(_) | PromptShellAction::HistorySearch(_) => current.clone(),
         PromptShellAction::FastToggle
         | PromptShellAction::RoleCycle
         | PromptShellAction::PromptNext
@@ -437,6 +461,18 @@ fn run_prompt_shell_action(
     };
     std::fs::write(tmp.path(), file_text.as_bytes())
         .map_err(|e| format!("could not write tempfile: {e}"))?;
+
+    let history_picker_input = match &action {
+        PromptShellAction::HistorySearch(_) => {
+            let rows = prompt_history_search_rows(prompt_history);
+            if rows.is_empty() {
+                return Ok(None);
+            }
+            term.record_prompt_undo();
+            Some(rows)
+        }
+        _ => None,
+    };
 
     let command = shell.command.as_str();
     tracing::trace!(
@@ -461,15 +497,36 @@ fn run_prompt_shell_action(
     }
     let _guard = ResumeGuard(term);
 
-    let output = std::process::Command::new("sh")
+    let mut command_builder = std::process::Command::new("sh");
+    command_builder
         .arg("-c")
         .arg(command)
         .env("TAU_PROMPT_PATH", tmp.path())
         .env("TAU_PROMPT_COLUMN", (cursor + 1).to_string())
         .env("TAU_PROMPT_ROW", "1")
-        .env("TAU_EDITOR", external_editor.unwrap_or(""))
-        .output()
+        .env("TAU_EDITOR", external_editor.unwrap_or(""));
+    command_builder.stdin(if history_picker_input.is_some() {
+        std::process::Stdio::piped()
+    } else {
+        std::process::Stdio::null()
+    });
+    let mut child = command_builder
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| format!("could not spawn shell: {e}"))?;
+    if let Some(input) = history_picker_input.as_deref()
+        && let Some(mut stdin) = child.stdin.take()
+    {
+        match stdin.write_all(input.as_bytes()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}
+            Err(error) => return Err(format!("could not write prompt history to shell: {error}")),
+        }
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("could not wait for shell: {e}"))?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -492,6 +549,27 @@ fn run_prompt_shell_action(
             let new_text = trim_prompt_newlines(new_text).to_owned();
             Ok(Some(PromptShellResult::Replace(new_text)))
         }
+        PromptShellAction::HistorySearch(_) => {
+            let selected = String::from_utf8(output.stdout)
+                .map_err(|e| format!("command output was not utf-8: {e}"))?;
+            let selected = if shell.trim {
+                selected.trim().to_owned()
+            } else {
+                selected
+            };
+            let selected_index = selected.split('\t').next().unwrap_or("").trim();
+            if selected_index.is_empty() {
+                return Ok(None);
+            }
+            let index = selected_index
+                .parse::<usize>()
+                .map_err(|e| format!("history selection was not an index: {e}"))?;
+            let text = prompt_history
+                .get(index)
+                .ok_or_else(|| format!("history selection index {index} is out of range"))?
+                .clone();
+            Ok(Some(PromptShellResult::ReplacePreservingUndo(text)))
+        }
         PromptShellAction::FastToggle
         | PromptShellAction::RoleCycle
         | PromptShellAction::PromptNext
@@ -499,6 +577,24 @@ fn run_prompt_shell_action(
         | PromptShellAction::PromptUndo
         | PromptShellAction::PromptRedo => unreachable!(),
     }
+}
+
+fn prompt_history_search_rows(prompt_history: &[String]) -> String {
+    let mut rows = String::new();
+    for (index, prompt) in prompt_history.iter().enumerate().rev() {
+        if prompt.is_empty() {
+            continue;
+        }
+        rows.push_str(&index.to_string());
+        rows.push('\t');
+        rows.push_str(&prompt_history_summary(prompt));
+        rows.push('\n');
+    }
+    rows
+}
+
+fn prompt_history_summary(prompt: &str) -> String {
+    prompt.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn append_prompt_trailer(current: &str, editor_context: &Arc<Mutex<EditorContext>>) -> String {

@@ -324,6 +324,9 @@ Supported actions:
   `{ action: "fast-toggle" }`.
 - `role-cycle`: cycle to the next available agent role directly. For example:
   `{ action: "role-cycle" }`.
+- `prompt-history-search`: feed indexed prompt-history rows to a picker command,
+  then replace the prompt with the selected original prompt. The draft active
+  when the picker opens is saved for prompt undo.
 
 Command environment:
 
@@ -343,6 +346,11 @@ bind: {
   },
   "C-s": { action: "role-cycle" },
   "C-r": {
+    action: "prompt-history-search",
+    command: "fzf --height=100% --delimiter='\\t' --with-nth=2.. | cut -f1",
+    trim: true,
+  },
+  "C-t": {
     action: "shell-prompt-insert",
     command: "RG_PREFIX='rg --line-number --column --no-heading --color=always --smart-case'; fzf --height=100% --ansi --disabled --bind \"change:reload:$RG_PREFIX {q} || true\" --delimiter : --preview 'bat --color=always --style=numbers --highlight-line {2} -- {1} 2>/dev/null || awk -v line={2} '\\''line - 4 <= NR && NR <= line + 4 { printf \"%6d  %s\\n\", NR, $0 }'\\'' -- {1}' --preview-window '+{2}/2' | cut -d: -f1",
     trim: true,
@@ -411,6 +419,11 @@ bind: {
     trim: true,
   },
   "C-r": {
+    action: "prompt-history-search",
+    command: "fzf --height=100% --delimiter='\\t' --with-nth=2.. | cut -f1",
+    trim: true,
+  },
+  "C-t": {
     action: "shell-prompt-insert",
     command: "RG_PREFIX='rg --line-number --column --no-heading --color=always --smart-case'; fzf --height=100% --ansi --disabled --bind \"change:reload:$RG_PREFIX {q} || true\" --delimiter : --preview 'bat --color=always --style=numbers --highlight-line {2} -- {1} 2>/dev/null || awk -v line={2} '\\''line - 4 <= NR && NR <= line + 4 { printf \"%6d  %s\\n\", NR, $0 }'\\'' -- {1}' --preview-window '+{2}/2' | cut -d: -f1",
     trim: true,
@@ -423,9 +436,12 @@ bind: {
 },
 ```
 
-`C-r` starts with an empty result list; type a query to search file contents
-with `rg`, preview the matching context, and insert the selected file path.
-`C-y` opens a jj change picker when inside a jj repository, falls back to git
+`C-r` searches prompt history (newest first) and replaces the current draft
+with the selected original prompt; `C-z` restores the draft that was active
+before the picker opened. `C-t` starts with an empty result list; type a query
+to search file contents with `rg`, preview the matching context, and insert the
+selected file path. `C-y` opens a jj change picker when inside a jj repository,
+falls back to git
 commits in git repositories, and inserts the selected change or commit id.
 Replace `rg --files | fzf`, the content-search command, or the commit picker
 with `git ls-files`, a custom script, or whatever fits your workflow.

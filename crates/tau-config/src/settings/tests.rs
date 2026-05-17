@@ -46,6 +46,7 @@ fn cli_settings_user_binding_keeps_built_in_chords() {
     assert_eq!(cf.command.as_deref(), Some("pick"));
     // ...and other built-in chords survive the merge.
     assert!(s.bind.contains_key("C-r"));
+    assert!(s.bind.contains_key("C-t"));
     assert!(s.bind.contains_key("C-o"));
 }
 

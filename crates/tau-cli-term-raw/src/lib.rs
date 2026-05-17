@@ -846,6 +846,23 @@ impl TermHandle {
         st.write_cursor(new_cursor);
     }
 
+    /// Replaces the input buffer and cursor position without clearing
+    /// prompt undo history.
+    ///
+    /// Use this after the caller has explicitly recorded the current
+    /// prompt as an undo snapshot before launching an external picker.
+    /// Active history navigation and completion are still closed because
+    /// the replacement becomes the new editable draft.
+    pub fn set_buffer_preserving_undo(&self, text: String, cursor: usize) {
+        let mut st = self.lock();
+        let new_cursor = cursor.min(text.len());
+        st.buffer = text;
+        st.history_nav = None;
+        st.completion = None;
+        st.current_redo.clear();
+        st.write_cursor(new_cursor);
+    }
+
     /// Snapshot of the open completion menu, if any. Returns `None`
     /// when no menu is showing.
     pub fn completion_state(&self) -> Option<CompletionView> {
@@ -1284,6 +1301,17 @@ impl Term {
         Ok(())
     }
 
+    /// Records the current prompt as an undo snapshot without changing
+    /// the visible buffer.
+    ///
+    /// External pickers call this before releasing the terminal so that
+    /// a later undo restores the draft that was on screen when the
+    /// picker opened.
+    pub fn record_prompt_undo(&self) {
+        let mut st = self.handle.lock();
+        st.record_undo();
+    }
+
     /// Programmatically triggers a history step (the same operation
     /// `Up`/`Down` and `Ctrl-K`/`Ctrl-J` perform). Closes any open
     /// completion menu first so callers don't have to coordinate with
@@ -1294,12 +1322,14 @@ impl Term {
         st.step_history(delta);
     }
 
+    /// Programmatically triggers prompt undo.
     pub fn trigger_undo(&self) -> bool {
         let mut st = self.handle.lock();
         st.completion = None;
         st.undo()
     }
 
+    /// Programmatically triggers prompt redo.
     pub fn trigger_redo(&self) -> bool {
         let mut st = self.handle.lock();
         st.completion = None;

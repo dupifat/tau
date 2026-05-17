@@ -8,7 +8,8 @@ Keep this document in sync with `crates/tau-config/config/built-in.cli-bindings.
 | Key | Action | Description |
 | --- | --- | --- |
 | `C-f` | `shell-prompt-insert` | Pick a file with `fzf` and insert it at the cursor. |
-| `C-r` | `shell-prompt-insert` | Search files with ripgrep through `fzf` and insert the selected path. |
+| `C-r` | `prompt-history-search` | Search past prompts with `fzf` and replace the current prompt with the selected prompt. |
+| `C-t` | `shell-prompt-insert` | Search files with ripgrep through `fzf` and insert the selected path. |
 | `C-s` | `role-cycle` | Cycle to the next agent role. |
 | `C-k`, `C-Up` | `prompt-previous` | Move to the previous prompt/history entry. |
 | `C-j`, `C-Down` | `prompt-next` | Move to the next prompt/history entry. |
@@ -48,5 +49,6 @@ Bindings live under `cli.bind` in config. The built-in bindings are merged below
 - `prompt-redo` — redo an undone edit in the current prompt/history entry.
 - `fast-toggle` — toggle fast mode without editing the prompt draft.
 - `role-cycle` — cycle to the next agent role.
+- `prompt-history-search` — feed indexed prompt-history rows (`<index>\t<single-line summary>`) to `command`; replace the prompt with the selected row's original prompt. The current draft is recorded for `prompt-undo` before the picker opens.
 - `shell-prompt-insert` — run `command` and insert stdout at the cursor.
 - `shell-prompt-edit` — run `command` with the current prompt in `$TAU_PROMPT_PATH` and replace the prompt with the edited file content.

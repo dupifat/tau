@@ -664,6 +664,74 @@ mod multi_arg_completion {
     }
 }
 
+mod prompt_history_search {
+    use std::sync::{Arc, Mutex};
+
+    use crate::{
+        EditorContext, PromptShellAction, PromptShellCommand, PromptShellResult,
+        prompt_history_search_rows, run_prompt_shell_action,
+    };
+
+    #[test]
+    fn search_rows_are_newest_first_and_keep_multiline_prompts_one_row() {
+        // Ctrl-R feeds fzf an indexed table, not raw prompt text. This
+        // regression test protects multiline prompts from being split
+        // into multiple fzf candidates and verifies the newest prompt
+        // is shown first.
+        let history = vec![
+            "old prompt".to_owned(),
+            "newer\nmultiline prompt".to_owned(),
+        ];
+
+        let rows = prompt_history_search_rows(&history);
+
+        assert_eq!(rows, "1\tnewer multiline prompt\n0\told prompt\n");
+    }
+
+    #[test]
+    fn selected_history_prompt_replaces_buffer_and_can_be_undone() {
+        // Ctrl-R must record the draft before launching the picker, then
+        // replace the buffer with the original history entry (including
+        // embedded newlines). Undo should restore the draft the user had
+        // before opening the picker.
+        let (term, handle, _input_tx) = tau_cli_term_raw::Term::new_virtual(
+            80,
+            24,
+            "> ",
+            Box::new(std::io::sink()),
+            crate::CursorShape::Bar,
+        );
+        handle.set_buffer("current draft".to_owned(), "current draft".len());
+        let history = vec!["old".to_owned(), "chosen\noriginal".to_owned()];
+        let action = PromptShellAction::HistorySearch(PromptShellCommand {
+            command: "cat | head -n 1 | cut -f1".to_owned(),
+            trim: true,
+        });
+
+        let result = run_prompt_shell_action(
+            &term,
+            &handle,
+            Arc::new(Mutex::new(EditorContext::default())),
+            None,
+            &history,
+            action,
+        )
+        .expect("history search action")
+        .expect("selected prompt");
+
+        match result {
+            PromptShellResult::ReplacePreservingUndo(text) => {
+                assert_eq!(text, "chosen\noriginal");
+                handle.set_buffer_preserving_undo(text, "chosen\noriginal".len());
+            }
+            _ => panic!("expected undo-preserving replacement"),
+        }
+        assert_eq!(handle.get_buffer(), "chosen\noriginal");
+        assert!(term.trigger_undo());
+        assert_eq!(handle.get_buffer(), "current draft");
+    }
+}
+
 mod prompt_action_parse {
     use crate::PromptShellAction;
 
@@ -708,6 +776,18 @@ mod prompt_action_parse {
                 assert_eq!(cmd.command, "bash -c 'echo a:b:c'");
             }
             _ => panic!("expected Edit"),
+        }
+    }
+
+    #[test]
+    fn parses_prompt_history_search_with_trim() {
+        let parsed = PromptShellAction::parse("prompt-history-search:trim:fzf | cut -f1");
+        match parsed {
+            Some(PromptShellAction::HistorySearch(cmd)) => {
+                assert!(cmd.trim);
+                assert_eq!(cmd.command, "fzf | cut -f1");
+            }
+            _ => panic!("expected HistorySearch"),
         }
     }
 

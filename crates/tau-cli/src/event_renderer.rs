@@ -119,6 +119,15 @@ pub(crate) struct EventRenderer {
     /// calls are excluded because they roll up under their `delegate`
     /// parent.
     main_tools_total: u64,
+    /// Whether the currently active prompt/agent lifecycle belongs to the
+    /// user-facing main agent. Side conversations temporarily make this
+    /// false while preserving the main task's counters.
+    main_agent_turn_active: bool,
+    /// Whether the main-agent tool usage chip should be painted. This is
+    /// separate from the counters so side-conversation lifecycles can hide
+    /// the chip until a main lifecycle event makes the main turn active
+    /// again.
+    main_tools_visible: bool,
     /// Whether to render per-turn token usage stats below completed
     /// agent responses.
     show_token_stats: bool,
@@ -559,6 +568,8 @@ impl EventRenderer {
             current_context_window: None,
             main_tools_completed: 0,
             main_tools_total: 0,
+            main_agent_turn_active: false,
+            main_tools_visible: false,
             redraw_counter: state.redraw_counter,
             last_full_render_count: 0,
             last_full_render_at: None,
@@ -1032,6 +1043,8 @@ impl EventRenderer {
         self.current_context_input_tokens = None;
         self.main_tools_completed = 0;
         self.main_tools_total = 0;
+        self.main_agent_turn_active = false;
+        self.main_tools_visible = false;
         self.cumulative_agent_latency = Duration::ZERO;
         self.handle.clear_output();
         self.render_session_preamble();
@@ -1233,7 +1246,7 @@ impl EventRenderer {
     }
 
     fn main_tools_status_chip(&self) -> Option<String> {
-        (self.main_tools_total != 0)
+        (self.main_tools_visible && self.main_tools_total != 0)
             .then(|| format!("{}/{}", self.main_tools_completed, self.main_tools_total))
     }
 
@@ -1243,12 +1256,47 @@ impl EventRenderer {
         }
     }
 
+    fn set_main_tools_visible(&mut self, visible: bool) {
+        if self.main_tools_visible == visible {
+            return;
+        }
+        self.main_tools_visible = visible;
+        if self.model_status_block.is_some() {
+            self.render_model_status();
+        }
+    }
+
+    fn set_main_agent_turn_active(&mut self, active: bool) {
+        self.main_agent_turn_active = active;
+        self.set_main_tools_visible(active && self.main_tools_total != 0);
+    }
+
+    fn sync_main_tools_visibility_for_prompt_lifecycle(&mut self, event: &Event) {
+        match event {
+            Event::SessionPromptCreated(prompt) => {
+                self.set_main_agent_turn_active(prompt.originator.is_user());
+            }
+            Event::ProviderPromptSubmitted(submitted) => {
+                self.set_main_agent_turn_active(submitted.originator.is_user());
+            }
+            Event::ProviderResponseUpdated(update) => {
+                self.set_main_agent_turn_active(update.originator.is_user());
+            }
+            Event::ProviderResponseFinished(finished) if !finished.originator.is_user() => {
+                self.set_main_agent_turn_active(false);
+            }
+            _ => {}
+        }
+    }
+
     fn reset_main_tool_usage(&mut self) {
-        if self.main_tools_completed == 0 && self.main_tools_total == 0 {
+        if self.main_tools_completed == 0 && self.main_tools_total == 0 && !self.main_tools_visible
+        {
             return;
         }
         self.main_tools_completed = 0;
         self.main_tools_total = 0;
+        self.main_tools_visible = false;
         if self.model_status_block.is_some() {
             self.render_model_status();
         }
@@ -1296,6 +1344,8 @@ impl EventRenderer {
         if self.handle_compaction_event(event) {
             return;
         }
+
+        self.sync_main_tools_visibility_for_prompt_lifecycle(event);
 
         // Side-conversation `ProviderResponseFinished` events get filtered
         // out by `originator_of(event).is_user()` below — but we still
@@ -1599,8 +1649,10 @@ impl EventRenderer {
                 // the user sees one line per delegation rather than
                 // a flood of nested invocations.
                 if finished.originator.is_user() {
+                    self.main_agent_turn_active = true;
                     let tool_calls = tool_calls_from_output_items(&finished.output_items);
                     self.main_tools_total += tool_calls.len() as u64;
+                    self.set_main_tools_visible(!tool_calls.is_empty());
                     let summary_block_id = if tool_calls.is_empty() {
                         self.prompt_tool_summary = None;
                         None
@@ -1730,6 +1782,9 @@ impl EventRenderer {
                 }
                 if known_main_tool {
                     self.record_main_tool_completed();
+                    if self.main_agent_turn_active {
+                        self.main_tools_visible = true;
+                    }
                 }
                 let existing_block_id = prior.block_id;
                 let last_progress = prior.delegate_last_progress;
@@ -1790,7 +1845,7 @@ impl EventRenderer {
                         display,
                     });
                 }
-                if known_main_tool {
+                if known_main_tool && self.main_agent_turn_active {
                     self.render_model_status();
                 }
             }
@@ -1806,6 +1861,9 @@ impl EventRenderer {
                 }
                 if known_main_tool {
                     self.record_main_tool_completed();
+                    if self.main_agent_turn_active {
+                        self.main_tools_visible = true;
+                    }
                 }
                 let existing_block_id = prior.block_id;
                 let last_progress = prior.delegate_last_progress;
@@ -1843,7 +1901,7 @@ impl EventRenderer {
                     block_id: bid,
                     display,
                 });
-                if known_main_tool {
+                if known_main_tool && self.main_agent_turn_active {
                     self.render_model_status();
                 }
             }

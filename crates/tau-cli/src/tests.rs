@@ -510,9 +510,75 @@ fn model_status_shows_main_tool_usage_before_context() {
         .expect("status row after tool result");
     assert!(status_row.ends_with("%1/2 #12k/200k"));
 
-    // Starting a new user task in the same session resets the current-task
-    // tool chip. The context chip remains because it is model/session state,
-    // not per-task tool usage.
+    // Regression coverage for turn visibility: once an extension/sub-agent
+    // prompt becomes active, the main-agent tool chip must disappear instead
+    // of showing stale progress from the previous main turn. Context remains
+    // visible because it is model/session state, not per-turn tool usage.
+    renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "core-delegate".into(),
+            query_id: "q2".to_owned(),
+        },
+        ..session_prompt_created("side-sp-2", "s1")
+    }));
+    sync(&handle);
+    let status_row = vt
+        .screen_text(100)
+        .into_iter()
+        .find(|row| row.contains("+smart"))
+        .expect("status row after side prompt starts");
+    assert!(status_row.ends_with("#12k/200k"));
+    assert!(!status_row.contains('%'));
+
+    renderer.handle(&Event::ToolResult(ToolResult {
+        call_id: "call-2".into(),
+        tool_name: tau_proto::ToolName::new("grep"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text("main result".into()),
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    sync(&handle);
+    let status_row = vt
+        .screen_text(100)
+        .into_iter()
+        .find(|row| row.contains("+smart"))
+        .expect("status row after second main tool result during side turn");
+    assert!(status_row.ends_with("#12k/200k"));
+    assert!(!status_row.contains('%'));
+
+    // Tool completions that arrive while a side conversation is active update
+    // counters silently. The chip becomes visible again only when a main/user
+    // lifecycle event shows the main agent has control again.
+    renderer.handle(&Event::SessionPromptCreated(session_prompt_created(
+        "main-follow-up-sp",
+        "s1",
+    )));
+    sync(&handle);
+    let status_row = vt
+        .screen_text(100)
+        .into_iter()
+        .find(|row| row.contains("+smart"))
+        .expect("status row after main prompt resumes");
+    assert!(status_row.ends_with("%2/2 #12k/200k"));
+
+    // The main agent's final no-tool response ends the tool-using turn and
+    // hides the chip while preserving context stats.
+    renderer.handle(&Event::ProviderResponseFinished(finished_response(
+        "main-final-sp",
+        vec![assistant_message_item("done")],
+    )));
+    sync(&handle);
+    let status_row = vt
+        .screen_text(100)
+        .into_iter()
+        .find(|row| row.contains("+smart"))
+        .expect("status row after final main response");
+    assert!(status_row.ends_with("#12k/200k"));
+    assert!(!status_row.contains('%'));
+
+    // Starting a new user task in the same session also keeps the chip hidden
+    // until the main agent requests tools for that task.
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "next task".into(),

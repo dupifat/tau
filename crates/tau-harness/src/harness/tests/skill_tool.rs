@@ -850,6 +850,62 @@ fn skill_tool_default_display_formats_query() {
 }
 
 #[test]
+fn default_tool_display_formats_requested_line_ranges() {
+    let read_display = super::super::build_tool_args_display(
+        "read",
+        &CborValue::Map(vec![
+            (
+                CborValue::Text("path".to_owned()),
+                CborValue::Text("src/lib.rs".to_owned()),
+            ),
+            (
+                CborValue::Text("start_line".to_owned()),
+                CborValue::Integer(2.into()),
+            ),
+            (
+                CborValue::Text("line_count".to_owned()),
+                CborValue::Integer(3.into()),
+            ),
+        ]),
+    )
+    .expect("read display");
+    assert_eq!(read_display.args, "src/lib.rs 2..5");
+
+    let edit_display = super::super::build_tool_args_display(
+        "edit",
+        &CborValue::Map(vec![
+            (
+                CborValue::Text("path".to_owned()),
+                CborValue::Text("src/lib.rs".to_owned()),
+            ),
+            (
+                CborValue::Text("edits".to_owned()),
+                CborValue::Array(vec![CborValue::Map(vec![
+                    (
+                        CborValue::Text("oldText".to_owned()),
+                        CborValue::Text("old".to_owned()),
+                    ),
+                    (
+                        CborValue::Text("newText".to_owned()),
+                        CborValue::Text("new".to_owned()),
+                    ),
+                    (
+                        CborValue::Text("start_line".to_owned()),
+                        CborValue::Integer(2.into()),
+                    ),
+                    (
+                        CborValue::Text("line_count".to_owned()),
+                        CborValue::Integer(1.into()),
+                    ),
+                ])]),
+            ),
+        ]),
+    )
+    .expect("edit display");
+    assert_eq!(edit_display.args, "src/lib.rs 2..3");
+}
+
+#[test]
 fn skill_tool_registered_in_tool_list() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");

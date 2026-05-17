@@ -1748,6 +1748,11 @@ fn edit_restricts_matches_to_line_range() {
     let Event::ToolResult(result) = result else {
         panic!("expected tool result");
     };
+    let expected_args = format!("{} 2..3", file_path.display());
+    assert_eq!(
+        result.display.as_ref().map(|display| display.args.as_str()),
+        Some(expected_args.as_str())
+    );
     assert_eq!(cbor_map_int(&result.result, "replacements"), Some(1));
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),

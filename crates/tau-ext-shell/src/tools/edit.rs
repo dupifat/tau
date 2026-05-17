@@ -8,37 +8,59 @@ use tau_proto::{CborValue, ToolDisplay, ToolDisplayPayload, ToolDisplayStatus};
 use crate::argument::{argument_array, argument_text, cbor_map_int, cbor_map_text};
 use crate::diff::{compute_diff, unified_diff};
 use crate::display::{ToolFailure, ToolOutput};
+use crate::tools::read::format_read_range;
 
 pub(crate) fn edit_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure> {
     let path = argument_text(arguments, "path").map_err(ToolFailure::from)?;
     let path_buf = PathBuf::from(&path);
-    let display_args = path_buf.display().to_string();
-    let with_args = |f: ToolFailure| f.with_args(display_args.clone());
+    let display_path = path_buf.display().to_string();
+    let mut display_args = display_path.clone();
 
-    let original_bytes =
-        fs::read(&path_buf).map_err(|e| with_args(ToolFailure::from(e.to_string())))?;
+    let original_bytes = fs::read(&path_buf)
+        .map_err(|e| with_display_args(&display_args, ToolFailure::from(e.to_string())))?;
 
-    let edits = argument_array(arguments, "edits").map_err(|e| with_args(ToolFailure::from(e)))?;
+    let edits = argument_array(arguments, "edits")
+        .map_err(|e| with_display_args(&display_args, ToolFailure::from(e)))?;
     if edits.is_empty() {
-        return Err(with_args(ToolFailure::new("edits array must not be empty")));
+        return Err(with_display_args(
+            &display_args,
+            ToolFailure::new("edits array must not be empty"),
+        ));
     }
 
     let line_starts = line_starts(&original_bytes);
 
     // Collect all replacements and validate against the original.
     let mut replacements: Vec<(usize, usize, &[u8])> = Vec::new();
+    let mut requested_ranges = Vec::new();
     for edit in edits {
-        let old_text = cbor_map_text(edit, "oldText")
-            .ok_or_else(|| with_args(ToolFailure::new("each edit must have a string oldText")))?;
-        let new_text = cbor_map_text(edit, "newText")
-            .ok_or_else(|| with_args(ToolFailure::new("each edit must have a string newText")))?;
-        let max_matches = parse_optional_count(edit, "max_matches", 1, &with_args)?;
-        let start_line = parse_optional_line(edit, "start_line", 1, &with_args)?;
+        let old_text = cbor_map_text(edit, "oldText").ok_or_else(|| {
+            with_display_args(
+                &display_args,
+                ToolFailure::new("each edit must have a string oldText"),
+            )
+        })?;
+        let new_text = cbor_map_text(edit, "newText").ok_or_else(|| {
+            with_display_args(
+                &display_args,
+                ToolFailure::new("each edit must have a string newText"),
+            )
+        })?;
+        let max_matches = parse_optional_count(edit, "max_matches", 1, &display_args)?;
+        let start_line = parse_optional_line(edit, "start_line", 1, &display_args)?;
         let end_line =
-            parse_optional_line_count(edit, start_line, line_starts.len() + 1, &with_args)?;
+            parse_optional_line_count(edit, start_line, line_starts.len() + 1, &display_args)?;
+        requested_ranges.push(format_read_range(
+            cbor_map_int(edit, "start_line").map(|_| start_line),
+            cbor_map_int(edit, "line_count").and_then(|count| usize::try_from(count).ok()),
+        ));
+        display_args = edit_display_args(&display_path, &requested_ranges);
 
         if old_text.is_empty() {
-            return Err(with_args(ToolFailure::new("oldText must not be empty")));
+            return Err(with_display_args(
+                &display_args,
+                ToolFailure::new("oldText must not be empty"),
+            ));
         }
 
         let old_bytes = old_text.as_bytes();
@@ -53,12 +75,18 @@ pub(crate) fn edit_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
             replacements.push((start, end, new_text.as_bytes()));
         }
         if replacements.len() == replacements_before {
-            return Err(with_args(ToolFailure::new("no matches for edit")));
+            return Err(with_display_args(
+                &display_args,
+                ToolFailure::new("no matches for edit"),
+            ));
         }
     }
 
     if replacements.is_empty() {
-        return Err(with_args(ToolFailure::new("no matches for edit")));
+        return Err(with_display_args(
+            &display_args,
+            ToolFailure::new("no matches for edit"),
+        ));
     }
 
     // Sort by start position (descending) so we can apply from end to start
@@ -70,7 +98,10 @@ pub(crate) fn edit_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
         // After descending sort: pair[0].start is later in the file.
         // Overlap if pair[1].end is after pair[0].start.
         if pair[0].0 < pair[1].1 {
-            return Err(with_args(ToolFailure::new("overlapping edits")));
+            return Err(with_display_args(
+                &display_args,
+                ToolFailure::new("overlapping edits"),
+            ));
         }
     }
 
@@ -81,7 +112,8 @@ pub(crate) fn edit_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
     }
 
     if result != original_bytes {
-        fs::write(&path_buf, &result).map_err(|e| with_args(ToolFailure::from(e.to_string())))?;
+        fs::write(&path_buf, &result)
+            .map_err(|e| with_display_args(&display_args, ToolFailure::from(e.to_string())))?;
     }
 
     let diff = match (
@@ -107,7 +139,7 @@ pub(crate) fn edit_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
         ..Default::default()
     };
     Ok(ToolOutput {
-        result: edit_result_value(display_args, replacements.len(), changed, diff.as_ref()),
+        result: edit_result_value(display_path, replacements.len(), changed, diff.as_ref()),
         display,
     })
 }
@@ -116,14 +148,19 @@ fn parse_optional_count(
     edit: &CborValue,
     key: &str,
     default: usize,
-    with_args: &dyn Fn(ToolFailure) -> ToolFailure,
+    display_args: &str,
 ) -> Result<usize, ToolFailure> {
     match cbor_map_int(edit, key) {
-        Some(n) if n < 1 => Err(with_args(ToolFailure::new(format!(
-            "{key} must be at least 1"
-        )))),
-        Some(n) => usize::try_from(n)
-            .map_err(|_| with_args(ToolFailure::new(format!("{key} is too large")))),
+        Some(n) if n < 1 => Err(with_display_args(
+            display_args,
+            ToolFailure::new(format!("{key} must be at least 1")),
+        )),
+        Some(n) => usize::try_from(n).map_err(|_| {
+            with_display_args(
+                display_args,
+                ToolFailure::new(format!("{key} is too large")),
+            )
+        }),
         None => Ok(default),
     }
 }
@@ -132,14 +169,19 @@ fn parse_optional_line(
     edit: &CborValue,
     key: &str,
     default: usize,
-    with_args: &dyn Fn(ToolFailure) -> ToolFailure,
+    display_args: &str,
 ) -> Result<usize, ToolFailure> {
     match cbor_map_int(edit, key) {
-        Some(n) if n < 1 => Err(with_args(ToolFailure::new(format!(
-            "{key} must be at least 1"
-        )))),
-        Some(n) => usize::try_from(n)
-            .map_err(|_| with_args(ToolFailure::new(format!("{key} is too large")))),
+        Some(n) if n < 1 => Err(with_display_args(
+            display_args,
+            ToolFailure::new(format!("{key} must be at least 1")),
+        )),
+        Some(n) => usize::try_from(n).map_err(|_| {
+            with_display_args(
+                display_args,
+                ToolFailure::new(format!("{key} is too large")),
+            )
+        }),
         None => Ok(default),
     }
 }
@@ -148,19 +190,44 @@ fn parse_optional_line_count(
     edit: &CborValue,
     start_line: usize,
     default_end_line: usize,
-    with_args: &dyn Fn(ToolFailure) -> ToolFailure,
+    display_args: &str,
 ) -> Result<usize, ToolFailure> {
     match cbor_map_int(edit, "line_count") {
-        Some(n) if n < 1 => Err(with_args(ToolFailure::new("line_count must be at least 1"))),
+        Some(n) if n < 1 => Err(with_display_args(
+            display_args,
+            ToolFailure::new("line_count must be at least 1"),
+        )),
         Some(n) => {
-            let count = usize::try_from(n)
-                .map_err(|_| with_args(ToolFailure::new("line_count is too large")))?;
-            start_line
-                .checked_add(count)
-                .ok_or_else(|| with_args(ToolFailure::new("line_count is too large")))
+            let count = usize::try_from(n).map_err(|_| {
+                with_display_args(display_args, ToolFailure::new("line_count is too large"))
+            })?;
+            start_line.checked_add(count).ok_or_else(|| {
+                with_display_args(display_args, ToolFailure::new("line_count is too large"))
+            })
         }
         None => Ok(default_end_line),
     }
+}
+
+fn with_display_args(args: &str, failure: ToolFailure) -> ToolFailure {
+    failure.with_args(args.to_owned())
+}
+
+fn edit_display_args(path: &str, ranges: &[String]) -> String {
+    if ranges.is_empty() {
+        return path.to_owned();
+    }
+
+    let mut unique_ranges: Vec<&str> = Vec::new();
+    for range in ranges {
+        if unique_ranges
+            .iter()
+            .all(|existing| *existing != range.as_str())
+        {
+            unique_ranges.push(range.as_str());
+        }
+    }
+    format!("{path} {}", unique_ranges.join(","))
 }
 
 fn line_starts(input: &[u8]) -> Vec<usize> {

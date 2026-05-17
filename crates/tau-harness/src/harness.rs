@@ -5346,7 +5346,7 @@ fn build_tool_args_display(
     tool_name: &str,
     arguments: &tau_proto::CborValue,
 ) -> Option<tau_proto::ToolDisplay> {
-    use tau_proto::{ToolDisplayStatus, cbor_bool_field, cbor_text_field};
+    use tau_proto::{ToolDisplayStatus, cbor_array_field, cbor_bool_field, cbor_text_field};
 
     let mut payload = None;
     let args = match tool_name {
@@ -5355,7 +5355,22 @@ fn build_tool_args_display(
             payload = shell_command_payload(&command);
             shell_command_args(&command)
         }
-        "read" | "write" | "edit" => cbor_text_field(arguments, "path").unwrap_or_default(),
+        "read" => {
+            let path = cbor_text_field(arguments, "path").unwrap_or_default();
+            format!("{path} {}", format_requested_line_range(arguments))
+        }
+        "write" => cbor_text_field(arguments, "path").unwrap_or_default(),
+        "edit" => {
+            let path = cbor_text_field(arguments, "path").unwrap_or_default();
+            let ranges = cbor_array_field(arguments, "edits")
+                .map(format_requested_edit_ranges)
+                .unwrap_or_default();
+            if ranges.is_empty() {
+                path
+            } else {
+                format!("{path} {ranges}")
+            }
+        }
         "find" => {
             let pattern = cbor_text_field(arguments, "pattern").unwrap_or_default();
             let path = cbor_text_field(arguments, "path").unwrap_or_else(|| ".".to_owned());
@@ -5393,6 +5408,36 @@ fn build_tool_args_display(
         payload,
         ..Default::default()
     })
+}
+
+fn format_requested_edit_ranges(edits: &[tau_proto::CborValue]) -> String {
+    let mut ranges: Vec<String> = Vec::new();
+    for edit in edits {
+        let range = format_requested_line_range(edit);
+        if ranges.iter().all(|existing| existing != &range) {
+            ranges.push(range);
+        }
+    }
+    ranges.join(",")
+}
+
+fn format_requested_line_range(arguments: &tau_proto::CborValue) -> String {
+    let start_line = positive_usize_field(arguments, "start_line");
+    let line_count = positive_usize_field(arguments, "line_count");
+    match (start_line, line_count) {
+        (None, None) => "..".to_owned(),
+        (Some(start), None) => format!("{start}.."),
+        (None, Some(count)) => format!("1..{}", 1usize.saturating_add(count)),
+        (Some(start), Some(count)) => format!("{start}..{}", start.saturating_add(count)),
+    }
+}
+
+fn positive_usize_field(arguments: &tau_proto::CborValue, key: &str) -> Option<usize> {
+    let value = tau_proto::cbor_int_field(arguments, key)?;
+    if value < 1 {
+        return None;
+    }
+    usize::try_from(value).ok()
 }
 
 fn cbor_query_label(arguments: &tau_proto::CborValue, key: &str) -> String {

@@ -2,17 +2,18 @@
 //!
 //! See `TODO-codex-websocket.md` §2 for the design rationale. Recap:
 //!
-//! - The provider's `run()` loop is single-threaded and processes prompts
-//!   serially, but it *alternates* between conversations (different sessions,
-//!   sub-agent delegations interleaved with the parent). The OpenAI WS endpoint
-//!   only caches the *most recent* `previous_response_id` per socket, so
-//!   routing A → B → A on one shared socket would flush each chain's warmth on
-//!   every switch. Keep one connection per `(account, session)` so warmth
-//!   survives context-switches.
-//! - Single owner = the provider loop. No `Mutex`/`Arc`/`DashMap`. Take the
-//!   connection *out* of the map for the duration of one turn
-//!   (`HashMap::remove`), put it back on success. Connection-in-flight
-//!   exclusivity is enforced by ownership.
+//! - The provider processes prompts concurrently, so it can alternate between
+//!   conversations (different sessions, sub-agent delegations interleaved with
+//!   the parent). The OpenAI WS endpoint only caches the *most recent*
+//!   `previous_response_id` per socket, so routing A → B → A on one shared
+//!   socket would flush each chain's warmth on every switch. Keep one
+//!   connection per `(account, session, conversation)` so warmth survives
+//!   context-switches.
+//! - Connection-in-flight exclusivity is enforced by ownership plus the shared
+//!   wrapper's per-key busy set: checkout removes the connection from the map
+//!   before a worker runs the turn, and same-key workers wait until release or
+//!   drop before retrying. Different keys do not wait on each other's network
+//!   turns.
 //! - Bounded by a soft cap (env-tunable `TAU_WS_POOL_MAX`,
 //!   [`DEFAULT_POOL_MAX`]). LRU eviction when full.
 //! - Connections age out near the server's 60-minute hard cap so a call doesn't
@@ -20,8 +21,11 @@
 //! - Bearer-mismatch on checkout means OAuth refreshed; drop the stale socket
 //!   and open a new one.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Condvar, Mutex};
 use std::time::Duration;
+
+const CHECKOUT_ABORT_POLL: Duration = Duration::from_millis(50);
 
 use super::ResponsesConfig;
 use super::ws::WsConn;
@@ -29,9 +33,9 @@ use crate::common::LlmError;
 
 /// Default soft cap on simultaneously-cached WS connections.
 ///
-/// One per `(account, session)`. A typical interactive workload runs
-/// 1–3 active sessions (the user's main + any in-flight sub-agent
-/// delegation). The cap exists to bound pathological growth (a
+/// One per `(account, session, conversation)`. A typical interactive workload
+/// runs 1–3 active sessions/conversations (the user's main + any in-flight
+/// sub-agent delegation). The cap exists to bound pathological growth (a
 /// long-lived agent process where the user reopens many old
 /// sessions), not because the normal path needs many slots.
 pub(crate) const DEFAULT_POOL_MAX: usize = 10;
@@ -54,22 +58,37 @@ pub(crate) const MAX_CONNECTION_AGE: Duration = Duration::from_secs(55 * 60);
 ///
 /// - `base_url` + `account_id` form a "socket realm" — same bearer, same
 ///   server-side state. Cross-realm reuse is impossible.
-/// - `session_id` is the harness's per-conversation identifier. The harness
-///   stamps it on every `SessionPromptCreated`; sub-agent delegations get their
-///   own session_id and therefore their own slot.
+/// - `session_id` scopes the harness session. Side conversations may share a
+///   session id with their parent, so `conversation_id` further separates the
+///   user turn from extension-originated query chains.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct PoolKey {
     pub base_url: String,
     pub account_id: Option<String>,
     pub session_id: String,
+    pub conversation_id: String,
 }
 
 impl PoolKey {
-    pub fn for_request(config: &ResponsesConfig, session_id: &str) -> Self {
+    pub fn for_request(
+        config: &ResponsesConfig,
+        session_id: &str,
+        originator: &tau_proto::PromptOriginator,
+    ) -> Self {
         Self {
             base_url: config.base_url.clone(),
             account_id: config.account_id.clone(),
             session_id: session_id.to_owned(),
+            conversation_id: conversation_id(originator),
+        }
+    }
+}
+
+fn conversation_id(originator: &tau_proto::PromptOriginator) -> String {
+    match originator {
+        tau_proto::PromptOriginator::User => "user".to_owned(),
+        tau_proto::PromptOriginator::Extension { name, query_id } => {
+            format!("extension/{name}/{query_id}")
         }
     }
 }
@@ -208,24 +227,158 @@ impl Default for WsPool {
     }
 }
 
+/// Thread-safe WS pool wrapper used by prompt workers.
+///
+/// The inner mutex protects only pool bookkeeping. A per-key busy set reserves
+/// a conversation chain while its network turn is in flight, so concurrent
+/// same-key callers wait for that turn to release/drop the socket instead of
+/// opening a second socket for the same chain. Different keys can still run
+/// their network turns concurrently.
+pub(crate) struct SharedWsPool {
+    inner: Mutex<SharedWsPoolInner>,
+    changed: Condvar,
+}
+
+struct SharedWsPoolInner {
+    pool: WsPool,
+    busy: HashSet<PoolKey>,
+}
+
+impl SharedWsPool {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: Mutex::new(SharedWsPoolInner {
+                pool: WsPool::new(),
+                busy: HashSet::new(),
+            }),
+            changed: Condvar::new(),
+        }
+    }
+
+    pub(crate) fn stats(&self) -> Option<WsPoolStats> {
+        self.inner.lock().ok().map(|inner| inner.pool.stats())
+    }
+
+    /// Try to reserve `key` without waiting for an active same-key turn. This
+    /// is used by best-effort prewarm requests that run on the provider
+    /// main loop: if a real turn already owns the reservation, prewarm
+    /// should skip rather than delaying cancellation, worker output,
+    /// PromptDone, or ACK handling.
+    fn try_checkout(
+        &self,
+        key: &PoolKey,
+        current_bearer: &str,
+    ) -> Result<TryCheckout, WsTurnError> {
+        let mut inner = self.lock_inner()?;
+        if inner.busy.contains(key) {
+            return Ok(TryCheckout::Busy);
+        }
+        inner.busy.insert(key.clone());
+        Ok(TryCheckout::Reserved(
+            inner.pool.checkout(key, current_bearer),
+        ))
+    }
+
+    /// Reserve `key`, aborting promptly if `should_abort` becomes true while a
+    /// same-key worker owns the reservation. This is used by prompt turns so a
+    /// targeted cancel cannot leave a worker blocked in the pool and then later
+    /// send a stale network request after the canceled turn releases.
+    fn checkout_until(
+        &self,
+        key: &PoolKey,
+        current_bearer: &str,
+        should_abort: &mut impl FnMut() -> bool,
+    ) -> Result<Option<WsConn>, WsTurnError> {
+        let mut inner = self.lock_inner()?;
+        while inner.busy.contains(key) {
+            if should_abort() {
+                return Err(WsTurnError::Canceled);
+            }
+            let (guard, _) = self
+                .changed
+                .wait_timeout(inner, CHECKOUT_ABORT_POLL)
+                .map_err(pool_poisoned)?;
+            inner = guard;
+        }
+        if should_abort() {
+            return Err(WsTurnError::Canceled);
+        }
+        inner.busy.insert(key.clone());
+        Ok(inner.pool.checkout(key, current_bearer))
+    }
+
+    fn release(&self, key: PoolKey, conn: WsConn) -> Result<(), WsTurnError> {
+        let mut inner = self.lock_inner()?;
+        inner.pool.release(key.clone(), conn);
+        inner.busy.remove(&key);
+        self.changed.notify_all();
+        Ok(())
+    }
+
+    fn abandon(&self, key: &PoolKey) -> Result<(), WsTurnError> {
+        let mut inner = self.lock_inner()?;
+        inner.busy.remove(key);
+        self.changed.notify_all();
+        Ok(())
+    }
+
+    fn bump_silent_reconnects(&self) -> Result<u64, WsTurnError> {
+        let mut inner = self.lock_inner()?;
+        inner.pool.stats.silent_reconnects += 1;
+        Ok(inner.pool.stats.silent_reconnects)
+    }
+
+    fn record_fresh_open(&self, previous_response: bool) -> Result<WsPoolStats, WsTurnError> {
+        let mut inner = self.lock_inner()?;
+        inner.pool.stats.upgrades += 1;
+        if previous_response {
+            inner.pool.stats.chain_strips_on_fresh += 1;
+        }
+        Ok(inner.pool.stats)
+    }
+
+    fn lock_inner(&self) -> Result<std::sync::MutexGuard<'_, SharedWsPoolInner>, WsTurnError> {
+        self.inner.lock().map_err(pool_poisoned)
+    }
+}
+
+impl Default for SharedWsPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn pool_poisoned<T>(error: std::sync::PoisonError<T>) -> WsTurnError {
+    WsTurnError::Other(LlmError::HttpStatus(
+        0,
+        format!("WS pool poisoned: {error}"),
+    ))
+}
+
+enum TryCheckout {
+    Reserved(Option<WsConn>),
+    Busy,
+}
+
 /// WS dispatch failed in a way the caller can classify.
 #[derive(Debug)]
 pub(crate) enum WsTurnError {
+    Canceled,
     Other(LlmError),
 }
 
 impl WsTurnError {
     pub(crate) fn into_llm_error(self) -> LlmError {
         match self {
+            Self::Canceled => LlmError::HttpStatus(499, "cancelled by harness".to_owned()),
             Self::Other(error) => error,
         }
     }
 }
 
-/// Convenience wrapper that wires `checkout` → `WsConn::run_turn` →
-/// `release` together with reopen-on-miss semantics. The provider's
-/// `run()` loop calls this; tests can call it directly with a fake
-/// `WsConn::connect` impl by exercising the lower-level methods.
+/// Test-only convenience wrapper that wires `checkout` → `WsConn::run_turn` →
+/// `release` together with reopen-on-miss semantics without the production
+/// mutex wrapper.
 ///
 /// Transparent reconnect: the Codex WS endpoint's
 /// `previous_response_id` cache is **connection-local** (per the
@@ -234,6 +387,7 @@ impl WsTurnError {
 /// carried in `request` would 404 on the server. The recovery path strips the
 /// chain id, replays the full prompt once over the new WS, and releases that
 /// socket back into the pool so the following turn is warm again.
+#[cfg(test)]
 pub(crate) fn run_turn_through_pool(
     pool: &mut WsPool,
     config: &ResponsesConfig,
@@ -242,7 +396,7 @@ pub(crate) fn run_turn_through_pool(
     request: &crate::common::PromptPayload<'_>,
     on_update: &mut impl FnMut(&str, Option<&str>),
 ) -> Result<crate::common::StreamState, WsTurnError> {
-    let key = PoolKey::for_request(config, session_id);
+    let key = PoolKey::for_request(config, session_id, request.originator);
 
     // First attempt: prefer a warm cached connection so the
     // connection-local chain cache stays useful.
@@ -302,17 +456,103 @@ pub(crate) fn run_turn_through_pool(
     }
 }
 
+/// Thread-safe prompt-worker entry point. Shared-pool bookkeeping is locked
+/// only while checking out/reserving a key, updating stats, or releasing a
+/// successful connection. The network turn runs without the lock, so unrelated
+/// prompt workers can use their own pooled sockets concurrently; same-key
+/// callers wait on the reservation to preserve one chain per socket.
+pub(crate) fn run_turn_through_shared_pool(
+    pool: &SharedWsPool,
+    config: &ResponsesConfig,
+    session_prompt_id: &str,
+    request: &crate::common::PromptPayload<'_>,
+    should_abort: &mut impl FnMut() -> bool,
+    on_update: &mut impl FnMut(&str, Option<&str>),
+) -> Result<crate::common::StreamState, WsTurnError> {
+    let session_id = request.session_id.as_str();
+    let key = PoolKey::for_request(config, session_id, request.originator);
+
+    if let Some(mut conn) = pool.checkout_until(&key, &config.api_key, should_abort)? {
+        if should_abort() {
+            pool.release(key, conn)?;
+            return Err(WsTurnError::Canceled);
+        }
+        match conn.run_turn(config, session_prompt_id, request, on_update) {
+            Ok(state) => {
+                pool.release(key, conn)?;
+                return Ok(state);
+            }
+            Err(err) if is_recoverable_ws_error(&err) => {
+                let silent_reconnects = pool.bump_silent_reconnects()?;
+                tracing::info!(
+                    target: crate::LOG_TARGET,
+                    session_id,
+                    error = %err,
+                    silent_reconnects,
+                    "Codex WS connection lost mid-turn",
+                );
+                drop(conn);
+            }
+            Err(other) => {
+                drop(conn);
+                pool.abandon(&key)?;
+                return Err(WsTurnError::Other(other));
+            }
+        }
+    }
+
+    if should_abort() {
+        pool.abandon(&key)?;
+        return Err(WsTurnError::Canceled);
+    }
+    let mut conn = match WsConn::connect(config) {
+        Ok(conn) => conn,
+        Err(error) => {
+            pool.abandon(&key)?;
+            return Err(WsTurnError::Other(error));
+        }
+    };
+    if should_abort() {
+        drop(conn);
+        pool.abandon(&key)?;
+        return Err(WsTurnError::Canceled);
+    }
+    let stats = pool.record_fresh_open(request.previous_response.is_some())?;
+    if request.previous_response.is_some() {
+        tracing::debug!(
+            target: crate::LOG_TARGET,
+            session_id,
+            upgrades = stats.upgrades,
+            chain_strips_on_fresh = stats.chain_strips_on_fresh,
+            "fresh Codex WS socket; stripping previous_response_id from outgoing request",
+        );
+    }
+    let fresh_request = without_previous_response(request);
+    match conn.run_turn(config, session_prompt_id, &fresh_request, on_update) {
+        Ok(state) => {
+            pool.release(key, conn)?;
+            Ok(state)
+        }
+        Err(err) => {
+            drop(conn);
+            pool.abandon(&key)?;
+            Err(WsTurnError::Other(err))
+        }
+    }
+}
+
 /// Send a best-effort non-generating prewarm over the same pooled WS
 /// connection a later real turn for this session will use. Unlike
 /// real turns, a failed cached socket is simply dropped and retried
 /// once on a fresh socket; no stateful chain id exists on prewarm.
+#[cfg(test)]
 pub(crate) fn run_prewarm_through_pool(
     pool: &mut WsPool,
     config: &ResponsesConfig,
     session_id: &str,
     request: &crate::common::PromptPayload<'_>,
 ) -> Result<crate::common::StreamState, LlmError> {
-    let key = PoolKey::for_request(config, session_id);
+    let key = PoolKey::for_request(config, session_id, request.originator);
 
     if let Some(mut conn) = pool.checkout(&key, &config.api_key) {
         match conn.run_prewarm(config, request) {
@@ -346,6 +586,79 @@ pub(crate) fn run_prewarm_through_pool(
         }
         Err(err) => {
             drop(conn);
+            Err(err)
+        }
+    }
+}
+
+/// Thread-safe prewarm entry point. It reserves only the matching key while the
+/// network prewarm is in flight, so prompt workers on other keys can continue
+/// to check out/release pooled sockets concurrently. If that key is already
+/// reserved, prewarm is skipped because it is best-effort main-loop work.
+pub(crate) fn run_prewarm_through_shared_pool(
+    pool: &SharedWsPool,
+    config: &ResponsesConfig,
+    session_id: &str,
+    request: &crate::common::PromptPayload<'_>,
+) -> Result<crate::common::StreamState, LlmError> {
+    let key = PoolKey::for_request(config, session_id, request.originator);
+
+    if let TryCheckout::Reserved(cached) = pool
+        .try_checkout(&key, &config.api_key)
+        .map_err(WsTurnError::into_llm_error)?
+    {
+        if let Some(mut conn) = cached {
+            match conn.run_prewarm(config, request) {
+                Ok(state) => {
+                    pool.release(key, conn)
+                        .map_err(WsTurnError::into_llm_error)?;
+                    return Ok(state);
+                }
+                Err(err) if is_recoverable_ws_error(&err) => {
+                    pool.bump_silent_reconnects()
+                        .map_err(WsTurnError::into_llm_error)?;
+                    tracing::info!(
+                        target: crate::LOG_TARGET,
+                        session_id,
+                        error = %err,
+                        "Codex WS connection lost during prewarm; reopening",
+                    );
+                    drop(conn);
+                }
+                Err(other) => {
+                    drop(conn);
+                    pool.abandon(&key).map_err(WsTurnError::into_llm_error)?;
+                    return Err(other);
+                }
+            }
+        }
+    } else {
+        tracing::debug!(
+            target: crate::LOG_TARGET,
+            session_id,
+            "skipping prompt prewarm: websocket pool key is busy",
+        );
+        return Ok(crate::common::StreamState::new());
+    }
+
+    let mut conn = match WsConn::connect(config) {
+        Ok(conn) => conn,
+        Err(error) => {
+            pool.abandon(&key).map_err(WsTurnError::into_llm_error)?;
+            return Err(error);
+        }
+    };
+    pool.record_fresh_open(false)
+        .map_err(WsTurnError::into_llm_error)?;
+    match conn.run_prewarm(config, request) {
+        Ok(state) => {
+            pool.release(key, conn)
+                .map_err(WsTurnError::into_llm_error)?;
+            Ok(state)
+        }
+        Err(err) => {
+            drop(conn);
+            pool.abandon(&key).map_err(WsTurnError::into_llm_error)?;
             Err(err)
         }
     }
@@ -418,7 +731,8 @@ fn without_previous_response<'a>(
 #[cfg(test)]
 mod tests {
     use std::net::{SocketAddr, TcpListener, TcpStream};
-    use std::sync::{Arc, Mutex};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier, Mutex};
     use std::thread;
 
     use tungstenite::Message;
@@ -430,8 +744,33 @@ mod tests {
     #[test]
     fn keys_distinguish_sessions_under_same_account() {
         let cfg = make_config("https://chatgpt.com/backend-api", Some("acc"));
-        let a = PoolKey::for_request(&cfg, "session-a");
-        let b = PoolKey::for_request(&cfg, "session-b");
+        let a = PoolKey::for_request(&cfg, "session-a", &tau_proto::PromptOriginator::User);
+        let b = PoolKey::for_request(&cfg, "session-b", &tau_proto::PromptOriginator::User);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn keys_distinguish_side_conversations_under_same_session() {
+        // Side conversations can share the parent session_id while representing
+        // independent extension query chains. They must not share one mutable
+        // WS cache slot when prompt workers run concurrently.
+        let cfg = make_config("https://chatgpt.com/backend-api", Some("acc"));
+        let a = PoolKey::for_request(
+            &cfg,
+            "shared-session",
+            &tau_proto::PromptOriginator::Extension {
+                name: tau_proto::ExtensionName::new("delegate"),
+                query_id: "q1".to_owned(),
+            },
+        );
+        let b = PoolKey::for_request(
+            &cfg,
+            "shared-session",
+            &tau_proto::PromptOriginator::Extension {
+                name: tau_proto::ExtensionName::new("delegate"),
+                query_id: "q2".to_owned(),
+            },
+        );
         assert_ne!(a, b);
     }
 
@@ -440,10 +779,12 @@ mod tests {
         let a = PoolKey::for_request(
             &make_config("https://chatgpt.com/backend-api", Some("acc-1")),
             "session",
+            &tau_proto::PromptOriginator::User,
         );
         let b = PoolKey::for_request(
             &make_config("https://chatgpt.com/backend-api", Some("acc-2")),
             "session",
+            &tau_proto::PromptOriginator::User,
         );
         assert_ne!(a, b);
     }
@@ -499,6 +840,198 @@ mod tests {
         );
     }
 
+    /// Concurrent same-key turns must serialize at the shared-pool reservation
+    /// boundary. Without that reservation, both workers can observe an empty
+    /// map while the first turn owns the socket and open two sockets for one
+    /// conversation chain.
+    #[test]
+    fn shared_pool_serializes_same_key_turns() {
+        let (addr, server) = spawn_fake_codex_server();
+        server.lock().expect("server lock").response_delay = Duration::from_millis(100);
+        let config = Arc::new(make_config(
+            &format!("http://{addr}/backend-api"),
+            Some("acc"),
+        ));
+        let pool = Arc::new(SharedWsPool::new());
+        let barrier = Arc::new(Barrier::new(2));
+
+        let mut handles = Vec::new();
+        for idx in 0..2 {
+            let config = config.clone();
+            let pool = pool.clone();
+            let barrier = barrier.clone();
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                run_shared_turn(&pool, &config, "same-session", &format!("sp-{idx}"));
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("worker join");
+        }
+
+        let state = server.lock().expect("server state lock");
+        assert_eq!(
+            state.upgrade_count, 1,
+            "same PoolKey must reuse one reserved socket rather than opening a parallel chain"
+        );
+        assert_eq!(state.turns_per_connection, vec![2]);
+        assert_eq!(
+            state.max_active_turns, 1,
+            "same-key WS turns should run one at a time"
+        );
+    }
+
+    /// A prompt canceled while it is queued behind a same-key WS reservation
+    /// must stop waiting instead of sending a stale network request after the
+    /// active turn releases. The pool polls prompt cancellation while parked on
+    /// the condvar so the waiter can unwind and let the worker emit its
+    /// terminal canceled response/PromptDone.
+    #[test]
+    fn shared_pool_checkout_wait_aborts_when_canceled() {
+        let config = make_config("https://chatgpt.com/backend-api", Some("acc"));
+        let key = PoolKey::for_request(&config, "same-session", &tau_proto::PromptOriginator::User);
+        let pool = Arc::new(SharedWsPool::new());
+        pool.inner
+            .lock()
+            .expect("pool lock")
+            .busy
+            .insert(key.clone());
+
+        let canceled = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(Barrier::new(2));
+        let handle = {
+            let pool = pool.clone();
+            let key = key.clone();
+            let canceled = canceled.clone();
+            let started = started.clone();
+            thread::spawn(move || {
+                started.wait();
+                pool.checkout_until(&key, "test", &mut || canceled.load(Ordering::SeqCst))
+            })
+        };
+
+        started.wait();
+        thread::sleep(Duration::from_millis(100));
+        canceled.store(true, Ordering::SeqCst);
+
+        let result = handle.join().expect("checkout waiter join");
+        assert!(matches!(result, Err(WsTurnError::Canceled)));
+        assert!(
+            pool.inner.lock().expect("pool lock").busy.contains(&key),
+            "a canceled waiter must not steal or clear the active worker's reservation"
+        );
+    }
+
+    /// Prewarm runs on the provider main loop, so it must never park behind an
+    /// active same-key reservation. A busy key means a real turn is already
+    /// doing the warming work; skip best-effort prewarm instead of delaying
+    /// cancellation, worker output, PromptDone, or ACK processing.
+    #[test]
+    fn shared_prewarm_skips_busy_same_key_without_waiting() {
+        let (addr, _server) = spawn_fake_codex_server();
+        let config = Arc::new(make_config(
+            &format!("http://{addr}/backend-api"),
+            Some("acc"),
+        ));
+        let pool = Arc::new(SharedWsPool::new());
+        let key = PoolKey::for_request(&config, "same-session", &tau_proto::PromptOriginator::User);
+        pool.inner
+            .lock()
+            .expect("pool lock")
+            .busy
+            .insert(key.clone());
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = {
+            let config = config.clone();
+            let pool = pool.clone();
+            thread::spawn(move || {
+                let session_id = tau_proto::SessionId::new("same-session");
+                let originator = tau_proto::PromptOriginator::User;
+                let request = PromptPayload {
+                    system_prompt: "sys",
+                    context_items: &[],
+                    tools: &[],
+                    params: tau_proto::ModelParams::default(),
+                    tool_choice: tau_proto::ToolChoice::default(),
+                    previous_response: None,
+                    originator: &originator,
+                    session_id: &session_id,
+                    share_user_cache_key: false,
+                };
+                let started = std::time::Instant::now();
+                let result =
+                    run_prewarm_through_shared_pool(&pool, &config, "same-session", &request);
+                tx.send((started.elapsed(), result.is_ok()))
+                    .expect("send prewarm result");
+            })
+        };
+
+        let (elapsed, ok) = match rx.recv_timeout(Duration::from_millis(150)) {
+            Ok(result) => result,
+            Err(error) => {
+                pool.inner.lock().expect("pool lock").busy.remove(&key);
+                pool.changed.notify_all();
+                handle.join().expect("prewarm join after unblocking");
+                panic!("prewarm blocked on a busy same-key reservation: {error}");
+            }
+        };
+        handle.join().expect("prewarm join");
+
+        assert!(ok, "skipped prewarm should report success");
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "prewarm should not wait for the checkout poll interval; elapsed {elapsed:?}"
+        );
+        assert!(
+            pool.inner.lock().expect("pool lock").busy.contains(&key),
+            "skipped prewarm must not clear the active worker's reservation"
+        );
+        assert_eq!(
+            pool.stats().expect("pool stats").upgrades,
+            0,
+            "skipped prewarm should not open a socket"
+        );
+    }
+
+    /// Different pool keys should not be serialized by the same-key guard. The
+    /// shared mutex may protect bookkeeping, but it must not cover network I/O.
+    #[test]
+    fn shared_pool_allows_different_keys_to_run_concurrently() {
+        let (addr, server) = spawn_fake_codex_server();
+        server.lock().expect("server lock").response_delay = Duration::from_millis(150);
+        let config = Arc::new(make_config(
+            &format!("http://{addr}/backend-api"),
+            Some("acc"),
+        ));
+        let pool = Arc::new(SharedWsPool::new());
+        let barrier = Arc::new(Barrier::new(2));
+
+        let mut handles = Vec::new();
+        for (idx, session) in ["session-a", "session-b"].into_iter().enumerate() {
+            let config = config.clone();
+            let pool = pool.clone();
+            let barrier = barrier.clone();
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                run_shared_turn(&pool, &config, session, &format!("sp-{idx}"));
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("worker join");
+        }
+
+        let state = server.lock().expect("server state lock");
+        assert_eq!(
+            state.upgrade_count, 2,
+            "different keys use different sockets"
+        );
+        assert_eq!(
+            state.max_active_turns, 2,
+            "different-key WS network turns should overlap"
+        );
+    }
+
     /// Cap the pool at 2 and exercise three sessions. The
     /// least-recently-used session's socket must get evicted; a
     /// follow-up turn on that session triggers a fresh upgrade.
@@ -539,7 +1072,7 @@ mod tests {
         assert_eq!(server.lock().expect("server state lock").upgrade_count, 1);
 
         // Forcibly age the cached connection past the threshold.
-        let key = PoolKey::for_request(&config, "session-aged");
+        let key = PoolKey::for_request(&config, "session-aged", &tau_proto::PromptOriginator::User);
         if let Some(conn) = pool.conns.get_mut(&key) {
             conn.opened_at =
                 std::time::Instant::now() - MAX_CONNECTION_AGE - Duration::from_secs(1);
@@ -967,6 +1500,13 @@ mod tests {
         /// connections. Available for tests that want to inspect
         /// what the client actually sent (chain ids, model knobs).
         requests: Vec<serde_json::Value>,
+        /// Artificial per-turn response delay used by concurrency tests to make
+        /// overlapping network turns observable.
+        response_delay: Duration,
+        /// Number of fake server turns currently sleeping/streaming.
+        active_turns: usize,
+        /// Maximum simultaneous fake server turns observed during a test.
+        max_active_turns: usize,
         /// Fault injection. When `Some`, the worker for a matching
         /// connection drops the socket with a 1011 close frame
         /// instead of serving the offending turn — mimicking the
@@ -1024,14 +1564,21 @@ mod tests {
                 Message::Text(text) => {
                     let parsed: serde_json::Value =
                         serde_json::from_str(text.as_str()).unwrap_or(serde_json::Value::Null);
-                    let fault_now = {
+                    let (fault_now, response_delay) = {
                         let mut s = state.lock().expect("server state lock");
                         s.requests.push(parsed.clone());
                         s.turns_per_connection[conn_idx] += 1;
-                        s.fault
-                            .filter(|f| f.on_conn_index == conn_idx && turn_counter >= f.after_turn)
+                        s.active_turns += 1;
+                        s.max_active_turns = s.max_active_turns.max(s.active_turns);
+                        let fault_now = s.fault.filter(|f| {
+                            f.on_conn_index == conn_idx && turn_counter >= f.after_turn
+                        });
+                        (fault_now, s.response_delay)
                     };
                     turn_counter += 1;
+                    if !response_delay.is_zero() {
+                        thread::sleep(response_delay);
+                    }
                     if fault_now.is_some() {
                         // Mimic the live Codex 1011 keepalive-timeout
                         // drop: send a close frame and bail without
@@ -1042,6 +1589,7 @@ mod tests {
                             code: tungstenite::protocol::frame::coding::CloseCode::Error,
                             reason: "keepalive ping timeout".into(),
                         })));
+                        finish_server_turn(&state);
                         return;
                     }
                     // Stream a tiny canned event sequence: one
@@ -1066,14 +1614,21 @@ mod tests {
                     for ev in events {
                         let txt = serde_json::to_string(&ev).expect("serialize");
                         if ws.send(Message::Text(txt.into())).is_err() {
+                            finish_server_turn(&state);
                             return;
                         }
                     }
+                    finish_server_turn(&state);
                 }
                 Message::Close(_) => return,
                 _ => continue,
             }
         }
+    }
+
+    fn finish_server_turn(state: &Arc<Mutex<ServerState>>) {
+        let mut s = state.lock().expect("server state lock");
+        s.active_turns = s.active_turns.saturating_sub(1);
     }
 
     fn user_msg(text: &str) -> tau_proto::ContextItem {
@@ -1106,6 +1661,37 @@ mod tests {
         };
         run_turn_through_pool(pool, config, session, "sp-test", &request, on_update)
             .expect("turn ok");
+    }
+
+    fn run_shared_turn(
+        pool: &SharedWsPool,
+        config: &ResponsesConfig,
+        session: &str,
+        session_prompt_id: &str,
+    ) {
+        let session_id = tau_proto::SessionId::new(session);
+        let originator = tau_proto::PromptOriginator::User;
+        let request = PromptPayload {
+            system_prompt: "sys",
+            context_items: &[],
+            tools: &[],
+            params: tau_proto::ModelParams::default(),
+            tool_choice: tau_proto::ToolChoice::default(),
+            previous_response: None,
+            originator: &originator,
+            session_id: &session_id,
+            share_user_cache_key: false,
+        };
+        let mut on_update = |_: &str, _: Option<&str>| {};
+        run_turn_through_shared_pool(
+            pool,
+            config,
+            session_prompt_id,
+            &request,
+            &mut || false,
+            &mut on_update,
+        )
+        .expect("shared turn ok");
     }
 
     fn make_config(base_url: &str, account_id: Option<&str>) -> ResponsesConfig {

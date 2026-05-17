@@ -8,10 +8,11 @@
 mod common;
 mod responses;
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::error::Error;
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -48,6 +49,14 @@ const LLM_MAX_RETRIES_EXTENSION: usize = 2;
 /// WebSocket attempts that can fail before a ChatGPT session falls back to
 /// HTTP+SSE for the process lifetime.
 const WS_RETRY_BUDGET_BEFORE_HTTP_FALLBACK: usize = 2;
+
+/// Default number of provider prompts allowed to execute concurrently.
+const DEFAULT_PROMPT_CONCURRENCY: usize = 4;
+
+/// Environment override for prompt execution concurrency.
+const PROMPT_CONCURRENCY_ENV: &str = "TAU_OPENAI_PROVIDER_PROMPT_CONCURRENCY";
+const CANCELED_BY_HARNESS_STATUS: u16 = 499;
+const CANCELED_BY_HARNESS_BODY: &str = "cancelled by harness";
 
 /// Runs the extension on stdin/stdout.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
@@ -96,14 +105,37 @@ fn run_inner<R, W, F>(
     reader: R,
     writer: W,
     startup_auth: AuthStore,
-    mut load_prompt_auth: F,
+    load_prompt_auth: F,
 ) -> Result<(), Box<dyn Error>>
 where
     R: Read + Send + 'static,
     W: Write,
     F: FnMut() -> AuthStore,
 {
-    let mut writer = FrameWriter::new(BufWriter::new(writer));
+    run_inner_with_prompt_executor(
+        reader,
+        writer,
+        startup_auth,
+        load_prompt_auth,
+        prompt_concurrency_limit(),
+        production_prompt_executor(),
+    )
+}
+
+fn run_inner_with_prompt_executor<R, W, F>(
+    reader: R,
+    writer: W,
+    startup_auth: AuthStore,
+    mut load_prompt_auth: F,
+    prompt_concurrency_limit: usize,
+    prompt_executor: PromptExecutor,
+) -> Result<(), Box<dyn Error>>
+where
+    R: Read + Send + 'static,
+    W: Write,
+    F: FnMut() -> AuthStore,
+{
+    let mut handshake_writer = FrameWriter::new(BufWriter::new(writer));
 
     tau_extension::Handshake::with_kind(EXTENSION_NAME, ClientKind::Provider)
         .subscribe([
@@ -114,7 +146,8 @@ where
             models: models_for_auth(&startup_auth),
         }))
         .ready_message("openai provider ready")
-        .run(&mut writer)?;
+        .run(&mut handshake_writer)?;
+    let mut writer = handshake_writer.into_inner();
 
     let (frame_tx, frame_rx) = mpsc::channel::<Frame>();
     thread::spawn(move || {
@@ -135,47 +168,105 @@ where
         }
     });
 
+    let (worker_tx, worker_rx) = mpsc::channel::<WorkerMessage>();
     let mut deferred: VecDeque<Frame> = VecDeque::new();
-    let mut ws_pool = responses::pool::WsPool::new();
-    let mut ws_disabled: HashSet<String> = HashSet::new();
-    let mut canceled_spids: HashSet<tau_proto::SessionPromptId> = HashSet::new();
+    let ws_pool = Arc::new(responses::pool::SharedWsPool::new());
+    let ws_disabled = Arc::new(Mutex::new(HashSet::new()));
+    let cancellation = Arc::new(CancellationState::default());
+    let mut prompt_queue: VecDeque<PromptJob> = VecDeque::new();
+    let mut active_prompts = 0_usize;
+    let mut ack_tracker = AckTracker::default();
+    let mut input_closed = false;
 
     loop {
+        drain_worker_messages(
+            &worker_rx,
+            &mut writer,
+            &mut active_prompts,
+            &mut ack_tracker,
+        )?;
+        start_queued_prompts(
+            &mut prompt_queue,
+            &mut active_prompts,
+            prompt_concurrency_limit,
+            &worker_tx,
+            &prompt_executor,
+            &cancellation,
+            &ws_pool,
+            &ws_disabled,
+            &mut writer,
+            &mut ack_tracker,
+        )?;
+        write_ready_acks(&mut writer, &mut ack_tracker)?;
+
+        if input_closed && active_prompts == 0 && prompt_queue.is_empty() {
+            return Ok(());
+        }
+
         let frame = match deferred.pop_front() {
-            Some(frame) => frame,
-            None => match frame_rx.recv() {
-                Ok(frame) => frame,
-                Err(_) => return Ok(()),
+            Some(frame) => Some(frame),
+            None if input_closed => None,
+            None if active_prompts == 0 && prompt_queue.is_empty() => match frame_rx.recv() {
+                Ok(frame) => Some(frame),
+                Err(_) => {
+                    input_closed = true;
+                    None
+                }
+            },
+            None => match frame_rx.recv_timeout(Duration::from_millis(10)) {
+                Ok(frame) => Some(frame),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => {
+                    input_closed = true;
+                    None
+                }
             },
         };
+        let Some(frame) = frame else {
+            continue;
+        };
+
         let (log_id, inner) = frame.peel_log();
+        if let Some(id) = log_id {
+            ack_tracker.register(id);
+        }
+        let mut complete_log_now = true;
         match inner {
             Frame::Event(Event::SessionPromptPrewarmRequested(prewarm)) => {
                 let mut auth_store = load_prompt_auth();
-                handle_prewarm(&prewarm, &mut auth_store, &mut ws_pool, &mut ws_disabled);
+                handle_prewarm(&prewarm, &mut auth_store, &ws_pool, &ws_disabled);
             }
             Frame::Event(Event::SessionCompactionRequested(request)) => {
                 let session_prompt_id = request.prompt.session_prompt_id.clone();
                 let prompt = materialize_prompt(&request.prompt);
 
-                if canceled_spids.remove(&session_prompt_id) {
-                    finish_canceled(&session_prompt_id, &prompt.originator, &mut writer)?;
+                if cancellation.take_canceled(&session_prompt_id) {
+                    let mut frame_writer = FrameWriter::new(&mut writer);
+                    finish_canceled(&session_prompt_id, &prompt.originator, &mut frame_writer)?;
                     if let Some(id) = log_id {
-                        writer.write_frame(&Frame::Message(Message::Ack(Ack { up_to: id })))?;
-                        writer.flush()?;
+                        ack_tracker.complete(id);
                     }
+                    write_ready_acks(&mut writer, &mut ack_tracker)?;
                     continue;
                 }
 
                 trace_prompt_like("provider compaction request", &request, &session_prompt_id);
-                write_prompt_submitted(&session_prompt_id, &prompt.originator, &mut writer)?;
+                {
+                    let mut frame_writer = FrameWriter::new(&mut writer);
+                    write_prompt_submitted(
+                        &session_prompt_id,
+                        &prompt.originator,
+                        &mut frame_writer,
+                    )?;
+                }
 
-                let mut retry_ctx = RetryContext {
+                let mut retry_ctx = FrameRetryContext {
                     frame_rx: &frame_rx,
                     deferred: &mut deferred,
-                    canceled_spids: &mut canceled_spids,
+                    cancellation: cancellation.clone(),
                 };
                 let mut auth_store = load_prompt_auth();
+                let mut frame_writer = FrameWriter::new(&mut writer);
                 match prompt
                     .model
                     .as_ref()
@@ -185,64 +276,433 @@ where
                         &session_prompt_id,
                         &backend,
                         &prompt,
-                        &mut writer,
+                        &mut frame_writer,
                         &mut retry_ctx,
                     )?,
-                    None => finish_missing_backend(&prompt, &session_prompt_id, &mut writer)?,
+                    None => finish_missing_backend(&prompt, &session_prompt_id, &mut frame_writer)?,
                 }
             }
             Frame::Event(Event::SessionPromptCreated(prompt)) => {
                 let session_prompt_id = prompt.session_prompt_id.clone();
                 let prompt = materialize_prompt(&prompt);
 
-                if canceled_spids.remove(&session_prompt_id) {
-                    finish_canceled(&session_prompt_id, &prompt.originator, &mut writer)?;
+                if cancellation.take_canceled(&session_prompt_id) {
+                    let mut frame_writer = FrameWriter::new(&mut writer);
+                    finish_canceled(&session_prompt_id, &prompt.originator, &mut frame_writer)?;
                     if let Some(id) = log_id {
-                        writer.write_frame(&Frame::Message(Message::Ack(Ack { up_to: id })))?;
-                        writer.flush()?;
+                        ack_tracker.complete(id);
                     }
+                    write_ready_acks(&mut writer, &mut ack_tracker)?;
                     continue;
                 }
 
                 trace_prompt_like("provider prompt", &prompt, &session_prompt_id);
-                write_prompt_submitted(&session_prompt_id, &prompt.originator, &mut writer)?;
 
-                let mut retry_ctx = RetryContext {
-                    frame_rx: &frame_rx,
-                    deferred: &mut deferred,
-                    canceled_spids: &mut canceled_spids,
-                };
                 let mut auth_store = load_prompt_auth();
                 match prompt
                     .model
                     .as_ref()
                     .and_then(|model| resolve_responses_backend(model, &mut auth_store))
                 {
-                    Some(backend) => handle_prompt(
-                        &session_prompt_id,
-                        &backend,
-                        &prompt,
+                    Some(backend) => {
+                        let job = PromptJob {
+                            log_id,
+                            session_prompt_id,
+                            prompt,
+                            backend,
+                        };
+                        if active_prompts < prompt_concurrency_limit {
+                            start_prompt_job(
+                                job,
+                                &mut active_prompts,
+                                &worker_tx,
+                                &prompt_executor,
+                                &cancellation,
+                                &ws_pool,
+                                &ws_disabled,
+                            );
+                        } else {
+                            prompt_queue.push_back(job);
+                        }
+                        complete_log_now = false;
+                    }
+                    None => {
+                        let mut frame_writer = FrameWriter::new(&mut writer);
+                        write_prompt_submitted(
+                            &session_prompt_id,
+                            &prompt.originator,
+                            &mut frame_writer,
+                        )?;
+                        finish_missing_backend(&prompt, &session_prompt_id, &mut frame_writer)?;
+                    }
+                }
+            }
+            Frame::Event(Event::UiCancelPrompt(cancel)) => match cancel.session_prompt_id {
+                Some(spid) => {
+                    cancellation.cancel(spid.clone());
+                    finish_queued_canceled(
+                        &spid,
+                        &mut prompt_queue,
                         &mut writer,
-                        &mut retry_ctx,
-                        &mut ws_pool,
-                        &mut ws_disabled,
-                    )?,
-                    None => finish_missing_backend(&prompt, &session_prompt_id, &mut writer)?,
+                        &mut ack_tracker,
+                    )?;
                 }
+                None => cancellation.cancel_retry_sleeps(),
+            },
+            Frame::Message(Message::Disconnect(_)) => {
+                cancellation.shutdown();
+                return Ok(());
             }
-            Frame::Event(Event::UiCancelPrompt(cancel)) => {
-                if let Some(spid) = cancel.session_prompt_id {
-                    canceled_spids.insert(spid);
-                }
-            }
-            Frame::Message(Message::Disconnect(_)) => return Ok(()),
             _ => {}
         }
-        if let Some(id) = log_id {
-            writer.write_frame(&Frame::Message(Message::Ack(Ack { up_to: id })))?;
-            writer.flush()?;
+        if complete_log_now {
+            if let Some(id) = log_id {
+                ack_tracker.complete(id);
+            }
+            write_ready_acks(&mut writer, &mut ack_tracker)?;
         }
     }
+}
+
+type PromptExecutor = Arc<dyn Fn(PromptExecution) + Send + Sync + 'static>;
+
+struct PromptJob {
+    log_id: Option<tau_proto::LogEventId>,
+    session_prompt_id: tau_proto::SessionPromptId,
+    prompt: tau_proto::SessionPromptCreated,
+    backend: responses::ResponsesConfig,
+}
+
+struct PromptExecution {
+    job: PromptJob,
+    output_tx: Sender<WorkerMessage>,
+    cancellation: Arc<CancellationState>,
+    ws_pool: Arc<responses::pool::SharedWsPool>,
+    ws_disabled: Arc<Mutex<HashSet<String>>>,
+}
+
+impl PromptExecution {
+    fn frame_writer(&self) -> FrameWriter<BufWriter<ChannelWrite>> {
+        FrameWriter::new(BufWriter::new(ChannelWrite::new(self.output_tx.clone())))
+    }
+}
+
+enum WorkerMessage {
+    Output(Vec<u8>),
+    PromptDone {
+        log_id: Option<tau_proto::LogEventId>,
+    },
+}
+
+struct ChannelWrite {
+    tx: Sender<WorkerMessage>,
+    buf: Vec<u8>,
+}
+
+impl ChannelWrite {
+    fn new(tx: Sender<WorkerMessage>) -> Self {
+        Self {
+            tx,
+            buf: Vec::new(),
+        }
+    }
+}
+
+impl Write for ChannelWrite {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        let bytes = std::mem::take(&mut self.buf);
+        self.tx
+            .send(WorkerMessage::Output(bytes))
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "writer closed"))
+    }
+}
+
+#[derive(Default)]
+struct AckTracker {
+    pending: BTreeSet<u64>,
+    completed: BTreeSet<u64>,
+    acked_up_to: Option<u64>,
+}
+
+impl AckTracker {
+    fn register(&mut self, id: tau_proto::LogEventId) {
+        self.pending.insert(id.get());
+    }
+
+    fn complete(&mut self, id: tau_proto::LogEventId) {
+        let raw = id.get();
+        self.pending.remove(&raw);
+        if self.acked_up_to.is_none_or(|acked| acked < raw) {
+            self.completed.insert(raw);
+        }
+    }
+
+    fn next_ack(&mut self) -> Option<tau_proto::LogEventId> {
+        let limit = self.pending.first().copied();
+        let raw = match limit {
+            Some(first_pending) => self.completed.range(..first_pending).next_back().copied()?,
+            None => self.completed.last().copied()?,
+        };
+        if self.acked_up_to.is_some_and(|acked| raw <= acked) {
+            return None;
+        }
+        self.completed.retain(|completed| raw < *completed);
+        self.acked_up_to = Some(raw);
+        Some(tau_proto::LogEventId::new(raw))
+    }
+}
+
+#[derive(Default)]
+struct CancellationState {
+    inner: Mutex<CancellationInner>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct CancellationInner {
+    canceled_spids: HashSet<tau_proto::SessionPromptId>,
+    retry_cancel_generation: u64,
+    shutdown: bool,
+}
+
+impl CancellationState {
+    fn cancel(&self, spid: tau_proto::SessionPromptId) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.canceled_spids.insert(spid);
+            self.changed.notify_all();
+        }
+    }
+
+    fn cancel_retry_sleeps(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.retry_cancel_generation = inner.retry_cancel_generation.saturating_add(1);
+            self.changed.notify_all();
+        }
+    }
+
+    fn shutdown(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.shutdown = true;
+            self.changed.notify_all();
+        }
+    }
+
+    fn take_canceled(&self, spid: &tau_proto::SessionPromptId) -> bool {
+        self.inner
+            .lock()
+            .map(|mut inner| inner.canceled_spids.remove(spid) || inner.shutdown)
+            .unwrap_or(true)
+    }
+
+    fn sleep_or_abort(&self, delay: Duration, current_spid: &str) -> SleepOutcome {
+        let deadline = Instant::now() + delay;
+        let mut inner = match self.inner.lock() {
+            Ok(inner) => inner,
+            Err(_) => return SleepOutcome::Aborted,
+        };
+        let generation = inner.retry_cancel_generation;
+        loop {
+            if inner.shutdown
+                || inner.retry_cancel_generation != generation
+                || inner
+                    .canceled_spids
+                    .iter()
+                    .any(|spid| spid.as_str() == current_spid)
+            {
+                return SleepOutcome::Aborted;
+            }
+            let now = Instant::now();
+            let Some(remaining) = deadline.checked_duration_since(now) else {
+                return SleepOutcome::Elapsed;
+            };
+            match self.changed.wait_timeout(inner, remaining) {
+                Ok((guard, result)) => {
+                    inner = guard;
+                    if result.timed_out() {
+                        return SleepOutcome::Elapsed;
+                    }
+                }
+                Err(_) => return SleepOutcome::Aborted,
+            }
+        }
+    }
+}
+
+fn prompt_concurrency_limit() -> usize {
+    std::env::var(PROMPT_CONCURRENCY_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| 0 < value)
+        .unwrap_or(DEFAULT_PROMPT_CONCURRENCY)
+}
+
+fn production_prompt_executor() -> PromptExecutor {
+    Arc::new(|execution| {
+        let session_prompt_id = execution.job.session_prompt_id.clone();
+        let mut writer = execution.frame_writer();
+        let mut retry_ctx = SharedRetryContext {
+            cancellation: execution.cancellation.clone(),
+        };
+        let result = handle_prompt(
+            &session_prompt_id,
+            &execution.job.backend,
+            &execution.job.prompt,
+            &mut writer,
+            &mut retry_ctx,
+            &execution.ws_pool,
+            &execution.ws_disabled,
+        );
+        if let Err(error) = result {
+            tracing::warn!(
+                target: LOG_TARGET,
+                session_prompt_id = %session_prompt_id,
+                "prompt worker failed to emit provider response: {error}"
+            );
+        }
+    })
+}
+
+fn start_prompt_job(
+    job: PromptJob,
+    active_prompts: &mut usize,
+    worker_tx: &Sender<WorkerMessage>,
+    prompt_executor: &PromptExecutor,
+    cancellation: &Arc<CancellationState>,
+    ws_pool: &Arc<responses::pool::SharedWsPool>,
+    ws_disabled: &Arc<Mutex<HashSet<String>>>,
+) {
+    *active_prompts += 1;
+    let log_id = job.log_id;
+    let execution = PromptExecution {
+        job,
+        output_tx: worker_tx.clone(),
+        cancellation: cancellation.clone(),
+        ws_pool: ws_pool.clone(),
+        ws_disabled: ws_disabled.clone(),
+    };
+    let executor = prompt_executor.clone();
+    let done_tx = worker_tx.clone();
+    thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| executor(execution)));
+        if result.is_err() {
+            tracing::error!(target: LOG_TARGET, "prompt worker panicked");
+        }
+        let _ = done_tx.send(WorkerMessage::PromptDone { log_id });
+    });
+}
+
+fn start_queued_prompts<W: Write>(
+    prompt_queue: &mut VecDeque<PromptJob>,
+    active_prompts: &mut usize,
+    prompt_concurrency_limit: usize,
+    worker_tx: &Sender<WorkerMessage>,
+    prompt_executor: &PromptExecutor,
+    cancellation: &Arc<CancellationState>,
+    ws_pool: &Arc<responses::pool::SharedWsPool>,
+    ws_disabled: &Arc<Mutex<HashSet<String>>>,
+    writer: &mut BufWriter<W>,
+    ack_tracker: &mut AckTracker,
+) -> Result<(), Box<dyn Error>> {
+    while *active_prompts < prompt_concurrency_limit {
+        let Some(job) = prompt_queue.pop_front() else {
+            return Ok(());
+        };
+        if cancellation.take_canceled(&job.session_prompt_id) {
+            let mut frame_writer = FrameWriter::new(&mut *writer);
+            finish_canceled(
+                &job.session_prompt_id,
+                &job.prompt.originator,
+                &mut frame_writer,
+            )?;
+            if let Some(id) = job.log_id {
+                ack_tracker.complete(id);
+            }
+            continue;
+        }
+        start_prompt_job(
+            job,
+            active_prompts,
+            worker_tx,
+            prompt_executor,
+            cancellation,
+            ws_pool,
+            ws_disabled,
+        );
+    }
+    Ok(())
+}
+
+fn finish_queued_canceled<W: Write>(
+    spid: &tau_proto::SessionPromptId,
+    prompt_queue: &mut VecDeque<PromptJob>,
+    writer: &mut BufWriter<W>,
+    ack_tracker: &mut AckTracker,
+) -> Result<(), Box<dyn Error>> {
+    let Some(index) = prompt_queue
+        .iter()
+        .position(|job| job.session_prompt_id.as_str() == spid.as_str())
+    else {
+        return Ok(());
+    };
+    let Some(job) = prompt_queue.remove(index) else {
+        return Ok(());
+    };
+    let mut frame_writer = FrameWriter::new(writer);
+    finish_canceled(
+        &job.session_prompt_id,
+        &job.prompt.originator,
+        &mut frame_writer,
+    )?;
+    if let Some(id) = job.log_id {
+        ack_tracker.complete(id);
+    }
+    Ok(())
+}
+
+fn drain_worker_messages<W: Write>(
+    worker_rx: &Receiver<WorkerMessage>,
+    writer: &mut BufWriter<W>,
+    active_prompts: &mut usize,
+    ack_tracker: &mut AckTracker,
+) -> Result<(), Box<dyn Error>> {
+    loop {
+        match worker_rx.try_recv() {
+            Ok(WorkerMessage::Output(bytes)) => {
+                writer.write_all(&bytes)?;
+                writer.flush()?;
+            }
+            Ok(WorkerMessage::PromptDone { log_id }) => {
+                *active_prompts = active_prompts.saturating_sub(1);
+                if let Some(id) = log_id {
+                    ack_tracker.complete(id);
+                }
+            }
+            Err(TryRecvError::Empty) => return Ok(()),
+            Err(TryRecvError::Disconnected) => return Ok(()),
+        }
+    }
+}
+
+fn write_ready_acks<W: Write>(
+    writer: &mut BufWriter<W>,
+    ack_tracker: &mut AckTracker,
+) -> Result<(), Box<dyn Error>> {
+    while let Some(id) = ack_tracker.next_ack() {
+        tau_proto::encode_frame(
+            writer.by_ref(),
+            &Frame::Message(Message::Ack(Ack { up_to: id })),
+        )?;
+        writer.flush()?;
+    }
+    Ok(())
 }
 
 fn materialize_prompt(prompt: &tau_proto::SessionPromptCreated) -> tau_proto::SessionPromptCreated {
@@ -272,7 +732,7 @@ fn trace_prompt_like<T: serde::Serialize>(label: &str, value: &T, session_prompt
 fn write_prompt_submitted<W: Write>(
     session_prompt_id: &str,
     originator: &tau_proto::PromptOriginator,
-    writer: &mut FrameWriter<BufWriter<W>>,
+    writer: &mut FrameWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
     writer.write_frame(&Frame::Event(Event::ProviderPromptSubmitted(
         ProviderPromptSubmitted {
@@ -287,7 +747,7 @@ fn write_prompt_submitted<W: Write>(
 fn finish_canceled<W: Write>(
     session_prompt_id: &str,
     originator: &tau_proto::PromptOriginator,
-    writer: &mut FrameWriter<BufWriter<W>>,
+    writer: &mut FrameWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
     tracing::info!(
         target: LOG_TARGET,
@@ -308,7 +768,7 @@ fn finish_canceled<W: Write>(
 fn finish_missing_backend<W: Write>(
     prompt: &tau_proto::SessionPromptCreated,
     session_prompt_id: &str,
-    writer: &mut FrameWriter<BufWriter<W>>,
+    writer: &mut FrameWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
     let msg = match &prompt.model {
         Some(model) => format!("cannot resolve provider backend for: {model}"),
@@ -354,21 +814,44 @@ fn stop_reason_from_output_items(output_items: &[ContextItem]) -> ProviderStopRe
     }
 }
 
-struct RetryContext<'a> {
-    frame_rx: &'a Receiver<Frame>,
-    deferred: &'a mut VecDeque<Frame>,
-    canceled_spids: &'a mut HashSet<tau_proto::SessionPromptId>,
+trait RetrySleeper {
+    fn sleep_or_abort(&mut self, delay: Duration, current_spid: &str) -> SleepOutcome;
+
+    fn is_aborted(&mut self, current_spid: &str) -> bool {
+        matches!(
+            self.sleep_or_abort(Duration::ZERO, current_spid),
+            SleepOutcome::Aborted,
+        )
+    }
 }
 
+struct FrameRetryContext<'a> {
+    frame_rx: &'a Receiver<Frame>,
+    deferred: &'a mut VecDeque<Frame>,
+    cancellation: Arc<CancellationState>,
+}
+
+struct SharedRetryContext {
+    cancellation: Arc<CancellationState>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SleepOutcome {
     Elapsed,
     Aborted,
 }
 
-impl RetryContext<'_> {
+impl RetrySleeper for FrameRetryContext<'_> {
     fn sleep_or_abort(&mut self, delay: Duration, current_spid: &str) -> SleepOutcome {
         let deadline = Instant::now() + delay;
         loop {
+            if self
+                .cancellation
+                .sleep_or_abort(Duration::ZERO, current_spid)
+                == SleepOutcome::Aborted
+            {
+                return SleepOutcome::Aborted;
+            }
             let now = Instant::now();
             let Some(remaining) = deadline.checked_duration_since(now) else {
                 return SleepOutcome::Elapsed;
@@ -380,20 +863,25 @@ impl RetryContext<'_> {
                     if let Frame::Event(Event::UiCancelPrompt(cancel)) = &frame {
                         match &cancel.session_prompt_id {
                             None => {
+                                self.cancellation.cancel_retry_sleeps();
                                 self.deferred.push_back(frame);
                                 return SleepOutcome::Aborted;
                             }
                             Some(spid) if spid.as_str() == current_spid => {
+                                self.cancellation.cancel(spid.clone());
                                 self.deferred.push_back(frame);
                                 return SleepOutcome::Aborted;
                             }
                             Some(spid) => {
-                                self.canceled_spids.insert(spid.clone());
+                                self.cancellation.cancel(spid.clone());
                                 continue;
                             }
                         }
                     }
                     let abort = matches!(&frame, Frame::Message(Message::Disconnect(_)));
+                    if abort {
+                        self.cancellation.shutdown();
+                    }
                     self.deferred.push_back(frame);
                     if abort {
                         return SleepOutcome::Aborted;
@@ -401,6 +889,17 @@ impl RetryContext<'_> {
                 }
             }
         }
+    }
+}
+
+impl RetrySleeper for SharedRetryContext {
+    fn sleep_or_abort(&mut self, delay: Duration, current_spid: &str) -> SleepOutcome {
+        // Prompt workers do not own the blocking network request, so targeted
+        // cancel cannot preempt an in-flight HTTP/WS read yet. It still aborts
+        // retry backoff sleeps and keeps queued prompts from starting, matching
+        // the existing provider's retry-abort safety without collateral-canceling
+        // unrelated prompt ids.
+        self.cancellation.sleep_or_abort(delay, current_spid)
     }
 }
 
@@ -544,21 +1043,22 @@ fn llm_retry_schedule(max_attempts: usize) -> backon::FibonacciBackoff {
         .build()
 }
 
-fn with_llm_retry<F, W: Write>(
+fn with_llm_retry<F, R, W: Write>(
     session_prompt_id: &str,
     originator: &tau_proto::PromptOriginator,
-    writer: &mut FrameWriter<BufWriter<W>>,
-    retry_ctx: &mut RetryContext<'_>,
+    writer: &mut FrameWriter<W>,
+    retry_ctx: &mut R,
     mut call: F,
 ) -> Result<common::StreamState, common::LlmError>
 where
-    F: FnMut(&mut FrameWriter<BufWriter<W>>) -> Result<common::StreamState, common::LlmError>,
+    F: FnMut(&mut FrameWriter<W>, &mut R) -> Result<common::StreamState, common::LlmError>,
+    R: RetrySleeper,
 {
     let max_attempts = max_retries_for(originator);
     let mut backoff = llm_retry_schedule(max_attempts);
     let mut attempt = 0_usize;
     loop {
-        let error = match call(writer) {
+        let error = match call(writer, retry_ctx) {
             Ok(state) => return Ok(state),
             Err(error) => error,
         };
@@ -601,7 +1101,7 @@ where
 fn emit_retry_banner<W: Write>(
     session_prompt_id: &str,
     originator: &tau_proto::PromptOriginator,
-    writer: &mut FrameWriter<BufWriter<W>>,
+    writer: &mut FrameWriter<W>,
     error: &common::LlmError,
     delay: Duration,
     attempt: usize,
@@ -630,36 +1130,41 @@ struct WsRetryState {
     budget: usize,
 }
 
-struct StreamDispatchState<'a> {
-    ws_pool: &'a mut responses::pool::WsPool,
-    ws_disabled: &'a mut HashSet<String>,
+struct SharedStreamDispatchState<'a> {
+    ws_pool: &'a responses::pool::SharedWsPool,
+    ws_disabled: &'a Mutex<HashSet<String>>,
     ws_retry: &'a mut WsRetryState,
     transport_taken: &'a mut ProviderBackendTransport,
 }
 
-fn stream_with_dispatch(
+fn stream_with_shared_dispatch(
     session_prompt_id: &str,
     config: &responses::ResponsesConfig,
     request: &common::PromptPayload<'_>,
-    dispatch: StreamDispatchState<'_>,
+    dispatch: SharedStreamDispatchState<'_>,
+    should_abort: &mut impl FnMut() -> bool,
     on_update: &mut impl FnMut(&str, Option<&str>),
 ) -> Result<common::StreamState, common::LlmError> {
-    let StreamDispatchState {
+    let SharedStreamDispatchState {
         ws_pool,
         ws_disabled,
         ws_retry,
         transport_taken,
     } = dispatch;
     let session_id = request.session_id.as_str();
-    let try_ws = config.supports_websocket && !ws_disabled.contains(session_id);
+    let try_ws = config.supports_websocket
+        && ws_disabled
+            .lock()
+            .map(|disabled| !disabled.contains(session_id))
+            .unwrap_or(false);
     if try_ws {
         let ws_request = request_for_transport(request, ProviderBackendTransport::Websocket);
-        match responses::pool::run_turn_through_pool(
+        match responses::pool::run_turn_through_shared_pool(
             ws_pool,
             config,
-            session_id,
             session_prompt_id,
             &ws_request,
+            should_abort,
             on_update,
         ) {
             Ok(state) => {
@@ -674,7 +1179,9 @@ fn stream_with_dispatch(
                     session_id,
                     "WS path failed ({error}); falling back to HTTP for this session",
                 );
-                ws_disabled.insert(session_id.to_owned());
+                if let Ok(mut disabled) = ws_disabled.lock() {
+                    disabled.insert(session_id.to_owned());
+                }
             }
             Err(other) => {
                 let error = other.into_llm_error();
@@ -698,7 +1205,9 @@ fn stream_with_dispatch(
                         ws_retry_budget = ws_retry.budget,
                         "WS retry budget exhausted ({error}); falling back to HTTP for this session",
                     );
-                    ws_disabled.insert(session_id.to_owned());
+                    if let Ok(mut disabled) = ws_disabled.lock() {
+                        disabled.insert(session_id.to_owned());
+                    }
                 } else {
                     return Err(error);
                 }
@@ -746,8 +1255,17 @@ fn request_for_transport<'a>(
 
 fn should_disable_ws_error(error: &responses::pool::WsTurnError) -> bool {
     match error {
+        responses::pool::WsTurnError::Canceled => false,
         responses::pool::WsTurnError::Other(error) => should_disable_ws(error),
     }
+}
+
+fn is_canceled_by_harness(error: &common::LlmError) -> bool {
+    matches!(
+        error,
+        common::LlmError::HttpStatus(CANCELED_BY_HARNESS_STATUS, body)
+            if body == CANCELED_BY_HARNESS_BODY
+    )
 }
 
 fn should_disable_ws(error: &common::LlmError) -> bool {
@@ -763,8 +1281,8 @@ fn should_disable_ws(error: &common::LlmError) -> bool {
 fn handle_prewarm(
     prewarm: &tau_proto::SessionPromptPrewarmRequested,
     auth_store: &mut AuthStore,
-    ws_pool: &mut responses::pool::WsPool,
-    ws_disabled: &mut HashSet<String>,
+    ws_pool: &responses::pool::SharedWsPool,
+    ws_disabled: &Mutex<HashSet<String>>,
 ) {
     let Some(model) = prewarm.model.as_ref() else {
         tracing::debug!(
@@ -784,7 +1302,11 @@ fn handle_prewarm(
         return;
     };
     let session_id = prewarm.session_id.as_str();
-    if !config.supports_websocket || ws_disabled.contains(session_id) {
+    let ws_disabled_for_session = ws_disabled
+        .lock()
+        .map(|disabled| disabled.contains(session_id))
+        .unwrap_or(true);
+    if !config.supports_websocket || ws_disabled_for_session {
         tracing::debug!(
             target: LOG_TARGET,
             session_id,
@@ -805,7 +1327,7 @@ fn handle_prewarm(
         session_id: &prewarm.session_id,
     };
     tracing::debug!(target: LOG_TARGET, session_id, "starting prompt prewarm");
-    match responses::pool::run_prewarm_through_pool(ws_pool, &config, session_id, &request) {
+    match responses::pool::run_prewarm_through_shared_pool(ws_pool, &config, session_id, &request) {
         Ok(_) => tracing::debug!(target: LOG_TARGET, session_id, "completed prompt prewarm"),
         Err(error) if should_disable_ws(&error) => {
             tracing::debug!(
@@ -813,7 +1335,9 @@ fn handle_prewarm(
                 session_id,
                 "prompt prewarm disabled WS path: {error}",
             );
-            ws_disabled.insert(session_id.to_owned());
+            if let Ok(mut disabled) = ws_disabled.lock() {
+                disabled.insert(session_id.to_owned());
+            }
         }
         Err(error) => tracing::debug!(
             target: LOG_TARGET,
@@ -823,15 +1347,19 @@ fn handle_prewarm(
     }
 }
 
-fn handle_prompt<W: Write>(
+fn handle_prompt<R, W: Write>(
     session_prompt_id: &str,
     config: &responses::ResponsesConfig,
     prompt: &tau_proto::SessionPromptCreated,
-    writer: &mut FrameWriter<BufWriter<W>>,
-    retry_ctx: &mut RetryContext<'_>,
-    ws_pool: &mut responses::pool::WsPool,
-    ws_disabled: &mut HashSet<String>,
-) -> Result<(), Box<dyn Error>> {
+    writer: &mut FrameWriter<W>,
+    retry_ctx: &mut R,
+    ws_pool: &responses::pool::SharedWsPool,
+    ws_disabled: &Mutex<HashSet<String>>,
+) -> Result<(), Box<dyn Error>>
+where
+    R: RetrySleeper,
+{
+    write_prompt_submitted(session_prompt_id, &prompt.originator, writer)?;
     let request = common::PromptPayload {
         system_prompt: &prompt.system_prompt,
         context_items: &prompt.context_items,
@@ -856,13 +1384,13 @@ fn handle_prompt<W: Write>(
         budget: max_retries_for(&originator).min(WS_RETRY_BUDGET_BEFORE_HTTP_FALLBACK),
     };
     let mut transport_taken = ProviderBackendTransport::HttpSse;
-    let ws_pool_before = Some(ws_pool.stats());
+    let ws_pool_before = ws_pool.stats();
     let result = with_llm_retry(
         session_prompt_id,
         &originator,
         writer,
         retry_ctx,
-        |writer| {
+        |writer, retry_ctx| {
             let mut on_update = |text_so_far: &str, thinking_so_far: Option<&str>| {
                 let _ = writer.write_frame(&Frame::Event(Event::ProviderResponseUpdated(
                     ProviderResponseUpdated {
@@ -874,21 +1402,26 @@ fn handle_prompt<W: Write>(
                 )));
                 let _ = writer.flush();
             };
-            stream_with_dispatch(
+            stream_with_shared_dispatch(
                 session_prompt_id,
                 config,
                 &request,
-                StreamDispatchState {
+                SharedStreamDispatchState {
                     ws_pool,
                     ws_disabled,
                     ws_retry: &mut ws_retry,
                     transport_taken: &mut transport_taken,
                 },
+                &mut || retry_ctx.is_aborted(session_prompt_id),
                 &mut on_update,
             )
         },
     );
-    let ws_pool_delta = ws_pool_before.map(|before| compute_ws_pool_delta(before, ws_pool.stats()));
+    let ws_pool_delta = ws_pool_before.and_then(|before| {
+        ws_pool
+            .stats()
+            .map(|after| compute_ws_pool_delta(before, after))
+    });
     match result {
         Ok(state) => {
             let backend = backend_descriptor(config, transport_taken, state.stale_chain_fallback);
@@ -901,6 +1434,9 @@ fn handle_prompt<W: Write>(
                 ws_pool_delta,
                 writer,
             )?
+        }
+        Err(error) if is_canceled_by_harness(&error) => {
+            finish_canceled(session_prompt_id, &prompt.originator, writer)?
         }
         Err(error) => {
             let backend = backend_descriptor(config, transport_taken, false);
@@ -918,13 +1454,16 @@ fn handle_prompt<W: Write>(
     Ok(())
 }
 
-fn handle_compaction_request<W: Write>(
+fn handle_compaction_request<R, W: Write>(
     session_prompt_id: &str,
     config: &responses::ResponsesConfig,
     prompt: &tau_proto::SessionPromptCreated,
-    writer: &mut FrameWriter<BufWriter<W>>,
-    retry_ctx: &mut RetryContext<'_>,
-) -> Result<(), Box<dyn Error>> {
+    writer: &mut FrameWriter<W>,
+    retry_ctx: &mut R,
+) -> Result<(), Box<dyn Error>>
+where
+    R: RetrySleeper,
+{
     let request = common::PromptPayload {
         system_prompt: &prompt.system_prompt,
         context_items: &prompt.context_items,
@@ -943,7 +1482,7 @@ fn handle_compaction_request<W: Write>(
             &prompt.originator,
             writer,
             retry_ctx,
-            |_writer| {
+            |_writer, _retry_ctx| {
                 responses::responses_compact(config, &request).map(|items| {
                     let mut state = common::StreamState::new();
                     state.append_chat_message_delta("Conversation compacted.");
@@ -1071,7 +1610,7 @@ fn finish_stream<W: Write>(
     backend: &ProviderBackend,
     mut state: common::StreamState,
     ws_pool_delta: Option<tau_proto::WsPoolDelta>,
-    writer: &mut FrameWriter<BufWriter<W>>,
+    writer: &mut FrameWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
     let input_tokens = state.input_tokens;
     let cached_tokens = state.cached_tokens;
@@ -1116,7 +1655,7 @@ fn finish_error<W: Write>(
     backend: &ProviderBackend,
     error: common::LlmError,
     ws_pool_delta: Option<tau_proto::WsPoolDelta>,
-    writer: &mut FrameWriter<BufWriter<W>>,
+    writer: &mut FrameWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
     let finished = ProviderResponseFinished {
         session_prompt_id: session_prompt_id.into(),
@@ -1220,6 +1759,8 @@ fn verbosities_for_model(model: &str) -> Vec<Verbosity> {
 mod tests {
     use std::collections::HashMap;
     use std::io::{BufReader, Cursor};
+    use std::sync::{Condvar, Mutex};
+    use std::time::{Duration, Instant};
 
     use super::*;
 
@@ -1406,6 +1947,110 @@ mod tests {
             gpt.verbosities,
             vec![Verbosity::Low, Verbosity::Medium, Verbosity::High]
         );
+    }
+
+    #[test]
+    fn ack_tracker_waits_for_contiguous_completed_log_events() {
+        // Parallel prompt workers can finish out of order, but `Ack { up_to }`
+        // is cumulative. Do not ack a later prompt until earlier received log
+        // events have completed, or a crash could lose accepted work.
+        let mut tracker = AckTracker::default();
+        tracker.register(tau_proto::LogEventId::new(7));
+        tracker.register(tau_proto::LogEventId::new(8));
+
+        tracker.complete(tau_proto::LogEventId::new(8));
+        assert_eq!(tracker.next_ack(), None);
+
+        tracker.complete(tau_proto::LogEventId::new(7));
+        assert_eq!(tracker.next_ack(), Some(tau_proto::LogEventId::new(8)));
+        assert_eq!(tracker.next_ack(), None);
+    }
+
+    #[test]
+    fn prompt_workers_start_concurrently() {
+        // Regression coverage for backend-agent parallelism: two accepted
+        // provider prompts must both enter worker execution before the first
+        // one finishes. A serial dispatcher would time out the first worker's
+        // wait and never observe two active starts at once.
+        let mut first = prompt();
+        first.session_prompt_id = "sp-par-1".into();
+        let mut second = prompt();
+        second.session_prompt_id = "sp-par-2".into();
+        let input = encode_frames(&[
+            Frame::Message(Message::LogEvent(tau_proto::LogEvent {
+                id: tau_proto::LogEventId::new(7),
+                recorded_at: tau_proto::UnixMicros::new(11),
+                event: Box::new(Event::SessionPromptCreated(first)),
+            })),
+            Frame::Message(Message::LogEvent(tau_proto::LogEvent {
+                id: tau_proto::LogEventId::new(8),
+                recorded_at: tau_proto::UnixMicros::new(12),
+                event: Box::new(Event::SessionPromptCreated(second)),
+            })),
+        ]);
+        let started = std::sync::Arc::new((Mutex::new((0_usize, 0_usize)), Condvar::new()));
+        let executor_started = started.clone();
+        let executor: PromptExecutor = std::sync::Arc::new(move |execution| {
+            let session_prompt_id = execution.job.session_prompt_id.clone();
+            let originator = execution.job.prompt.originator.clone();
+            let (lock, cv) = &*executor_started;
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let mut guard = lock.lock().expect("started lock");
+            guard.0 += 1;
+            guard.1 = guard.1.max(guard.0);
+            cv.notify_all();
+            while guard.0 < 2 {
+                let now = Instant::now();
+                let Some(remaining) = deadline.checked_duration_since(now) else {
+                    break;
+                };
+                let (next, wait) = cv.wait_timeout(guard, remaining).expect("wait for peer");
+                guard = next;
+                if wait.timed_out() {
+                    break;
+                }
+            }
+            drop(guard);
+
+            let mut writer = execution.frame_writer();
+            write_prompt_submitted(&session_prompt_id, &originator, &mut writer)
+                .expect("submitted");
+            writer
+                .write_frame(&Frame::Event(Event::ProviderResponseFinished(
+                    simple_finished(session_prompt_id.clone(), originator, "done"),
+                )))
+                .expect("finished");
+            writer.flush().expect("flush fake response");
+
+            let mut guard = lock.lock().expect("started lock");
+            guard.0 -= 1;
+            cv.notify_all();
+        });
+
+        let auth = auth_store([(CHATGPT_PROVIDER_NAME, chatgpt_oauth())]);
+        let prompt_auth = auth.clone();
+        let mut output = Vec::new();
+        run_inner_with_prompt_executor(
+            Cursor::new(input),
+            &mut output,
+            auth,
+            move || prompt_auth.clone(),
+            2,
+            executor,
+        )
+        .expect("run provider extension");
+
+        let max_started = started.0.lock().expect("started lock").1;
+        assert_eq!(max_started, 2, "both prompt workers should overlap");
+        let frames = decode_frames(&output);
+        let finished_count = frames
+            .iter()
+            .filter(|frame| matches!(frame, Frame::Event(Event::ProviderResponseFinished(_))))
+            .count();
+        assert_eq!(finished_count, 2);
+        assert!(frames.iter().any(|frame| {
+            matches!(frame, Frame::Message(Message::Ack(ack)) if ack.up_to.get() == 8)
+        }));
     }
 
     #[test]

@@ -269,6 +269,11 @@ pub fn run_daemon_with_echo(
         });
     let mut harness =
         Harness::new_with_provider(state_dir, dirs, echo_runner, echo_tools(), eager_session_id)?;
+    // The echo daemon has no provider extension to publish runtime models.
+    // Seed the same synthetic model used by unit tests so socket-submitted
+    // prompts dispatch instead of sitting in the production "awaiting model"
+    // queue forever.
+    harness.selected_model = Some("test/model".into());
 
     let tx = harness.tx.clone();
     thread::spawn(move || {

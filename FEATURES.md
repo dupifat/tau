@@ -374,6 +374,11 @@ bind: {
     command: "RG_PREFIX='rg --line-number --column --no-heading --color=always --smart-case'; fzf --height=100% --ansi --disabled --bind \"change:reload:$RG_PREFIX {q} || true\" --delimiter : --preview 'bat --color=always --style=numbers --highlight-line {2} -- {1} 2>/dev/null || awk -v line={2} '\\''line - 4 <= NR && NR <= line + 4 { printf \"%6d  %s\\n\", NR, $0 }'\\'' -- {1}' --preview-window '+{2}/2' | cut -d: -f1",
     trim: true,
   },
+  "C-y": {
+    action: "shell-prompt-insert",
+    command: "if command -v jj >/dev/null 2>&1 && jj root --ignore-working-copy >/dev/null 2>&1; then jj log -r '::@' --no-graph -T 'change_id.shortest(8) ++ \"\\t\" ++ description.first_line() ++ \"\\n\"' | awk 'BEGIN { OFS=\"\\t\" } { id=$0; sub(/\\t.*/, \"\", id); title=$0; sub(/^[^\\t]*\\t?/, \"\", title); if (title == \"\") title=\"(no description set)\"; if (length(title) < 81) short=title; else short=substr(title, 1, 77) \"...\"; print id, short }' | fzf --height=100% --delimiter='\\t' --with-nth=2 --preview 'jj show --color=always {1}' --preview-window 'right,50%,wrap' | cut -f1; elif command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git log --format='%h%x09%s' | awk 'BEGIN { OFS=\"\\t\" } { id=$0; sub(/\\t.*/, \"\", id); title=$0; sub(/^[^\\t]*\\t?/, \"\", title); if (title == \"\") title=\"(no description set)\"; if (length(title) < 81) short=title; else short=substr(title, 1, 77) \"...\"; print id, short }' | fzf --height=100% --delimiter='\\t' --with-nth=2 --preview 'git show --color=always {1}' --preview-window 'right,50%,wrap' | cut -f1; fi",
+    trim: true,
+  },
   "C-o": {
     action: "shell-prompt-edit",
     command: "${VISUAL:-${EDITOR:-}} \"$TAU_PROMPT_PATH\"",
@@ -437,13 +442,20 @@ bind: {
     command: "RG_PREFIX='rg --line-number --column --no-heading --color=always --smart-case'; fzf --height=100% --ansi --disabled --bind \"change:reload:$RG_PREFIX {q} || true\" --delimiter : --preview 'bat --color=always --style=numbers --highlight-line {2} -- {1} 2>/dev/null || awk -v line={2} '\\''line - 4 <= NR && NR <= line + 4 { printf \"%6d  %s\\n\", NR, $0 }'\\'' -- {1}' --preview-window '+{2}/2' | cut -d: -f1",
     trim: true,
   },
+  "C-y": {
+    action: "shell-prompt-insert",
+    command: "if command -v jj >/dev/null 2>&1 && jj root --ignore-working-copy >/dev/null 2>&1; then jj log -r '::@' --no-graph -T 'change_id.shortest(8) ++ \"\\t\" ++ description.first_line() ++ \"\\n\"' | awk 'BEGIN { OFS=\"\\t\" } { id=$0; sub(/\\t.*/, \"\", id); title=$0; sub(/^[^\\t]*\\t?/, \"\", title); if (title == \"\") title=\"(no description set)\"; if (length(title) < 81) short=title; else short=substr(title, 1, 77) \"...\"; print id, short }' | fzf --height=100% --delimiter='\\t' --with-nth=2 --preview 'jj show --color=always {1}' --preview-window 'right,50%,wrap' | cut -f1; elif command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git log --format='%h%x09%s' | awk 'BEGIN { OFS=\"\\t\" } { id=$0; sub(/\\t.*/, \"\", id); title=$0; sub(/^[^\\t]*\\t?/, \"\", title); if (title == \"\") title=\"(no description set)\"; if (length(title) < 81) short=title; else short=substr(title, 1, 77) \"...\"; print id, short }' | fzf --height=100% --delimiter='\\t' --with-nth=2 --preview 'git show --color=always {1}' --preview-window 'right,50%,wrap' | cut -f1; fi",
+    trim: true,
+  },
 },
 ```
 
 `C-r` starts with an empty result list; type a query to search file contents
 with `rg`, preview the matching context, and insert the selected file path.
-Replace `rg --files | fzf` or the content-search command with `git ls-files`,
-a custom script, or whatever fits your workflow.
+`C-y` opens a jj change picker when inside a jj repository, falls back to git
+commits in git repositories, and inserts the selected change or commit id.
+Replace `rg --files | fzf`, the content-search command, or the commit picker
+with `git ls-files`, a custom script, or whatever fits your workflow.
 
 ### Thinking / reasoning rendering
 

@@ -13,7 +13,7 @@ Keep this document in sync with `crates/tau-config/config/built-in.cli-bindings.
 | `C-k`, `C-Up` | `prompt-previous` | Move to the previous prompt/history entry. |
 | `C-j`, `C-Down` | `prompt-next` | Move to the next prompt/history entry. |
 | `C-z` | `prompt-undo` | Undo the last edit in the current prompt/history entry. |
-| `C-y` | `prompt-redo` | Redo the last undone edit in the current prompt/history entry. |
+| `C-y` | `shell-prompt-insert` | Pick a jj change or git commit with `fzf` and insert its id at the cursor. |
 | `C-o`, `C-g` | `shell-prompt-edit` | Edit the current prompt in `$TAU_EDITOR`. |
 
 

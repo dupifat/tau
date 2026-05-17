@@ -1258,7 +1258,8 @@ pub struct ToolError {
     pub details: Option<CborValue>,
     /// See [`ToolResult::display`]. On error, the descriptor's
     /// `status` is typically [`ToolDisplayStatus::Error`] and
-    /// `status_text` carries a short error label for the chip.
+    /// `status_text` carries an optional error label. Renderers add the
+    /// generic error prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<ToolDisplay>,
     /// Echo of the originating [`ToolRequest::originator`]; see
@@ -1298,8 +1299,11 @@ pub struct ToolDisplay {
     pub info_chips: Vec<String>,
     /// Severity of the trailing status chip. Picks its themed color.
     pub status: ToolDisplayStatus,
-    /// Short status word/message rendered as the last chip (e.g.
-    /// `"ok"`, `"ok: no matches"`, `"err: regex parse error: …"`).
+    /// Status word/message rendered as the last chip (e.g. `"ok"`,
+    /// `"ok: no matches"`, `"regex parse error"`). For
+    /// [`ToolDisplayStatus::Error`], this is the label without the
+    /// generic `"err:"` prefix; renderers add that prefix and handle any
+    /// width abbreviation needed for the current UI.
     pub status_text: String,
     /// Optional rich content rendered in a block below the chip row.
     #[serde(default, skip_serializing_if = "Option::is_none")]

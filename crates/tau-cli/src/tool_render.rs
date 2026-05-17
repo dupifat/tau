@@ -308,7 +308,7 @@ pub(crate) fn format_tool_call(tool_name: &str, display: Option<&ToolDisplay>) -
 /// Build the completion descriptor for a finished `delegate` call by
 /// carrying the cached progress (args + counters from the latest
 /// [`tau_proto::DelegateProgress`]) and replacing the trailing
-/// in-progress chip with output stats + the final `ok`/`err: …`
+/// in-progress chip with output stats + the final `ok`/`err: message`
 /// status. The chip order matches the running line so the only
 /// visible change at completion is the trailing segments.
 pub(crate) fn build_delegate_completion_display(
@@ -336,7 +336,7 @@ pub(crate) fn build_delegate_completion_display(
     match error {
         Some(msg) if !msg.is_empty() => {
             display.status = ToolDisplayStatus::Error;
-            display.status_text = short_error_chip(msg);
+            display.status_text = first_error_line(msg);
         }
         _ => {
             display.status = ToolDisplayStatus::Success;
@@ -494,13 +494,16 @@ pub(crate) fn render_tool_display(tool_name: &str, display: &ToolDisplay) -> Too
         ToolDisplayStatus::Error => ToolStatus::Error,
         ToolDisplayStatus::InProgress => ToolStatus::Progress,
     };
-    let status_text = if display.status_text.is_empty()
+    let mut status_text = if display.status_text.is_empty()
         && matches!(display.status, ToolDisplayStatus::InProgress)
     {
         "…".to_owned()
     } else {
         display.status_text.clone()
     };
+    if matches!(display.status, ToolDisplayStatus::Error) {
+        status_text = error_status_text(&status_text);
+    }
     suffixes.push(tool_suffix(status_text, status_kind));
     ToolCallDisplay {
         tool_name: tool_name.to_owned(),
@@ -581,7 +584,7 @@ fn format_tool_display_bytes(bytes: u64) -> String {
 /// touching this code.
 pub(crate) fn synthesize_fallback_display(tool_name: &str, error: Option<&str>) -> ToolDisplay {
     let (status, status_text) = match error {
-        Some(msg) if !msg.is_empty() => (ToolDisplayStatus::Error, short_error_chip(msg)),
+        Some(msg) if !msg.is_empty() => (ToolDisplayStatus::Error, first_error_line(msg)),
         _ => (ToolDisplayStatus::Success, "ok".to_owned()),
     };
     let _ = tool_name;
@@ -593,23 +596,23 @@ pub(crate) fn synthesize_fallback_display(tool_name: &str, error: Option<&str>) 
     }
 }
 
-fn short_error_chip(message: &str) -> String {
-    let first = message
+fn first_error_line(message: &str) -> String {
+    message
         .lines()
         .map(str::trim)
         .find(|l| !l.is_empty())
-        .unwrap_or("");
-    if first.is_empty() {
+        .unwrap_or("")
+        .to_owned()
+}
+
+fn error_status_text(label: &str) -> String {
+    let label = label.trim();
+    if label.is_empty() || label == "err" {
         return "err".to_owned();
     }
-    const MAX: usize = 64;
-    let label = if first.chars().count() <= MAX {
-        first.to_owned()
-    } else {
-        let mut s: String = first.chars().take(MAX.saturating_sub(1)).collect();
-        s.push('…');
-        s
-    };
+    if label.starts_with("err:") {
+        return label.to_owned();
+    }
     format!("err: {label}")
 }
 

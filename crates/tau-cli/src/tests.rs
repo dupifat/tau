@@ -1873,8 +1873,30 @@ fn synthesize_fallback_display_is_minimal() {
 
     let err =
         synthesize_fallback_display("my_tool", Some("failure description\nwith trailing line"));
-    assert_eq!(err.status_text, "err: failure description");
+    assert_eq!(err.status_text, "failure description");
     assert!(matches!(err.status, tau_proto::ToolDisplayStatus::Error));
+}
+
+#[test]
+fn fallback_error_status_is_abbreviated_only_by_renderer() {
+    let message =
+        "failed to access /home/dpc/agent/.agents/skills: No such file or directory (os error 2)";
+    let display = synthesize_fallback_display("ls", Some(message));
+    assert_eq!(display.status_text, message);
+    assert!(!display.status_text.contains("err:"));
+    assert!(!display.status_text.contains('…'));
+
+    let rendered = render_tool_display("ls", &display);
+    let block = render_tool_block(&tau_themes::Theme::builtin(), &rendered);
+    let text: String = block
+        .content
+        .spans()
+        .iter()
+        .map(|span| span.text.as_str())
+        .collect();
+
+    assert!(text.contains('┄'));
+    assert!(!text.contains('…'));
 }
 
 #[test]
@@ -1884,13 +1906,22 @@ fn render_tool_display_error_status_picks_error_severity() {
     let display = ToolDisplay {
         args: "/etc".into(),
         status: ToolDisplayStatus::Error,
-        status_text: "err: permission denied".into(),
+        status_text: "permission denied".into(),
         ..Default::default()
     };
     let rendered = render_tool_display("ls", &display);
     assert_eq!(rendered.suffixes.len(), 1);
     assert_eq!(rendered.suffixes[0].text, "err: permission denied");
     assert!(matches!(rendered.suffixes[0].status, ToolStatus::Error));
+
+    let legacy_display = ToolDisplay {
+        args: "/etc".into(),
+        status: ToolDisplayStatus::Error,
+        status_text: "err: permission denied".into(),
+        ..Default::default()
+    };
+    let rendered = render_tool_display("ls", &legacy_display);
+    assert_eq!(rendered.suffixes[0].text, "err: permission denied");
 }
 
 #[test]
@@ -1901,7 +1932,7 @@ fn render_tool_block_abbreviates_inline_args_and_error_but_preserves_payload() {
     let display = ToolDisplay {
         args: "LOG_MODULE_WALLETV2|LOG_CLIENT_MODULE_WALLETV2 in modules/fedimint-walletv2-server/src modules/fedimint-walletv2-client/src".into(),
         status: ToolDisplayStatus::Error,
-        status_text: "err: ripgrep error: rg: modules/fedimint-walletv2-server/src modules/fedimint-walletv2-client/src: IO error for operation".into(),
+        status_text: "ripgrep error: rg: modules/fedimint-walletv2-server/src modules/fedimint-walletv2-client/src: IO error for operation".into(),
         payload: Some(ToolDisplayPayload::Text {
             text: payload.clone(),
         }),

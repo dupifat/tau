@@ -580,23 +580,12 @@ fn push_matched_field(fields: &mut Vec<String>, field: &str) {
 }
 
 fn error_chip_text(message: &str) -> String {
-    let first = message
+    message
         .lines()
         .map(str::trim)
         .find(|l| !l.is_empty())
-        .unwrap_or("");
-    if first.is_empty() {
-        return "err".to_owned();
-    }
-    const MAX: usize = 64;
-    let label = if first.chars().count() <= MAX {
-        first.to_owned()
-    } else {
-        let mut s: String = first.chars().take(MAX.saturating_sub(1)).collect();
-        s.push('…');
-        s
-    };
-    format!("err: {label}")
+        .unwrap_or("")
+        .to_owned()
 }
 
 /// Parse the `query` argument of a `skill` tool call into one-or-more

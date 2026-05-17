@@ -88,7 +88,7 @@ pub(crate) fn run_command(
         let status_text = if wait.timed_out {
             "timeout".to_owned()
         } else {
-            format!("err: {exit_label}")
+            exit_label.clone()
         };
         let mut display = ToolDisplay {
             args: display_args,

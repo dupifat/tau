@@ -62,26 +62,17 @@ impl From<String> for ToolFailure {
     }
 }
 
-/// Short single-line chip text for an error.  Multi-line / very long
-/// messages get collapsed so the inline chip stays readable.
+/// Single-line chip label for an error. Multi-line messages are
+/// collapsed to their first non-empty line; error prefixing and width
+/// abbreviation belong to the renderer so tool-side text does not get
+/// double-formatted.
 fn error_chip_text(message: &str) -> String {
-    let first = message
+    message
         .lines()
         .map(str::trim)
         .find(|l| !l.is_empty())
-        .unwrap_or("");
-    if first.is_empty() {
-        return "err".to_owned();
-    }
-    const MAX: usize = 64;
-    let label = if first.chars().count() <= MAX {
-        first.to_owned()
-    } else {
-        let mut s: String = first.chars().take(MAX.saturating_sub(1)).collect();
-        s.push('…');
-        s
-    };
-    format!("err: {label}")
+        .unwrap_or("")
+        .to_owned()
 }
 
 /// Build a `ToolDisplayStats` from textual output: lines + bytes.
@@ -104,5 +95,23 @@ pub(crate) fn ok_display(args: impl Into<String>) -> ToolDisplay {
         status: ToolDisplayStatus::Success,
         status_text: "ok".to_owned(),
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_chip_text_keeps_full_first_line_for_renderer_abbreviation() {
+        let message = "failed to access /home/dpc/agent/.agents/skills: No such file or directory (os error 2)\nignored detail";
+        let failure = ToolFailure::new(message);
+
+        assert_eq!(
+            failure.display.status_text,
+            "failed to access /home/dpc/agent/.agents/skills: No such file or directory (os error 2)"
+        );
+        assert!(!failure.display.status_text.contains("err:"));
+        assert!(!failure.display.status_text.contains('…'));
     }
 }

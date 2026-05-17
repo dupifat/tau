@@ -337,18 +337,11 @@ fn exa_error_display(message: &str) -> ToolDisplay {
         .map(str::trim)
         .find(|l| !l.is_empty())
         .unwrap_or("");
-    let label = if first.is_empty() {
-        "err".to_owned()
-    } else if first.chars().count() <= 64 {
-        format!("err: {first}")
-    } else {
-        let truncated: String = first.chars().take(63).collect();
-        format!("err: {truncated}…")
-    };
+    let status_text = first.to_owned();
     ToolDisplay {
         args: String::new(),
         status: ToolDisplayStatus::Error,
-        status_text: label,
+        status_text,
         ..Default::default()
     }
 }

@@ -174,6 +174,13 @@ where
     let ws_disabled = Arc::new(Mutex::new(HashSet::new()));
     let cancellation = Arc::new(CancellationState::default());
     let mut prompt_queue: VecDeque<PromptJob> = VecDeque::new();
+    let prompt_worker_context = PromptWorkerContext {
+        worker_tx: &worker_tx,
+        prompt_executor: &prompt_executor,
+        cancellation: &cancellation,
+        ws_pool: &ws_pool,
+        ws_disabled: &ws_disabled,
+    };
     let mut active_prompts = 0_usize;
     let mut ack_tracker = AckTracker::default();
     let mut input_closed = false;
@@ -189,11 +196,7 @@ where
             &mut prompt_queue,
             &mut active_prompts,
             prompt_concurrency_limit,
-            &worker_tx,
-            &prompt_executor,
-            &cancellation,
-            &ws_pool,
-            &ws_disabled,
+            &prompt_worker_context,
             &mut writer,
             &mut ack_tracker,
         )?;
@@ -312,15 +315,7 @@ where
                             backend,
                         };
                         if active_prompts < prompt_concurrency_limit {
-                            start_prompt_job(
-                                job,
-                                &mut active_prompts,
-                                &worker_tx,
-                                &prompt_executor,
-                                &cancellation,
-                                &ws_pool,
-                                &ws_disabled,
-                            );
+                            start_prompt_job(job, &mut active_prompts, &prompt_worker_context);
                         } else {
                             prompt_queue.push_back(job);
                         }
@@ -379,6 +374,14 @@ struct PromptExecution {
     cancellation: Arc<CancellationState>,
     ws_pool: Arc<responses::pool::SharedWsPool>,
     ws_disabled: Arc<Mutex<HashSet<String>>>,
+}
+
+struct PromptWorkerContext<'a> {
+    worker_tx: &'a Sender<WorkerMessage>,
+    prompt_executor: &'a PromptExecutor,
+    cancellation: &'a Arc<CancellationState>,
+    ws_pool: &'a Arc<responses::pool::SharedWsPool>,
+    ws_disabled: &'a Arc<Mutex<HashSet<String>>>,
 }
 
 impl PromptExecution {
@@ -570,26 +573,18 @@ fn production_prompt_executor() -> PromptExecutor {
     })
 }
 
-fn start_prompt_job(
-    job: PromptJob,
-    active_prompts: &mut usize,
-    worker_tx: &Sender<WorkerMessage>,
-    prompt_executor: &PromptExecutor,
-    cancellation: &Arc<CancellationState>,
-    ws_pool: &Arc<responses::pool::SharedWsPool>,
-    ws_disabled: &Arc<Mutex<HashSet<String>>>,
-) {
+fn start_prompt_job(job: PromptJob, active_prompts: &mut usize, context: &PromptWorkerContext<'_>) {
     *active_prompts += 1;
     let log_id = job.log_id;
     let execution = PromptExecution {
         job,
-        output_tx: worker_tx.clone(),
-        cancellation: cancellation.clone(),
-        ws_pool: ws_pool.clone(),
-        ws_disabled: ws_disabled.clone(),
+        output_tx: context.worker_tx.clone(),
+        cancellation: context.cancellation.clone(),
+        ws_pool: context.ws_pool.clone(),
+        ws_disabled: context.ws_disabled.clone(),
     };
-    let executor = prompt_executor.clone();
-    let done_tx = worker_tx.clone();
+    let executor = context.prompt_executor.clone();
+    let done_tx = context.worker_tx.clone();
     thread::spawn(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| executor(execution)));
         if result.is_err() {
@@ -603,11 +598,7 @@ fn start_queued_prompts<W: Write>(
     prompt_queue: &mut VecDeque<PromptJob>,
     active_prompts: &mut usize,
     prompt_concurrency_limit: usize,
-    worker_tx: &Sender<WorkerMessage>,
-    prompt_executor: &PromptExecutor,
-    cancellation: &Arc<CancellationState>,
-    ws_pool: &Arc<responses::pool::SharedWsPool>,
-    ws_disabled: &Arc<Mutex<HashSet<String>>>,
+    context: &PromptWorkerContext<'_>,
     writer: &mut BufWriter<W>,
     ack_tracker: &mut AckTracker,
 ) -> Result<(), Box<dyn Error>> {
@@ -615,7 +606,7 @@ fn start_queued_prompts<W: Write>(
         let Some(job) = prompt_queue.pop_front() else {
             return Ok(());
         };
-        if cancellation.take_canceled(&job.session_prompt_id) {
+        if context.cancellation.take_canceled(&job.session_prompt_id) {
             let mut frame_writer = FrameWriter::new(&mut *writer);
             finish_canceled(
                 &job.session_prompt_id,
@@ -627,15 +618,7 @@ fn start_queued_prompts<W: Write>(
             }
             continue;
         }
-        start_prompt_job(
-            job,
-            active_prompts,
-            worker_tx,
-            prompt_executor,
-            cancellation,
-            ws_pool,
-            ws_disabled,
-        );
+        start_prompt_job(job, active_prompts, context);
     }
     Ok(())
 }

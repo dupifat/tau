@@ -199,6 +199,7 @@ fn harness_roles_merge_with_built_ins() {
     assert!(s.roles.contains_key("smart"));
     assert!(s.roles.contains_key("deep"));
     assert!(s.roles.contains_key("rush"));
+    assert!(s.roles.contains_key("foreman"));
     assert!(!s.roles.contains_key("default"));
     assert_eq!(
         s.roles["custom"].description.as_deref(),
@@ -222,7 +223,9 @@ fn harness_roles_merge_with_built_ins() {
     let deep = &s.roles["deep"];
     assert_eq!(
         deep.description.as_deref(),
-        Some("Deeper reasoning for hard problems.")
+        Some(
+            "Deep reasoning expert, using potentially slower and more expensive model. Good for research and very complext tasks."
+        )
     );
     assert_eq!(
         deep.model.as_ref().map(ToString::to_string).as_deref(),
@@ -233,6 +236,41 @@ fn harness_roles_merge_with_built_ins() {
     assert_eq!(
         deep.thinking_summary,
         Some(tau_proto::ThinkingSummary::Detailed)
+    );
+    let foreman = &s.roles["foreman"];
+    assert_eq!(
+        foreman.description.as_deref(),
+        Some("Role focused on splitting and delegation of tasks to other sub-agents")
+    );
+    assert_eq!(foreman.orchestrator, Some(true));
+}
+
+#[test]
+fn harness_foreman_partial_override_keeps_built_in_orchestrator_flag() {
+    // The orchestrator marker is stored as Option<bool> so a user can partially
+    // override built-in foreman settings without accidentally disabling its
+    // role-list prompt behavior.
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.json5"),
+        r#"{
+            roles: {
+                foreman: { model: "openai/gpt-5.5" },
+            },
+        }"#,
+    )
+    .expect("write");
+
+    let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+    assert_eq!(s.roles["foreman"].orchestrator, Some(true));
+    assert_eq!(
+        s.roles["foreman"]
+            .model
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("openai/gpt-5.5")
     );
 }
 
@@ -317,6 +355,7 @@ fn missing_user_files_load_the_built_in_baseline() {
     assert!(harness.roles.contains_key("smart"));
     assert!(harness.roles.contains_key("deep"));
     assert!(harness.roles.contains_key("rush"));
+    assert!(harness.roles.contains_key("foreman"));
     assert!(harness.tools_profiles.contains_key("gpt"));
 }
 

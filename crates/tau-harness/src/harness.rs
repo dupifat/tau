@@ -49,8 +49,8 @@ use crate::harness::interception::{
 use crate::model::{
     baseline_params_for_selection, clamp_effort, clamp_thinking_summary, clamp_verbosity,
     context_percent_used, context_window_for_model, efforts_for_model, fallback_role, load_roles,
-    role_infos, save_role_overrides, select_model_for_available, selected_params_for_role,
-    thinking_summaries_for_model, verbosities_for_model,
+    model_for_role, role_infos, save_role_overrides, select_model_for_available,
+    selected_params_for_role, thinking_summaries_for_model, verbosities_for_model,
 };
 use crate::prompt::{
     assemble_conversation_from, assemble_prompt_context_from, build_system_prompt, cbor_map_bool,
@@ -295,6 +295,7 @@ struct PendingExtAgentQuery {
     source_id: String,
     extension_name: String,
     query: tau_proto::ExtAgentQuery,
+    role: String,
     cid: ConversationId,
     parent_cid: ConversationId,
 }
@@ -3147,6 +3148,72 @@ impl Harness {
         self.initialized_sessions.contains(session_id)
     }
 
+    fn available_delegate_role_names(&self) -> Vec<String> {
+        let mut names: Vec<_> = self
+            .available_roles
+            .keys()
+            .filter(|name| {
+                model_for_role(&self.available_roles, name, &self.available_models).is_some()
+            })
+            .cloned()
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn available_delegate_roles_message(&self) -> String {
+        let roles = self.available_delegate_role_names();
+        if roles.is_empty() {
+            "available roles: (none)".to_owned()
+        } else {
+            format!("available roles: {}", roles.join(", "))
+        }
+    }
+
+    fn resolve_ext_agent_query_role(
+        &self,
+        query: &tau_proto::ExtAgentQuery,
+    ) -> Result<String, String> {
+        let requested = if let Some(role) = query.role.as_deref() {
+            role
+        } else if query.tool_call_id.is_some() {
+            "smart"
+        } else {
+            self.selected_role.as_str()
+        };
+
+        if self.available_roles.contains_key(requested)
+            && model_for_role(&self.available_roles, requested, &self.available_models).is_some()
+        {
+            return Ok(requested.to_owned());
+        }
+
+        let reason = if query.role.is_none() && query.tool_call_id.is_some() {
+            "delegate requires default role `smart`, but it is not available"
+        } else if self.available_roles.contains_key(requested) {
+            "requested role is not backed by an available model"
+        } else {
+            "requested role does not exist"
+        };
+        Err(format!(
+            "{reason}: `{requested}`; {}",
+            self.available_delegate_roles_message()
+        ))
+    }
+
+    fn fail_ext_agent_query(&mut self, source_id: &str, query_id: String, error: String) {
+        let result = tau_proto::ExtAgentQueryResult {
+            query_id,
+            text: String::new(),
+            error: Some(error),
+        };
+        let _ = self.bus.send_to(
+            source_id,
+            None,
+            Frame::Event(Event::ExtAgentQueryResult(result)),
+        );
+    }
+
     /// Queue an extension-started sub-agent request onto the harness-owned
     /// global shared/exclusive scheduler.
     ///
@@ -3164,6 +3231,13 @@ impl Harness {
             .get(source_id)
             .map(|e| e.name.clone())
             .unwrap_or_else(|| source_id.to_owned());
+        let role = match self.resolve_ext_agent_query_role(&query) {
+            Ok(role) => role,
+            Err(error) => {
+                self.fail_ext_agent_query(source_id, query.query_id, error);
+                return Ok(());
+            }
+        };
         let cid = ConversationId::new(format!("extq-{}-{}", extension_name, query.query_id));
         if self.conversations.contains_key(&cid)
             || self
@@ -3193,6 +3267,7 @@ impl Harness {
                 source_id: source_id.to_owned(),
                 extension_name,
                 query,
+                role,
                 cid,
                 parent_cid,
             });
@@ -3351,11 +3426,17 @@ impl Harness {
             source_id,
             extension_name,
             query,
+            role,
             cid,
             parent_cid,
         } = pending;
         let parent_call_id = query.tool_call_id.clone();
         let task_name = query.task_name.clone();
+        let conversation_role = if query.tool_call_id.is_some() || query.role.is_some() {
+            Some(role)
+        } else {
+            None
+        };
         let execution_mode = query.execution_mode;
         let parent_conv = self
             .conversations
@@ -3387,6 +3468,7 @@ impl Harness {
         // that tool block via `DelegateProgress`.
         conv.parent_tool_call_id = parent_call_id;
         conv.task_name = task_name;
+        conv.role = conversation_role;
         conv.chain_anchor = initial_chain_anchor;
         self.conversations.insert(cid.clone(), conv);
         self.active_ext_agent_queries
@@ -3458,12 +3540,15 @@ impl Harness {
         else {
             return;
         };
-        let ctx_window = self
-            .selected_model
-            .as_ref()
-            .and_then(|m| context_window_for_model(&self.provider_model_info, m));
+        let role = conv.role.clone();
+        let ctx_window = conv.context_input_tokens.and_then(|_| {
+            self.model_for_conversation_role(conv)
+                .as_ref()
+                .and_then(|m| context_window_for_model(&self.provider_model_info, m))
+        });
         let display = build_delegate_progress_display(
             &task_name,
+            role.as_deref(),
             conv.context_input_tokens,
             conv.context_percent_used,
             ctx_window,
@@ -3473,6 +3558,7 @@ impl Harness {
         let progress = tau_proto::DelegateProgress {
             call_id,
             task_name,
+            role,
             ctx_percent: conv.context_percent_used,
             ctx_input_tokens: conv.context_input_tokens,
             ctx_window,
@@ -4476,6 +4562,17 @@ impl Harness {
             .expect("send_prompt_to_agent_for: unknown conversation id");
         let session_id = conv.session_id.clone();
         let originator = conv.originator.clone();
+        let role_name = self.role_name_for_conversation(conv);
+        let (prompt_model, prompt_params) = if conv.role.is_some() {
+            let model = self.model_for_conversation_role(conv);
+            let params = model
+                .as_ref()
+                .map(|model| self.params_for_role_model(&role_name, model))
+                .unwrap_or_default();
+            (model, params)
+        } else {
+            (self.selected_model.clone(), self.selected_params)
+        };
         // Non-tool extension side conversations (`std-notifications`'
         // idle summary, etc.) must not execute tools — their whole
         // job is to produce a one-line summary, and unfettered tool
@@ -4515,11 +4612,11 @@ impl Harness {
                 context_items: Vec::new(),
             });
         let context_items = prompt_context.context_items;
-        let tools = self.gather_tool_definitions();
+        let tools = self.gather_tool_definitions_for_role(&role_name);
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "(unknown)".to_owned());
-        let system_prompt = self.build_current_system_prompt(&cwd);
+        let system_prompt = self.build_system_prompt_for_role(&cwd, &role_name);
         // Fingerprint the non-input fields of the impending request.
         // Used to (a) drop the chain anchor when any of those fields
         // drifted since the anchor was minted (matches Pi's
@@ -4529,7 +4626,7 @@ impl Harness {
         let request_fingerprint = crate::conversation::compute_chain_fingerprint_detail(
             &system_prompt,
             &tools,
-            &self.selected_params,
+            &prompt_params,
             tool_choice,
         );
         // Stateful-chain hint: if the prior turn for this conversation
@@ -4548,7 +4645,7 @@ impl Harness {
                 .expect("send_prompt_to_agent_for: unknown conversation id");
             let anchor = conv.chain_anchor.as_ref();
             if let Some(a) = anchor {
-                let model_ok = self.selected_model.as_ref() == Some(&a.model);
+                let model_ok = prompt_model.as_ref() == Some(&a.model);
                 let count_ok = a.message_count <= context_items.len();
                 let tree_ok = tree.is_some_and(|t| anchor_is_ancestor(t, a.head, conv.head));
                 let fingerprint_ok = a.request_fingerprint == request_fingerprint.digest;
@@ -4565,7 +4662,7 @@ impl Harness {
                         session_id = %session_id,
                         response_id = %a.response_id,
                         anchor_model = %a.model,
-                        current_model = ?self.selected_model,
+                        current_model = ?prompt_model,
                         model_ok,
                         anchor_message_count = a.message_count,
                         current_message_count = context_items.len(),
@@ -4615,7 +4712,7 @@ impl Harness {
         // Publish the prompt-shaped request event. Normal turns use
         // `SessionPromptCreated`; provider-side compaction uses the
         // dedicated `SessionCompactionRequested` envelope.
-        let model = self.selected_model.clone();
+        let model = prompt_model;
         if let Some(model) = model.as_ref() {
             self.current_session_state.token_usage.start_request(model);
             self.prompt_models
@@ -4648,7 +4745,7 @@ impl Harness {
             tools,
             tools_ref: None,
             model,
-            model_params: self.selected_params,
+            model_params: prompt_params,
             tool_choice,
             originator,
             share_user_cache_key,
@@ -4671,38 +4768,96 @@ impl Harness {
         session_prompt_id
     }
 
+    fn role_name_for_conversation(&self, conv: &Conversation) -> String {
+        conv.role
+            .clone()
+            .unwrap_or_else(|| self.selected_role.clone())
+    }
+
+    fn role_name_for_conversation_id(&self, cid: &ConversationId) -> String {
+        self.conversations
+            .get(cid)
+            .and_then(|conv| conv.role.clone())
+            .unwrap_or_else(|| self.selected_role.clone())
+    }
+
+    fn model_for_conversation_role(&self, conv: &Conversation) -> Option<ModelId> {
+        let role_name = self.role_name_for_conversation(conv);
+        model_for_role(&self.available_roles, &role_name, &self.available_models)
+    }
+
+    fn params_for_role_model(&self, role_name: &str, model: &ModelId) -> tau_proto::ModelParams {
+        selected_params_for_role(
+            &self.provider_model_info,
+            &self.available_roles,
+            role_name,
+            model,
+        )
+    }
+
     fn build_current_system_prompt(&self, cwd: &str) -> String {
-        let current_role = self.available_roles.get(&self.selected_role);
-        let default_role_prompt = default_tau_role_prompt(&self.selected_role);
+        self.build_system_prompt_for_role(cwd, &self.selected_role)
+    }
+
+    fn build_system_prompt_for_role(&self, cwd: &str, role_name: &str) -> String {
+        let current_role = self.available_roles.get(role_name);
+        let default_role_prompt = default_tau_role_prompt(role_name);
         let tau_role_prompt = effective_tau_role_prompt(
             current_role.and_then(|role| role.prompt.as_ref()),
             default_role_prompt.as_ref(),
         );
-        let tool_prompt_hook = self.gather_tool_prompt_hook();
+        let available_sub_task_roles_prompt = current_role
+            .and_then(|role| role.orchestrator)
+            .unwrap_or(false)
+            .then(|| self.available_sub_task_roles_prompt());
+        let tool_prompt_hook = self.gather_tool_prompt_hook_for_role(role_name);
         build_system_prompt(
             &self.discovered_skills,
             cwd,
             tau_role_prompt,
             current_role.and_then(|role| role.extra_prompt.as_ref()),
+            available_sub_task_roles_prompt.as_ref(),
             &tool_prompt_hook,
         )
     }
 
+    fn available_sub_task_roles_prompt(&self) -> tau_proto::PromptContent {
+        let mut lines = vec!["## Available sub-task roles".to_owned(), String::new()];
+        for name in self.available_delegate_role_names() {
+            let description = self
+                .available_roles
+                .get(&name)
+                .and_then(|role| role.description.as_deref())
+                .unwrap_or_default();
+            lines.push(format!("* `{name}` - \"{description}\""));
+        }
+        tau_proto::PromptContent::new(lines.join("\n"))
+    }
+
+    #[cfg(test)]
     fn gather_tool_prompt_hook(&self) -> PromptHook {
+        self.gather_tool_prompt_hook_for_role(&self.selected_role)
+    }
+
+    fn gather_tool_prompt_hook_for_role(&self, role_name: &str) -> PromptHook {
         self.registry
             .all_tool_providers()
             .into_iter()
-            .filter(|provider| self.is_tool_enabled_for_current_role(&provider.tool))
+            .filter(|provider| self.is_tool_enabled_for_role(&provider.tool, role_name))
             .filter_map(|provider| provider.prompt.as_ref())
             .map(|part| (part.priority, part.content.clone()))
             .collect()
     }
 
     fn gather_tool_definitions(&self) -> Vec<ToolDefinition> {
+        self.gather_tool_definitions_for_role(&self.selected_role)
+    }
+
+    fn gather_tool_definitions_for_role(&self, role_name: &str) -> Vec<ToolDefinition> {
         self.registry
             .all_tools()
             .into_iter()
-            .filter(|spec| self.is_tool_enabled_for_current_role(spec))
+            .filter(|spec| self.is_tool_enabled_for_role(spec, role_name))
             .map(|spec| ToolDefinition {
                 name: spec.name.clone(),
                 model_visible_name: spec.model_visible_name.clone(),
@@ -4728,13 +4883,14 @@ impl Harness {
         false
     }
 
-    fn resolve_enabled_tool_name_for_current_role(
+    fn resolve_enabled_tool_name_for_role(
         &self,
         requested_name: &ToolName,
+        role_name: &str,
     ) -> Option<(ToolName, ToolName)> {
         let mut visible_match: Option<&tau_proto::ToolSpec> = None;
         for spec in self.registry.all_tools() {
-            if !self.is_tool_enabled_for_current_role(spec) {
+            if !self.is_tool_enabled_for_role(spec, role_name) {
                 continue;
             }
             if spec.name == *requested_name {
@@ -4755,16 +4911,19 @@ impl Harness {
         })
     }
 
-    fn current_tools_profile(&self) -> Option<&tau_config::settings::ToolsProfile> {
+    fn tools_profile_for_role(
+        &self,
+        role_name: &str,
+    ) -> Option<&tau_config::settings::ToolsProfile> {
         let profile_name = self
             .available_roles
-            .get(self.selected_role.as_str())
+            .get(role_name)
             .and_then(|role| role.tools_profile.as_deref())?;
         self.tools_profiles.get(profile_name)
     }
 
-    fn is_tool_enabled_for_current_role(&self, spec: &tau_proto::ToolSpec) -> bool {
-        self.current_tools_profile()
+    fn is_tool_enabled_for_role(&self, spec: &tau_proto::ToolSpec, role_name: &str) -> bool {
+        self.tools_profile_for_role(role_name)
             .and_then(|profile| profile.get(&spec.name).copied())
             .unwrap_or(spec.enabled_by_default)
     }
@@ -5010,7 +5169,8 @@ impl Harness {
                 .get(cid)
                 .and_then(|conv| conv.context_input_tokens);
             self.maybe_emit_cache_miss_diagnostic(&response, previous_input_tokens);
-            self.update_conversation_context_usage(cid, input_tokens);
+            let usage_model = self.prompt_models.get(&response.session_prompt_id).cloned();
+            self.update_conversation_context_usage(cid, usage_model.as_ref(), input_tokens);
             self.emit_delegate_progress(cid);
         }
         // Dedupe: under at-least-once delivery the agent may resend a
@@ -5301,12 +5461,11 @@ impl Harness {
     fn update_conversation_context_usage(
         &mut self,
         cid: &ConversationId,
+        model: Option<&ModelId>,
         input_tokens: Option<u64>,
     ) {
-        let context_window = self
-            .selected_model
-            .as_ref()
-            .and_then(|m| context_window_for_model(&self.provider_model_info, m));
+        let context_window =
+            model.and_then(|m| context_window_for_model(&self.provider_model_info, m));
         let percent_used = match (context_window, input_tokens) {
             (Some(w), Some(tokens)) => Some(context_percent_used(tokens, w)),
             _ => None,
@@ -5619,9 +5778,10 @@ impl Harness {
         call: &AgentToolCall,
     ) -> Result<(), HarnessError> {
         let tool_name = call.name.clone();
+        let role_name = self.role_name_for_conversation_id(cid).to_owned();
 
         let Some((internal_tool_name, visible_tool_name)) =
-            self.resolve_enabled_tool_name_for_current_role(&tool_name)
+            self.resolve_enabled_tool_name_for_role(&tool_name, &role_name)
         else {
             let message = if self.has_registered_tool_name(&tool_name) {
                 "tool is not enabled for the current role"
@@ -6026,7 +6186,10 @@ fn build_tool_args_display(
         }
         "ls" => cbor_text_field(arguments, "path").unwrap_or_else(|| ".".to_owned()),
         "delegate" => match cbor_text_field(arguments, "task_name") {
-            Some(name) if !name.is_empty() => format!("[{name}]"),
+            Some(name) if !name.is_empty() => match cbor_text_field(arguments, "role") {
+                Some(role) if !role.is_empty() => format!("[{name}] +{role}"),
+                _ => format!("[{name}]"),
+            },
             _ => String::new(),
         },
         "skill" => {
@@ -6133,6 +6296,7 @@ fn shell_command_payload(command: &str) -> Option<tau_proto::ToolDisplayPayload>
 /// [`tau_proto::PROGRESS_INDICATOR_TEXT`].
 fn build_delegate_progress_display(
     task_name: &str,
+    role: Option<&str>,
     ctx_input_tokens: Option<u64>,
     ctx_percent: Option<u8>,
     ctx_window: Option<u64>,
@@ -6164,7 +6328,10 @@ fn build_delegate_progress_display(
         });
     }
     tau_proto::ToolDisplay {
-        args: format!("[{task_name}]"),
+        args: match role {
+            Some(role) => format!("[{task_name}] +{role}"),
+            None => format!("[{task_name}]"),
+        },
         progress_counters: counters,
         status: ToolDisplayStatus::InProgress,
         status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),

@@ -433,14 +433,20 @@ fn default_agent_roles() -> HashMap<String, AgentRole> {
     default_roles.insert(
         BASE_AGENT_ROLE.to_owned(),
         AgentRole {
-            description: Some("Balanced default coding role.".to_owned()),
+            description: Some(
+                "Individual contributor using state of the art model. Good default for most tasks."
+                    .to_owned(),
+            ),
             ..AgentRole::default()
         },
     );
     default_roles.insert(
         "deep".to_owned(),
         AgentRole {
-            description: Some("Deeper reasoning for hard problems.".to_owned()),
+            description: Some(
+                "Deep reasoning expert, using potentially slower and more expensive model. Good for research and very complext tasks."
+                    .to_owned(),
+            ),
             effort: Some(tau_proto::Effort::XHigh),
             thinking_summary: Some(tau_proto::ThinkingSummary::Detailed),
             ..AgentRole::default()
@@ -449,9 +455,22 @@ fn default_agent_roles() -> HashMap<String, AgentRole> {
     default_roles.insert(
         "rush".to_owned(),
         AgentRole {
-            description: Some("Lower-latency responses for simple tasks.".to_owned()),
+            description: Some(
+                "Individual contributor using fast and cheaper model for smaller well-defined tasks."
+                    .to_owned(),
+            ),
             effort: Some(tau_proto::Effort::Low),
             thinking_summary: Some(tau_proto::ThinkingSummary::Off),
+            ..AgentRole::default()
+        },
+    );
+    default_roles.insert(
+        "foreman".to_owned(),
+        AgentRole {
+            description: Some(
+                "Role focused on splitting and delegation of tasks to other sub-agents".to_owned(),
+            ),
+            orchestrator: Some(true),
             ..AgentRole::default()
         },
     );
@@ -493,6 +512,10 @@ pub struct AgentRole {
     /// User-provided replacement for the role's built-in prompt, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<PromptContent>,
+    /// Whether this role focuses on orchestrating and delegating work to
+    /// sub-agents. Defaults semantically to false when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub orchestrator: Option<bool>,
     /// Additional role-specific prompt text appended after the role prompt.
     #[serde(skip_serializing_if = "Option::is_none", rename = "extraPrompt")]
     pub extra_prompt: Option<PromptContent>,
@@ -513,6 +536,7 @@ impl AgentRole {
         self.thinking_summary = self.thinking_summary.or(fallback.thinking_summary);
         self.service_tier = self.service_tier.or(fallback.service_tier);
         self.prompt = self.prompt.clone().or_else(|| fallback.prompt.clone());
+        self.orchestrator = self.orchestrator.or(fallback.orchestrator);
         self.extra_prompt = self
             .extra_prompt
             .clone()

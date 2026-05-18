@@ -220,6 +220,9 @@ pub(crate) struct Conversation {
     /// task, surfaced in the UI alongside `parent_tool_call_id`. Only
     /// set when `parent_tool_call_id` is.
     pub(crate) task_name: Option<String>,
+    /// Agent role used for this conversation. `None` means the conversation
+    /// follows the harness's globally selected interactive role.
+    pub(crate) role: Option<String>,
     /// Number of tool calls currently in flight on this conversation.
     pub(crate) tools_in_flight: u32,
     /// Cumulative tool calls this conversation has started (in-flight
@@ -311,6 +314,7 @@ impl Conversation {
             turn_state: ConversationTurnState::Idle,
             parent_tool_call_id: None,
             task_name: None,
+            role: None,
             tools_in_flight: 0,
             tools_total: 0,
             context_input_tokens: None,

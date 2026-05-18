@@ -10,14 +10,17 @@ use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill};
 
 const ROLE_EXTRA_PROMPT_PRIORITY: PromptPriority = PromptPriority::new(1000);
 
+const FOREMAN_ROLE_PROMPT: &str = "You are an orchestrator agent. Your focus is on delegating tasks to sub-agents to help user achive its goals to sub-agents.\n\nFor most tasks consider following sub-agent steps:\n\n* research and scoping,\n* implementation,\n* review and validation.\n\nSplit and repeat steps if needed according to the scope and difficulty of each task.";
+
 /// Return the built-in prompt text for a role, if Tau ships one.
 ///
-/// There are currently no built-in role prompts: built-in role configs only set
-/// model parameters. Keeping this as a distinct layer makes configured
-/// `prompt` an override of default role prompt text rather than an additive
-/// append point.
-pub(crate) fn default_tau_role_prompt(_role_name: &str) -> Option<PromptContent> {
-    None
+/// Keeping this as a distinct layer makes configured `prompt` an override of
+/// default role prompt text rather than an additive append point.
+pub(crate) fn default_tau_role_prompt(role_name: &str) -> Option<PromptContent> {
+    match role_name {
+        "foreman" => Some(PromptContent::new(FOREMAN_ROLE_PROMPT)),
+        _ => None,
+    }
 }
 
 /// Resolve the role prompt layer after applying the configured override.
@@ -42,6 +45,7 @@ pub(crate) fn build_system_prompt(
     cwd: &str,
     role_prompt: Option<&PromptContent>,
     role_extra_prompt: Option<&PromptContent>,
+    available_sub_task_roles_prompt: Option<&PromptContent>,
     tool_prompt_hook: &PromptHook,
 ) -> String {
     // Tool definitions are delivered out-of-band via the provider's
@@ -85,13 +89,20 @@ pub(crate) fn build_system_prompt(
 
     prompt.push_str(&format!("\nCurrent working directory: {cwd}\n"));
 
-    compose_system_prompt(prompt, role_prompt, role_extra_prompt, tool_prompt_hook)
+    compose_system_prompt(
+        prompt,
+        role_prompt,
+        role_extra_prompt,
+        available_sub_task_roles_prompt,
+        tool_prompt_hook,
+    )
 }
 
 fn compose_system_prompt(
     tau_system_prompt: String,
     role_prompt: Option<&PromptContent>,
     role_extra_prompt: Option<&PromptContent>,
+    available_sub_task_roles_prompt: Option<&PromptContent>,
     tool_prompt_hook: &PromptHook,
 ) -> String {
     let mut prompt = tau_system_prompt.trim_end().to_owned();
@@ -105,7 +116,9 @@ fn compose_system_prompt(
 
     let has_role_prompt = role_prompt.is_some_and(|content| !content.is_empty());
     let has_role_extra = !role_extra_prompt_hook.is_empty();
-    if has_role_prompt || has_role_extra {
+    let has_available_roles =
+        available_sub_task_roles_prompt.is_some_and(|content| !content.is_empty());
+    if has_role_prompt || has_role_extra || has_available_roles {
         prompt.push_str("\n\n");
         if let Some(content) = role_prompt
             && !content.is_empty()
@@ -116,6 +129,14 @@ fn compose_system_prompt(
             prompt.push('\n');
         }
         append_prompt_hook(&mut prompt, &role_extra_prompt_hook);
+        if (has_role_prompt || has_role_extra) && has_available_roles {
+            prompt.push_str("\n\n");
+        }
+        if let Some(content) = available_sub_task_roles_prompt
+            && !content.is_empty()
+        {
+            prompt.push_str(content.as_str());
+        }
     }
 
     if prompt_hook_has_content(tool_prompt_hook) {
@@ -351,6 +372,7 @@ mod tests {
             "/tmp/work",
             None,
             None,
+            None,
             &tau_proto::PromptHook::new(),
         );
         assert!(prompt.contains("expert coding assistant"));
@@ -363,6 +385,7 @@ mod tests {
         let prompt = build_system_prompt(
             &skills,
             "/tmp/work",
+            None,
             None,
             None,
             &tau_proto::PromptHook::new(),
@@ -390,6 +413,36 @@ mod tests {
         );
         assert!(effective_tau_role_prompt(None, None).is_none());
         assert!(default_tau_role_prompt("smart").is_none());
+        let foreman = default_tau_role_prompt("foreman").expect("foreman prompt");
+        assert!(foreman.as_str().contains("You are an orchestrator agent"));
+    }
+
+    /// Orchestrator roles append the available sub-task roles after the
+    /// effective role prompt so user prompt overrides do not hide delegation
+    /// choices from the model.
+    #[test]
+    fn build_system_prompt_appends_available_roles_for_orchestrator_context() {
+        let skills = std::collections::HashMap::new();
+        let role_prompt = tau_proto::PromptContent::new("CUSTOM FOREMAN");
+        let available_roles = tau_proto::PromptContent::new(
+            "## Available sub-task roles\n\n* `smart` - \"Individual contributor using state of the art model. Good default for most tasks.\"",
+        );
+
+        let prompt = build_system_prompt(
+            &skills,
+            "/tmp/work",
+            Some(&role_prompt),
+            None,
+            Some(&available_roles),
+            &tau_proto::PromptHook::new(),
+        );
+
+        let role = prompt.find("CUSTOM FOREMAN").expect("role prompt");
+        let roles = prompt
+            .find("## Available sub-task roles")
+            .expect("available roles");
+        assert!(role < roles);
+        assert!(prompt.contains("* `smart` - \"Individual contributor using state of the art model. Good default for most tasks.\""));
     }
 
     /// Role prompt overrides, role extra prompts, and tool prompt hooks are
@@ -416,6 +469,7 @@ mod tests {
             "/tmp/work",
             Some(&role_prompt),
             Some(&role_extra),
+            None,
             &tool_hook,
         );
 
@@ -449,6 +503,7 @@ mod tests {
             "/tmp/work",
             None,
             None,
+            None,
             &tau_proto::PromptHook::new(),
         );
         let mut empty_hook = tau_proto::PromptHook::new();
@@ -456,7 +511,8 @@ mod tests {
             tau_proto::PromptPriority::new(10),
             tau_proto::PromptContent::new(""),
         ));
-        let with_empty_hook = build_system_prompt(&skills, "/tmp/work", None, None, &empty_hook);
+        let with_empty_hook =
+            build_system_prompt(&skills, "/tmp/work", None, None, None, &empty_hook);
 
         assert_eq!(with_empty_hook, without_hook);
     }

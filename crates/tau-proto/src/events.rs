@@ -1542,6 +1542,9 @@ pub struct DelegateProgress {
     pub call_id: ToolCallId,
     /// Display name the parent agent provided for the sub-task.
     pub task_name: String,
+    /// Role used by the delegated sub-agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     /// Most recent percent-of-context-window the sub-agent reported,
     /// when its model's window size is known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1667,6 +1670,11 @@ pub struct ExtAgentQuery {
     /// User-style instruction text. Appended to the current
     /// conversation's history as a `User` message before dispatch.
     pub instruction: String,
+    /// Requested agent role for this side conversation. Tool-backed
+    /// delegate queries default to `smart`; non-tool queries without a role
+    /// keep using the currently selected interactive role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     /// Global sub-agent scheduling mode enforced by the harness.
     ///
     /// Shared queries may overlap with other shared sub-agent queries.

@@ -735,10 +735,9 @@ fn tool_register_prompt_is_optional_and_round_trips_when_present() {
     assert_eq!(decoded, with_prompt);
 }
 
-/// Older extensions did not send `execution_mode` on `ExtAgentQuery`. The
-/// harness-owned global sub-agent scheduler must treat those as Shared so
-/// existing notifications/delegate flows keep overlapping unless they opt into
-/// rare exclusive scheduling.
+/// Older extensions did not send `execution_mode` or `role` on
+/// `ExtAgentQuery`. The harness-owned global sub-agent scheduler must treat the
+/// mode as Shared and leave role selection to the harness compatibility path.
 #[test]
 fn ext_agent_query_execution_mode_defaults_to_shared() {
     let parsed: ExtAgentQuery = serde_json::from_value(serde_json::json!({
@@ -747,6 +746,7 @@ fn ext_agent_query_execution_mode_defaults_to_shared() {
     }))
     .expect("deserialize ext agent query");
     assert_eq!(parsed.execution_mode, ToolExecutionMode::Shared);
+    assert_eq!(parsed.role, None);
 
     let exclusive: ExtAgentQuery = serde_json::from_value(serde_json::json!({
         "query_id": "q2",
@@ -755,6 +755,30 @@ fn ext_agent_query_execution_mode_defaults_to_shared() {
     }))
     .expect("deserialize exclusive ext agent query");
     assert_eq!(exclusive.execution_mode, ToolExecutionMode::Exclusive);
+}
+
+/// `DelegateProgress.role` is additive UI metadata. Omitting it must keep older
+/// serialized progress events readable by newer clients.
+#[test]
+fn delegate_progress_role_is_backward_compatible() {
+    let parsed: DelegateProgress = serde_json::from_value(serde_json::json!({
+        "call_id": "call-1",
+        "task_name": "audit",
+        "tools_in_flight": 0,
+        "tools_total": 0
+    }))
+    .expect("deserialize progress without role");
+    assert_eq!(parsed.role, None);
+
+    let with_role: DelegateProgress = serde_json::from_value(serde_json::json!({
+        "call_id": "call-1",
+        "task_name": "audit",
+        "role": "rush",
+        "tools_in_flight": 0,
+        "tools_total": 0
+    }))
+    .expect("deserialize progress with role");
+    assert_eq!(with_role.role.as_deref(), Some("rush"));
 }
 
 /// `Verbosity::next_in` mirrors `Effort::next_in`. Even though the CLI

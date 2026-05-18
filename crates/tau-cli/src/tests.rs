@@ -1574,6 +1574,7 @@ fn delegate_progress_redraws_live_parent_block() {
     renderer.handle(&Event::ToolDelegateProgress(tau_proto::DelegateProgress {
         call_id: "call-delegate".into(),
         task_name: "probe".into(),
+        role: Some("smart".to_owned()),
         ctx_percent: None,
         ctx_input_tokens: None,
         ctx_window: None,

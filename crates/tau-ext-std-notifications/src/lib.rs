@@ -510,6 +510,7 @@ where
                         writer.write_frame(&Frame::Event(Event::ExtAgentQuery(ExtAgentQuery {
                             query_id: query_id.clone(),
                             instruction: SUMMARY_INSTRUCTION.to_owned(),
+                            role: None,
                             execution_mode: tau_proto::ToolExecutionMode::Shared,
                             // Notifications doesn't implement a tool —
                             // these fields are only meaningful for the

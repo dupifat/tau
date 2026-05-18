@@ -174,12 +174,14 @@ fn handle_tool_invoke<W: Write>(
         task_name = %parsed.task_name,
         execution_mode = ?parsed.execution_mode,
         prompt_len = parsed.prompt.len(),
+        role = ?parsed.role,
         "dispatching delegation",
     );
     pending.insert(query_id.clone(), (invoke.call_id, invoke.tool_name));
     writer.write_frame(&Frame::Event(Event::ExtAgentQuery(ExtAgentQuery {
         query_id,
         instruction: format!("{DELEGATE_PREFIX}{}", parsed.prompt),
+        role: parsed.role,
         execution_mode: parsed.execution_mode,
         // Hand the parent call_id and the agent-supplied task name to
         // the harness so it can route sub-agent progress
@@ -225,6 +227,10 @@ fn tool_spec() -> ToolSpec {
                     "type": "string",
                     "enum": ["shared", "exclusive"],
                     "description": "Use `shared` when the sub-task can safely overlap globally with other shared sub-agent delegations. Use `exclusive` when it must run alone: it waits for all other sub-agent delegations and blocks later independent ones. Default: `shared`."
+                },
+                "role": {
+                    "type": "string",
+                    "description": "Optional sub-agent role to use. When omitted, Tau defaults delegate calls to `smart` if that role is available and enabled."
                 }
             },
             "required": ["task_name", "prompt"]
@@ -243,6 +249,7 @@ struct DelegateArgs {
     task_name: String,
     prompt: String,
     execution_mode: ToolExecutionMode,
+    role: Option<String>,
 }
 
 fn parse_args(arguments: &CborValue) -> Result<DelegateArgs, String> {
@@ -252,6 +259,7 @@ fn parse_args(arguments: &CborValue) -> Result<DelegateArgs, String> {
     let mut prompt = None;
     let mut task_name = None;
     let mut execution_mode = None;
+    let mut role = None;
     for (k, v) in entries {
         let CborValue::Text(name) = k else { continue };
         match name.as_str() {
@@ -262,6 +270,10 @@ fn parse_args(arguments: &CborValue) -> Result<DelegateArgs, String> {
             "task_name" => match v {
                 CborValue::Text(text) => task_name = Some(text.clone()),
                 _ => return Err("`task_name` must be a string".to_owned()),
+            },
+            "role" => match v {
+                CborValue::Text(text) => role = Some(text.clone()),
+                _ => return Err("`role` must be a string".to_owned()),
             },
             "execution_mode" => match v {
                 CborValue::Text(text) if text == "shared" => {
@@ -294,11 +306,13 @@ fn parse_args(arguments: &CborValue) -> Result<DelegateArgs, String> {
     if task_name.trim().is_empty() {
         return Err("`task_name` must not be empty".to_owned());
     }
+    let role = role.filter(|role| !role.trim().is_empty());
     let execution_mode = execution_mode.unwrap_or(ToolExecutionMode::Shared);
     Ok(DelegateArgs {
         task_name,
         prompt,
         execution_mode,
+        role,
     })
 }
 
@@ -329,6 +343,29 @@ mod tests {
         assert_eq!(parsed.task_name, "audit");
         assert_eq!(parsed.prompt, "do the thing");
         assert_eq!(parsed.execution_mode, ToolExecutionMode::Shared);
+        assert_eq!(parsed.role, None);
+    }
+
+    /// Delegate role is optional metadata passed through to the harness; empty
+    /// strings are treated as omitted so older agents that hallucinate blank
+    /// fields do not change behavior.
+    #[test]
+    fn parses_optional_role() {
+        let parsed = parse_args(&args(&[
+            ("task_name", text("audit")),
+            ("prompt", text("do the thing")),
+            ("role", text("rush")),
+        ]))
+        .expect("role args parse");
+        assert_eq!(parsed.role.as_deref(), Some("rush"));
+
+        let omitted = parse_args(&args(&[
+            ("task_name", text("audit")),
+            ("prompt", text("do the thing")),
+            ("role", text("   ")),
+        ]))
+        .expect("blank role args parse");
+        assert_eq!(omitted.role, None);
     }
 
     /// Regression coverage for global sub-agent scheduling intent: omitted
@@ -355,10 +392,10 @@ mod tests {
     }
 
     /// Regression coverage for the agent-visible terminology: delegate should
-    /// advertise shared/exclusive execution modes and keep the legacy alias out
-    /// of the schema/description.
+    /// advertise shared/exclusive execution modes plus optional role selection,
+    /// and keep the legacy alias out of the schema/description.
     #[test]
-    fn tool_schema_advertises_execution_mode_only() {
+    fn tool_schema_advertises_execution_mode_and_role() {
         let spec = tool_spec();
         let description = spec.description.expect("description");
         assert!(description.contains("execution_mode"));
@@ -373,6 +410,7 @@ mod tests {
             .and_then(serde_json::Value::as_object)
             .expect("object properties");
         assert!(properties.contains_key("execution_mode"));
+        assert!(properties.contains_key("role"));
         assert!(!properties.contains_key("read_only"));
         assert_eq!(spec.execution_mode, ToolExecutionMode::Shared);
     }
@@ -448,5 +486,16 @@ mod tests {
         ]))
         .expect_err("parse_args should reject invalid arguments");
         assert!(err.contains("`task_name` must be a string"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_wrong_type_for_role() {
+        let err = parse_args(&args(&[
+            ("task_name", text("audit")),
+            ("prompt", text("do the thing")),
+            ("role", CborValue::Bool(false)),
+        ]))
+        .expect_err("parse_args should reject invalid arguments");
+        assert!(err.contains("`role` must be a string"), "got: {err}");
     }
 }

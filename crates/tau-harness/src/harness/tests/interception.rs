@@ -100,6 +100,7 @@ fn ext_agent_query_defers_dispatch_when_publish_is_intercepted() {
         ExtAgentQuery {
             query_id: "q-side".to_owned(),
             instruction: "side instruction".to_owned(),
+            role: None,
             execution_mode: ToolExecutionMode::Shared,
             tool_call_id: Some("main-call".into()),
             task_name: Some("side".to_owned()),

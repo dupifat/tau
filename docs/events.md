@@ -114,8 +114,9 @@ the agent requests calls, and the harness orchestrates dispatch.
 - **`tool.cancelled`** *(extension)* — The extension acknowledges that a
   call has been cancelled. Operational only; transient.
 - **`tool.delegate_progress`** *(harness)* — Live snapshot of a sub-agent
-  spawned by the `delegate` tool: tools-in-flight, total, context
-  tokens, percent. Transient; the UI re-renders the parent tool block.
+  spawned by the `delegate` tool: task name, resolved delegate role,
+  tools-in-flight, total, context tokens, percent. Transient; the UI
+  re-renders the parent tool block.
 
 ## Extensions
 
@@ -152,8 +153,10 @@ harness/agent.
   `session.started`).
 - **`extension.agent_query`** — The extension asks the harness to
   dispatch a side prompt to the agent: instruction text, correlation
-  `query_id`, optional tool-call attribution and human-readable task
-  name (used by the `delegate` tool).
+  `query_id`, optional requested `role`, optional tool-call attribution,
+  and human-readable task name (used by the `delegate` tool). Tool-backed
+  delegate queries default to `smart` when `role` is absent; non-tool
+  queries without `role` use the currently selected interactive role.
 - **`extension.agent_query_result`** — The agent's final answer to an
   earlier `extension.agent_query`, routed point-to-point back to the
   requesting extension. Carries the same `query_id`.

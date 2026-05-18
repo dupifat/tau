@@ -100,11 +100,13 @@ roles: {
   },
   deep: { effort: "xhigh", thinkingSummary: "detailed" },
   rush: { effort: "low", serviceTier: "fast" },
+  foreman: { orchestrator: true },
 },
 ```
 
 Roles can include a `description` shown after the model/knob summary in
-`/role ...` completions. Roles can also select a named `toolsProfile`.
+`/role ...` completions. Roles can also select a named `toolsProfile`, and
+orchestrator roles append an available sub-task role list to their prompt.
 Profiles live in `harness.json5` under `toolsProfiles` and map tool names to booleans,
 overriding each tool's extension-declared `enabled_by_default` hint. Tau ships
 a built-in `gpt` profile that enables `apply_patch` while disabling direct
@@ -201,7 +203,9 @@ to `.gitignore` instead of checked in.
 
 Role prompts are composable too: each `harness.json5` role may set `prompt` to
 replace the role's built-in prompt, if any, and `extraPrompt` to append local
-instructions after the role prompt. Extensions can also attach ordered prompt
+instructions after the role prompt. Roles with `orchestrator: true` then get a
+sorted `Available sub-task roles` section appended after the effective role
+prompt. Extensions can also attach ordered prompt
 fragments to registered tools, so tool-specific instructions appear only when
 that tool is enabled for the active role.
 
@@ -240,16 +244,18 @@ agent for a one-sentence idle summary before notifying.
 
 ### `core-delegate` — sub-task delegation
 
-Exposes a `delegate` tool that spawns a side conversation, runs it to
-completion against the same model and tool set, and returns its result to the
-caller. The sub-agent starts with a *fresh* context — only the parent's
-`prompt`, the system prompt, and tools — with no visibility into the parent
-conversation's prior turns, tool results, or in-flight state. The same
-isolation applies at every nesting depth, so sub-sub-agents don't see
-ancestor task framing and can't be tricked into re-delegating it. Parent
-agents are responsible for putting everything the sub-agent needs into the
-`prompt`. Live progress (turns, current tool) is shown in the parent UI
-alongside the delegate's task name.
+Exposes a `delegate` tool that spawns a side conversation and returns its result
+to the caller. Unless the tool call supplies `role`, delegated sub-agents default
+to the `smart` role. When `role` is supplied, or when the default `smart` role is
+used, the sub-agent runs with that role's resolved model, model parameters,
+system prompt, and tool profile/filtering. The sub-agent starts with a *fresh*
+context — only the parent's `prompt`, the selected role's system prompt, and the
+selected role's tools — with no visibility into the parent conversation's prior
+turns, tool results, or in-flight state. The same isolation applies at every
+nesting depth, so sub-sub-agents don't see ancestor task framing and can't be
+tricked into re-delegating it. Parent agents are responsible for putting
+everything the sub-agent needs into the `prompt`. Live progress (turns, current
+tool) is shown in the parent UI alongside the delegate's task name and role.
 
 ### `std-websearch-exa` — opt-in web search
 

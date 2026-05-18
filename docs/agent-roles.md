@@ -11,6 +11,7 @@ A role can set:
 - `thinkingSummary`: `off`, `auto`, `concise`, or `detailed`
 - `serviceTier`: `fast` or `flex`
 - `toolsProfile`: name of a tool-availability profile from `harness.json5`
+- `orchestrator`: when true, append a sorted list of available sub-task roles to this role's prompt
 
 Roles live in `harness.json5` under `roles`:
 
@@ -31,6 +32,9 @@ Roles live in `harness.json5` under `roles`:
       effort: "low",
       thinkingSummary: "off",
       serviceTier: "fast",
+    },
+    foreman: {
+      orchestrator: true,
     },
   },
 }
@@ -68,7 +72,9 @@ tool's extension-provided `enabled_by_default` setting. Tau includes a built-in
 
 Missing fields use provider-published fallback knobs for the role's resolved model.
 
-Tau ships built-in `smart`, `deep`, and `rush` roles. `smart` is the startup fallback role; `deep` asks for higher reasoning with detailed thinking summaries; `rush` asks for lower reasoning.
+Tau ships built-in `smart`, `deep`, `rush`, and `foreman` roles. `smart` is the startup fallback role; `deep` asks for higher reasoning with detailed thinking summaries; `rush` asks for lower reasoning; `foreman` is an orchestration role with a built-in delegation prompt.
+
+When a role has `orchestrator: true`, Tau appends an `Available sub-task roles` section listing every role whose model is currently available. This list is appended even when the role's `prompt` is overridden.
 
 
 ## Selecting a role
@@ -105,4 +111,4 @@ The `<role>` argument completes existing roles, but any new name can be used to 
 
 `/role <role> delete` removes the runtime/persisted role override. It does not edit `roles` from configuration; built-in or configured roles come back on the next harness start.
 
-Runtime changes for built-in or configured roles are persisted in `~/.local/state/tau/harness.json5` together with the last selected role. Role `description`, `prompt`, and `extraPrompt` remain config-only metadata, so changing them in `harness.json5` takes effect after restart without stale runtime state shadowing them.
+Runtime changes for built-in or configured roles are persisted in `~/.local/state/tau/harness.json5` together with the last selected role. Role `description`, `prompt`, `orchestrator`, and `extraPrompt` remain config-only metadata, so changing them in `harness.json5` takes effect after restart without stale runtime state shadowing them.

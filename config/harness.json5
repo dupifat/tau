@@ -5,10 +5,12 @@
   // overrides.
 
   // Optional role defaults. Built-in roles are merged underneath this map:
-  // smart = neutral defaults, deep = xhigh/detailed, rush = low/off.
+  // smart = state-of-the-art default, deep = xhigh/detailed,
+  // rush = fast/cheap low reasoning, foreman = orchestration/delegation.
   // Role `description` is shown in `/role ...` completions. Role `prompt`
   // replaces the built-in role prompt, if any; `extraPrompt`
-  // appends additional role-specific instructions after it.
+  // appends additional role-specific instructions after it. Set
+  // `orchestrator: true` to append available sub-task roles to the role prompt.
   // roles: {
   //   smart: {
   //     // description: "Balanced coding assistant.",

@@ -17,6 +17,7 @@ fn build_system_prompt_includes_skills() {
         "/tmp/work",
         None,
         None,
+        None,
         &tau_proto::PromptHook::new(),
     );
     assert!(prompt.contains("<available_skills>"));
@@ -45,6 +46,7 @@ fn build_system_prompt_excludes_hidden_skills() {
         "/tmp/work",
         None,
         None,
+        None,
         &tau_proto::PromptHook::new(),
     );
     assert!(!prompt.contains("<available_skills>"));
@@ -66,6 +68,7 @@ fn build_system_prompt_escapes_skill_xml_text() {
     let prompt = build_system_prompt(
         &skills,
         "/tmp/work",
+        None,
         None,
         None,
         &tau_proto::PromptHook::new(),

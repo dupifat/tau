@@ -147,10 +147,41 @@ fn ext_query(query_id: &str, execution_mode: ToolExecutionMode) -> ExtAgentQuery
     ExtAgentQuery {
         query_id: query_id.to_owned(),
         instruction: format!("instruction {query_id}"),
+        role: None,
         execution_mode,
         tool_call_id: None,
         task_name: None,
     }
+}
+
+fn provider_model_info(
+    id: tau_proto::ModelId,
+    context_window: u64,
+) -> tau_proto::ProviderModelInfo {
+    tau_proto::ProviderModelInfo {
+        id,
+        display_name: None,
+        context_window,
+        efforts: vec![tau_proto::Effort::Off, tau_proto::Effort::High],
+        verbosities: vec![tau_proto::Verbosity::Low, tau_proto::Verbosity::High],
+        thinking_summaries: vec![
+            tau_proto::ThinkingSummary::Off,
+            tau_proto::ThinkingSummary::Auto,
+        ],
+        supports_compaction: false,
+    }
+}
+
+fn set_available_provider_models(
+    h: &mut Harness,
+    models: impl IntoIterator<Item = tau_proto::ProviderModelInfo>,
+) {
+    let models: Vec<_> = models.into_iter().collect();
+    h.available_models = models.iter().map(|info| info.id.clone()).collect();
+    h.provider_model_info = models
+        .into_iter()
+        .map(|info| (info.id.clone(), info))
+        .collect();
 }
 
 fn ext_query_cid(h: &Harness, query_id: &str) -> Option<ConversationId> {
@@ -2571,6 +2602,7 @@ fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
         ExtAgentQuery {
             query_id: "q1".to_owned(),
             instruction: "side task".to_owned(),
+            role: None,
             execution_mode: ToolExecutionMode::Shared,
             tool_call_id: Some("delegate-call".into()),
             task_name: None,
@@ -2727,6 +2759,7 @@ fn ext_agent_query_during_tool_call_branches_off_unresolved_tool_use() {
         ExtAgentQuery {
             query_id: "q1".to_owned(),
             instruction: "side task".to_owned(),
+            role: None,
             execution_mode: ToolExecutionMode::Shared,
             tool_call_id: Some("delegate-call".into()),
             task_name: None,
@@ -2868,6 +2901,7 @@ fn non_tool_ext_agent_query_inherits_parent_branch() {
         ExtAgentQuery {
             query_id: "idle-0".to_owned(),
             instruction: "Summarize in one sentence.".to_owned(),
+            role: None,
             execution_mode: ToolExecutionMode::Shared,
             tool_call_id: None,
             task_name: None,
@@ -3011,6 +3045,7 @@ fn non_tool_ext_agent_query_preserves_chain_anchor_and_tool_choice() {
         ExtAgentQuery {
             query_id: "idle-0".to_owned(),
             instruction: "Summarize in one sentence.".to_owned(),
+            role: None,
             execution_mode: ToolExecutionMode::Shared,
             tool_call_id: None,
             task_name: None,
@@ -3119,6 +3154,7 @@ fn delegate_ext_agent_query_keeps_tool_choice_auto() {
         ExtAgentQuery {
             query_id: "q1".to_owned(),
             instruction: "side task".to_owned(),
+            role: None,
             execution_mode: ToolExecutionMode::Shared,
             tool_call_id: Some("delegate-call".into()),
             task_name: None,
@@ -3167,6 +3203,7 @@ fn user_prompt_preempts_in_flight_non_tool_ext_side_conversation() {
         ExtAgentQuery {
             query_id: "idle-0".to_owned(),
             instruction: "Summarize in one sentence.".to_owned(),
+            role: None,
             execution_mode: ToolExecutionMode::Shared,
             tool_call_id: None,
             task_name: None,
@@ -3307,6 +3344,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
         ExtAgentQuery {
             query_id: "q1".to_owned(),
             instruction: "side task".to_owned(),
+            role: None,
             execution_mode: ToolExecutionMode::Shared,
             tool_call_id: Some("delegate-call".into()),
             task_name: None,
@@ -3806,6 +3844,7 @@ fn exclusive_tools_in_distinct_side_conversations_dispatch_concurrently() {
         ExtAgentQuery {
             query_id: "q-A".to_owned(),
             instruction: "side task A".to_owned(),
+            role: None,
             execution_mode: ToolExecutionMode::Shared,
             tool_call_id: Some("delegate-A".into()),
             task_name: Some("A".to_owned()),
@@ -3817,6 +3856,7 @@ fn exclusive_tools_in_distinct_side_conversations_dispatch_concurrently() {
         ExtAgentQuery {
             query_id: "q-B".to_owned(),
             instruction: "side task B".to_owned(),
+            role: None,
             execution_mode: ToolExecutionMode::Shared,
             tool_call_id: Some("delegate-B".into()),
             task_name: Some("B".to_owned()),
@@ -4012,6 +4052,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
         ExtAgentQuery {
             query_id: "q1".to_owned(),
             instruction: "side task".to_owned(),
+            role: None,
             execution_mode: ToolExecutionMode::Shared,
             tool_call_id: Some("delegate-call".into()),
             task_name: Some("look it up".to_owned()),
@@ -4024,6 +4065,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
     let initial = pop_delegate_progress(&sink, "delegate-call")
         .expect("initial DelegateProgress on side conv spawn");
     assert_eq!(initial.task_name, "look it up");
+    assert_eq!(initial.role.as_deref(), Some("smart"));
     assert_eq!(initial.tools_in_flight, 0);
     assert_eq!(initial.tools_total, 0);
     assert_delegate_tools_counter(&initial, Some(0), Some(0));
@@ -4073,11 +4115,12 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
         .pop()
         .expect("at least one DelegateProgress after side response");
     assert_eq!(latest.task_name, "look it up");
+    assert_eq!(latest.role.as_deref(), Some("smart"));
     assert_eq!(latest.tools_in_flight, 1, "websearch is in flight");
     assert_eq!(latest.tools_total, 1, "websearch counts toward total");
     assert_delegate_tools_counter(&latest, Some(0), Some(1));
     assert_eq!(latest.ctx_input_tokens, Some(1234));
-    assert_delegate_ctx_counter(&latest, Some(1234), None);
+    assert_delegate_ctx_counter(&latest, Some(1234), Some(128_000));
     // Regression coverage for the live delegate line: renderers preserve
     // progress_counters order, so tools must precede context in the UI.
     assert_delegate_counter_order(&latest, &["tools", "ctx"]);
@@ -4103,6 +4146,327 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
     assert_eq!(after_complete.tools_in_flight, 0);
     assert_eq!(after_complete.tools_total, 1);
     assert_delegate_tools_counter(&after_complete, Some(1), Some(1));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// An explicit `delegate` role must be a real role switch for the sub-agent,
+/// not just UI metadata: the prompt uses that role's model, params, prompt, and
+/// tool profile.
+#[test]
+fn delegate_explicit_role_uses_role_model_params_prompt_and_tools() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    let smart_model: tau_proto::ModelId = "test/smart".into();
+    let worker_model: tau_proto::ModelId = "test/worker".into();
+    set_available_provider_models(
+        &mut h,
+        [
+            provider_model_info(smart_model.clone(), 64_000),
+            provider_model_info(worker_model.clone(), 256_000),
+        ],
+    );
+    h.selected_role = "smart".to_owned();
+    h.selected_model = Some(smart_model.clone());
+    h.available_roles = std::collections::HashMap::from([
+        (
+            "smart".to_owned(),
+            tau_config::settings::AgentRole {
+                model: Some(smart_model),
+                prompt: Some(tau_proto::PromptContent::new("SMART ROLE PROMPT")),
+                ..Default::default()
+            },
+        ),
+        (
+            "worker".to_owned(),
+            tau_config::settings::AgentRole {
+                model: Some(worker_model.clone()),
+                effort: Some(tau_proto::Effort::High),
+                verbosity: Some(tau_proto::Verbosity::High),
+                thinking_summary: Some(tau_proto::ThinkingSummary::Auto),
+                service_tier: Some(tau_proto::ServiceTier::Flex),
+                prompt: Some(tau_proto::PromptContent::new("WORKER ROLE PROMPT")),
+                extra_prompt: Some(tau_proto::PromptContent::new("WORKER EXTRA PROMPT")),
+                tools_profile: Some("worker-tools".to_owned()),
+                ..Default::default()
+            },
+        ),
+    ]);
+    h.tools_profiles.insert(
+        "worker-tools".to_owned(),
+        std::collections::HashMap::from([
+            (ToolName::new("allowed_tool"), true),
+            (ToolName::new("denied_tool"), false),
+        ]),
+    );
+    h.registry.register_with_prompt(
+        "conn-allowed-tool",
+        tau_proto::ToolRegister {
+            tool: ToolSpec {
+                name: ToolName::new("allowed_tool"),
+                model_visible_name: None,
+                description: Some("allowed".to_owned()),
+                parameters: None,
+                tool_type: tau_proto::ToolType::Function,
+                format: None,
+                enabled_by_default: false,
+                execution_mode: ToolExecutionMode::Shared,
+            },
+            prompt: Some(tau_proto::PromptHookPart::new(
+                tau_proto::PromptPriority::new(10),
+                "ALLOWED TOOL PROMPT",
+            )),
+        },
+    );
+    h.registry.register_with_prompt(
+        "conn-denied-tool",
+        tau_proto::ToolRegister {
+            tool: ToolSpec {
+                name: ToolName::new("denied_tool"),
+                model_visible_name: None,
+                description: Some("denied".to_owned()),
+                parameters: None,
+                tool_type: tau_proto::ToolType::Function,
+                format: None,
+                enabled_by_default: true,
+                execution_mode: ToolExecutionMode::Shared,
+            },
+            prompt: Some(tau_proto::PromptHookPart::new(
+                tau_proto::PromptPriority::new(10),
+                "DENIED TOOL PROMPT",
+            )),
+        },
+    );
+
+    let _delegate = connect_test_tool(&mut h, "conn-delegate");
+    let sink = collect_event_sink(&mut h);
+    h.handle_ext_agent_query(
+        "conn-delegate",
+        ExtAgentQuery {
+            query_id: "q-worker".to_owned(),
+            instruction: "side task".to_owned(),
+            role: Some("worker".to_owned()),
+            execution_mode: ToolExecutionMode::Shared,
+            tool_call_id: Some("delegate-call".into()),
+            task_name: Some("use worker".to_owned()),
+        },
+    )
+    .expect("query");
+
+    let progress = pop_delegate_progress(&sink, "delegate-call").expect("initial progress");
+    assert_eq!(progress.role.as_deref(), Some("worker"));
+
+    let side_cid = ext_query_cid(&h, "q-worker").expect("side conversation");
+    let side_spid = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
+        .expect("side prompt id");
+    let prompt = read_prompt_created(&h, &side_spid);
+
+    assert_eq!(prompt.model.as_ref(), Some(&worker_model));
+    assert_eq!(prompt.model_params.effort, tau_proto::Effort::High);
+    assert_eq!(prompt.model_params.verbosity, tau_proto::Verbosity::High);
+    assert_eq!(
+        prompt.model_params.thinking_summary,
+        tau_proto::ThinkingSummary::Auto
+    );
+    assert_eq!(
+        prompt.model_params.service_tier,
+        Some(tau_proto::ServiceTier::Flex)
+    );
+    assert!(prompt.system_prompt.contains("WORKER ROLE PROMPT"));
+    assert!(prompt.system_prompt.contains("WORKER EXTRA PROMPT"));
+    assert!(!prompt.system_prompt.contains("SMART ROLE PROMPT"));
+    assert!(prompt.system_prompt.contains("ALLOWED TOOL PROMPT"));
+    assert!(!prompt.system_prompt.contains("DENIED TOOL PROMPT"));
+    assert!(
+        prompt
+            .tools
+            .iter()
+            .any(|tool| tool.name.as_str() == "allowed_tool")
+    );
+    assert!(
+        !prompt
+            .tools
+            .iter()
+            .any(|tool| tool.name.as_str() == "denied_tool")
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+fn ext_agent_query_error(frames: &Arc<Mutex<Vec<RoutedFrame>>>, query_id: &str) -> Option<String> {
+    frames
+        .lock()
+        .expect("frames")
+        .iter()
+        .find_map(|routed| match &routed.frame {
+            Frame::Event(Event::ExtAgentQueryResult(result)) if result.query_id == query_id => {
+                result.error.clone()
+            }
+            _ => None,
+        })
+}
+
+fn configure_delegate_error_roles(h: &mut Harness) {
+    let available_model: tau_proto::ModelId = "test/available".into();
+    set_available_provider_models(h, [provider_model_info(available_model.clone(), 128_000)]);
+    h.available_roles = std::collections::HashMap::from([
+        (
+            "beta".to_owned(),
+            tau_config::settings::AgentRole {
+                model: Some(available_model.clone()),
+                ..Default::default()
+            },
+        ),
+        (
+            "alpha".to_owned(),
+            tau_config::settings::AgentRole {
+                model: Some(available_model),
+                ..Default::default()
+            },
+        ),
+        (
+            "offline".to_owned(),
+            tau_config::settings::AgentRole {
+                model: Some("test/offline".into()),
+                ..Default::default()
+            },
+        ),
+    ]);
+}
+
+/// Bad delegate roles fail before spawning a side conversation and report the
+/// usable role names in sorted order, excluding roles whose model is
+/// unavailable.
+#[test]
+fn delegate_invalid_or_unavailable_role_errors_with_sorted_available_roles() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    configure_delegate_error_roles(&mut h);
+
+    let delegate = connect_test_tool(&mut h, "conn-delegate");
+    for (query_id, role, expected_reason) in [
+        ("q-missing", "missing", "requested role does not exist"),
+        (
+            "q-offline",
+            "offline",
+            "requested role is not backed by an available model",
+        ),
+    ] {
+        h.handle_ext_agent_query(
+            "conn-delegate",
+            ExtAgentQuery {
+                query_id: query_id.to_owned(),
+                instruction: "side task".to_owned(),
+                role: Some(role.to_owned()),
+                execution_mode: ToolExecutionMode::Shared,
+                tool_call_id: Some(format!("delegate-{query_id}").into()),
+                task_name: Some(query_id.to_owned()),
+            },
+        )
+        .expect("query");
+        let error = ext_agent_query_error(&delegate, query_id).expect("query error");
+        assert!(error.contains(expected_reason), "got: {error}");
+        assert!(
+            error.contains("available roles: alpha, beta"),
+            "available roles should be sorted and filtered: {error}"
+        );
+        assert!(
+            !error.contains("available roles: alpha, beta, offline"),
+            "unavailable role leaked into available role list: {error}"
+        );
+    }
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Omitting `role` on the delegate tool means `smart`; if `smart` cannot
+/// resolve to an available model, the harness reports that compatibility
+/// default as the problem instead of silently falling back to another role.
+#[test]
+fn delegate_missing_default_smart_errors_when_smart_unavailable() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    configure_delegate_error_roles(&mut h);
+
+    let delegate = connect_test_tool(&mut h, "conn-delegate");
+    h.handle_ext_agent_query(
+        "conn-delegate",
+        ExtAgentQuery {
+            query_id: "q-default".to_owned(),
+            instruction: "side task".to_owned(),
+            role: None,
+            execution_mode: ToolExecutionMode::Shared,
+            tool_call_id: Some("delegate-call".into()),
+            task_name: Some("default".to_owned()),
+        },
+    )
+    .expect("query");
+
+    let error = ext_agent_query_error(&delegate, "q-default").expect("query error");
+    assert!(
+        error.contains("delegate requires default role `smart`, but it is not available: `smart`"),
+        "got: {error}"
+    );
+    assert!(
+        error.contains("available roles: alpha, beta"),
+        "got: {error}"
+    );
+    assert!(ext_query_cid(&h, "q-default").is_none());
+
+    h.shutdown().expect("shutdown");
+}
+
+/// The foreman/orchestrator prompt lists only available sub-task roles, sorted
+/// by role name, with descriptions preserved for the model.
+#[test]
+fn orchestrator_available_sub_task_roles_are_sorted_and_described() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let available_model: tau_proto::ModelId = "test/available".into();
+    set_available_provider_models(
+        &mut h,
+        [provider_model_info(available_model.clone(), 128_000)],
+    );
+    h.available_roles = std::collections::HashMap::from([
+        (
+            "zeta".to_owned(),
+            tau_config::settings::AgentRole {
+                model: Some(available_model.clone()),
+                description: Some("last role".to_owned()),
+                ..Default::default()
+            },
+        ),
+        (
+            "alpha".to_owned(),
+            tau_config::settings::AgentRole {
+                model: Some(available_model),
+                description: Some("first role".to_owned()),
+                ..Default::default()
+            },
+        ),
+        (
+            "offline".to_owned(),
+            tau_config::settings::AgentRole {
+                model: Some("test/offline".into()),
+                description: Some("not shown".to_owned()),
+                ..Default::default()
+            },
+        ),
+    ]);
+
+    let prompt = h.available_sub_task_roles_prompt();
+    assert_eq!(
+        prompt.as_str(),
+        "## Available sub-task roles\n\n* `alpha` - \"first role\"\n* `zeta` - \"last role\""
+    );
 
     h.shutdown().expect("shutdown");
 }
@@ -4185,6 +4549,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         ExtAgentQuery {
             query_id: "q-outer".to_owned(),
             instruction: "outer task".to_owned(),
+            role: None,
             execution_mode: ToolExecutionMode::Shared,
             tool_call_id: Some("outer-call".into()),
             task_name: Some("outer".to_owned()),
@@ -4236,6 +4601,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         ExtAgentQuery {
             query_id: "q-nested".to_owned(),
             instruction: "nested task".to_owned(),
+            role: None,
             execution_mode: ToolExecutionMode::Shared,
             tool_call_id: Some("nested-call".into()),
             task_name: Some("nested".to_owned()),
@@ -4421,6 +4787,7 @@ fn nested_ext_agent_query_branches_from_tool_owner_conversation() {
         ExtAgentQuery {
             query_id: "q-outer".to_owned(),
             instruction: "outer task".to_owned(),
+            role: None,
             execution_mode: ToolExecutionMode::Shared,
             tool_call_id: Some("outer-call".into()),
             task_name: Some("outer".to_owned()),
@@ -4468,6 +4835,7 @@ fn nested_ext_agent_query_branches_from_tool_owner_conversation() {
         ExtAgentQuery {
             query_id: "q-nested".to_owned(),
             instruction: "nested task".to_owned(),
+            role: None,
             execution_mode: ToolExecutionMode::Shared,
             tool_call_id: Some("nested-call".into()),
             task_name: Some("nested".to_owned()),
@@ -4570,6 +4938,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         ExtAgentQuery {
             query_id: "q-outer".to_owned(),
             instruction: "outer task".to_owned(),
+            role: None,
             execution_mode: ToolExecutionMode::Shared,
             tool_call_id: Some("outer-call".into()),
             task_name: Some("outer".to_owned()),
@@ -4717,6 +5086,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         ExtAgentQuery {
             query_id: "q-top".to_owned(),
             instruction: "TOP: delegate exactly two more subtasks".to_owned(),
+            role: None,
             execution_mode: ToolExecutionMode::Shared,
             tool_call_id: Some("top-call".into()),
             task_name: Some("top".to_owned()),
@@ -4764,6 +5134,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         ExtAgentQuery {
             query_id: "q-leaf".to_owned(),
             instruction: "LEAF: do one terminal search only".to_owned(),
+            role: None,
             execution_mode: ToolExecutionMode::Shared,
             tool_call_id: Some("leaf-call".into()),
             task_name: Some("leaf".to_owned()),
@@ -4990,6 +5361,7 @@ fn parallel_side_convs_do_not_share_branch_cursor() {
         ExtAgentQuery {
             query_id: "q-A".to_owned(),
             instruction: "instr A".to_owned(),
+            role: None,
             execution_mode: ToolExecutionMode::Shared,
             tool_call_id: Some("main-A".into()),
             task_name: Some("A".to_owned()),
@@ -5001,6 +5373,7 @@ fn parallel_side_convs_do_not_share_branch_cursor() {
         ExtAgentQuery {
             query_id: "q-B".to_owned(),
             instruction: "instr B".to_owned(),
+            role: None,
             execution_mode: ToolExecutionMode::Shared,
             tool_call_id: Some("main-B".into()),
             task_name: Some("B".to_owned()),
@@ -5189,6 +5562,7 @@ fn tool_events_carry_owning_conversation_originator() {
         ExtAgentQuery {
             query_id: "q-sub".to_owned(),
             instruction: "sub task".to_owned(),
+            role: None,
             execution_mode: ToolExecutionMode::Shared,
             tool_call_id: Some("main-call".into()),
             task_name: Some("sub".to_owned()),

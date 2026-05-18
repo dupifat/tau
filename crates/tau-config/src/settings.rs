@@ -312,7 +312,7 @@ fn merge_default_tools_profiles(profiles: &mut ToolsProfiles) {
 /// `config/built-in.harness.json5` and is layered in by the loader.
 /// Use [`HarnessSettings::built_in`] when you need a fresh,
 /// populated value in a test or fallback.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct HarnessSettings {
     /// Number of days to keep inactive session state directories.
     /// Set to `0` to disable session cleanup.
@@ -339,20 +339,48 @@ pub struct HarnessSettings {
     pub extensions: HashMap<String, ExtensionEntry>,
 
     /// Harness-owned role defaults. Each role is a partial set of model
-    /// settings; missing fields use hardcoded fallbacks for the selected
+    /// settings; missing fields use provider/model fallbacks for the selected
     /// provider-published model.
-    #[serde(
-        rename = "roles",
-        alias = "defaultRoles",
-        default = "default_agent_roles"
-    )]
     pub roles: HashMap<String, AgentRole>,
 
     /// Named per-tool enablement overlays keyed by tool name. Each
     /// role may opt into one profile via `toolsProfile`; profile
     /// entries override an extension tool's `enabled_by_default` hint.
-    #[serde(default, rename = "toolsProfiles")]
     pub tools_profiles: ToolsProfiles,
+}
+
+#[derive(Deserialize)]
+struct HarnessSettingsWire {
+    session_retention_days: u64,
+    extensions: HashMap<String, ExtensionEntry>,
+    #[serde(default)]
+    roles: HashMap<String, AgentRole>,
+    #[serde(default, rename = "defaultRoles")]
+    default_roles: HashMap<String, AgentRole>,
+    #[serde(default, rename = "toolsProfiles")]
+    tools_profiles: ToolsProfiles,
+}
+
+impl<'de> Deserialize<'de> for HarnessSettings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = HarnessSettingsWire::deserialize(deserializer)?;
+        let mut roles = wire.roles;
+        for (name, legacy_role) in wire.default_roles {
+            roles
+                .entry(name)
+                .and_modify(|role| role.apply_overrides_from(&legacy_role))
+                .or_insert(legacy_role);
+        }
+        Ok(Self {
+            session_retention_days: wire.session_retention_days,
+            extensions: wire.extensions,
+            roles,
+            tools_profiles: wire.tools_profiles,
+        })
+    }
 }
 
 impl HarnessSettings {
@@ -360,7 +388,6 @@ impl HarnessSettings {
     /// the embedded `built-in.harness.json5`.
     pub fn built_in() -> Self {
         let mut s: Self = parse_built_in("built-in.harness.json5", BUILT_IN_HARNESS_JSON5);
-        merge_default_agent_roles(&mut s.roles);
         merge_default_tools_profiles(&mut s.tools_profiles);
         s
     }
@@ -426,66 +453,6 @@ pub struct ExtensionEntry {
 // Harness roles
 // ---------------------------------------------------------------------------
 
-const BASE_AGENT_ROLE: &str = "smart";
-
-fn default_agent_roles() -> HashMap<String, AgentRole> {
-    let mut default_roles = HashMap::new();
-    default_roles.insert(
-        BASE_AGENT_ROLE.to_owned(),
-        AgentRole {
-            description: Some(
-                "Individual contributor using state of the art model. Good default for most tasks."
-                    .to_owned(),
-            ),
-            ..AgentRole::default()
-        },
-    );
-    default_roles.insert(
-        "deep".to_owned(),
-        AgentRole {
-            description: Some(
-                "Deep reasoning expert, using potentially slower and more expensive model. Good for research and very complext tasks."
-                    .to_owned(),
-            ),
-            effort: Some(tau_proto::Effort::XHigh),
-            thinking_summary: Some(tau_proto::ThinkingSummary::Detailed),
-            ..AgentRole::default()
-        },
-    );
-    default_roles.insert(
-        "rush".to_owned(),
-        AgentRole {
-            description: Some(
-                "Individual contributor using fast and cheaper model for smaller well-defined tasks."
-                    .to_owned(),
-            ),
-            effort: Some(tau_proto::Effort::Low),
-            thinking_summary: Some(tau_proto::ThinkingSummary::Off),
-            ..AgentRole::default()
-        },
-    );
-    default_roles.insert(
-        "foreman".to_owned(),
-        AgentRole {
-            description: Some(
-                "Role focused on splitting and delegation of tasks to other sub-agents".to_owned(),
-            ),
-            orchestrator: Some(true),
-            ..AgentRole::default()
-        },
-    );
-    default_roles
-}
-
-fn merge_default_agent_roles(roles: &mut HashMap<String, AgentRole>) {
-    for (name, built_in_role) in default_agent_roles() {
-        roles
-            .entry(name)
-            .and_modify(|role| role.fill_missing_from(&built_in_role))
-            .or_insert(built_in_role);
-    }
-}
-
 /// Partial harness role settings loaded from `harness.json5` and persisted
 /// to state. `None` means "use the selected model's fallback" for every field.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -525,26 +492,37 @@ pub struct AgentRole {
 }
 
 impl AgentRole {
-    fn fill_missing_from(&mut self, fallback: &Self) {
-        self.description = self
-            .description
-            .clone()
-            .or_else(|| fallback.description.clone());
-        self.model = self.model.clone().or_else(|| fallback.model.clone());
-        self.effort = self.effort.or(fallback.effort);
-        self.verbosity = self.verbosity.or(fallback.verbosity);
-        self.thinking_summary = self.thinking_summary.or(fallback.thinking_summary);
-        self.service_tier = self.service_tier.or(fallback.service_tier);
-        self.prompt = self.prompt.clone().or_else(|| fallback.prompt.clone());
-        self.orchestrator = self.orchestrator.or(fallback.orchestrator);
-        self.extra_prompt = self
-            .extra_prompt
-            .clone()
-            .or_else(|| fallback.extra_prompt.clone());
-        self.tools_profile = self
-            .tools_profile
-            .clone()
-            .or_else(|| fallback.tools_profile.clone());
+    fn apply_overrides_from(&mut self, override_role: &Self) {
+        if let Some(description) = &override_role.description {
+            self.description = Some(description.clone());
+        }
+        if let Some(model) = &override_role.model {
+            self.model = Some(model.clone());
+        }
+        if let Some(effort) = override_role.effort {
+            self.effort = Some(effort);
+        }
+        if let Some(verbosity) = override_role.verbosity {
+            self.verbosity = Some(verbosity);
+        }
+        if let Some(thinking_summary) = override_role.thinking_summary {
+            self.thinking_summary = Some(thinking_summary);
+        }
+        if let Some(service_tier) = override_role.service_tier {
+            self.service_tier = Some(service_tier);
+        }
+        if let Some(prompt) = &override_role.prompt {
+            self.prompt = Some(prompt.clone());
+        }
+        if let Some(orchestrator) = override_role.orchestrator {
+            self.orchestrator = Some(orchestrator);
+        }
+        if let Some(extra_prompt) = &override_role.extra_prompt {
+            self.extra_prompt = Some(extra_prompt.clone());
+        }
+        if let Some(tools_profile) = &override_role.tools_profile {
+            self.tools_profile = Some(tools_profile.clone());
+        }
     }
 }
 
@@ -665,7 +643,6 @@ pub fn load_harness_settings_in(dirs: &TauDirs) -> Result<HarnessSettings, Setti
         dirs.config_dir.as_deref(),
         "harness",
     )?;
-    merge_default_agent_roles(&mut settings.roles);
     merge_default_tools_profiles(&mut settings.tools_profiles);
     Ok(settings)
 }

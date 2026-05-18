@@ -243,13 +243,19 @@ fn harness_roles_merge_with_built_ins() {
         Some("Role focused on splitting and delegation of tasks to other sub-agents")
     );
     assert_eq!(foreman.orchestrator, Some(true));
+    assert!(
+        foreman
+            .prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.as_str().contains("use the `delegate` tool"))
+    );
 }
 
 #[test]
-fn harness_foreman_partial_override_keeps_built_in_orchestrator_flag() {
-    // The orchestrator marker is stored as Option<bool> so a user can partially
-    // override built-in foreman settings without accidentally disabling its
-    // role-list prompt behavior.
+fn harness_foreman_partial_override_keeps_built_in_prompt_and_orchestrator_flag() {
+    // The orchestrator marker and prompt are stored in the built-in harness
+    // config, so a user can partially override foreman settings without
+    // accidentally disabling its delegation prompt behavior.
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     std::fs::write(
@@ -263,15 +269,43 @@ fn harness_foreman_partial_override_keeps_built_in_orchestrator_flag() {
     .expect("write");
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    assert_eq!(s.roles["foreman"].orchestrator, Some(true));
-    assert_eq!(
-        s.roles["foreman"]
-            .model
+    let foreman = &s.roles["foreman"];
+    assert_eq!(foreman.orchestrator, Some(true));
+    assert!(
+        foreman
+            .prompt
             .as_ref()
-            .map(ToString::to_string)
-            .as_deref(),
+            .is_some_and(|prompt| prompt.as_str().contains("self-contained instructions"))
+    );
+    assert_eq!(
+        foreman.model.as_ref().map(ToString::to_string).as_deref(),
         Some("openai/gpt-5.5")
     );
+}
+
+#[test]
+fn harness_foreman_prompt_override_replaces_built_in_prompt() {
+    // A user-provided role prompt is an override of the built-in role prompt;
+    // extraPrompt remains the append point for additive instructions.
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.json5"),
+        r#"{
+            roles: {
+                foreman: { prompt: "Custom foreman prompt." },
+            },
+        }"#,
+    )
+    .expect("write");
+
+    let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+    let foreman = &s.roles["foreman"];
+    assert_eq!(
+        foreman.prompt.as_ref().map(|prompt| prompt.as_str()),
+        Some("Custom foreman prompt.")
+    );
+    assert_eq!(foreman.orchestrator, Some(true));
 }
 
 #[test]
@@ -306,13 +340,20 @@ fn harness_role_prompt_fields_parse_as_plain_strings() {
 }
 
 #[test]
-fn harness_built_in_roles_leave_prompt_fields_unset() {
-    // Built-in roles may provide completion descriptions and model knobs, but
-    // prompt customization is opt-in so users do not inherit hidden role prompt
-    // text they cannot see in config.
+fn harness_built_in_roles_load_from_json_with_foreman_prompt() {
+    // Built-in role defaults live in built-in.harness.json5. Foreman has a
+    // visible built-in prompt there; the individual-contributor roles do not.
     let s = HarnessSettings::built_in();
+    assert!(s.roles["smart"].prompt.is_none());
+    assert!(s.roles["deep"].prompt.is_none());
+    assert!(s.roles["rush"].prompt.is_none());
+    let foreman = &s.roles["foreman"];
+    assert_eq!(foreman.orchestrator, Some(true));
+    let prompt = foreman.prompt.as_ref().expect("foreman prompt").as_str();
+    assert!(prompt.contains("You are a foreman/orchestrator agent"));
+    assert!(prompt.contains("use the `delegate` tool"));
+    assert!(prompt.contains("available sub-task roles list"));
     for (name, role) in &s.roles {
-        assert!(role.prompt.is_none(), "built-in role {name} has prompt");
         assert!(
             role.extra_prompt.is_none(),
             "built-in role {name} has extraPrompt"
@@ -331,6 +372,7 @@ fn harness_default_roles_alias_still_loads() {
         r#"{
             defaultRoles: {
                 custom: { effort: "medium", toolsProfile: "read_only" },
+                foreman: { model: "openai/gpt-5.5" },
             },
         }"#,
     )
@@ -341,6 +383,18 @@ fn harness_default_roles_alias_still_loads() {
     assert_eq!(
         s.roles["custom"].tools_profile.as_deref(),
         Some("read_only")
+    );
+    let foreman = &s.roles["foreman"];
+    assert_eq!(foreman.orchestrator, Some(true));
+    assert!(
+        foreman
+            .prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.as_str().contains("use the `delegate` tool"))
+    );
+    assert_eq!(
+        foreman.model.as_ref().map(ToString::to_string).as_deref(),
+        Some("openai/gpt-5.5")
     );
 }
 

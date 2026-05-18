@@ -54,7 +54,7 @@ use crate::model::{
 };
 use crate::prompt::{
     assemble_conversation_from, assemble_prompt_context_from, build_system_prompt, cbor_map_bool,
-    default_tau_role_prompt, effective_tau_role_prompt, render_agents_context_message,
+    render_agents_context_message,
 };
 use crate::settings::{Config, load_harness_settings_or_warn};
 use crate::turn::{PromptSubmission, TurnState};
@@ -4801,11 +4801,7 @@ impl Harness {
 
     fn build_system_prompt_for_role(&self, cwd: &str, role_name: &str) -> String {
         let current_role = self.available_roles.get(role_name);
-        let default_role_prompt = default_tau_role_prompt(role_name);
-        let tau_role_prompt = effective_tau_role_prompt(
-            current_role.and_then(|role| role.prompt.as_ref()),
-            default_role_prompt.as_ref(),
-        );
+        let role_prompt = current_role.and_then(|role| role.prompt.as_ref());
         let available_sub_task_roles_prompt = current_role
             .and_then(|role| role.orchestrator)
             .unwrap_or(false)
@@ -4814,7 +4810,7 @@ impl Harness {
         build_system_prompt(
             &self.discovered_skills,
             cwd,
-            tau_role_prompt,
+            role_prompt,
             current_role.and_then(|role| role.extra_prompt.as_ref()),
             available_sub_task_roles_prompt.as_ref(),
             &tool_prompt_hook,

@@ -10,43 +10,6 @@ use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill};
 
 const ROLE_EXTRA_PROMPT_PRIORITY: PromptPriority = PromptPriority::new(1000);
 
-const FOREMAN_ROLE_PROMPT: &str = "You are a foreman/orchestrator agent. Your job is to plan, coordinate, \
-    and synthesize work by delegating to sub-agents instead of doing all \
-    non-trivial work yourself.\n\n\
-    Default workflow:\n\n\
-    * For tiny, simple, or purely clerical tasks, you may work directly.\n\
-    * For non-trivial tasks, use the `delegate` tool as the default path. \
-    Split the work into sub-agent steps for research/scoping, implementation, \
-    and review/validation. Split or repeat steps as needed for the task scope \
-    and difficulty.\n\
-    * Delegate those steps instead of performing every detail yourself.\n\
-    * Pass each sub-agent complete, self-contained instructions: the goal, \
-    relevant context, exact paths/symbols/snippets, constraints, \
-    tests/validation to run, and expected answer format.\n\
-    * When useful, choose an explicit role for delegated work from the available \
-    sub-task roles list.\n\
-    * Synthesize sub-agent results, resolve discrepancies, do only tiny or \
-    clerical follow-up directly, and report the final outcome.";
-
-/// Return the built-in prompt text for a role, if Tau ships one.
-///
-/// Keeping this as a distinct layer makes configured `prompt` an override of
-/// default role prompt text rather than an additive append point.
-pub(crate) fn default_tau_role_prompt(role_name: &str) -> Option<PromptContent> {
-    match role_name {
-        "foreman" => Some(PromptContent::new(FOREMAN_ROLE_PROMPT)),
-        _ => None,
-    }
-}
-
-/// Resolve the role prompt layer after applying the configured override.
-pub(crate) fn effective_tau_role_prompt<'a>(
-    role_prompt_override: Option<&'a PromptContent>,
-    default_role_prompt: Option<&'a PromptContent>,
-) -> Option<&'a PromptContent> {
-    role_prompt_override.or(default_role_prompt)
-}
-
 /// Builds the system prompt from Tau defaults plus role/tool prompt hooks.
 ///
 /// Must be deterministic and stable across turns of the same session
@@ -408,41 +371,6 @@ mod tests {
         );
         assert!(prompt.contains("parallel"));
         assert!(prompt.contains("make all independent tool calls in parallel"));
-    }
-
-    /// A configured role prompt replaces default role prompt text. If neither
-    /// exists, the role prompt layer is absent rather than represented as an
-    /// empty append-only section.
-    #[test]
-    fn effective_tau_role_prompt_uses_override_else_default_else_none() {
-        let configured = tau_proto::PromptContent::new("CONFIGURED ROLE PROMPT");
-        let default = tau_proto::PromptContent::new("DEFAULT ROLE PROMPT");
-
-        assert_eq!(
-            effective_tau_role_prompt(Some(&configured), Some(&default))
-                .map(tau_proto::PromptContent::as_str),
-            Some("CONFIGURED ROLE PROMPT")
-        );
-        assert_eq!(
-            effective_tau_role_prompt(None, Some(&default)).map(tau_proto::PromptContent::as_str),
-            Some("DEFAULT ROLE PROMPT")
-        );
-        assert!(effective_tau_role_prompt(None, None).is_none());
-        assert!(default_tau_role_prompt("smart").is_none());
-        let foreman = default_tau_role_prompt("foreman").expect("foreman prompt");
-        assert!(
-            foreman
-                .as_str()
-                .contains("You are a foreman/orchestrator agent")
-        );
-        assert!(foreman.as_str().contains("use the `delegate` tool"));
-        assert!(
-            foreman
-                .as_str()
-                .contains("research/scoping, implementation")
-        );
-        assert!(foreman.as_str().contains("self-contained instructions"));
-        assert!(foreman.as_str().contains("available sub-task roles list"));
     }
 
     /// Orchestrator roles append the available sub-task roles after the

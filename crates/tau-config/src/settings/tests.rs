@@ -188,7 +188,7 @@ fn harness_roles_merge_with_built_ins() {
         r#"{
             roles: {
                 smart: { model: "openai/gpt-5.5", toolsProfile: "full" },
-                custom: { effort: "medium", toolsProfile: "read_only" },
+                custom: { description: "Custom local role", effort: "medium", toolsProfile: "read_only" },
                 deep: { model: "openai/gpt-5.5" },
             },
         }"#,
@@ -200,6 +200,10 @@ fn harness_roles_merge_with_built_ins() {
     assert!(s.roles.contains_key("deep"));
     assert!(s.roles.contains_key("rush"));
     assert!(!s.roles.contains_key("default"));
+    assert_eq!(
+        s.roles["custom"].description.as_deref(),
+        Some("Custom local role")
+    );
     assert_eq!(s.roles["custom"].effort, Some(tau_proto::Effort::Medium));
     assert_eq!(
         s.roles["custom"].tools_profile.as_deref(),
@@ -216,6 +220,10 @@ fn harness_roles_merge_with_built_ins() {
     assert_eq!(s.roles["smart"].tools_profile.as_deref(), Some("full"));
 
     let deep = &s.roles["deep"];
+    assert_eq!(
+        deep.description.as_deref(),
+        Some("Deeper reasoning for hard problems.")
+    );
     assert_eq!(
         deep.model.as_ref().map(ToString::to_string).as_deref(),
         Some("openai/gpt-5.5")
@@ -261,8 +269,9 @@ fn harness_role_prompt_fields_parse_as_plain_strings() {
 
 #[test]
 fn harness_built_in_roles_leave_prompt_fields_unset() {
-    // Built-in roles only pick model knobs; prompt customization is opt-in so
-    // users do not inherit hidden role prompt text they cannot see in config.
+    // Built-in roles may provide completion descriptions and model knobs, but
+    // prompt customization is opt-in so users do not inherit hidden role prompt
+    // text they cannot see in config.
     let s = HarnessSettings::built_in();
     for (name, role) in &s.roles {
         assert!(role.prompt.is_none(), "built-in role {name} has prompt");

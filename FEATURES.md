@@ -92,14 +92,20 @@ Defaults are normally selected through agent roles in `harness.json5`:
 
 ```json5
 roles: {
-  smart: { model: "chatgpt/gpt-5.5", effort: "medium", toolsProfile: "full" },
+  smart: {
+    description: "Balanced coding assistant",
+    model: "chatgpt/gpt-5.5",
+    effort: "medium",
+    toolsProfile: "full",
+  },
   deep: { effort: "xhigh", thinkingSummary: "detailed" },
   rush: { effort: "low", serviceTier: "fast" },
 },
 ```
 
-Roles can also select a named `toolsProfile`. Profiles live in
-`harness.json5` under `toolsProfiles` and map tool names to booleans,
+Roles can include a `description` shown after the model/knob summary in
+`/role ...` completions. Roles can also select a named `toolsProfile`.
+Profiles live in `harness.json5` under `toolsProfiles` and map tool names to booleans,
 overriding each tool's extension-declared `enabled_by_default` hint. Tau ships
 a built-in `gpt` profile that enables `apply_patch` while disabling direct
 file/search tools (`edit`, `write`, `read`, `grep`, `find`, and `ls`).

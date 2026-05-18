@@ -6,10 +6,12 @@
 
   // Optional role defaults. Built-in roles are merged underneath this map:
   // smart = neutral defaults, deep = xhigh/detailed, rush = low/off.
-  // Role `prompt` replaces the built-in role prompt, if any; `extraPrompt`
+  // Role `description` is shown in `/role ...` completions. Role `prompt`
+  // replaces the built-in role prompt, if any; `extraPrompt`
   // appends additional role-specific instructions after it.
   // roles: {
   //   smart: {
+  //     // description: "Balanced coding assistant.",
   //     // model: "chatgpt/gpt-5.5",
   //     // toolsProfile: "read_only",
   //     // prompt: "You are a careful coding assistant.",

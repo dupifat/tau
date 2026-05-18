@@ -422,6 +422,36 @@ fn execution_events_use_provider_wire_family() {
 }
 
 #[test]
+fn harness_role_info_role_description_is_optional_and_round_trips() {
+    // Older harnesses only send `description`; the new free-form role metadata
+    // must default cleanly while preserving the technical description field.
+    let legacy: HarnessRoleInfo = serde_json::from_value(serde_json::json!({
+        "name": "smart",
+        "description": "model=openai/gpt-4.1, effort=high"
+    }))
+    .expect("decode legacy role info");
+    assert_eq!(legacy.name, "smart");
+    assert_eq!(legacy.role_description, None);
+
+    let with_description = HarnessRoleInfo {
+        name: "deep".to_owned(),
+        description: "model=openai/gpt-4.1, effort=xhigh".to_owned(),
+        role_description: Some("Deep investigation mode".to_owned()),
+    };
+    let json = serde_json::to_value(&with_description).expect("serialize role info");
+    assert_eq!(json["role_description"], "Deep investigation mode");
+    let decoded: HarnessRoleInfo = serde_json::from_value(json).expect("decode role info");
+    assert_eq!(decoded, with_description);
+
+    let without_description = serde_json::to_value(HarnessRoleInfo {
+        role_description: None,
+        ..with_description
+    })
+    .expect("serialize role info without metadata");
+    assert!(without_description.get("role_description").is_none());
+}
+
+#[test]
 fn provider_model_info_requires_context_window() {
     // The harness uses provider snapshots as the only source of model UI
     // metadata, so context windows must be present instead of defaulted.

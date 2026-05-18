@@ -430,10 +430,17 @@ const BASE_AGENT_ROLE: &str = "smart";
 
 fn default_agent_roles() -> HashMap<String, AgentRole> {
     let mut default_roles = HashMap::new();
-    default_roles.insert(BASE_AGENT_ROLE.to_owned(), AgentRole::default());
+    default_roles.insert(
+        BASE_AGENT_ROLE.to_owned(),
+        AgentRole {
+            description: Some("Balanced default coding role.".to_owned()),
+            ..AgentRole::default()
+        },
+    );
     default_roles.insert(
         "deep".to_owned(),
         AgentRole {
+            description: Some("Deeper reasoning for hard problems.".to_owned()),
             effort: Some(tau_proto::Effort::XHigh),
             thinking_summary: Some(tau_proto::ThinkingSummary::Detailed),
             ..AgentRole::default()
@@ -442,6 +449,7 @@ fn default_agent_roles() -> HashMap<String, AgentRole> {
     default_roles.insert(
         "rush".to_owned(),
         AgentRole {
+            description: Some("Lower-latency responses for simple tasks.".to_owned()),
             effort: Some(tau_proto::Effort::Low),
             thinking_summary: Some(tau_proto::ThinkingSummary::Off),
             ..AgentRole::default()
@@ -464,6 +472,9 @@ fn merge_default_agent_roles(roles: &mut HashMap<String, AgentRole>) {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AgentRole {
+    /// Short free-form summary shown in role-selection completion menus.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Model id preferred by this role.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelId>,
@@ -492,6 +503,10 @@ pub struct AgentRole {
 
 impl AgentRole {
     fn fill_missing_from(&mut self, fallback: &Self) {
+        self.description = self
+            .description
+            .clone()
+            .or_else(|| fallback.description.clone());
         self.model = self.model.clone().or_else(|| fallback.model.clone());
         self.effort = self.effort.or(fallback.effort);
         self.verbosity = self.verbosity.or(fallback.verbosity);

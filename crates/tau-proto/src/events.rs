@@ -597,6 +597,9 @@ pub struct HarnessRoleInfo {
     pub name: String,
     /// Human-readable summary of the role's resolved model and knobs.
     pub description: String,
+    /// Optional free-form role summary from harness configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_description: Option<String>,
 }
 
 /// The harness announces all roles available for selection.

@@ -66,6 +66,37 @@ fn connect_provider_source(h: &mut Harness, name: &str) {
     let _frames = connect_test_client(h, name, tau_proto::ClientKind::Provider);
 }
 
+/// Role info keeps the machine-readable model/knob summary separate from the
+/// free-form role description so completion UIs do not have to parse user text.
+#[test]
+fn role_infos_include_configured_role_description() {
+    let model: ModelId = "openai/gpt-4.1".parse().expect("model id");
+    let mut roles = std::collections::HashMap::new();
+    roles.insert(
+        "smart".to_owned(),
+        tau_config::settings::AgentRole {
+            description: Some("Balanced coding helper".to_owned()),
+            model: Some(model.clone()),
+            effort: Some(Effort::High),
+            ..Default::default()
+        },
+    );
+    let provider_models = provider_models([provider_model(model.clone(), 128_000)]);
+    let infos = role_infos(
+        &provider_models,
+        &roles,
+        &tau_config::settings::ToolsProfiles::default(),
+        &[model],
+    );
+
+    assert_eq!(infos.len(), 1);
+    assert!(infos[0].description.contains("model=openai/gpt-4.1"));
+    assert_eq!(
+        infos[0].role_description.as_deref(),
+        Some("Balanced coding helper")
+    );
+}
+
 /// Provider snapshots are runtime registry input, not just private extension
 /// chatter: the harness must retain metadata/routes and re-emit refreshed UI
 /// state for clients that are already connected.
@@ -408,11 +439,11 @@ fn role_baseline_ignores_persisted_role_overrides() {
     assert_eq!(baseline.verbosity, Verbosity::Medium);
 }
 
-/// Persisted runtime role overrides must never carry prompt text. Prompt fields
-/// come from harness config so changing `harness.json5` is reflected after a
-/// restart instead of being shadowed by stale state.
+/// Persisted runtime role overrides must never carry prompt text or role
+/// descriptions. Config-only metadata must come from `harness.json5` so changes
+/// are reflected after a restart instead of being shadowed by stale state.
 #[test]
-fn persisted_role_overrides_do_not_shadow_configured_role_prompts() {
+fn persisted_role_overrides_do_not_shadow_configured_role_metadata() {
     let td = TempDir::new().expect("tempdir");
     let config_dir = td.path().join("config");
     let state_dir = td.path().join("state");
@@ -428,6 +459,7 @@ fn persisted_role_overrides_do_not_shadow_configured_role_prompts() {
         r#"{
             roles: {
                 smart: {
+                    description: "CURRENT CONFIG DESCRIPTION",
                     model: "openai/gpt-4.1",
                     prompt: "CURRENT CONFIG PROMPT",
                     extraPrompt: "CURRENT CONFIG EXTRA",
@@ -442,6 +474,7 @@ fn persisted_role_overrides_do_not_shadow_configured_role_prompts() {
             "last_selected_role": "smart",
             "role_overrides": {
                 "smart": {
+                    "description": "STALE STATE DESCRIPTION",
                     "model": "openai/gpt-4.1-mini",
                     "prompt": "STALE STATE PROMPT",
                     "extraPrompt": "STALE STATE EXTRA"
@@ -461,6 +494,10 @@ fn persisted_role_overrides_do_not_shadow_configured_role_prompts() {
         Some("openai/gpt-4.1-mini")
     );
     assert_eq!(
+        role.description.as_deref(),
+        Some("CURRENT CONFIG DESCRIPTION")
+    );
+    assert_eq!(
         role.prompt.as_ref().map(|prompt| prompt.as_str()),
         Some("CURRENT CONFIG PROMPT")
     );
@@ -469,11 +506,16 @@ fn persisted_role_overrides_do_not_shadow_configured_role_prompts() {
         Some("CURRENT CONFIG EXTRA")
     );
     let runtime_override = role_overrides.get("smart").expect("runtime override");
+    assert!(runtime_override.description.is_none());
     assert!(runtime_override.prompt.is_none());
     assert!(runtime_override.extra_prompt.is_none());
 
     save_role_overrides(&dirs, &selected_role, &roles);
     let saved = std::fs::read_to_string(state_dir.join("harness.json5")).expect("read state");
+    assert!(
+        !saved.contains("description"),
+        "saved state must strip description: {saved}"
+    );
     assert!(
         !saved.contains("prompt"),
         "saved state must strip prompt fields: {saved}"

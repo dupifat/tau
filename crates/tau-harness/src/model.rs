@@ -26,6 +26,7 @@ pub(crate) fn load_roles(
     for (name, role) in &role_overrides {
         let mut effective_role = role.clone();
         if let Some(configured_role) = roles.get(name) {
+            effective_role.description = configured_role.description.clone();
             effective_role.prompt = configured_role.prompt.clone();
             effective_role.extra_prompt = configured_role.extra_prompt.clone();
         }
@@ -173,6 +174,7 @@ pub(crate) fn role_infos(
                 name,
                 available,
             ),
+            role_description: roles.get(name).and_then(|role| role.description.clone()),
         })
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -369,7 +371,8 @@ fn load_last_selected_role(dirs: &tau_config::settings::TauDirs) -> Option<Strin
     (!role.is_empty()).then_some(role)
 }
 
-fn role_without_prompt_fields(mut role: AgentRole) -> AgentRole {
+fn role_without_config_metadata(mut role: AgentRole) -> AgentRole {
+    role.description = None;
     role.prompt = None;
     role.extra_prompt = None;
     role
@@ -384,7 +387,7 @@ fn load_role_overrides(dirs: &tau_config::settings::TauDirs) -> HashMap<String, 
     {
         for (name, entry) in map {
             if let Ok(role) = serde_json::from_value::<AgentRole>(entry.clone()) {
-                out.insert(name.clone(), role_without_prompt_fields(role));
+                out.insert(name.clone(), role_without_config_metadata(role));
             }
         }
     }
@@ -412,7 +415,7 @@ pub(crate) fn save_role_overrides(
         .map(|(name, role)| {
             (
                 name.clone(),
-                serde_json::to_value(role_without_prompt_fields(role.clone()))
+                serde_json::to_value(role_without_config_metadata(role.clone()))
                     .unwrap_or(serde_json::Value::Null),
             )
         })

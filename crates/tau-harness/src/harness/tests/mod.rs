@@ -39,7 +39,7 @@ use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill};
 use crate::error::HarnessError;
 use crate::event::HarnessEvent;
 use crate::model::{
-    baseline_params_for_selection, clamp_effort, efforts_for_model, load_roles,
+    baseline_params_for_selection, clamp_effort, efforts_for_model, load_roles, role_infos,
     save_role_overrides, select_model_for_available, selected_params_for_role,
     thinking_summaries_for_model, verbosities_for_model,
 };

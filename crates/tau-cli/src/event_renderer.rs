@@ -232,9 +232,16 @@ struct RoleCompletionDetails {
     thinking_summary: Option<String>,
     service_tier: Option<String>,
     tools_profile: Option<String>,
+    role_description: Option<String>,
 }
 
 impl RoleCompletionDetails {
+    fn from_role_info(role: &tau_proto::HarnessRoleInfo) -> Self {
+        let mut details = Self::from_description(&role.description);
+        details.role_description = role.role_description.clone();
+        details
+    }
+
     fn from_description(description: &str) -> Self {
         let mut details = Self {
             model: None,
@@ -243,6 +250,7 @@ impl RoleCompletionDetails {
             thinking_summary: None,
             service_tier: None,
             tools_profile: None,
+            role_description: None,
         };
 
         if description == "no model" {
@@ -287,11 +295,19 @@ impl RoleCompletionDetails {
         if let Some(tools_profile) = self.tools_profile.as_deref() {
             parts.push(format!("tp={tools_profile}"));
         }
-        if parts.is_empty() {
+        let mut summary = if parts.is_empty() {
             "no model".to_owned()
         } else {
             parts.join(" ")
+        };
+        if let Some(description) = self.role_description.as_deref() {
+            let description = description.trim();
+            if !description.is_empty() {
+                summary.push_str(" — ");
+                summary.push_str(description);
+            }
         }
+        summary
     }
 
     fn current_description(&self, field: &str) -> String {
@@ -2268,12 +2284,7 @@ impl EventRenderer {
                 let role_defaults: HashMap<String, RoleCompletionDetails> = roles
                     .roles
                     .iter()
-                    .map(|r| {
-                        (
-                            r.name.clone(),
-                            RoleCompletionDetails::from_description(&r.description),
-                        )
-                    })
+                    .map(|r| (r.name.clone(), RoleCompletionDetails::from_role_info(r)))
                     .collect();
                 let role_items: Vec<(tau_cli_term::CompletionItem, RoleCompletionDetails)> = roles
                     .roles
@@ -2320,6 +2331,7 @@ impl EventRenderer {
                                     thinking_summary: None,
                                     service_tier: None,
                                     tools_profile: None,
+                                    role_description: None,
                                 });
                             [
                                 ("delete", "delete this runtime role/override".to_owned()),
@@ -2542,6 +2554,24 @@ mod tests {
         assert_eq!(
             details.short_description(),
             "codex-dpcpw/gpt-5.5 e=xhigh v=medium ts=off tp=read_only"
+        );
+    }
+
+    /// `/role <name>` completion appends free-form role descriptions after the
+    /// parsed model/knob summary instead of parsing that user text as settings.
+    #[test]
+    fn role_details_append_configured_role_description() {
+        let details = RoleCompletionDetails::from_role_info(&tau_proto::HarnessRoleInfo {
+            name: "deep".to_owned(),
+            description:
+                "model=codex-dpcpw/gpt-5.5, effort=xhigh, verbosity=medium, thinking-summary=off"
+                    .to_owned(),
+            role_description: Some("Investigate deeply, no rush = thorough".to_owned()),
+        });
+
+        assert_eq!(
+            details.short_description(),
+            "codex-dpcpw/gpt-5.5 e=xhigh v=medium ts=off — Investigate deeply, no rush = thorough"
         );
     }
 

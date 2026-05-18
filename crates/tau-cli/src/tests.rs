@@ -759,6 +759,7 @@ fn role_default_knobs_are_hidden_and_overrides_follow_role() {
             name: "smart".to_owned(),
             description: "model=test/model, effort=medium, verbosity=medium, thinking-summary=auto"
                 .to_owned(),
+            role_description: None,
         }],
     }));
     renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
@@ -813,6 +814,7 @@ fn role_state_overrides_are_compared_to_role_baseline() {
             name: "smart".to_owned(),
             description: "model=test/model, effort=low, verbosity=high, thinking-summary=auto"
                 .to_owned(),
+            role_description: None,
         }],
     }));
     renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {

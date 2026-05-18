@@ -4,6 +4,7 @@ Agent roles are named aliases for the model and model-behavior settings Tau shou
 
 A role can set:
 
+- `description`: short free-form summary shown in `/role ...` completions
 - `model`: qualified model id, in `provider/model` form
 - `effort`: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`
 - `verbosity`: `low`, `medium`, or `high`
@@ -17,6 +18,7 @@ Roles live in `harness.json5` under `roles`:
 {
   roles: {
     smart: {
+      description: "Balanced coding assistant",
       model: "chatgpt/gpt-5.3-codex",
       effort: "medium",
       toolsProfile: "full",
@@ -73,7 +75,7 @@ Tau ships built-in `smart`, `deep`, and `rush` roles. `smart` is the startup fal
 
 Use `/model <role>` or `/role <role>`.
 
-`/model` and `/role` completion list roles, not raw models. Each completion description shows the currently resolved model and role settings.
+`/model` and `/role` completion list roles, not raw models. Each completion description shows the currently resolved model and role settings. `/role` completions also append the configured role `description` when present.
 
 
 ## Editing roles
@@ -103,4 +105,4 @@ The `<role>` argument completes existing roles, but any new name can be used to 
 
 `/role <role> delete` removes the runtime/persisted role override. It does not edit `roles` from configuration; built-in or configured roles come back on the next harness start.
 
-Runtime changes for built-in or configured roles are persisted in `~/.local/state/tau/harness.json5` together with the last selected role.
+Runtime changes for built-in or configured roles are persisted in `~/.local/state/tau/harness.json5` together with the last selected role. Role `description`, `prompt`, and `extraPrompt` remain config-only metadata, so changing them in `harness.json5` takes effect after restart without stale runtime state shadowing them.

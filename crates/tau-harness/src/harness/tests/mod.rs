@@ -35,7 +35,7 @@ use crate::daemon::{
     ServeOptions, bind_listener, run_daemon_with_echo, run_embedded_message_with_echo,
     send_daemon_message, send_daemon_message_with_trace,
 };
-use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill};
+use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill, DiscoveredSkillSource};
 use crate::error::HarnessError;
 use crate::event::HarnessEvent;
 use crate::model::{

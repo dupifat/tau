@@ -498,6 +498,84 @@ fn load_from_empty_dirs() {
 }
 
 #[test]
+fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
+    let skills = built_in_skills();
+    let names: Vec<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec![
+            "tau-self-knowledge",
+            "tau-self-knowledge-architecture",
+            "tau-self-knowledge-config",
+            "tau-self-knowledge-source-code",
+            "tau-self-knowledge-community",
+            "tau-self-knowledge-debugging",
+        ]
+    );
+
+    let skill = skills
+        .iter()
+        .find(|skill| skill.name == "tau-self-knowledge")
+        .expect("built-in tau self-knowledge skill");
+    assert_eq!(
+        skill.description,
+        "Built-in information about Tau coding harness you are running in."
+    );
+    assert!(skill.add_to_prompt);
+    assert!(skill.content.contains("# Tau self-knowledge"));
+    assert!(!skill.content.contains(SELF_KNOWLEDGE_VERSION_TOKEN));
+    assert!(
+        skill
+            .content
+            .contains(&format!("Tau version `{TAU_VERSION}`"))
+    );
+    assert!(skill.content.contains("tau-self-knowledge-architecture"));
+    assert!(skill.content.contains("tau-self-knowledge-config"));
+    assert!(skill.content.contains("tau-self-knowledge-source-code"));
+    assert!(skill.content.contains("tau-self-knowledge-community"));
+    assert!(skill.content.contains("tau-self-knowledge-debugging"));
+
+    let architecture = skills
+        .iter()
+        .find(|skill| skill.name == "tau-self-knowledge-architecture")
+        .expect("built-in architecture skill");
+    assert!(!architecture.add_to_prompt);
+    assert!(architecture.content.contains("# Tau architecture overview"));
+
+    let config = skills
+        .iter()
+        .find(|skill| skill.name == "tau-self-knowledge-config")
+        .expect("built-in config skill");
+    assert!(!config.add_to_prompt);
+    assert!(config.content.contains("tau provider add"));
+
+    let source_code = skills
+        .iter()
+        .find(|skill| skill.name == "tau-self-knowledge-source-code")
+        .expect("built-in source code skill");
+    assert!(!source_code.add_to_prompt);
+    assert!(
+        source_code
+            .content
+            .contains("rad:z3ToHcxKefTYxZEoCoDXmddUkK3a4")
+    );
+
+    let community = skills
+        .iter()
+        .find(|skill| skill.name == "tau-self-knowledge-community")
+        .expect("built-in community skill");
+    assert!(!community.add_to_prompt);
+    assert!(community.content.contains("GitHub Discussions"));
+
+    let debugging = skills
+        .iter()
+        .find(|skill| skill.name == "tau-self-knowledge-debugging")
+        .expect("built-in debugging skill");
+    assert!(!debugging.add_to_prompt);
+    assert!(debugging.content.contains("## Important paths"));
+}
+
+#[test]
 fn load_from_scoped_dirs_applies_prompt_default_when_advertise_is_omitted() {
     let tmp = tempfile::tempdir().expect("tempdir");
     for (name, advertise) in [

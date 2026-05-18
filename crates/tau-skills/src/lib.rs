@@ -47,6 +47,25 @@ pub struct SkillDir {
     pub add_to_prompt_by_default: bool,
 }
 
+/// A skill bundled into Tau at compile time.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BuiltInSkill {
+    /// Validated skill name from frontmatter.
+    pub name: String,
+    /// Validated and possibly truncated description from frontmatter.
+    pub description: String,
+    /// Full Markdown source included into the binary at build time,
+    /// with runtime placeholders resolved.
+    pub content: Cow<'static, str>,
+    /// Whether this skill should appear in the initial system prompt.
+    pub add_to_prompt: bool,
+}
+
+struct BuiltInSkillSource {
+    diagnostic_path: &'static str,
+    content: &'static str,
+}
+
 impl Skill {
     /// Directory containing this skill's file. Always
     /// `file_path.parent()` (falling back to `file_path` if there is
@@ -87,6 +106,35 @@ pub struct LoadSkillsResult {
 const MAX_NAME_LENGTH: usize = 64;
 pub const MAX_DESCRIPTION_LENGTH: usize = 1024;
 const SKILL_FILENAME: &str = "SKILL.md";
+const SELF_KNOWLEDGE_VERSION_TOKEN: &str = "__TAU_SELF_KNOWLEDGE_VERSION__";
+const TAU_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+const BUILT_IN_SKILL_SOURCES: &[BuiltInSkillSource] = &[
+    BuiltInSkillSource {
+        diagnostic_path: "tau-self-knowledge.md",
+        content: include_str!("../self-knowledge/tau-self-knowledge.md"),
+    },
+    BuiltInSkillSource {
+        diagnostic_path: "tau-self-knowledge-architecture.md",
+        content: include_str!("../self-knowledge/tau-self-knowledge-architecture.md"),
+    },
+    BuiltInSkillSource {
+        diagnostic_path: "tau-self-knowledge-config.md",
+        content: include_str!("../self-knowledge/tau-self-knowledge-config.md"),
+    },
+    BuiltInSkillSource {
+        diagnostic_path: "tau-self-knowledge-source-code.md",
+        content: include_str!("../self-knowledge/tau-self-knowledge-source-code.md"),
+    },
+    BuiltInSkillSource {
+        diagnostic_path: "tau-self-knowledge-community.md",
+        content: include_str!("../self-knowledge/tau-self-knowledge-community.md"),
+    },
+    BuiltInSkillSource {
+        diagnostic_path: "tau-self-knowledge-debugging.md",
+        content: include_str!("../self-knowledge/tau-self-knowledge-debugging.md"),
+    },
+];
 
 // ---------------------------------------------------------------------------
 // Frontmatter parsing
@@ -629,6 +677,51 @@ pub fn load_skills_from_skill_dirs(dirs: &[SkillDir]) -> LoadSkillsResult {
 /// Load skills from a single directory.
 pub fn load_skills_from_dir(dir: &Path) -> LoadSkillsResult {
     load_skills_from_dirs(&[dir.to_owned()])
+}
+
+fn render_built_in_skill_content(content: &'static str) -> Cow<'static, str> {
+    if content.contains(SELF_KNOWLEDGE_VERSION_TOKEN) {
+        Cow::Owned(content.replace(SELF_KNOWLEDGE_VERSION_TOKEN, TAU_VERSION))
+    } else {
+        Cow::Borrowed(content)
+    }
+}
+
+/// Load Tau's compile-time bundled self-knowledge skills.
+///
+/// Built-ins are stored as normal Markdown skill files in this crate and
+/// embedded with `include_str!`, but they intentionally do not expose an
+/// on-disk path to callers.
+pub fn built_in_skills() -> Vec<BuiltInSkill> {
+    BUILT_IN_SKILL_SOURCES
+        .iter()
+        .map(|source| {
+            let path = Path::new(source.diagnostic_path);
+            let content = render_built_in_skill_content(source.content);
+            let (skill, diagnostics) = load_skill_from_content(&content, path);
+            let fatal = diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.kind == DiagnosticKind::Skipped);
+            if let Some(diagnostic) = fatal {
+                panic!(
+                    "invalid built-in skill {}: {}",
+                    source.diagnostic_path, diagnostic.message
+                );
+            }
+            let skill = skill.unwrap_or_else(|| {
+                panic!(
+                    "invalid built-in skill {}: missing skill",
+                    source.diagnostic_path
+                )
+            });
+            BuiltInSkill {
+                name: skill.name,
+                description: skill.description,
+                content,
+                add_to_prompt: skill.add_to_prompt,
+            }
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

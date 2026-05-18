@@ -17,6 +17,7 @@ const MAX_SKILL_CONTENT_BYTES: usize = 64 * 1024;
 const MAX_SKILL_SEARCH_MATCHES: usize = 50;
 
 use crate::conversation::ConversationId;
+use crate::discovery::DiscoveredSkillSource;
 use crate::error::HarnessError;
 use crate::harness::{AgentToolCall, HARNESS_CONNECTION_ID, Harness, PendingTool};
 
@@ -137,9 +138,10 @@ impl Harness {
                 originator: tau_proto::PromptOriginator::User,
             });
         };
-        let file_path = skill.file_path.clone();
+        let source = skill.source.clone();
+        let source_label = source.label();
         let description = skill.description.clone();
-        match read_text_file_prefix(&file_path, MAX_SKILL_CONTENT_BYTES) {
+        match read_skill_source_prefix(&source, MAX_SKILL_CONTENT_BYTES) {
             Ok(read) => {
                 let mut body = match skill_body_from_prefix(&read) {
                     Ok(body) => body,
@@ -158,7 +160,7 @@ impl Harness {
                 if read.truncated {
                     self.emit_info_important(&format!(
                         "skill too long: {} truncated to {MAX_SKILL_CONTENT_BYTES} bytes while loading {}",
-                        file_path.display(),
+                        source_label,
                         name,
                     ));
                     body.push_str(&format!(
@@ -385,13 +387,13 @@ impl Harness {
                 }
                 if search_content {
                     let body = body.get_or_insert_with(|| {
-                        match read_text_file_prefix(&skill.file_path, MAX_SKILL_CONTENT_BYTES) {
+                        match read_skill_source_prefix(&skill.source, MAX_SKILL_CONTENT_BYTES) {
                             Ok(read) => match skill_body_from_prefix(&read) {
                                 Ok(body) => {
                                     if read.truncated {
                                         let warning = format!(
                                             "skill too long: {} truncated to {MAX_SKILL_CONTENT_BYTES} bytes while content-searching {}",
-                                            skill.file_path.display(),
+                                            skill.source.label(),
                                             name.as_str(),
                                         );
                                         tracing::warn!(%warning);
@@ -402,7 +404,7 @@ impl Harness {
                                 Err(message) => {
                                     let warning = format!(
                                         "skill frontmatter too long: {} while content-searching {}: {message}",
-                                        skill.file_path.display(),
+                                        skill.source.label(),
                                         name.as_str(),
                                     );
                                     tracing::warn!(%warning);
@@ -413,7 +415,7 @@ impl Harness {
                             Err(err) => {
                                 tracing::warn!(
                                     skill = %name.as_str(),
-                                    path = %skill.file_path.display(),
+                                    source = %skill.source.label(),
                                     error = %err,
                                     "skill body unreadable; treating as empty for content search",
                                 );
@@ -513,6 +515,18 @@ fn skill_body_from_prefix(read: &LimitedTextRead) -> Result<String, String> {
     Ok(tau_skills::strip_frontmatter(&read.text).to_owned())
 }
 
+fn read_skill_source_prefix(
+    source: &DiscoveredSkillSource,
+    max_bytes: usize,
+) -> std::io::Result<LimitedTextRead> {
+    match source {
+        DiscoveredSkillSource::File(path) => read_text_file_prefix(path, max_bytes),
+        DiscoveredSkillSource::BuiltIn { content } => {
+            Ok(read_text_prefix(content.as_ref(), max_bytes))
+        }
+    }
+}
+
 fn read_text_file_prefix(
     path: &std::path::Path,
     max_bytes: usize,
@@ -533,6 +547,27 @@ fn read_text_file_prefix(
         truncated,
         total_bytes,
     })
+}
+
+fn read_text_prefix(text: &str, max_bytes: usize) -> LimitedTextRead {
+    let total_bytes = text.len() as u64;
+    if text.len() <= max_bytes {
+        return LimitedTextRead {
+            text: text.to_owned(),
+            truncated: false,
+            total_bytes,
+        };
+    }
+
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    LimitedTextRead {
+        text: text[..end].to_owned(),
+        truncated: true,
+        total_bytes,
+    }
 }
 
 fn skill_ok_display(args: &str) -> ToolDisplay {

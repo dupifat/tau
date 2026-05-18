@@ -31,7 +31,7 @@ use crate::dedup::{
     encode_error_for_hash, encode_for_hash, hash_truncated,
 };
 use crate::dirs::policy_store_path_from;
-use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill};
+use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill, DiscoveredSkillSource};
 use crate::error::HarnessError;
 use crate::event::{
     ChannelSink, HarnessEvent, WriterShutdown, spawn_reader_thread, spawn_writer_thread,
@@ -62,6 +62,10 @@ use crate::turn::{PromptSubmission, TurnState};
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 const AUTO_COMPACTION_CONTEXT_PERCENT: u8 = 90;
+const BUILT_IN_SKILLS_SOURCE_ID: &str = "harness:built-in-skills";
+const SELF_KNOWLEDGE_VERSION_TOKEN: &str = "__TAU_SELF_KNOWLEDGE_VERSION__";
+const SELF_KNOWLEDGE_HASH_TOKEN: &str = "__TAU_SELF_KNOWLEDGE_HASH__";
+const SELF_KNOWLEDGE_BUILD_DATE_TOKEN: &str = "__TAU_SELF_KNOWLEDGE_BUILD_DATE__";
 
 #[derive(Clone, Debug)]
 pub(crate) struct AgentToolCall {
@@ -86,6 +90,44 @@ fn hex_bytes(bytes: &[u8]) -> String {
         out.push(HEX[(byte & 0x0f) as usize] as char);
     }
     out
+}
+
+fn built_in_discovered_skills() -> HashMap<tau_proto::SkillName, DiscoveredSkill> {
+    tau_skills::built_in_skills()
+        .into_iter()
+        .map(|skill| {
+            (
+                tau_proto::SkillName::from(skill.name),
+                DiscoveredSkill {
+                    source_id: BUILT_IN_SKILLS_SOURCE_ID.into(),
+                    description: skill.description,
+                    source: DiscoveredSkillSource::BuiltIn {
+                        content: render_self_knowledge_content(skill.content),
+                    },
+                    add_to_prompt: skill.add_to_prompt,
+                },
+            )
+        })
+        .collect()
+}
+
+fn render_self_knowledge_content(
+    content: std::borrow::Cow<'static, str>,
+) -> std::borrow::Cow<'static, str> {
+    let Some(last_modified) = crate::version::build_last_modified() else {
+        return std::borrow::Cow::Owned(
+            content
+                .replace(SELF_KNOWLEDGE_VERSION_TOKEN, env!("CARGO_PKG_VERSION"))
+                .replace(SELF_KNOWLEDGE_HASH_TOKEN, &crate::version::build_revision())
+                .replace(SELF_KNOWLEDGE_BUILD_DATE_TOKEN, "unknown"),
+        );
+    };
+    std::borrow::Cow::Owned(
+        content
+            .replace(SELF_KNOWLEDGE_VERSION_TOKEN, env!("CARGO_PKG_VERSION"))
+            .replace(SELF_KNOWLEDGE_HASH_TOKEN, &crate::version::build_revision())
+            .replace(SELF_KNOWLEDGE_BUILD_DATE_TOKEN, &last_modified),
+    )
 }
 
 pub(crate) fn assistant_text_from_output_items(output_items: &[ContextItem]) -> Option<String> {
@@ -948,7 +990,7 @@ impl Harness {
             current_session_state: CurrentSessionState::default(),
             prompt_models: std::collections::HashMap::new(),
             prompt_fingerprints: std::collections::HashMap::new(),
-            discovered_skills: std::collections::HashMap::new(),
+            discovered_skills: built_in_discovered_skills(),
             discovered_agents_files: Vec::new(),
             initialized_sessions: std::collections::HashSet::new(),
             completed_prompts: std::collections::HashSet::new(),
@@ -1160,7 +1202,7 @@ impl Harness {
             current_session_state: CurrentSessionState::default(),
             prompt_models: std::collections::HashMap::new(),
             prompt_fingerprints: std::collections::HashMap::new(),
-            discovered_skills: std::collections::HashMap::new(),
+            discovered_skills: built_in_discovered_skills(),
             discovered_agents_files: Vec::new(),
             initialized_sessions: std::collections::HashSet::new(),
             completed_prompts: std::collections::HashSet::new(),
@@ -3066,8 +3108,10 @@ impl Harness {
     }
 
     fn remove_discovered_context(&mut self, source_id: &str) {
-        self.discovered_skills
-            .retain(|_, skill| skill.source_id != source_id);
+        self.discovered_skills.retain(|_, skill| {
+            matches!(skill.source, DiscoveredSkillSource::BuiltIn { .. })
+                || skill.source_id != source_id
+        });
         self.discovered_agents_files
             .retain(|file| file.source_id != source_id);
     }
@@ -3100,14 +3144,14 @@ impl Harness {
             .discovered_skills
             .get(&skill.name)
             .filter(|existing| existing.source_id != source_id)
-            .map(|existing| (existing.source_id.clone(), existing.file_path.clone()));
+            .map(|existing| (existing.source_id.clone(), existing.source.label()));
 
-        if let Some((existing_source, existing_path)) = collision {
+        if let Some((existing_source, existing_label)) = collision {
             self.emit_info_important(&format!(
                 "skill collision: {} from {} ignored; keeping {} from {}",
                 skill.name,
                 skill.file_path.display(),
-                existing_path.display(),
+                existing_label,
                 existing_source,
             ));
             return;
@@ -3118,7 +3162,7 @@ impl Harness {
             DiscoveredSkill {
                 source_id: source_id.into(),
                 description,
-                file_path: std::path::PathBuf::from(&skill.file_path),
+                source: DiscoveredSkillSource::File(std::path::PathBuf::from(&skill.file_path)),
                 add_to_prompt: skill.add_to_prompt,
             },
         );

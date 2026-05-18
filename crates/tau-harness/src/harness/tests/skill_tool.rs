@@ -8,7 +8,7 @@ fn build_system_prompt_includes_skills() {
         DiscoveredSkill {
             source_id: "skills".into(),
             description: "Web search via Brave API".to_owned(),
-            file_path: PathBuf::from("/skills/brave-search/SKILL.md"),
+            source: DiscoveredSkillSource::File(PathBuf::from("/skills/brave-search/SKILL.md")),
             add_to_prompt: true,
         },
     );
@@ -37,7 +37,7 @@ fn build_system_prompt_excludes_hidden_skills() {
         DiscoveredSkill {
             source_id: "skills".into(),
             description: "Should not appear".to_owned(),
-            file_path: PathBuf::from("/skills/hidden/SKILL.md"),
+            source: DiscoveredSkillSource::File(PathBuf::from("/skills/hidden/SKILL.md")),
             add_to_prompt: false,
         },
     );
@@ -61,7 +61,7 @@ fn build_system_prompt_escapes_skill_xml_text() {
         DiscoveredSkill {
             source_id: "skills".into(),
             description: "Use </description> & <tag> \"quotes\"".to_owned(),
-            file_path: PathBuf::from("/skills/weird-skill/SKILL.md"),
+            source: DiscoveredSkillSource::File(PathBuf::from("/skills/weird-skill/SKILL.md")),
             add_to_prompt: true,
         },
     );
@@ -87,7 +87,7 @@ fn skill_tool_reads_file_content() {
     let skill_file = skill_dir.join("SKILL.md");
     std::fs::write(
         &skill_file,
-        "---\nname: my-skill\ndescription: A test skill\n---\n# Instructions\nDo the thing.",
+        "---\nname: my-skill\ndescription: A test skill\n---\n# Instructions\nDo the thing. __TAU_SELF_KNOWLEDGE_VERSION__",
     )
     .expect("write");
 
@@ -99,7 +99,7 @@ fn skill_tool_reads_file_content() {
         DiscoveredSkill {
             source_id: "skills".into(),
             description: "A test skill".to_owned(),
-            file_path: skill_file,
+            source: DiscoveredSkillSource::File(skill_file),
             add_to_prompt: true,
         },
     );
@@ -126,6 +126,10 @@ fn skill_tool_reads_file_content() {
     assert_eq!(
         cbor_text_field(&result, "description").as_deref(),
         Some("A test skill")
+    );
+    assert_eq!(
+        cbor_text_field(&result, "content").as_deref(),
+        Some("# Instructions\nDo the thing. __TAU_SELF_KNOWLEDGE_VERSION__")
     );
 }
 
@@ -243,7 +247,7 @@ fn skill_tool_search_matches_name_description_and_optional_content() {
         DiscoveredSkill {
             source_id: "skills".into(),
             description: format!("{KW} helpers"),
-            file_path: alpha_file,
+            source: DiscoveredSkillSource::File(alpha_file),
             add_to_prompt: false,
         },
     );
@@ -252,7 +256,7 @@ fn skill_tool_search_matches_name_description_and_optional_content() {
         DiscoveredSkill {
             source_id: "skills".into(),
             description: "unrelated thing".to_owned(),
-            file_path: beta_file,
+            source: DiscoveredSkillSource::File(beta_file),
             add_to_prompt: false,
         },
     );
@@ -261,7 +265,7 @@ fn skill_tool_search_matches_name_description_and_optional_content() {
         DiscoveredSkill {
             source_id: "skills".into(),
             description: "a different topic".to_owned(),
-            file_path: gamma_file,
+            source: DiscoveredSkillSource::File(gamma_file),
             add_to_prompt: false,
         },
     );
@@ -446,7 +450,7 @@ fn skill_tool_search_accepts_multiple_terms_and_ranks_by_matched_terms() {
         DiscoveredSkill {
             source_id: "skills".into(),
             description: format!("matches {T1} and {T2}"),
-            file_path: alpha_file,
+            source: DiscoveredSkillSource::File(alpha_file),
             add_to_prompt: false,
         },
     );
@@ -455,7 +459,7 @@ fn skill_tool_search_accepts_multiple_terms_and_ranks_by_matched_terms() {
         DiscoveredSkill {
             source_id: "skills".into(),
             description: format!("matches only {T1}"),
-            file_path: beta_file,
+            source: DiscoveredSkillSource::File(beta_file),
             add_to_prompt: false,
         },
     );
@@ -464,7 +468,7 @@ fn skill_tool_search_accepts_multiple_terms_and_ranks_by_matched_terms() {
         DiscoveredSkill {
             source_id: "skills".into(),
             description: "unrelated".to_owned(),
-            file_path: gamma_file,
+            source: DiscoveredSkillSource::File(gamma_file),
             add_to_prompt: false,
         },
     );
@@ -616,7 +620,7 @@ fn skill_tool_load_truncates_large_skill_content() {
         DiscoveredSkill {
             source_id: "skills".into(),
             description: "large skill".to_owned(),
-            file_path: skill_file,
+            source: DiscoveredSkillSource::File(skill_file),
             add_to_prompt: false,
         },
     );
@@ -655,7 +659,7 @@ fn skill_tool_errors_when_frontmatter_exceeds_read_limit() {
         DiscoveredSkill {
             source_id: "skills".into(),
             description: "large frontmatter".to_owned(),
-            file_path: skill_file,
+            source: DiscoveredSkillSource::File(skill_file),
             add_to_prompt: false,
         },
     );
@@ -686,7 +690,9 @@ fn skill_tool_search_caps_match_output() {
             DiscoveredSkill {
                 source_id: "skills".into(),
                 description: "matches zqxlimit token".to_owned(),
-                file_path: PathBuf::from(format!("/skills/{name}/SKILL.md")),
+                source: DiscoveredSkillSource::File(PathBuf::from(format!(
+                    "/skills/{name}/SKILL.md"
+                ))),
                 add_to_prompt: false,
             },
         );
@@ -734,7 +740,7 @@ fn skill_tool_loads_exact_single_term_match_even_with_other_hits() {
             DiscoveredSkill {
                 source_id: "skills".into(),
                 description: desc.to_owned(),
-                file_path: path,
+                source: DiscoveredSkillSource::File(path),
                 add_to_prompt: false,
             },
         );
@@ -775,7 +781,9 @@ fn skill_tool_search_result_includes_guidance_and_matched_fields() {
             DiscoveredSkill {
                 source_id: "skills".into(),
                 description: "mentions zqxguidance".to_owned(),
-                file_path: PathBuf::from(format!("/skills/{name}/SKILL.md")),
+                source: DiscoveredSkillSource::File(PathBuf::from(format!(
+                    "/skills/{name}/SKILL.md"
+                ))),
                 add_to_prompt: false,
             },
         );
@@ -903,6 +911,89 @@ fn skill_tool_registered_in_tool_list() {
 }
 
 #[test]
+fn built_in_tau_self_knowledge_skills_are_available_without_file_paths() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    for (name, advertised) in [
+        ("tau-self-knowledge", true),
+        ("tau-self-knowledge-architecture", false),
+        ("tau-self-knowledge-config", false),
+        ("tau-self-knowledge-source-code", false),
+        ("tau-self-knowledge-community", false),
+        ("tau-self-knowledge-debugging", false),
+    ] {
+        let skill = h
+            .discovered_skills
+            .get(&tau_proto::SkillName::from(name))
+            .expect("built-in skill is seeded at harness startup");
+        assert!(matches!(
+            skill.source,
+            DiscoveredSkillSource::BuiltIn { .. }
+        ));
+        assert!(skill.source.file_path().is_none());
+        assert_eq!(skill.add_to_prompt, advertised, "{name} prompt flag");
+    }
+
+    let prompt = build_system_prompt(
+        &h.discovered_skills,
+        "/tmp/work",
+        None,
+        None,
+        None,
+        &tau_proto::PromptHook::new(),
+    );
+    assert!(prompt.contains("<name>tau-self-knowledge</name>"));
+    assert!(prompt.contains("Built-in information about Tau coding harness you are running in."));
+    assert!(!prompt.contains("<name>tau-self-knowledge-architecture</name>"));
+    assert!(!prompt.contains("<name>tau-self-knowledge-config</name>"));
+    assert!(!prompt.contains("<name>tau-self-knowledge-source-code</name>"));
+    assert!(!prompt.contains("<name>tau-self-knowledge-community</name>"));
+    assert!(!prompt.contains("<name>tau-self-knowledge-debugging</name>"));
+
+    let cid = h.default_conversation_id.clone();
+    seed_assistant_tool_round(&mut h, &cid, &[("call-built-in", "skill")]);
+    h.handle_skill_tool_call(
+        &cid,
+        &skill_call("tau-self-knowledge", false, "call-built-in"),
+    )
+    .expect("built-in skill call");
+
+    let result = latest_tool_result(&h, "s1", "call-built-in");
+    assert_eq!(
+        cbor_text_field(&result, "name").as_deref(),
+        Some("tau-self-knowledge")
+    );
+    let content = cbor_text_field(&result, "content").expect("content");
+    assert!(content.contains("# Tau self-knowledge"));
+    assert!(!content.contains("__TAU_SELF_KNOWLEDGE_VERSION__"));
+    assert!(content.contains(&format!("Tau version `{}`", env!("CARGO_PKG_VERSION"))));
+    assert!(content.contains("tau-self-knowledge-architecture"));
+    assert!(content.contains("tau-self-knowledge-config"));
+    assert!(content.contains("tau-self-knowledge-source-code"));
+    assert!(content.contains("tau-self-knowledge-community"));
+    assert!(content.contains("tau-self-knowledge-debugging"));
+
+    seed_assistant_tool_round(&mut h, &cid, &[("call-debugging", "skill")]);
+    h.handle_skill_tool_call(
+        &cid,
+        &skill_call("tau-self-knowledge-debugging", false, "call-debugging"),
+    )
+    .expect("debugging skill call");
+    let debugging = latest_tool_result(&h, "s1", "call-debugging");
+    assert_eq!(
+        cbor_text_field(&debugging, "name").as_deref(),
+        Some("tau-self-knowledge-debugging")
+    );
+    assert!(
+        cbor_text_field(&debugging, "content")
+            .expect("debugging content")
+            .contains("## Important paths")
+    );
+}
+
+#[test]
 fn extension_skill_invalid_name_is_skipped() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
@@ -979,7 +1070,10 @@ fn duplicate_extension_skill_keeps_first_source_but_allows_refresh() {
         .expect("stored skill");
     assert_eq!(stored.source_id, "source-a");
     assert_eq!(stored.description, "refreshed");
-    assert_eq!(stored.file_path, PathBuf::from("/skills/a2/SKILL.md"));
+    assert_eq!(
+        stored.source.file_path(),
+        Some(Path::new("/skills/a2/SKILL.md"))
+    );
 }
 
 fn skill_call(query: &str, search_content: bool, id: &str) -> AgentToolCall {

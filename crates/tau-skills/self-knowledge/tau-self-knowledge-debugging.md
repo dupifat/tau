@@ -1,8 +1,7 @@
 ---
-name: tau-debugging
-description: "Debug Tau sessions and daemon behavior by inspecting Tau state, session stores, event logs, and runtime files."
-user-invocable: true
-advertise: true
+name: tau-self-knowledge-debugging
+description: Debug Tau sessions and daemon behavior by inspecting Tau state, session stores, event logs, and runtime files.
+advertise: false
 ---
 
 ## Important paths

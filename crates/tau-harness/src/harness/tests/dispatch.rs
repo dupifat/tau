@@ -1473,7 +1473,9 @@ fn system_prompt_drift_invalidates_chain_anchor() {
         crate::discovery::DiscoveredSkill {
             source_id: tau_proto::ConnectionId::from("test-ext"),
             description: "appears between turns".to_owned(),
-            file_path: std::path::PathBuf::from("/tmp/late-loaded.md"),
+            source: crate::discovery::DiscoveredSkillSource::File(std::path::PathBuf::from(
+                "/tmp/late-loaded.md",
+            )),
             add_to_prompt: true,
         },
     );

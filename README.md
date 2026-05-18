@@ -81,10 +81,11 @@ To explore other entry points, run `tau -h`.
 
 ## Contributing & Contact
 
-* [GitHub Discussions](https://github.com/dpc/tau/discussions) — questions, ideas, general conversation
-* [I don't want your PRs anymore](https://dpc.pw/posts/i-dont-want-your-prs-anymore/) — I do not accept pull requests
+* [Discord server](https://discord.gg/zens2jjA3U)
 * [`#support:dpc.pw` Matrix channel](https://matrix.to/#/#support:dpc.pw)
 * [Rostra p2p social network profile](https://rostra.me/profile/rse1okfyp4yj75i6riwbz86mpmbgna3f7qr66aj1njceqoigjabegy)
+* [GitHub Discussions](https://github.com/dpc/tau/discussions) — questions, ideas, general conversation
+* [I don't want your PRs anymore](https://dpc.pw/posts/i-dont-want-your-prs-anymore/) — I do not accept pull requests
 
 
 ## License

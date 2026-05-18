@@ -23,10 +23,15 @@ Head to [Tau's Radicle site][project-radicle] for an up-to-date version and more
 ## Contributing
 
 Use [GitHub Discussions][discussions] for questions, ideas, and general conversation.
+For chat, use the [Discord server][discord] or [`#support:dpc.pw` Matrix channel][matrix].
+You can also follow dpc on [Rostra][rostra].
 
 I do not accept pull requests. See [I don't want your PRs anymore][no-prs] for the rationale.
 
 [discussions]: https://github.com/dpc/tau/discussions
+[discord]: https://discord.gg/zens2jjA3U
+[matrix]: https://matrix.to/#/#support:dpc.pw
+[rostra]: https://rostra.me/profile/rse1okfyp4yj75i6riwbz86mpmbgna3f7qr66aj1njceqoigjabegy
 [no-prs]: https://dpc.pw/posts/i-dont-want-your-prs-anymore/
 
 ---

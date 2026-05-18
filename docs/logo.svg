@@ -1,16 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800">
   <!-- tau: top bar + stem + bottom-right hook -->
   <path fill="#fff" d="
-    M165.29 165.29
-    H576.04
+    M194.63 165.29
+    H605.38
     V282.65
-    H400
+    H429.34
     V517.36
-    H517.36
+    H546.70
     V634.72
-    H282.65
+    H311.99
     V282.65
-    H165.29
+    H194.63
     Z
   "/>
 </svg>

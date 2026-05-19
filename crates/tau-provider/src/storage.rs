@@ -1,12 +1,11 @@
 //! Auth credential storage.
 //!
 //! Credentials live as one file per provider under
-//! `~/.local/state/tau/auth.d/<name>.json`. A pre-existing whole-file
-//! `auth.json` from older Tau versions is still read on load for
-//! backwards compatibility, but all *writes* go through the per-file
-//! layout so concurrent updates to different providers cannot collide.
+//! `~/.local/state/tau/auth.d/<name>.json`. Writes are serialized with a
+//! per-provider sidecar lock and persisted with atomic replacement.
 
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
 use std::{fs, io};
 
@@ -25,27 +24,225 @@ fn state_dir() -> Option<PathBuf> {
         .map(|d| d.join("tau"))
 }
 
-/// Returns the path to legacy `auth.json` (read for backwards compat,
-/// never written to by the current code).
-pub fn auth_path() -> Option<PathBuf> {
-    state_dir().map(|d| d.join("auth.json"))
+/// A filesystem-backed credential store.
+#[derive(Clone, Debug)]
+pub struct ProviderStore {
+    state_dir: PathBuf,
 }
 
-/// Returns the per-provider auth directory `auth.d/`.
-pub fn auth_dir() -> Option<PathBuf> {
-    state_dir().map(|d| d.join("auth.d"))
+impl ProviderStore {
+    /// Open the default Tau provider credential store.
+    pub fn open_default() -> io::Result<Self> {
+        let state_dir = state_dir().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "cannot determine data directory")
+        })?;
+        Ok(Self { state_dir })
+    }
+
+    /// Returns the per-provider auth directory `auth.d/`.
+    pub fn auth_dir(&self) -> PathBuf {
+        self.state_dir.join("auth.d")
+    }
+
+    /// Returns a handle for one named provider.
+    pub fn provider(&self, provider_name: ProviderName) -> ProviderHandle {
+        ProviderHandle {
+            store: self.clone(),
+            provider_name,
+        }
+    }
+
+    /// Load all credentials from disk.
+    ///
+    /// Reads every `auth.d/*.json` provider file. Missing directories yield an
+    /// empty store. Files whose stem fails [`ProviderName`] validation are
+    /// skipped with a warning rather than aborting the whole load.
+    pub fn load(&self) -> io::Result<AuthStore> {
+        let mut providers: HashMap<ProviderName, Credentials> = HashMap::new();
+
+        let dir = self.auth_dir();
+        if dir.is_dir() {
+            for entry in fs::read_dir(&dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                    continue;
+                }
+                let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let provider = match ProviderName::try_new(stem.to_owned()) {
+                    Ok(p) => p,
+                    Err(error) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            "skipping auth file with invalid provider name: {error}"
+                        );
+                        continue;
+                    }
+                };
+                let text = fs::read_to_string(&path)?;
+                let creds: Credentials = serde_json::from_str(&text)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                providers.insert(provider, creds);
+            }
+        }
+
+        Ok(AuthStore { providers })
+    }
 }
 
-/// Returns the file path that backs the named provider's credentials.
-///
-/// Filename safety is guaranteed by [`ProviderName`]'s constructor —
-/// the type itself rejects names that aren't safe to embed in a path,
-/// so this helper just joins.
-pub fn provider_auth_path(provider_name: &ProviderName) -> io::Result<PathBuf> {
-    let dir = auth_dir().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::NotFound, "cannot determine data directory")
-    })?;
-    Ok(dir.join(format!("{provider_name}.json")))
+/// A handle to one provider's credential file.
+#[derive(Clone, Debug)]
+pub struct ProviderHandle {
+    store: ProviderStore,
+    provider_name: ProviderName,
+}
+
+impl ProviderHandle {
+    /// Returns the provider name this handle addresses.
+    pub fn provider_name(&self) -> &ProviderName {
+        &self.provider_name
+    }
+
+    /// Returns the file path that backs this provider's credentials.
+    pub fn auth_path(&self) -> PathBuf {
+        self.store
+            .auth_dir()
+            .join(format!("{}.json", self.provider_name))
+    }
+
+    /// Returns the sidecar lock path that serializes this provider file.
+    pub fn lock_path(&self) -> PathBuf {
+        self.store
+            .auth_dir()
+            .join(format!("{}.lock", self.provider_name))
+    }
+
+    /// Load this provider's credentials without taking a lock.
+    pub fn load(&self) -> io::Result<Option<Credentials>> {
+        load_provider_from_path(&self.auth_path())
+    }
+
+    /// Atomically save this provider's credentials while holding its lock.
+    pub fn save(&self, credentials: &Credentials) -> io::Result<()> {
+        self.with_lock(|locked| locked.save(credentials))
+    }
+
+    /// Remove this provider's credentials while holding its lock.
+    ///
+    /// Removes `auth.d/<name>.json` if present, and also strips the entry
+    /// from legacy `auth.json` if that file still exists. Returns true if
+    /// any state on disk changed.
+    pub fn delete(&self) -> io::Result<bool> {
+        self.with_lock(|locked| locked.delete())
+    }
+
+    /// Run a callback while holding the exclusive sidecar lock for this
+    /// provider.
+    pub fn with_lock<T>(
+        &self,
+        f: impl FnOnce(&LockedProviderHandle<'_>) -> io::Result<T>,
+    ) -> io::Result<T> {
+        let lock_file = self.open_lock_file()?;
+        lock_file.lock()?;
+        let locked = LockedProviderHandle {
+            handle: self,
+            lock_file,
+        };
+        let result = f(&locked);
+        let unlock_result = locked.lock_file.unlock();
+        match (result, unlock_result) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    fn open_lock_file(&self) -> io::Result<File> {
+        let path = self.lock_path();
+        let dir = path.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "no parent for provider lock path")
+        })?;
+        fs::create_dir_all(dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        }
+        OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(path)
+    }
+}
+
+/// A provider handle whose sidecar lock is held.
+pub struct LockedProviderHandle<'a> {
+    handle: &'a ProviderHandle,
+    lock_file: File,
+}
+
+impl LockedProviderHandle<'_> {
+    /// Load this provider's credentials while its lock is held.
+    pub fn load(&self) -> io::Result<Option<Credentials>> {
+        self.handle.load()
+    }
+
+    /// Atomically save this provider's credentials while its lock is held.
+    pub fn save(&self, credentials: &Credentials) -> io::Result<()> {
+        let path = self.handle.auth_path();
+        let dir = path.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "no parent for provider auth path")
+        })?;
+        fs::create_dir_all(dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        }
+
+        let json = serde_json::to_string_pretty(credentials)?;
+
+        #[cfg(unix)]
+        let default_permissions = {
+            use std::os::unix::fs::PermissionsExt;
+            Some(fs::Permissions::from_mode(0o600))
+        };
+        #[cfg(not(unix))]
+        let default_permissions = None;
+
+        atomic_write_following_symlink(&path, json.as_bytes(), default_permissions)
+    }
+
+    /// Remove this provider's credentials while its lock is held.
+    pub fn delete(&self) -> io::Result<bool> {
+        let mut changed = false;
+
+        match fs::remove_file(self.handle.auth_path()) {
+            Ok(()) => {
+                changed = true;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+
+        Ok(changed)
+    }
+}
+
+fn load_provider_from_path(path: &PathBuf) -> io::Result<Option<Credentials>> {
+    match fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text)
+            .map(Some)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 /// The kind of provider (determines which OAuth flow or auth method).
@@ -138,131 +335,6 @@ impl Credentials {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AuthStore {
     pub providers: HashMap<ProviderName, Credentials>,
-}
-
-/// Load all credentials from disk.
-///
-/// Reads (in order): legacy `auth.json` if present, then each
-/// `auth.d/*.json` file. Per-file entries override the legacy file on
-/// duplicate provider names. Missing files yield an empty store.
-/// Files whose stem fails [`ProviderName`] validation are skipped with
-/// a warning rather than aborting the whole load.
-pub fn load() -> io::Result<AuthStore> {
-    let mut providers: HashMap<ProviderName, Credentials> = HashMap::new();
-
-    if let Some(legacy_path) = auth_path() {
-        if legacy_path.exists() {
-            let text = fs::read_to_string(&legacy_path)?;
-            let legacy: AuthStore = serde_json::from_str(&text)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            providers.extend(legacy.providers);
-        }
-    }
-
-    if let Some(dir) = auth_dir() {
-        if dir.is_dir() {
-            for entry in fs::read_dir(&dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                if !path.is_file() {
-                    continue;
-                }
-                if path.extension().and_then(|s| s.to_str()) != Some("json") {
-                    continue;
-                }
-                let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                    continue;
-                };
-                let provider = match ProviderName::try_new(stem.to_owned()) {
-                    Ok(p) => p,
-                    Err(error) => {
-                        tracing::warn!(
-                            path = %path.display(),
-                            "skipping auth file with invalid provider name: {error}"
-                        );
-                        continue;
-                    }
-                };
-                let text = fs::read_to_string(&path)?;
-                let creds: Credentials = serde_json::from_str(&text)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                providers.insert(provider, creds);
-            }
-        }
-    }
-
-    Ok(AuthStore { providers })
-}
-
-/// Atomically save one provider's credentials to `auth.d/<name>.json`.
-///
-/// This is the only durability primitive for credentials. Unlike a
-/// whole-store write, it does not read or rewrite other providers, so a
-/// concurrent `tau provider login` against a different provider can run
-/// safely in parallel.
-pub fn save_provider(provider_name: &ProviderName, credentials: &Credentials) -> io::Result<()> {
-    let path = provider_auth_path(provider_name)?;
-    let dir = path.parent().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::NotFound, "no parent for provider auth path")
-    })?;
-    fs::create_dir_all(dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
-    }
-
-    let json = serde_json::to_string_pretty(credentials)?;
-
-    #[cfg(unix)]
-    let default_permissions = {
-        use std::os::unix::fs::PermissionsExt;
-        Some(fs::Permissions::from_mode(0o600))
-    };
-    #[cfg(not(unix))]
-    let default_permissions = None;
-
-    atomic_write_following_symlink(&path, json.as_bytes(), default_permissions)
-}
-
-/// Remove a provider's credentials from disk.
-///
-/// Removes `auth.d/<name>.json` if present, and also strips the entry
-/// from legacy `auth.json` if that file still exists. Returns true if
-/// any state on disk changed.
-pub fn delete_provider(provider_name: &ProviderName) -> io::Result<bool> {
-    let mut changed = false;
-
-    let path = provider_auth_path(provider_name)?;
-    match fs::remove_file(&path) {
-        Ok(()) => {
-            changed = true;
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-
-    if let Some(legacy_path) = auth_path() {
-        if legacy_path.exists() {
-            let text = fs::read_to_string(&legacy_path)?;
-            let mut store: AuthStore = serde_json::from_str(&text)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            if store.providers.remove(provider_name).is_some() {
-                let json = serde_json::to_string_pretty(&store)?;
-                #[cfg(unix)]
-                let default_permissions = {
-                    use std::os::unix::fs::PermissionsExt;
-                    Some(fs::Permissions::from_mode(0o600))
-                };
-                #[cfg(not(unix))]
-                let default_permissions = None;
-                atomic_write_following_symlink(&legacy_path, json.as_bytes(), default_permissions)?;
-                changed = true;
-            }
-        }
-    }
-
-    Ok(changed)
 }
 
 #[cfg(test)]

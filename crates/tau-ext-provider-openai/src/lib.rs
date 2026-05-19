@@ -24,7 +24,7 @@ use tau_proto::{
     ProviderResponseFinished, ProviderResponseUpdated, ProviderStopReason, ThinkingSummary,
     Verbosity,
 };
-use tau_provider::storage::{self, AuthStore, Credentials, ProviderKind};
+use tau_provider::storage::{AuthStore, Credentials, ProviderKind, ProviderStore};
 
 /// `tracing` target for events emitted from this extension.
 pub const LOG_TARGET: &str = "provider-openai";
@@ -78,7 +78,7 @@ where
 }
 
 fn load_auth_store() -> AuthStore {
-    match storage::load() {
+    match ProviderStore::open_default().and_then(|store| store.load()) {
         Ok(auth) => auth,
         Err(error) => {
             tracing::warn!(
@@ -917,26 +917,16 @@ fn resolve_chatgpt_backend(
     }
     if oauth_token_should_refresh(&access_token, expires_at_ms) && !refresh_token.trim().is_empty()
     {
-        match tau_provider::oauth::openai_codex_refresh(&refresh_token) {
-            Ok(tokens) => {
-                access_token = tokens.access_token.clone();
-                account_id = tokens.account_id.clone();
-                let refreshed = Credentials::Oauth {
-                    provider_kind: ProviderKind::OpenaiCodex,
-                    access_token: tokens.access_token,
-                    refresh_token: tokens.refresh_token,
-                    expires_at_ms: tokens.expires_at_ms,
-                    account_id: tokens.account_id,
-                };
-                if let Err(error) = storage::save_provider(&provider, &refreshed) {
-                    tracing::warn!(
-                        target: LOG_TARGET,
-                        provider = %provider,
-                        "failed to save refreshed credentials: {error}"
-                    );
-                }
-                auth_store.providers.insert(provider.clone(), refreshed);
+        match refresh_chatgpt_credentials_locked(&provider, auth_store) {
+            Ok(Some(Credentials::Oauth {
+                access_token: refreshed_access_token,
+                account_id: refreshed_account_id,
+                ..
+            })) => {
+                access_token = refreshed_access_token;
+                account_id = refreshed_account_id;
             }
+            Ok(Some(_)) | Ok(None) => {}
             Err(error) => tracing::warn!(
                 target: LOG_TARGET,
                 provider = %provider,
@@ -964,6 +954,57 @@ fn resolve_chatgpt_backend(
         supports_compaction: true,
         supports_prompt_cache_key: true,
     })
+}
+
+fn refresh_chatgpt_credentials_locked(
+    provider: &ProviderName,
+    auth_store: &mut AuthStore,
+) -> std::io::Result<Option<Credentials>> {
+    let provider_handle = ProviderStore::open_default()?.provider(provider.clone());
+    let refreshed = provider_handle.with_lock(|locked| {
+        let Some(current) = locked.load()? else {
+            return Ok(None);
+        };
+        let Credentials::Oauth {
+            provider_kind,
+            access_token,
+            refresh_token,
+            expires_at_ms,
+            ..
+        } = &current
+        else {
+            return Ok(Some(current));
+        };
+        if *provider_kind != ProviderKind::OpenaiCodex
+            || !oauth_token_should_refresh(access_token, *expires_at_ms)
+            || refresh_token.trim().is_empty()
+        {
+            return Ok(Some(current));
+        }
+
+        let tokens = tau_provider::oauth::openai_codex_refresh(refresh_token)?;
+        let refreshed = Credentials::Oauth {
+            provider_kind: ProviderKind::OpenaiCodex,
+            access_token: tokens.access_token,
+            refresh_token: tokens.refresh_token,
+            expires_at_ms: tokens.expires_at_ms,
+            account_id: tokens.account_id,
+        };
+        locked.save(&refreshed)?;
+        Ok(Some(refreshed))
+    })?;
+
+    match &refreshed {
+        Some(credentials) => {
+            auth_store
+                .providers
+                .insert(provider.clone(), credentials.clone());
+        }
+        None => {
+            auth_store.providers.remove(provider);
+        }
+    }
+    Ok(refreshed)
 }
 
 fn oauth_token_should_refresh(access_token: &str, expires_at_ms: u64) -> bool {

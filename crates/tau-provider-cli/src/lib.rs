@@ -6,7 +6,7 @@ use dialoguer::Input;
 use tau_cli_picker::{PickerItem, pick};
 use tau_proto::ProviderName;
 use tau_provider::oauth;
-use tau_provider::storage::{self, Credentials, ProviderKind};
+use tau_provider::storage::{Credentials, ProviderKind, ProviderStore};
 
 fn parse_provider_name(name: &str) -> Result<ProviderName, Box<dyn std::error::Error>> {
     ProviderName::try_new(name.to_owned())
@@ -99,11 +99,10 @@ fn cmd_add() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    storage::save_provider(&name, &creds)?;
+    let provider = ProviderStore::open_default()?.provider(name);
+    provider.save(&creds)?;
 
-    if let Ok(path) = storage::provider_auth_path(&name) {
-        eprintln!("\nCredentials saved to: {}", path.display());
-    }
+    eprintln!("\nCredentials saved to: {}", provider.auth_path().display());
     eprintln!("Provider extensions publish models at runtime.");
 
     Ok(())
@@ -124,7 +123,8 @@ fn default_provider_name(kind: &ProviderKind) -> &'static str {
 // ---------------------------------------------------------------------------
 
 fn cmd_remove(name_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-    let store = storage::load()?;
+    let provider_store = ProviderStore::open_default()?;
+    let store = provider_store.load()?;
 
     let name = match name_arg {
         Some(n) => parse_provider_name(n)?,
@@ -146,7 +146,7 @@ fn cmd_remove(name_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> 
         }
     };
 
-    if storage::delete_provider(&name)? {
+    if provider_store.provider(name.clone()).delete()? {
         eprintln!("Removed credentials for '{name}'.");
     } else {
         eprintln!("Provider '{name}' not found.");
@@ -162,7 +162,8 @@ fn cmd_remove(name_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> 
 fn cmd_list() -> Result<(), Box<dyn std::error::Error>> {
     use comfy_table::{ContentArrangement, Table};
 
-    let store = storage::load()?;
+    let provider_store = ProviderStore::open_default()?;
+    let store = provider_store.load()?;
 
     if store.providers.is_empty() {
         eprintln!("No providers configured. Use `tau provider add` to add one.");
@@ -218,7 +219,8 @@ fn now_ms() -> u64 {
 // ---------------------------------------------------------------------------
 
 fn cmd_login(name_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-    let store = storage::load()?;
+    let provider_store = ProviderStore::open_default()?;
+    let store = provider_store.load()?;
 
     let name = match name_arg {
         Some(n) => parse_provider_name(n)?,
@@ -269,7 +271,7 @@ fn cmd_login(name_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    storage::save_provider(&name, &new_creds)?;
+    provider_store.provider(name.clone()).save(&new_creds)?;
     eprintln!("Login refreshed for '{name}'.");
     Ok(())
 }

@@ -1,0 +1,6 @@
+greeting: true
+show_logo: true
+bar_cursor: true
+prompt_symbol: "▶"
+submitted_prompt_symbol: "▌"
+bind: {}

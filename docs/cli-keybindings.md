@@ -1,6 +1,6 @@
 # CLI keybindings
 
-Keep this document in sync with `crates/tau-config/config/built-in.cli-bindings.json5` and the action parser in `crates/tau-cli-term/src/lib.rs`.
+Keep this document in sync with `crates/tau-config/config/built-in.cli-bindings.yaml` and the action parser in `crates/tau-cli-term/src/lib.rs`.
 
 
 ## Built-in bindings

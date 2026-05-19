@@ -224,7 +224,7 @@ pub(crate) fn mint_short_id(prefix: &str) -> String {
 // `tau init`
 // ---------------------------------------------------------------------------
 
-const SAMPLE_CLI: &str = include_str!("../../../config/cli.json5");
+const SAMPLE_CLI: &str = include_str!("../../../config/cli.yaml");
 const SAMPLE_HARNESS: &str = include_str!("../../../config/harness.yaml");
 
 fn run_init(force: bool) -> Result<(), CliError> {
@@ -236,7 +236,7 @@ fn run_init(force: bool) -> Result<(), CliError> {
     };
     std::fs::create_dir_all(&dir)?;
 
-    let files = [("cli.json5", SAMPLE_CLI), ("harness.yaml", SAMPLE_HARNESS)];
+    let files = [("cli.yaml", SAMPLE_CLI), ("harness.yaml", SAMPLE_HARNESS)];
 
     for (name, content) in &files {
         let path = dir.join(name);

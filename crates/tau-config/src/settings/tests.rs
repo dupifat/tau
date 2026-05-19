@@ -23,7 +23,7 @@ fn zero_session_retention_disables_cleanup() {
 fn cli_settings_user_scalar_override_wins_over_built_in() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
-    std::fs::write(dir.join("cli.json5"), r#"{ greeting: false }"#).expect("write");
+    std::fs::write(dir.join("cli.yaml"), r#"{ greeting: false }"#).expect("write");
 
     let s = load_cli_settings_in(&dirs_with_config(dir)).expect("load");
     assert!(!s.greeting);
@@ -34,7 +34,7 @@ fn cli_settings_user_binding_keeps_built_in_chords() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     std::fs::write(
-        dir.join("cli.json5"),
+        dir.join("cli.yaml"),
         r#"{ bind: { "C-f": { action: "shell-prompt-edit", command: "pick", trim: true } } }"#,
     )
     .expect("write");
@@ -145,10 +145,10 @@ fn harness_settings_load_role_tool_lists() {
 fn cli_settings_drop_in_layers_on_top_of_base() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
-    std::fs::write(dir.join("cli.json5"), r#"{ greeting: true }"#).expect("write");
+    std::fs::write(dir.join("cli.yaml"), r#"{ greeting: true }"#).expect("write");
     std::fs::create_dir(dir.join("cli.d")).expect("mkdir");
     std::fs::write(
-        dir.join("cli.d").join("01-override.json5"),
+        dir.join("cli.d").join("01-override.yaml"),
         r#"{ greeting: false }"#,
     )
     .expect("write");
@@ -411,8 +411,8 @@ fn sample_configs_deserialize() {
     let dir = td.path();
 
     std::fs::write(
-        dir.join("cli.json5"),
-        include_str!("../../../../config/cli.json5"),
+        dir.join("cli.yaml"),
+        include_str!("../../../../config/cli.yaml"),
     )
     .expect("write cli");
     std::fs::write(

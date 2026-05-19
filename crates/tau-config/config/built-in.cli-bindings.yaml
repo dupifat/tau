@@ -1,0 +1,12 @@
+C-r:
+  action: shell-prompt-insert
+  command: history 1
+  trim: true
+C-t:
+  action: shell-prompt-insert
+  command: date
+  trim: true
+C-o:
+  action: shell-prompt-insert
+  command: pwd
+  trim: true

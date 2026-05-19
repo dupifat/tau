@@ -2915,7 +2915,7 @@ mod tests {
 
         assert_eq!(
             details.short_description(),
-            "codex-dpcpw/gpt-5.5 e=xhigh v=medium ts=off tp=read_only"
+            "codex-dpcpw/gpt-5.5 e=xhigh v=medium ts=off tools=read_only"
         );
     }
 

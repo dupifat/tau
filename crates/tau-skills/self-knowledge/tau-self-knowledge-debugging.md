@@ -9,7 +9,7 @@ advertise: false
 Tau follows the XDG directories:
 
 - Config: `~/.config/tau/`
-  - `cli.json5`, `cli.d/*.json5` — CLI display and key-binding config.
+  - `cli.yaml`, `cli.d/*.yaml` — CLI display and key-binding config.
   - `harness.yaml`, `harness.d/*.yaml` — harness, agent roles/defaults, extension, and session-retention config.
 - State: `~/.local/state/tau/` on Linux.
   - If no XDG state dir is available, inspection defaults may fall back to `.tau/state`.

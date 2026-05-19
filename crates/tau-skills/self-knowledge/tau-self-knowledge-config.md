@@ -9,7 +9,7 @@ advertise: false
 Tau follows the XDG directory layout on normal Linux installs:
 
 - Config: `~/.config/tau/`
-  - `cli.json5`, `cli.d/*.json5` — CLI display preferences and key bindings.
+  - `cli.yaml`, `cli.d/*.yaml` — CLI display preferences and key bindings.
   - `harness.yaml`, `harness.d/*.yaml` — harness roles/defaults, extensions, tools, and session retention.
 - State: `~/.local/state/tau/` (or the platform/user state directory)
   - `sessions/<session_id>/` — durable session events, metadata, logs, and debug captures.
@@ -19,7 +19,7 @@ Tau follows the XDG directory layout on normal Linux installs:
 - Runtime: `${XDG_RUNTIME_DIR}/tau/<pid>/` or `/tmp/tau-$USER/<pid>/`
   - `tau.sock`, `tau.pid`, `tau.session_id`, `tau.dir` — daemon socket and discovery markers.
 
-Use `tau init` to create starter `cli.json5` and `harness.yaml` files.
+Use `tau init` to create starter `cli.yaml` and `harness.yaml` files.
 
 ## Providers
 

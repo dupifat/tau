@@ -1,7 +1,7 @@
 //! User settings loaded from `~/.config/tau/` with `.d/` directory
 //! overrides. Primary config files:
 //!
-//! - `cli.json5` — CLI display preferences
+//! - `cli.yaml` — CLI display preferences
 //! - `harness.yaml` — harness settings, extensions, and roles
 //!
 //! Uses the `config` crate for layered JSON5/YAML loading.
@@ -17,7 +17,7 @@ use tau_proto::{ModelId, PromptContent, PromptPriority, ToolName};
 // ---------------------------------------------------------------------------
 // Built-in configs
 //
-// Tau ships its baseline `cli.json5`, `cli-bindings.json5` and
+// Tau ships its baseline `cli.yaml`, `cli-bindings.json5` and
 // `harness.yaml` as ordinary source files under
 // `crates/tau-config/config/`, embedded via `include_str!`. They are
 // layered underneath the user's own files at load time (see
@@ -27,15 +27,9 @@ use tau_proto::{ModelId, PromptContent, PromptPriority, ToolName};
 // synthesized `Default` impl that secretly parses a file.
 // ---------------------------------------------------------------------------
 
-const BUILT_IN_CLI_JSON5: &str = include_str!("../config/built-in.cli.json5");
-const BUILT_IN_CLI_BINDINGS_JSON5: &str = include_str!("../config/built-in.cli-bindings.json5");
+const BUILT_IN_CLI_YAML: &str = include_str!("../config/built-in.cli.yaml");
+const BUILT_IN_CLI_BINDINGS_YAML: &str = include_str!("../config/built-in.cli-bindings.yaml");
 const BUILT_IN_HARNESS_YAML: &str = include_str!("../config/built-in.harness.yaml");
-
-fn parse_built_in<T: for<'de> Deserialize<'de>>(name: &str, text: &str) -> T {
-    json5::from_str(text).unwrap_or_else(|err| {
-        panic!("tau ships with malformed {name}: {err}\nthis is a bug; please report it")
-    })
-}
 
 fn parse_built_in_yaml<T: for<'de> Deserialize<'de>>(name: &str, text: &str) -> T {
     serde_yaml_ng::from_str(text).unwrap_or_else(|err| {
@@ -47,10 +41,10 @@ fn parse_built_in_yaml<T: for<'de> Deserialize<'de>>(name: &str, text: &str) -> 
 // CLI settings
 // ---------------------------------------------------------------------------
 
-/// CLI display settings loaded from `cli.json5`.
+/// CLI display settings loaded from `cli.yaml`.
 ///
 /// Has no `Default` impl on purpose — the baseline lives in
-/// `config/built-in.cli.json5` and is layered in by the loader. Use
+/// `config/built-in.cli.yaml` and is layered in by the loader. Use
 /// [`CliSettings::built_in`] when you need a fresh, populated value
 /// in a test or fallback.
 #[derive(Clone, Debug, Deserialize)]
@@ -68,16 +62,16 @@ pub struct CliSettings {
     pub submitted_prompt_symbol: String,
     /// Key bindings for prompt-local shell actions. Defaults to an
     /// empty map at the serde layer; the loader merges
-    /// `built-in.cli-bindings.json5` underneath the user's bindings.
+    /// `built-in.cli-bindings.yaml` underneath the user's bindings.
     #[serde(default)]
     pub bind: HashMap<String, CliBindingAction>,
 }
 
 impl CliSettings {
     /// The fully-populated baseline that ships with tau, parsed from
-    /// the embedded `built-in.cli.json5` plus `built-in.cli-bindings.json5`.
+    /// the embedded `built-in.cli.yaml` plus `built-in.cli-bindings.yaml`.
     pub fn built_in() -> Self {
-        let mut s: Self = parse_built_in("built-in.cli.json5", BUILT_IN_CLI_JSON5);
+        let mut s: Self = parse_built_in_yaml("built-in.cli.yaml", BUILT_IN_CLI_YAML);
         s.bind = default_cli_bindings();
         s
     }
@@ -149,12 +143,12 @@ impl Default for CliBindingAction {
     }
 }
 
-/// Parse the embedded `built-in.cli-bindings.json5`. Called from
+/// Parse the embedded `built-in.cli-bindings.yaml`. Called from
 /// [`CliSettings::built_in`] and from [`load_cli_settings_in`] (the
 /// latter overlays user bindings on top of this baseline so users
 /// don't lose unmentioned keys when they customize a single chord).
 pub(crate) fn default_cli_bindings() -> HashMap<String, CliBindingAction> {
-    parse_built_in("built-in.cli-bindings.json5", BUILT_IN_CLI_BINDINGS_JSON5)
+    parse_built_in_yaml("built-in.cli-bindings.yaml", BUILT_IN_CLI_BINDINGS_YAML)
 }
 
 // ---------------------------------------------------------------------------
@@ -585,7 +579,7 @@ pub fn sessions_dir() -> Option<PathBuf> {
 /// installations.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TauDirs {
-    /// Where to look for `cli.json5`, `harness.yaml`, etc.
+    /// Where to look for `cli.yaml`, `harness.yaml`, etc.
     pub config_dir: Option<PathBuf>,
     /// Where to read/write runtime state like persisted role settings.
     pub state_dir: Option<PathBuf>,
@@ -600,21 +594,21 @@ impl Default for TauDirs {
     }
 }
 
-/// Loads CLI settings from `cli.json5` with `cli.d/*.json5` overrides.
+/// Loads CLI settings from `cli.yaml` with `cli.d/*.yaml` overrides.
 pub fn load_cli_settings() -> Result<CliSettings, SettingsError> {
     load_cli_settings_in(&TauDirs::default())
 }
 
 /// Like [`load_cli_settings`] but reads from an explicit directory layout.
 ///
-/// The embedded `built-in.cli.json5` is layered underneath the user's
-/// own `cli.json5` (and any `cli.d/*.json5` drop-ins), so the user
+/// The embedded `built-in.cli.yaml` is layered underneath the user's
+/// own `cli.yaml` (and any `cli.d/*.yaml` drop-ins), so the user
 /// can write a partial file and unmentioned fields fall back to the
 /// shipped defaults. The `bind` map is merged per-key on top so a
 /// user customizing one chord doesn't lose the others.
 pub fn load_cli_settings_in(dirs: &TauDirs) -> Result<CliSettings, SettingsError> {
     let mut settings: CliSettings =
-        load_json5_layered_with_builtin(BUILT_IN_CLI_JSON5, dirs.config_dir.as_deref(), "cli")?;
+        load_yaml_layered_with_builtin(BUILT_IN_CLI_YAML, dirs.config_dir.as_deref(), "cli")?;
     let mut bindings = default_cli_bindings();
     bindings.extend(settings.bind);
     settings.bind = bindings;
@@ -635,50 +629,6 @@ pub fn load_harness_settings_in(dirs: &TauDirs) -> Result<HarnessSettings, Setti
 /// Stacks an embedded built-in JSON5 string underneath the user's files.
 /// `T` therefore doesn't need a `Default` impl — the built-in layer always
 /// supplies every required field.
-fn load_json5_layered_with_builtin<T: for<'de> Deserialize<'de>>(
-    built_in_text: &'static str,
-    dir: Option<&Path>,
-    name: &str,
-) -> Result<T, SettingsError> {
-    let mut builder = config::Config::builder().add_source(
-        config::File::from_str(built_in_text, config::FileFormat::Json5).required(true),
-    );
-
-    if let Some(dir) = dir {
-        let base_path = dir.join(format!("{name}.json5"));
-        if base_path.exists() {
-            builder = builder.add_source(
-                config::File::from(base_path)
-                    .format(config::FileFormat::Json5)
-                    .required(true),
-            );
-        }
-
-        let drop_dir = dir.join(format!("{name}.d"));
-        if drop_dir.is_dir() {
-            let mut paths: Vec<PathBuf> = std::fs::read_dir(&drop_dir)
-                .into_iter()
-                .flatten()
-                .filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| p.extension().is_some_and(|ext| ext == "json5"))
-                .collect();
-            paths.sort();
-            for path in paths {
-                builder = builder.add_source(
-                    config::File::from(path)
-                        .format(config::FileFormat::Json5)
-                        .required(true),
-                );
-            }
-        }
-    }
-
-    builder
-        .build()?
-        .try_deserialize()
-        .map_err(SettingsError::from)
-}
-
 /// Stacks an embedded built-in YAML string underneath the user's files.
 /// `T` therefore doesn't need a `Default` impl — the built-in layer always
 /// supplies every required field.

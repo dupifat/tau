@@ -322,7 +322,7 @@ Examples:
 
 ### Customizable key bindings
 
-`cli.json5` exposes a `bind:` table that maps key chords to prompt-local
+`cli.yaml` exposes a `bind:` table that maps key chords to prompt-local
 shell actions. Bindings are layered on top of built-ins; user entries with the
 same key replace the built-in binding.
 

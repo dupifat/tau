@@ -40,8 +40,7 @@ pub enum Event {
     /// opened, or closed). Caller should redraw any prompt-derived
     /// UI.
     BufferChanged,
-    /// Shift+Tab pressed outside an open completion menu — caller
-    /// decides what to do with it.
+    /// Shift+Tab pressed outside an open completion menu.
     BackTab,
     /// A binding requested Fast mode toggle without touching the prompt draft.
     FastToggle,

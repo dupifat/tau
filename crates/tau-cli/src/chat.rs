@@ -731,8 +731,8 @@ impl<'a> TerminalInputSession<'a> {
             }
             TermEvent::BufferChanged => self.update_draft(),
             TermEvent::FastToggle => self.toggle_fast_service_tier(),
-            TermEvent::RoleCycle | TermEvent::BackTab => self.cycle_role(),
-            TermEvent::Line(_) | TermEvent::Eof => {}
+            TermEvent::RoleCycle => self.cycle_role(),
+            TermEvent::BackTab | TermEvent::Line(_) | TermEvent::Eof => {}
         }
     }
 

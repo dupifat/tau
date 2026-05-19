@@ -1,3 +1,5 @@
+Tab:
+  action: role-cycle
 C-r:
   action: shell-prompt-insert
   command: history 1

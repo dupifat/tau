@@ -359,7 +359,7 @@ bind: {
     command: "rg --files --hidden --glob '!.git' | fzf --height=100%",
     trim: true,
   },
-  "C-s": { action: "role-cycle" },
+  Tab: { action: "role-cycle" },
   "C-r": {
     action: "prompt-history-search",
     command: "fzf --height=100% --delimiter='\\t' --with-nth=2 --no-hscroll --preview 'cat \"$TAU_PROMPT_HISTORY_DIR\"/{1}' --preview-window 'right,60%,wrap' | cut -f1",

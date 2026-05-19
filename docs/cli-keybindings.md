@@ -10,7 +10,7 @@ Keep this document in sync with `crates/tau-config/config/built-in.cli-bindings.
 | `C-f` | `shell-prompt-insert` | Pick a file with `fzf` and insert it at the cursor. |
 | `C-r` | `prompt-history-search` | Search past prompts with `fzf`, preview the highlighted prompt, and replace the current prompt with the selected prompt. |
 | `C-t` | `shell-prompt-insert` | Search files with ripgrep through `fzf` and insert the selected path. |
-| `C-s` | `role-cycle` | Cycle to the next agent role. |
+| `Tab` | `role-cycle` | Cycle to the next agent role. |
 | `C-k`, `C-Up` | `prompt-previous` | Move to the previous prompt/history entry. |
 | `C-j`, `C-Down` | `prompt-next` | Move to the next prompt/history entry. |
 | `C-z` | `prompt-undo` | Undo the last edit in the current prompt/history entry. |
@@ -35,7 +35,7 @@ These keys are handled by the raw terminal prompt and are not configurable bindi
 | `C-w` | Kill the word before the cursor. |
 | `Backspace`, `Delete` | Delete text around the cursor. |
 | Arrow keys | Move within multiline input, completion candidates, or prompt history. |
-| `Tab`, `Shift-Tab` | Cycle completion candidates; `Shift-Tab` outside completion cycles to the next agent role. |
+| `Shift-Tab` | Cycle completion candidates backward; no-op outside completion. |
 | `Esc` | Dismiss the completion menu. |
 
 

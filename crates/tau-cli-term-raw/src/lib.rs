@@ -512,10 +512,14 @@ impl SharedState {
 enum KeyBinding {
     Ctrl(char),
     CtrlKey(KeyCode),
+    Key(KeyCode),
 }
 
 fn parse_key_binding(input: &str) -> Option<KeyBinding> {
     let input = input.trim_matches('`');
+    if input.eq_ignore_ascii_case("tab") {
+        return Some(KeyBinding::Key(KeyCode::Tab));
+    }
     let rest = input
         .strip_prefix("C-")
         .or_else(|| input.strip_prefix("c-"))?;
@@ -540,6 +544,7 @@ fn key_binding_for_event(key: KeyEvent, ctrl: bool) -> Option<KeyBinding> {
             Some(KeyBinding::Ctrl(letter))
         }
         KeyCode::Up | KeyCode::Down if ctrl => Some(KeyBinding::CtrlKey(key.code)),
+        KeyCode::Tab => Some(KeyBinding::Key(KeyCode::Tab)),
         _ => None,
     }
 }
@@ -1482,11 +1487,22 @@ impl Term {
                 st.write_cursor(len);
             }
 
-            KeyCode::Char(_ch)
-                if binding
-                    .as_ref()
-                    .and_then(|key| self.bindings.get(key))
-                    .is_some() =>
+            KeyCode::Tab => {
+                {
+                    let mut st = self.handle.lock();
+                    if st.cycle_completion(1) {
+                        return Ok(Some(Event::BufferChanged));
+                    }
+                }
+                if let Some(action) = binding.as_ref().and_then(|key| self.bindings.get(key)) {
+                    return Ok(Some(Event::Binding(action.clone())));
+                }
+            }
+
+            _ if binding
+                .as_ref()
+                .and_then(|key| self.bindings.get(key))
+                .is_some() =>
             {
                 let key = binding.expect("checked above");
                 let action = self.bindings.get(&key).expect("checked above").clone();
@@ -1631,14 +1647,6 @@ impl Term {
                 let mut st = self.handle.lock();
                 let len = st.buffer.len();
                 st.write_cursor(len);
-            }
-
-            KeyCode::Tab => {
-                let mut st = self.handle.lock();
-                if st.cycle_completion(1) {
-                    return Ok(Some(Event::BufferChanged));
-                }
-                // Tab outside a menu is a no-op.
             }
 
             KeyCode::BackTab => {

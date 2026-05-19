@@ -157,23 +157,24 @@ fn spawn_extension() -> (
 /// Consumes startup events (tool registers). The hello/subscribe/ready
 /// messages are filtered out by the test-side `EventReader` wrapper.
 fn drain_startup(reader: &mut EventReader<BufReader<UnixStream>>) {
-    for _expected in [
-        EventName::TOOL_REGISTER, // echo
-        EventName::TOOL_REGISTER, // read
-        EventName::TOOL_REGISTER, // write
-        EventName::TOOL_REGISTER, // edit
-        EventName::TOOL_REGISTER, // apply_patch
-        EventName::TOOL_REGISTER, // grep
-        EventName::TOOL_REGISTER, // find
-        EventName::TOOL_REGISTER, // ls
-        EventName::TOOL_REGISTER, // shell
-        EventName::TOOL_REGISTER, // gpt_shell
+    for expected in [
+        EventName::TOOL_REGISTER,                     // echo
+        EventName::TOOL_REGISTER,                     // read
+        EventName::TOOL_REGISTER,                     // write
+        EventName::TOOL_REGISTER,                     // edit
+        EventName::TOOL_REGISTER,                     // apply_patch
+        EventName::TOOL_REGISTER,                     // grep
+        EventName::TOOL_REGISTER,                     // find
+        EventName::TOOL_REGISTER,                     // ls
+        EventName::TOOL_REGISTER,                     // shell
+        EventName::TOOL_REGISTER,                     // gpt_shell
+        EventName::EXTENSION_PROMPT_FRAGMENT_PUBLISH, // shell.cwd
     ] {
         let event = reader
             .read_event()
             .expect("read")
             .expect("startup event should arrive");
-        assert_eq!(event.name(), EventName::TOOL_REGISTER);
+        assert_eq!(event.name(), expected);
     }
 }
 
@@ -239,6 +240,72 @@ fn startup_registers_shell_schemas_with_cwd_and_timeout_minimum() {
         .write_frame(&disconnect_frame(None))
         .expect("disconnect");
     writer.flush().expect("flush");
+}
+
+#[test]
+fn startup_registers_shell_cwd_prompt_fragment() {
+    // The cwd prompt prose is owned by the shell extension, not an individual
+    // tool, so it remains available even when shell tools are disabled.
+    let (mut reader, mut writer) = spawn_extension();
+
+    let mut found_fragment = false;
+    let mut saw_tool_fragment = false;
+    for _ in 0..11 {
+        let event = reader
+            .read_event()
+            .expect("read")
+            .expect("startup event should arrive");
+        match event {
+            Event::ToolRegister(register) => {
+                saw_tool_fragment |= register.prompt_fragment.is_some();
+            }
+            Event::ExtPromptFragmentPublish(publish) => {
+                assert_eq!(publish.fragment.name, "shell.cwd");
+                assert!(
+                    publish
+                        .fragment
+                        .template
+                        .as_str()
+                        .contains("session_context.cwd")
+                );
+                found_fragment = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(found_fragment, "expected shell cwd prompt fragment publish");
+    assert!(!saw_tool_fragment, "cwd must not be attached to any tool");
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+#[test]
+fn session_started_publishes_current_directory_context() {
+    // Session context is the structured source used by the shell cwd prompt
+    // fragment rather than interpolating the harness built-in cwd directly.
+    let cwd = std::env::current_dir().expect("current dir");
+    let events = build_session_started_events(tau_proto::SessionStarted {
+        session_id: tau_proto::SessionId::new("session-1"),
+        reason: tau_proto::SessionStartReason::Initial,
+    });
+
+    let publish = events
+        .iter()
+        .find_map(|event| match event {
+            Event::ExtSessionContextPublish(publish) if publish.key.as_ref() == "cwd" => {
+                Some(publish)
+            }
+            _ => None,
+        })
+        .expect("cwd session context publish");
+    assert_eq!(publish.session_id.as_ref(), "session-1");
+    assert_eq!(
+        publish.value.0,
+        serde_json::Value::String(cwd.display().to_string())
+    );
 }
 
 #[test]

@@ -18,8 +18,6 @@ Below are skills you should be initially aware of. Use the skill tool to load a 
 </available_skills>
 
 {{/if~}}
-Current working directory: {{cwd}}
-
 {{#if role_prompt~}}
 {{{role_prompt}}}
 
@@ -32,8 +30,8 @@ Current working directory: {{cwd}}
 {{{available_sub_task_roles_prompt}}}
 
 {{/if~}}
-{{#if tool_prompt_hooks~}}
-{{#each tool_prompt_hooks~}}
+{{#if prompt_fragments~}}
+{{#each prompt_fragments~}}
 {{#unless @first~}}
 
 {{/unless~}}

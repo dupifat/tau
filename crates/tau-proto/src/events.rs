@@ -12,8 +12,8 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CborValue, DiffSummary, ExtensionName, ModelId, ProviderTokenUsage, SessionId, SessionPromptId,
-    SkillName, ToolCallId, ToolName,
+    CborValue, DiffSummary, ExtensionName, ModelId, ProviderTokenUsage, SessionContextKey,
+    SessionId, SessionPromptId, SkillName, ToolCallId, ToolName,
 };
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -206,6 +206,10 @@ impl EventName {
         Self::from_static(EventCategory::Extension, "agents_md_available");
     pub const EXTENSION_CONTEXT_READY: Self =
         Self::from_static(EventCategory::Extension, "context_ready");
+    pub const EXTENSION_SESSION_CONTEXT_PUBLISH: Self =
+        Self::from_static(EventCategory::Extension, "session_context_publish");
+    pub const EXTENSION_PROMPT_FRAGMENT_PUBLISH: Self =
+        Self::from_static(EventCategory::Extension, "prompt_fragment_publish");
     pub const EXTENSION_AGENT_QUERY: Self =
         Self::from_static(EventCategory::Extension, "agent_query");
     pub const EXTENSION_AGENT_QUERY_RESULT: Self =
@@ -376,7 +380,7 @@ pub enum EventSelector {
     Prefix(String),
 }
 
-/// System-prompt hook priority. Lower numeric values render first.
+/// System-prompt fragment priority. Lower numeric values render first.
 #[derive(
     Clone, Copy, Debug, Default, Eq, PartialEq, Hash, PartialOrd, Ord, Serialize, Deserialize,
 )]
@@ -454,26 +458,33 @@ impl AsRef<str> for PromptContent {
     }
 }
 
-/// Ordered collection of prompt hook fragments.
-pub type PromptHook = BTreeSet<(PromptPriority, PromptContent)>;
+/// Ordered collection of rendered prompt fragments.
+pub type PromptFragments = BTreeSet<(PromptPriority, String, PromptContent)>;
 
-/// One prompt fragment contributed to a hook.
+/// One prompt fragment template contributed by a tool or extension.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct PromptHookPart {
-    /// Priority controlling coarse placement among hook fragments. Lower values
+pub struct PromptFragment {
+    /// Stable fragment name, preferably namespaced by producer.
+    pub name: String,
+    /// Priority controlling coarse placement among fragments. Lower values
     /// render first.
     pub priority: PromptPriority,
-    /// Prompt text rendered at this priority.
-    pub content: PromptContent,
+    /// Handlebars template rendered into prompt text.
+    pub template: PromptContent,
 }
 
-impl PromptHookPart {
-    /// Create one prompt hook fragment.
+impl PromptFragment {
+    /// Create one prompt fragment template.
     #[must_use]
-    pub fn new(priority: PromptPriority, content: impl Into<PromptContent>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        priority: PromptPriority,
+        template: impl Into<PromptContent>,
+    ) -> Self {
         Self {
+            name: name.into(),
             priority,
-            content: content.into(),
+            template: template.into(),
         }
     }
 }
@@ -1299,10 +1310,10 @@ impl ToolChoice {
 pub struct ToolRegister {
     /// Tool metadata made available to the agent and used for routing calls.
     pub tool: ToolSpec,
-    /// Optional system-prompt fragment to include whenever this tool is enabled
-    /// for the current role.
+    /// Optional system-prompt fragment template to render whenever this tool is
+    /// enabled for the current role.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<PromptHookPart>,
+    pub prompt_fragment: Option<PromptFragment>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1648,6 +1659,34 @@ pub struct ExtAgentsMdAvailable {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionContextReady {
     pub session_id: SessionId,
+}
+
+/// Arbitrary JSON value published by an extension for one session context key.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SessionContextValue(pub serde_json::Value);
+
+/// An extension publishes its complete session-scoped contribution for one key.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExtSessionContextPublish {
+    /// Session this context belongs to.
+    pub session_id: SessionId,
+    /// Top-level context key exposed to templates under
+    /// `session_context.<key>`.
+    pub key: SessionContextKey,
+    /// Complete JSON contribution from this extension for the key.
+    pub value: SessionContextValue,
+}
+
+/// An extension publishes or replaces one extension-level prompt fragment.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExtPromptFragmentPublish {
+    /// Fragment template to make available during prompt rendering.
+    ///
+    /// The harness keys replacement by `(source_connection_id, fragment.name)`;
+    /// the same extension publishing the same name again replaces its previous
+    /// fragment.
+    pub fragment: PromptFragment,
 }
 
 /// An extension's request for the harness to dispatch a side prompt
@@ -2784,6 +2823,10 @@ pub enum Event {
     ExtAgentsMdAvailable(ExtAgentsMdAvailable),
     #[serde(rename = "extension.context_ready")]
     ExtensionContextReady(ExtensionContextReady),
+    #[serde(rename = "extension.session_context_publish")]
+    ExtSessionContextPublish(ExtSessionContextPublish),
+    #[serde(rename = "extension.prompt_fragment_publish")]
+    ExtPromptFragmentPublish(ExtPromptFragmentPublish),
     #[serde(rename = "extension.agent_query")]
     ExtAgentQuery(ExtAgentQuery),
     #[serde(rename = "extension.agent_query_result")]
@@ -2914,6 +2957,8 @@ impl Event {
             Self::ExtSkillAvailable(_) => EventName::EXTENSION_SKILL_AVAILABLE,
             Self::ExtAgentsMdAvailable(_) => EventName::EXTENSION_AGENTS_MD_AVAILABLE,
             Self::ExtensionContextReady(_) => EventName::EXTENSION_CONTEXT_READY,
+            Self::ExtSessionContextPublish(_) => EventName::EXTENSION_SESSION_CONTEXT_PUBLISH,
+            Self::ExtPromptFragmentPublish(_) => EventName::EXTENSION_PROMPT_FRAGMENT_PUBLISH,
             Self::ExtAgentQuery(_) => EventName::EXTENSION_AGENT_QUERY,
             Self::ExtAgentQueryResult(_) => EventName::EXTENSION_AGENT_QUERY_RESULT,
             Self::ExtensionEvent(event) => event.name.clone(),

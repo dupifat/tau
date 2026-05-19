@@ -4203,7 +4203,7 @@ fn delegate_explicit_role_uses_role_model_params_prompt_and_tools() {
             (ToolName::new("denied_tool"), false),
         ]),
     );
-    h.registry.register_with_prompt(
+    h.registry.register_with_prompt_fragment(
         "conn-allowed-tool",
         tau_proto::ToolRegister {
             tool: ToolSpec {
@@ -4216,13 +4216,14 @@ fn delegate_explicit_role_uses_role_model_params_prompt_and_tools() {
                 enabled_by_default: false,
                 execution_mode: ToolExecutionMode::Shared,
             },
-            prompt: Some(tau_proto::PromptHookPart::new(
+            prompt_fragment: Some(tau_proto::PromptFragment::new(
+                "allowed_tool.instructions",
                 tau_proto::PromptPriority::new(10),
                 "ALLOWED TOOL PROMPT",
             )),
         },
     );
-    h.registry.register_with_prompt(
+    h.registry.register_with_prompt_fragment(
         "conn-denied-tool",
         tau_proto::ToolRegister {
             tool: ToolSpec {
@@ -4235,7 +4236,8 @@ fn delegate_explicit_role_uses_role_model_params_prompt_and_tools() {
                 enabled_by_default: true,
                 execution_mode: ToolExecutionMode::Shared,
             },
-            prompt: Some(tau_proto::PromptHookPart::new(
+            prompt_fragment: Some(tau_proto::PromptFragment::new(
+                "denied_tool.instructions",
                 tau_proto::PromptPriority::new(10),
                 "DENIED TOOL PROMPT",
             )),

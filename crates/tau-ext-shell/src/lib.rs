@@ -11,8 +11,9 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::sync::{Arc, mpsc};
 
 use tau_proto::{
-    Ack, ConfigError, Event, Frame, FrameReader, FrameWriter, LogEventId, Message, SessionStarted,
-    ToolExecutionMode, ToolSpec,
+    Ack, ConfigError, Event, ExtPromptFragmentPublish, ExtSessionContextPublish, Frame,
+    FrameReader, FrameWriter, LogEventId, Message, PromptContent, PromptFragment, PromptPriority,
+    SessionContextKey, SessionContextValue, SessionStarted, ToolExecutionMode, ToolSpec,
 };
 
 mod agents;
@@ -397,13 +398,18 @@ where
         },
     ]);
 
-    tau_extension::Handshake::tool("tau-ext-shell")
-        .subscribe([
-            tau_proto::EventName::TOOL_INVOKE,
-            tau_proto::EventName::SESSION_STARTED,
-            tau_proto::EventName::UI_SHELL_COMMAND,
-        ])
-        .register_tools(tools)
+    let mut handshake = tau_extension::Handshake::tool("tau-ext-shell").subscribe([
+        tau_proto::EventName::TOOL_INVOKE,
+        tau_proto::EventName::SESSION_STARTED,
+        tau_proto::EventName::UI_SHELL_COMMAND,
+    ]);
+    for tool in tools {
+        handshake = handshake.register_tool(tool);
+    }
+    handshake
+        .announce_event(Event::ExtPromptFragmentPublish(ExtPromptFragmentPublish {
+            fragment: shell_cwd_prompt_fragment(),
+        }))
         .ready_message("filesystem and shell tools ready")
         .run(&mut writer)?;
 
@@ -517,6 +523,14 @@ fn ack_log_event(id: LogEventId, tx: &mpsc::Sender<Frame>) {
 fn build_session_started_events(started: SessionStarted) -> Vec<Event> {
     let mut events = Vec::new();
 
+    if let Ok(cwd) = std::env::current_dir() {
+        events.push(Event::ExtSessionContextPublish(ExtSessionContextPublish {
+            session_id: started.session_id.clone(),
+            key: SessionContextKey::new("cwd"),
+            value: SessionContextValue(serde_json::Value::String(cwd.display().to_string())),
+        }));
+    }
+
     let skill_dirs = session_skill_dirs(std::env::current_dir().ok(), dirs::home_dir());
 
     let result = tau_skills::load_skills_from_skill_dirs(&skill_dirs);
@@ -546,6 +560,17 @@ fn build_session_started_events(started: SessionStarted) -> Vec<Event> {
         },
     ));
     events
+}
+
+fn shell_cwd_prompt_fragment() -> PromptFragment {
+    PromptFragment::new(
+        "shell.cwd",
+        PromptPriority::new(10),
+        PromptContent::new(
+            "{{#each session_context.cwd}}{{#if @first}}Current working directory: \
+             {{value}}{{/if}}{{/each}}",
+        ),
+    )
 }
 
 fn push_skill_diagnostic_events(

@@ -12,21 +12,14 @@ fn build_system_prompt_includes_skills() {
             add_to_prompt: true,
         },
     );
-    let prompt = build_system_prompt(
-        &skills,
-        "/tmp/work",
-        None,
-        None,
-        None,
-        &tau_proto::PromptHook::new(),
-    );
+    let prompt = build_system_prompt(&skills, "/tmp/work", None, None, None, &[]);
     assert!(prompt.contains("<available_skills>"));
     assert!(prompt.contains("<name>brave-search</name>"));
     assert!(prompt.contains("<description>Web search via Brave API</description>"));
 
     assert!(prompt.contains("Web search via Brave API"));
     assert!(!prompt.contains("Current date:"));
-    assert!(prompt.contains("Current working directory: /tmp/work"));
+    assert!(!prompt.contains("Current working directory: /tmp/work"));
 }
 
 #[test]
@@ -41,14 +34,7 @@ fn build_system_prompt_excludes_hidden_skills() {
             add_to_prompt: false,
         },
     );
-    let prompt = build_system_prompt(
-        &skills,
-        "/tmp/work",
-        None,
-        None,
-        None,
-        &tau_proto::PromptHook::new(),
-    );
+    let prompt = build_system_prompt(&skills, "/tmp/work", None, None, None, &[]);
     assert!(!prompt.contains("<available_skills>"));
     assert!(!prompt.contains("hidden"));
 }
@@ -65,14 +51,7 @@ fn build_system_prompt_escapes_skill_xml_text() {
             add_to_prompt: true,
         },
     );
-    let prompt = build_system_prompt(
-        &skills,
-        "/tmp/work",
-        None,
-        None,
-        None,
-        &tau_proto::PromptHook::new(),
-    );
+    let prompt = build_system_prompt(&skills, "/tmp/work", None, None, None, &[]);
     assert!(prompt.contains("Use &lt;/description&gt; &amp; &lt;tag&gt; &quot;quotes&quot;"));
     assert!(!prompt.contains("Use </description>"));
 }
@@ -936,14 +915,7 @@ fn built_in_tau_self_knowledge_skills_are_available_without_file_paths() {
         assert_eq!(skill.add_to_prompt, advertised, "{name} prompt flag");
     }
 
-    let prompt = build_system_prompt(
-        &h.discovered_skills,
-        "/tmp/work",
-        None,
-        None,
-        None,
-        &tau_proto::PromptHook::new(),
-    );
+    let prompt = build_system_prompt(&h.discovered_skills, "/tmp/work", None, None, None, &[]);
     assert!(prompt.contains("<name>tau-self-knowledge</name>"));
     assert!(prompt.contains("Built-in information about Tau coding harness you are running in."));
     assert!(!prompt.contains("<name>tau-self-knowledge-architecture</name>"));
@@ -1206,7 +1178,7 @@ fn gather_tool_definitions_respects_role_tools_profile() {
 }
 
 #[test]
-fn tool_prompt_hook_includes_only_tools_enabled_for_current_role() {
+fn prompt_fragments_include_only_tools_enabled_for_current_role() {
     // Tool prompt fragments ride along with tool registration, but must only be
     // rendered for tools the current role can actually call. Otherwise a hidden
     // or profile-disabled tool could still steer the model via the system prompt.
@@ -1214,7 +1186,7 @@ fn tool_prompt_hook_includes_only_tools_enabled_for_current_role() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    h.registry.register_with_prompt(
+    h.registry.register_with_prompt_fragment(
         "conn-prompt-enabled",
         tau_proto::ToolRegister {
             tool: ToolSpec {
@@ -1227,13 +1199,14 @@ fn tool_prompt_hook_includes_only_tools_enabled_for_current_role() {
                 enabled_by_default: true,
                 execution_mode: ToolExecutionMode::Shared,
             },
-            prompt: Some(tau_proto::PromptHookPart::new(
+            prompt_fragment: Some(tau_proto::PromptFragment::new(
+                "prompt_enabled.instructions",
                 tau_proto::PromptPriority::new(10),
                 "ENABLED TOOL PROMPT",
             )),
         },
     );
-    h.registry.register_with_prompt(
+    h.registry.register_with_prompt_fragment(
         "conn-prompt-disabled",
         tau_proto::ToolRegister {
             tool: ToolSpec {
@@ -1246,22 +1219,98 @@ fn tool_prompt_hook_includes_only_tools_enabled_for_current_role() {
                 enabled_by_default: false,
                 execution_mode: ToolExecutionMode::Shared,
             },
-            prompt: Some(tau_proto::PromptHookPart::new(
+            prompt_fragment: Some(tau_proto::PromptFragment::new(
+                "prompt_disabled.instructions",
                 tau_proto::PromptPriority::new(5),
                 "DISABLED TOOL PROMPT",
             )),
         },
     );
 
-    let hook = h.gather_tool_prompt_hook();
-    let rendered = hook
+    let fragments = h.gather_prompt_fragments();
+    let rendered = fragments
         .iter()
-        .map(|(_, content)| content.as_str())
+        .map(|fragment| fragment.template.as_str())
         .collect::<Vec<_>>()
         .join("\n");
 
     assert!(rendered.contains("ENABLED TOOL PROMPT"));
     assert!(!rendered.contains("DISABLED TOOL PROMPT"));
+}
+
+#[test]
+fn extension_prompt_fragments_are_included_without_enabled_tools() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    h.extension_prompt_fragments
+        .entry(tau_proto::ConnectionId::new("conn-extension"))
+        .or_default()
+        .insert(
+            "extension.context".to_owned(),
+            tau_proto::PromptFragment::new(
+                "extension.context",
+                tau_proto::PromptPriority::new(10),
+                "EXTENSION CONTEXT",
+            ),
+        );
+
+    let fragments = h.gather_prompt_fragments();
+    assert!(fragments.iter().any(|f| f.name == "extension.context"));
+}
+
+#[test]
+fn extension_and_tool_prompt_fragments_sort_together_by_priority_source_name() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    h.extension_prompt_fragments
+        .entry(tau_proto::ConnectionId::new("conn-b"))
+        .or_default()
+        .insert(
+            "b".to_owned(),
+            tau_proto::PromptFragment::new("b", tau_proto::PromptPriority::new(10), "B"),
+        );
+    h.registry.register_with_prompt_fragment(
+        "conn-a",
+        tau_proto::ToolRegister {
+            tool: ToolSpec {
+                name: ToolName::new("prompt_enabled_order"),
+                model_visible_name: None,
+                description: Some("enabled prompt tool".to_owned()),
+                tool_type: tau_proto::ToolType::Function,
+                parameters: None,
+                format: None,
+                enabled_by_default: true,
+                execution_mode: ToolExecutionMode::Shared,
+            },
+            prompt_fragment: Some(tau_proto::PromptFragment::new(
+                "z",
+                tau_proto::PromptPriority::new(10),
+                "A",
+            )),
+        },
+    );
+    h.extension_prompt_fragments
+        .entry(tau_proto::ConnectionId::new("conn-a"))
+        .or_default()
+        .insert(
+            "a".to_owned(),
+            tau_proto::PromptFragment::new("a", tau_proto::PromptPriority::new(10), "AA"),
+        );
+
+    let names = h
+        .gather_prompt_fragments()
+        .into_iter()
+        .filter(|f| matches!(f.name.as_str(), "a" | "z" | "b"))
+        .map(|f| (f.priority.get(), f.name))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        vec![(10, "a".into()), (10, "z".into()), (10, "b".into())]
+    );
 }
 
 #[test]

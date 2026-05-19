@@ -6,7 +6,7 @@ use std::error::Error;
 use std::fmt;
 
 use tau_proto::{
-    ConnectionId, Event, PromptHookPart, ToolName, ToolRegister, ToolRequest, ToolSpec,
+    ConnectionId, Event, PromptFragment, ToolName, ToolRegister, ToolRequest, ToolSpec,
 };
 
 use crate::bus::EventBus;
@@ -19,8 +19,9 @@ pub struct ToolProvider {
     pub connection_id: ConnectionId,
     /// Tool metadata advertised to the model and used for routing.
     pub tool: ToolSpec,
-    /// Optional prompt fragment contributed while this tool is enabled.
-    pub prompt: Option<PromptHookPart>,
+    /// Optional prompt fragment template contributed while this tool is
+    /// enabled.
+    pub prompt_fragment: Option<PromptFragment>,
 }
 
 /// Warning emitted by the tool registry.
@@ -84,19 +85,29 @@ impl ToolRegistry {
         Self::default()
     }
 
-    /// Registers one tool for a live provider connection without a prompt hook.
+    /// Registers one tool for a live provider connection without a prompt
+    /// fragment.
     pub fn register(&mut self, connection_id: &str, tool: ToolSpec) -> RegisterToolReport {
-        self.register_with_prompt(connection_id, ToolRegister { tool, prompt: None })
+        self.register_with_prompt_fragment(
+            connection_id,
+            ToolRegister {
+                tool,
+                prompt_fragment: None,
+            },
+        )
     }
 
     /// Registers one tool for a live provider connection, including any prompt
-    /// hook fragment attached to the registration.
-    pub fn register_with_prompt(
+    /// fragment attached to the registration.
+    pub fn register_with_prompt_fragment(
         &mut self,
         connection_id: &str,
         registration: ToolRegister,
     ) -> RegisterToolReport {
-        let ToolRegister { tool, prompt } = registration;
+        let ToolRegister {
+            tool,
+            prompt_fragment,
+        } = registration;
         let tool_name = tool.name.clone();
         let providers = self.providers_by_tool.entry(tool_name.clone()).or_default();
 
@@ -119,12 +130,12 @@ impl ToolRegistry {
             .find(|provider| provider.connection_id == connection_id)
         {
             existing_provider.tool = tool;
-            existing_provider.prompt = prompt;
+            existing_provider.prompt_fragment = prompt_fragment;
         } else {
             providers.push(ToolProvider {
                 connection_id: connection_id.into(),
                 tool,
-                prompt,
+                prompt_fragment,
             });
         }
 

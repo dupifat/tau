@@ -2,7 +2,7 @@
 //! store, and the live extensions; routes every event between the agent,
 //! tools, and clients.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -15,12 +15,12 @@ use tau_core::{
 use tau_proto::{
     CborValue, ClientKind, ContentPart, ContextItem, ContextRole, Disconnect, Event, EventSelector,
     ExtensionName, Frame, HarnessContextUsageChanged, HarnessRoleSelected, Message, MessageItem,
-    ModelId, PreviousResponseCandidate, PromptHook, PromptOriginator, ProviderCacheMissDiagnostic,
-    ProviderModelInfo, ProviderResponseFinished, ProviderStopReason, ProviderTokenUsage,
-    SessionCompactionRequested, SessionId, SessionPromptCreated, SessionPromptId,
-    SessionPromptPrewarmRequested, SessionPromptQueued, TokenUsageStats, ToolCallId, ToolCallItem,
-    ToolCancelled, ToolChoice, ToolDefinition, ToolError, ToolName, ToolRequest, ToolType,
-    UiCancelPrompt,
+    ModelId, PreviousResponseCandidate, PromptFragment, PromptOriginator,
+    ProviderCacheMissDiagnostic, ProviderModelInfo, ProviderResponseFinished, ProviderStopReason,
+    ProviderTokenUsage, SessionCompactionRequested, SessionId, SessionPromptCreated,
+    SessionPromptId, SessionPromptPrewarmRequested, SessionPromptQueued, TokenUsageStats,
+    ToolCallId, ToolCallItem, ToolCancelled, ToolChoice, ToolDefinition, ToolError, ToolName,
+    ToolRequest, ToolType, UiCancelPrompt,
 };
 
 use crate::conversation::{Conversation, ConversationId, ConversationTurnState, PendingCancel};
@@ -66,6 +66,77 @@ const BUILT_IN_SKILLS_SOURCE_ID: &str = "harness:built-in-skills";
 const SELF_KNOWLEDGE_VERSION_TOKEN: &str = "__TAU_SELF_KNOWLEDGE_VERSION__";
 const SELF_KNOWLEDGE_HASH_TOKEN: &str = "__TAU_SELF_KNOWLEDGE_HASH__";
 const SELF_KNOWLEDGE_BUILD_DATE_TOKEN: &str = "__TAU_SELF_KNOWLEDGE_BUILD_DATE__";
+
+#[derive(Clone, Debug)]
+struct SessionContextContribution {
+    extension_name: String,
+    value: tau_proto::SessionContextValue,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SessionContextStore {
+    by_session: BTreeMap<
+        SessionId,
+        BTreeMap<
+            tau_proto::SessionContextKey,
+            BTreeMap<tau_proto::ConnectionId, SessionContextContribution>,
+        >,
+    >,
+}
+
+impl SessionContextStore {
+    /// Store or replace one contributor's value for a session context key.
+    pub(crate) fn publish(
+        &mut self,
+        session_id: SessionId,
+        key: tau_proto::SessionContextKey,
+        contributor: tau_proto::ConnectionId,
+        extension_name: String,
+        value: tau_proto::SessionContextValue,
+    ) {
+        self.by_session
+            .entry(session_id)
+            .or_default()
+            .entry(key)
+            .or_default()
+            .insert(
+                contributor,
+                SessionContextContribution {
+                    extension_name,
+                    value,
+                },
+            );
+    }
+
+    /// Return the Handlebars-visible `session_context` object for one session.
+    pub(crate) fn template_value(&self, session_id: &SessionId) -> serde_json::Value {
+        let mut object = serde_json::Map::new();
+        let Some(keys) = self.by_session.get(session_id) else {
+            return serde_json::Value::Object(object);
+        };
+        for (key, contributions) in keys {
+            let mut wrappers: Vec<_> = contributions
+                .iter()
+                .map(|(connection_id, contribution)| {
+                    (
+                        contribution.extension_name.clone(),
+                        connection_id.clone(),
+                        serde_json::json!({
+                            "extension_name": contribution.extension_name,
+                            "value": contribution.value.0,
+                        }),
+                    )
+                })
+                .collect();
+            wrappers.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+            object.insert(
+                key.to_string(),
+                serde_json::Value::Array(wrappers.into_iter().map(|(_, _, value)| value).collect()),
+            );
+        }
+        serde_json::Value::Object(object)
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct AgentToolCall {
@@ -519,6 +590,11 @@ pub(crate) struct Harness {
     pub(crate) discovered_skills: std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
     /// AGENTS.md files discovered by extensions, in delivery order.
     pub(crate) discovered_agents_files: Vec<DiscoveredAgentsFile>,
+    /// Session-scoped JSON context contributions published by extensions.
+    pub(crate) session_context: SessionContextStore,
+    /// Extension-level prompt fragments keyed by source connection and name.
+    pub(crate) extension_prompt_fragments:
+        BTreeMap<tau_proto::ConnectionId, BTreeMap<String, PromptFragment>>,
     /// Sessions whose AGENTS/skill discovery has completed.
     pub(crate) initialized_sessions: std::collections::HashSet<SessionId>,
     /// Session prompt IDs that have already been completed by the agent.
@@ -992,6 +1068,8 @@ impl Harness {
             prompt_fingerprints: std::collections::HashMap::new(),
             discovered_skills: built_in_discovered_skills(),
             discovered_agents_files: Vec::new(),
+            session_context: SessionContextStore::default(),
+            extension_prompt_fragments: BTreeMap::new(),
             initialized_sessions: std::collections::HashSet::new(),
             completed_prompts: std::collections::HashSet::new(),
             pending_tool_invocations: VecDeque::new(),
@@ -1204,6 +1282,8 @@ impl Harness {
             prompt_fingerprints: std::collections::HashMap::new(),
             discovered_skills: built_in_discovered_skills(),
             discovered_agents_files: Vec::new(),
+            session_context: SessionContextStore::default(),
+            extension_prompt_fragments: BTreeMap::new(),
             initialized_sessions: std::collections::HashSet::new(),
             completed_prompts: std::collections::HashSet::new(),
             pending_tool_invocations: VecDeque::new(),
@@ -1827,6 +1907,7 @@ impl Harness {
             Event::ExtAgentsMdAvailable(_) | Event::ExtensionContextReady(_) => {
                 Some(self.current_session_id.clone())
             }
+            Event::ExtSessionContextPublish(publish) => Some(publish.session_id.clone()),
             Event::ExtensionEvent(event) => event.session_id.clone(),
             _ => None,
         }
@@ -2180,7 +2261,9 @@ impl Harness {
 
         match event {
             Event::ToolRegister(registration) => {
-                let _ = self.registry.register_with_prompt(source_id, registration);
+                let _ = self
+                    .registry
+                    .register_with_prompt_fragment(source_id, registration);
             }
             Event::ToolRequest(request) => {
                 // Track session attribution before publishing — the
@@ -2336,6 +2419,30 @@ impl Harness {
             Event::ExtensionContextReady(ready) => {
                 self.publish_event(Some(source_id), Event::ExtensionContextReady(ready.clone()));
                 self.handle_extension_context_ready(source_id, ready)?;
+            }
+            Event::ExtSessionContextPublish(publish) => {
+                let contributor = tau_proto::ConnectionId::from(source_id);
+                let extension_name = self
+                    .extensions
+                    .get(&contributor)
+                    .map(|entry| entry.name.clone())
+                    .unwrap_or_else(|| source_id.to_owned());
+                self.session_context.publish(
+                    publish.session_id.clone(),
+                    publish.key.clone(),
+                    contributor,
+                    extension_name,
+                    publish.value.clone(),
+                );
+                self.publish_event(Some(source_id), Event::ExtSessionContextPublish(publish));
+            }
+            Event::ExtPromptFragmentPublish(publish) => {
+                let contributor = tau_proto::ConnectionId::from(source_id);
+                self.extension_prompt_fragments
+                    .entry(contributor)
+                    .or_default()
+                    .insert(publish.fragment.name.clone(), publish.fragment.clone());
+                self.publish_event(Some(source_id), Event::ExtPromptFragmentPublish(publish));
             }
             Event::ExtAgentQuery(query) => {
                 self.handle_ext_agent_query(source_id, query)?;
@@ -4926,14 +5033,16 @@ impl Harness {
             .and_then(|role| role.orchestrator)
             .unwrap_or(false)
             .then(|| self.available_sub_task_roles_prompt());
-        let tool_prompt_hook = self.gather_tool_prompt_hook_for_role(role_name);
+        let prompt_fragments = self.gather_prompt_fragments_for_role(role_name);
         build_system_prompt_with_template_context(
             &self.discovered_skills,
             cwd,
             role_prompt,
             current_role.and_then(|role| role.extra_prompt.as_ref()),
             available_sub_task_roles_prompt.as_ref(),
-            &tool_prompt_hook,
+            &prompt_fragments,
+            self.session_context
+                .template_value(&self.current_session_id),
             RolePromptTemplateContext { role_name, cwd },
         )
     }
@@ -4952,17 +5061,41 @@ impl Harness {
     }
 
     #[cfg(test)]
-    fn gather_tool_prompt_hook(&self) -> PromptHook {
-        self.gather_tool_prompt_hook_for_role(&self.selected_role)
+    fn gather_prompt_fragments(&self) -> Vec<PromptFragment> {
+        self.gather_prompt_fragments_for_role(&self.selected_role)
     }
 
-    fn gather_tool_prompt_hook_for_role(&self, role_name: &str) -> PromptHook {
-        self.registry
-            .all_tool_providers()
+    fn gather_prompt_fragments_for_role(&self, role_name: &str) -> Vec<PromptFragment> {
+        let mut fragments: Vec<_> = self
+            .extension_prompt_fragments
+            .iter()
+            .flat_map(|(connection_id, fragments)| {
+                fragments
+                    .values()
+                    .map(move |fragment| (connection_id.clone(), fragment.clone()))
+            })
+            .collect();
+        fragments.extend(
+            self.registry
+                .all_tool_providers()
+                .into_iter()
+                .filter(|provider| self.is_tool_enabled_for_role(&provider.tool, role_name))
+                .filter_map(|provider| {
+                    provider
+                        .prompt_fragment
+                        .as_ref()
+                        .map(|fragment| (provider.connection_id.clone(), fragment.clone()))
+                }),
+        );
+        fragments.sort_by(|a, b| {
+            a.1.priority
+                .cmp(&b.1.priority)
+                .then_with(|| a.0.cmp(&b.0))
+                .then_with(|| a.1.name.cmp(&b.1.name))
+        });
+        fragments
             .into_iter()
-            .filter(|provider| self.is_tool_enabled_for_role(&provider.tool, role_name))
-            .filter_map(|provider| provider.prompt.as_ref())
-            .map(|part| (part.priority, part.content.clone()))
+            .map(|(_, fragment)| fragment)
             .collect()
     }
 
@@ -6480,4 +6613,163 @@ pub(crate) fn selector_matches_event(selectors: &[EventSelector], event: &Event)
         EventSelector::Exact(expected) => *expected == target_name,
         EventSelector::Prefix(prefix) => target_name.matches_prefix(prefix),
     })
+}
+
+#[cfg(test)]
+mod session_context_tests {
+    use super::*;
+
+    fn publish(
+        store: &mut SessionContextStore,
+        session: &str,
+        key: &str,
+        contributor: &str,
+        extension_name: &str,
+        value: serde_json::Value,
+    ) {
+        store.publish(
+            SessionId::from(session),
+            tau_proto::SessionContextKey::from(key),
+            tau_proto::ConnectionId::from(contributor),
+            extension_name.to_owned(),
+            tau_proto::SessionContextValue(value),
+        );
+    }
+
+    /// Contributions are isolated by `(session, key, contributor)` so one
+    /// extension can publish multiple keys without overwriting another.
+    #[test]
+    fn publish_stores_per_session_key_and_contributor() {
+        let mut store = SessionContextStore::default();
+        publish(
+            &mut store,
+            "s1",
+            "skills",
+            "c1",
+            "alpha",
+            serde_json::json!([1]),
+        );
+        publish(
+            &mut store,
+            "s1",
+            "project",
+            "c1",
+            "alpha",
+            serde_json::json!({"root": "/repo"}),
+        );
+        publish(
+            &mut store,
+            "s1",
+            "skills",
+            "c2",
+            "beta",
+            serde_json::json!([2]),
+        );
+
+        let visible = store.template_value(&SessionId::from("s1"));
+
+        assert_eq!(visible["skills"].as_array().expect("skills").len(), 2);
+        assert_eq!(visible["project"].as_array().expect("project").len(), 1);
+    }
+
+    /// Republishing the same `(session, key, contributor)` replaces the
+    /// contributor's previous JSON value instead of appending a duplicate.
+    #[test]
+    fn same_contributor_replaces_own_value() {
+        let mut store = SessionContextStore::default();
+        publish(
+            &mut store,
+            "s1",
+            "skills",
+            "c1",
+            "alpha",
+            serde_json::json!(["old"]),
+        );
+        publish(
+            &mut store,
+            "s1",
+            "skills",
+            "c1",
+            "alpha",
+            serde_json::json!(["new"]),
+        );
+
+        let visible = store.template_value(&SessionId::from("s1"));
+
+        assert_eq!(
+            visible["skills"],
+            serde_json::json!([{ "extension_name": "alpha", "value": ["new"] }])
+        );
+    }
+
+    /// Multiple contributors for the same key are exposed as stable wrapper
+    /// objects sorted by extension name and then connection id.
+    #[test]
+    fn multiple_contributors_are_stable_wrappers_under_same_key() {
+        let mut store = SessionContextStore::default();
+        publish(
+            &mut store,
+            "s1",
+            "skills",
+            "c-z",
+            "zeta",
+            serde_json::json!([3]),
+        );
+        publish(
+            &mut store,
+            "s1",
+            "skills",
+            "c-a",
+            "alpha",
+            serde_json::json!([1]),
+        );
+        publish(
+            &mut store,
+            "s1",
+            "skills",
+            "c-b",
+            "alpha",
+            serde_json::json!([2]),
+        );
+
+        let visible = store.template_value(&SessionId::from("s1"));
+
+        assert_eq!(
+            visible["skills"],
+            serde_json::json!([
+                { "extension_name": "alpha", "value": [1] },
+                { "extension_name": "alpha", "value": [2] },
+                { "extension_name": "zeta", "value": [3] },
+            ])
+        );
+    }
+
+    /// Session context never leaks between sessions, which matters when one
+    /// daemon serves different working directories over time.
+    #[test]
+    fn different_sessions_do_not_leak_context() {
+        let mut store = SessionContextStore::default();
+        publish(
+            &mut store,
+            "s1",
+            "skills",
+            "c1",
+            "alpha",
+            serde_json::json!(["s1"]),
+        );
+        publish(
+            &mut store,
+            "s2",
+            "skills",
+            "c1",
+            "alpha",
+            serde_json::json!(["s2"]),
+        );
+
+        let s1 = store.template_value(&SessionId::from("s1"));
+        let s2 = store.template_value(&SessionId::from("s2"));
+
+        assert_eq!(s1["skills"][0]["value"], serde_json::json!(["s1"]));
+        assert_eq!(s2["skills"][0]["value"], serde_json::json!(["s2"]));
+    }
 }

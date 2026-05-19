@@ -23,7 +23,7 @@ fn representative_events() -> Vec<Event> {
                 enabled_by_default: true,
                 execution_mode: ToolExecutionMode::Shared,
             },
-            prompt: None,
+            prompt_fragment: None,
         }),
         Event::ToolRequest(ToolRequest {
             call_id: "call-1".into(),
@@ -677,11 +677,11 @@ fn tool_spec_defaults_and_execution_mode_compatibility() {
     );
 }
 
-/// Prompt hook primitives are transparent on the wire so config and extension
-/// JSON can stay simple: priorities are numbers and prompt contents are plain
-/// strings.
+/// Prompt fragment primitives are transparent on the wire so config and
+/// extension JSON can stay simple: priorities are numbers and prompt contents
+/// are plain strings.
 #[test]
-fn prompt_hook_primitives_serde_as_simple_values() {
+fn prompt_fragment_primitives_serde_as_simple_values() {
     let priority: PromptPriority =
         serde_json::from_value(serde_json::json!(42)).expect("deserialize prompt priority");
     let content: PromptContent =
@@ -712,8 +712,8 @@ fn echo_tool_spec() -> ToolSpec {
     }
 }
 
-/// `tool.register` remains compatible with extensions that omit prompt hooks,
-/// while newer extensions can attach one ordered prompt fragment.
+/// `tool.register` remains compatible with extensions that omit prompt
+/// fragments, while newer extensions can attach one ordered prompt fragment.
 #[test]
 fn tool_register_prompt_is_optional_and_round_trips_when_present() {
     let without_prompt: ToolRegister = serde_json::from_value(serde_json::json!({
@@ -725,22 +725,23 @@ fn tool_register_prompt_is_optional_and_round_trips_when_present() {
         }
     }))
     .expect("deserialize tool register without prompt");
-    assert_eq!(without_prompt.prompt, None);
+    assert_eq!(without_prompt.prompt_fragment, None);
 
     let with_prompt = ToolRegister {
         tool: echo_tool_spec(),
-        prompt: Some(PromptHookPart::new(
+        prompt_fragment: Some(PromptFragment::new(
+            "echo.instructions",
             PromptPriority::new(7),
             "Prefer the echo tool for echo requests.",
         )),
     };
     let json = serde_json::to_value(&with_prompt).expect("serialize tool register with prompt");
-    assert_eq!(json["prompt"]["priority"], serde_json::json!(7));
+    assert_eq!(json["prompt_fragment"]["priority"], serde_json::json!(7));
     assert_eq!(
-        json["prompt"]["content"],
+        json["prompt_fragment"]["template"],
         serde_json::json!("Prefer the echo tool for echo requests.")
     );
-    let decoded: ToolRegister = serde_json::from_value(json).expect("decode prompt hook");
+    let decoded: ToolRegister = serde_json::from_value(json).expect("decode prompt fragment");
     assert_eq!(decoded, with_prompt);
 }
 

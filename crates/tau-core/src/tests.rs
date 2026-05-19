@@ -467,9 +467,9 @@ fn disconnect_cleanup_removes_stale_tool_providers() {
 }
 
 #[test]
-fn re_registering_tool_without_prompt_clears_previous_prompt_hook() {
-    // Prompt hooks are part of the live registration, not sticky metadata. A
-    // tool that unregisters or re-registers without a hook must not leave stale
+fn re_registering_tool_without_fragment_clears_previous_prompt_fragment() {
+    // Prompt fragments are part of the live registration, not sticky metadata. A
+    // tool that unregisters or re-registers without a fragment must not leave stale
     // prompt text behind for future prompt assembly.
     let mut registry = ToolRegistry::new();
     let tool = || ToolSpec {
@@ -483,36 +483,37 @@ fn re_registering_tool_without_prompt_clears_previous_prompt_hook() {
         execution_mode: ToolExecutionMode::Shared,
     };
 
-    registry.register_with_prompt(
+    registry.register_with_prompt_fragment(
         "conn-tool",
         ToolRegister {
             tool: tool(),
-            prompt: Some(tau_proto::PromptHookPart::new(
+            prompt_fragment: Some(tau_proto::PromptFragment::new(
+                "echo.instructions",
                 tau_proto::PromptPriority::new(10),
                 "STALE TOOL PROMPT",
             )),
         },
     );
-    assert!(registry.providers_for("echo")[0].prompt.is_some());
+    assert!(registry.providers_for("echo")[0].prompt_fragment.is_some());
 
-    registry.register_with_prompt(
+    registry.register_with_prompt_fragment(
         "conn-tool",
         ToolRegister {
             tool: tool(),
-            prompt: None,
+            prompt_fragment: None,
         },
     );
-    assert_eq!(registry.providers_for("echo")[0].prompt, None);
+    assert_eq!(registry.providers_for("echo")[0].prompt_fragment, None);
 
     assert!(registry.unregister("conn-tool", "echo"));
-    registry.register_with_prompt(
+    registry.register_with_prompt_fragment(
         "conn-tool",
         ToolRegister {
             tool: tool(),
-            prompt: None,
+            prompt_fragment: None,
         },
     );
-    assert_eq!(registry.providers_for("echo")[0].prompt, None);
+    assert_eq!(registry.providers_for("echo")[0].prompt_fragment, None);
 }
 
 #[test]
@@ -532,7 +533,7 @@ fn register_events_map_cleanly_to_registry_state() {
                 enabled_by_default: true,
                 execution_mode: ToolExecutionMode::Shared,
             },
-            prompt: None,
+            prompt_fragment: None,
         }
         .tool,
     );

@@ -100,6 +100,8 @@ string_newtype!(/// Unique identifier for one prompt within a session.
     SessionPromptId);
 string_newtype!(/// Extension name.
     ExtensionName);
+string_newtype!(/// Session-scoped context key published by an extension.
+    SessionContextKey);
 // ProviderName / ModelName / ModelId are defined manually below — they
 // validate at construction (no '/', non-empty, etc.) so the rest of
 // the codebase can stop re-parsing `"provider/model"` strings.

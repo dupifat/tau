@@ -26,7 +26,7 @@ use std::io::Write;
 
 use tau_proto::{
     ClientKind, EncodeError, Event, EventName, EventSelector, ExtensionName, Frame, FrameWriter,
-    Hello, Intercept, InterceptionPriority, Message, PROTOCOL_VERSION, PromptHookPart, Ready,
+    Hello, Intercept, InterceptionPriority, Message, PROTOCOL_VERSION, PromptFragment, Ready,
     Subscribe, ToolRegister, ToolSpec,
 };
 
@@ -88,29 +88,32 @@ impl Handshake {
         self
     }
 
-    /// Register a single tool without adding a prompt hook.
+    /// Register a single tool without adding a prompt fragment.
     pub fn register_tool(self, tool: ToolSpec) -> Self {
-        self.register_tool_with_prompt(tool, None)
+        self.register_tool_with_prompt_fragment(tool, None)
     }
 
-    /// Register a single tool and optionally attach a prompt hook fragment that
+    /// Register a single tool and optionally attach a prompt fragment that
     /// the harness includes whenever the tool is enabled for the current role.
-    pub fn register_tool_with_prompt(
+    pub fn register_tool_with_prompt_fragment(
         mut self,
         tool: ToolSpec,
-        prompt: Option<PromptHookPart>,
+        prompt_fragment: Option<PromptFragment>,
     ) -> Self {
-        self.tools.push(ToolRegister { tool, prompt });
+        self.tools.push(ToolRegister {
+            tool,
+            prompt_fragment,
+        });
         self
     }
 
-    /// Register multiple tools at once without adding prompt hooks.
+    /// Register multiple tools at once without adding prompt fragments.
     pub fn register_tools(mut self, tools: impl IntoIterator<Item = ToolSpec>) -> Self {
-        self.tools.extend(
-            tools
-                .into_iter()
-                .map(|tool| ToolRegister { tool, prompt: None }),
-        );
+        self.tools
+            .extend(tools.into_iter().map(|tool| ToolRegister {
+                tool,
+                prompt_fragment: None,
+            }));
         self
     }
 

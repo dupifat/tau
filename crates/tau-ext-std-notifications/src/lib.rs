@@ -17,8 +17,7 @@
 //!   consumers can use it as the desktop notification's source-app indicator
 //!   instead of us baking it into the title. The idle timer resets on every
 //!   user-originated `ui.prompt_submitted` / `provider.prompt_submitted`.
-//!   Tunable via the extension's `config.idle_seconds` field in
-//!   `harness.json5`.
+//!   Tunable via the extension's `config.idle_seconds` field in `harness.yaml`.
 //!
 //! The downstream tooling (typically a terminal multiplexer status
 //! line or a `user-notification.sh` consumer wired to a sound file)
@@ -63,7 +62,7 @@ pub const VALUE_AGENT_END: &str = "protoss-upgrade-complete";
 
 /// Default idle window before the extension nudges the user via a
 /// text notification, in seconds. Override via the `idle_seconds`
-/// field of the extension's `config` block in `harness.json5`.
+/// field of the extension's `config` block in `harness.yaml`.
 pub const DEFAULT_IDLE_SECONDS: u64 = 60;
 
 /// How long to wait for the agent to summarize the conversation

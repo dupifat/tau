@@ -53,7 +53,7 @@ to scope to LinkedIn-style profiles or company pages.
 
 ## Configuration
 
-Enabled by default. Disable in `harness.json5` if you'd rather not
+Enabled by default. Disable in `harness.yaml` if you'd rather not
 make outbound HTTP calls:
 
 ```json5

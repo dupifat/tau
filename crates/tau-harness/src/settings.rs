@@ -4,7 +4,7 @@
 //! [`CoreMode`], [`ExtensionConfig`]), the built-in extension list, and
 //! the resolver that merges the user's
 //! [`tau_config::settings::HarnessSettings`] on top of the built-ins. The wire
-//! schema for `harness.json5` lives in `tau-config`; this module turns that
+//! schema for `harness.yaml` lives in `tau-config`; this module turns that
 //! schema into something the harness can spawn.
 
 use std::collections::BTreeMap;
@@ -65,7 +65,7 @@ pub struct BuiltinExtension {
     pub role: Option<String>,
     pub enable: bool,
     /// Built-in default config for this extension, merged below any
-    /// user-provided `config: { … }` object in `harness.json5`.
+    /// user-provided `config: { … }` object in `harness.yaml`.
     pub config: serde_json::Value,
 }
 
@@ -243,7 +243,7 @@ fn merge_json(base: serde_json::Value, over: serde_json::Value) -> serde_json::V
     }
 }
 
-/// Load `harness.json5`, falling back to defaults on parse error and
+/// Load `harness.yaml`, falling back to defaults on parse error and
 /// writing a warning to stderr. Returns the parse error too so the
 /// harness can surface it in the UI without re-parsing the same file
 /// from scratch.
@@ -257,7 +257,7 @@ pub(crate) fn load_harness_settings_or_warn(
     match tau_config::settings::load_harness_settings_in(dirs) {
         Ok(settings) => (settings, None),
         Err(error) => {
-            eprintln!("tau: harness.json5 failed to parse — ignored.\n{error}");
+            eprintln!("tau: harness.yaml failed to parse — ignored.\n{error}");
             (HarnessSettings::built_in(), Some(error))
         }
     }
@@ -267,9 +267,9 @@ pub(crate) fn load_harness_settings_or_warn(
 ///
 /// Each entry's `command` is `[<current-exe>]` and `suffix` is
 /// `["ext", <name>]`, so a fresh `tau` install with no
-/// `harness.json5` runs the in-binary provider and tool extensions out
+/// `harness.yaml` runs the in-binary provider and tool extensions out
 /// of the box. Users can override individual fields
-/// (or set `enable: false`) per entry in `harness.json5` under
+/// (or set `enable: false`) per entry in `harness.yaml` under
 /// `extensions: { name: { … } }`.
 ///
 /// The list itself lives in `config/built-in.extensions.json5` and is
@@ -356,9 +356,9 @@ pub fn default_config() -> Config {
 pub(crate) fn resolve_config(
     _explicit_path: Option<&std::path::Path>,
 ) -> Result<Config, Box<dyn std::error::Error>> {
-    // Extensions live in `harness.json5` under `extensions: { ... }`.
+    // Extensions live in `harness.yaml` under `extensions: { ... }`.
     // We start from the built-in provider + tools defaults and apply the
-    // user's overrides on top; a malformed harness.json5 falls back
+    // user's overrides on top; a malformed harness.yaml falls back
     // to defaults rather than failing the whole startup, but we warn
     // on stderr so the user can see why their config is being
     // ignored.

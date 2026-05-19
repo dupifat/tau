@@ -1,7 +1,7 @@
 //! User configuration loading.
 //!
 //! Settings live in `~/.config/tau/` as JSON5: `cli.json5` and
-//! `harness.json5`, each with an optional `*.d/*.json5` drop-in directory
+//! `harness.yaml`, each with an optional `*.d/*.yaml` drop-in directory
 //! for layered overrides. See
 //! [`settings`] for the schema and loader entry points.
 //!

@@ -263,7 +263,7 @@ fn role_disabled_tool_is_reported_without_dispatch() {
     std::fs::create_dir_all(&config_dir).expect("mkdir config");
     std::fs::create_dir_all(&state_dir).expect("mkdir state");
     std::fs::write(
-        config_dir.join("harness.json5"),
+        config_dir.join("harness.yaml"),
         r#"{
             toolsProfiles: {
                 read_only: {

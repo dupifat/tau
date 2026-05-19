@@ -555,7 +555,7 @@ pub(crate) struct Harness {
     /// Available agent roles.
     pub(crate) available_roles: std::collections::HashMap<String, tau_config::settings::AgentRole>,
     /// Named role-selectable tool enablement overlays loaded from
-    /// `harness.json5`.
+    /// `harness.yaml`.
     pub(crate) tools_profiles: tau_config::settings::ToolsProfiles,
     /// Persisted role overrides loaded from state and changed at runtime.
     pub(crate) role_overrides: std::collections::HashMap<String, tau_config::settings::AgentRole>,
@@ -2200,7 +2200,7 @@ impl Harness {
                     .unwrap_or_else(|| "extension".to_owned());
                 self.emit_info_important(&format!(
                     "extension {name} rejected its config: {}\nthe value of \
-                     `extensions.{name}.config` in harness.json5 is being ignored",
+                     `extensions.{name}.config` in harness.yaml is being ignored",
                     err.message,
                 ));
             }
@@ -3217,7 +3217,7 @@ impl Harness {
 
     fn check_config_exists(&mut self) {
         if let Some(dir) = tau_config::settings::config_dir() {
-            if !dir.join("harness.json5").exists() {
+            if !dir.join("harness.yaml").exists() {
                 self.emit_info_important(
                     "no config found; run `tau init` to create sample config files",
                 );
@@ -3245,13 +3245,11 @@ impl Harness {
         harness_settings_error: Option<tau_config::settings::SettingsError>,
     ) {
         if let Some(error) = harness_settings_error {
-            self.emit_info_important(&format!(
-                "harness.json5 failed to parse — ignored.\n{error}"
-            ));
+            self.emit_info_important(&format!("harness.yaml failed to parse — ignored.\n{error}"));
         }
     }
 
-    /// Push the configured `config` value (from `harness.json5`) to
+    /// Push the configured `config` value (from `harness.yaml`) to
     /// the just-said-Hello extension. Sends point-to-point so it
     /// arrives even if the extension hasn't subscribed to the
     /// `lifecycle` category yet. In-process extensions don't carry

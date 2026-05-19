@@ -10,10 +10,10 @@ A role can set:
 - `verbosity`: `low`, `medium`, or `high`
 - `thinkingSummary`: `off`, `auto`, `concise`, or `detailed`
 - `serviceTier`: `fast` or `flex`
-- `toolsProfile`: name of a tool-availability profile from `harness.json5`
+- `toolsProfile`: name of a tool-availability profile from `harness.yaml`
 - `orchestrator`: when true, append a sorted list of available sub-task roles to this role's prompt
 
-Roles live in `harness.json5` under `roles`:
+Roles live in `harness.yaml` under `roles`:
 
 ```json5
 {
@@ -40,7 +40,7 @@ Roles live in `harness.json5` under `roles`:
 }
 ```
 
-Tool profiles themselves live in `harness.json5` under `toolsProfiles`:
+Tool profiles themselves live in `harness.yaml` under `toolsProfiles`:
 
 ```json5
 {
@@ -111,4 +111,4 @@ The `<role>` argument completes existing roles, but any new name can be used to 
 
 `/role <role> delete` removes the runtime/persisted role override. It does not edit `roles` from configuration; built-in or configured roles come back on the next harness start.
 
-Runtime changes for built-in or configured roles are persisted in `~/.local/state/tau/harness.json5` together with the last selected role. Role `description`, `prompt`, `orchestrator`, and `extraPrompt` remain config-only metadata, so changing them in `harness.json5` takes effect after restart without stale runtime state shadowing them.
+Runtime changes for built-in or configured roles are persisted in `~/.local/state/tau/harness.yaml` together with the last selected role. Role `description`, `prompt`, `orchestrator`, and `extraPrompt` remain config-only metadata, so changing them in `harness.yaml` takes effect after restart without stale runtime state shadowing them.

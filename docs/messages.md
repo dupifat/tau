@@ -47,12 +47,12 @@ extensions; client sends `ready` once setup is done.
 - **`configure`** — Sent point-to-point by the harness to one
   extension immediately after that extension's `hello`. Carries
   whatever the `config: { … }` value was for that extension in
-  `harness.json5`, or an empty map when no config was provided.
+  `harness.yaml`, or an empty map when no config was provided.
   In-process extensions don't carry a supervised config and receive
   the empty default.
 - **`config_error`** — An extension reports back that the `configure`
   payload it received was malformed or unusable; the harness surfaces
-  the message just like a `harness.json5` parse error so the user can
+  the message just like a `harness.yaml` parse error so the user can
   see why their per-extension config was rejected.
 
 ## Emission pipeline (client ↔ harness)

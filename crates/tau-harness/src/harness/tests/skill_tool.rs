@@ -1151,7 +1151,7 @@ fn gather_tool_definitions_respects_role_tools_profile() {
     std::fs::create_dir_all(&config_dir).expect("mkdir config");
     std::fs::create_dir_all(&state_dir).expect("mkdir state");
     std::fs::write(
-        config_dir.join("harness.json5"),
+        config_dir.join("harness.yaml"),
         r#"{
             toolsProfiles: {
                 read_only: {
@@ -1321,7 +1321,7 @@ fn aliased_tool_name_is_advertised_and_routed_via_internal_tool() {
     std::fs::create_dir_all(&config_dir).expect("mkdir config");
     std::fs::create_dir_all(&state_dir).expect("mkdir state");
     std::fs::write(
-        config_dir.join("harness.json5"),
+        config_dir.join("harness.yaml"),
         r#"{
             toolsProfiles: {
                 specialized: {

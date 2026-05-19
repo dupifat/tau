@@ -92,7 +92,7 @@ having to bake "tau" into the title text.
 ## Configuration
 
 The extension reads its config from the `extensions.<name>.config`
-field of `harness.json5`. All fields are optional; unknown fields
+field of `harness.yaml`. All fields are optional; unknown fields
 are rejected with a `lifecycle.config_error` so the harness can
 surface typos to the user.
 

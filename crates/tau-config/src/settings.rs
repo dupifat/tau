@@ -2,9 +2,9 @@
 //! overrides. Primary config files:
 //!
 //! - `cli.json5` — CLI display preferences
-//! - `harness.json5` — harness settings, extensions, and roles
+//! - `harness.yaml` — harness settings, extensions, and roles
 //!
-//! Uses the `config` crate for layered JSON5 loading.
+//! Uses the `config` crate for layered JSON5/YAML loading.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -18,21 +18,27 @@ use tau_proto::{ModelId, PromptContent, ToolName};
 // Built-in configs
 //
 // Tau ships its baseline `cli.json5`, `cli-bindings.json5` and
-// `harness.json5` as ordinary source files under
+// `harness.yaml` as ordinary source files under
 // `crates/tau-config/config/`, embedded via `include_str!`. They are
 // layered underneath the user's own files at load time (see
-// `load_json5_layered_with_builtin`) so user partial overrides keep
-// working without the public `CliSettings` / `HarnessSettings` types
-// having to carry a `#[serde(default)]` and a synthesized `Default`
-// impl that secretly parses a file.
+// `load_json5_layered_with_builtin` / `load_yaml_layered_with_builtin`) so user
+// partial overrides keep working without the public `CliSettings` /
+// `HarnessSettings` types having to carry a `#[serde(default)]` and a
+// synthesized `Default` impl that secretly parses a file.
 // ---------------------------------------------------------------------------
 
 const BUILT_IN_CLI_JSON5: &str = include_str!("../config/built-in.cli.json5");
 const BUILT_IN_CLI_BINDINGS_JSON5: &str = include_str!("../config/built-in.cli-bindings.json5");
-const BUILT_IN_HARNESS_JSON5: &str = include_str!("../config/built-in.harness.json5");
+const BUILT_IN_HARNESS_YAML: &str = include_str!("../config/built-in.harness.yaml");
 
 fn parse_built_in<T: for<'de> Deserialize<'de>>(name: &str, text: &str) -> T {
     json5::from_str(text).unwrap_or_else(|err| {
+        panic!("tau ships with malformed {name}: {err}\nthis is a bug; please report it")
+    })
+}
+
+fn parse_built_in_yaml<T: for<'de> Deserialize<'de>>(name: &str, text: &str) -> T {
+    serde_yaml_ng::from_str(text).unwrap_or_else(|err| {
         panic!("tau ships with malformed {name}: {err}\nthis is a bug; please report it")
     })
 }
@@ -277,7 +283,7 @@ impl CliState {
 
 /// One named tools-profile: tool name -> enabled/disabled override.
 pub type ToolsProfile = HashMap<ToolName, bool>;
-/// All named tools-profiles loaded from `harness.json5`.
+/// All named tools-profiles loaded from `harness.yaml`.
 pub type ToolsProfiles = HashMap<String, ToolsProfile>;
 
 fn default_tools_profiles() -> ToolsProfiles {
@@ -306,10 +312,10 @@ fn merge_default_tools_profiles(profiles: &mut ToolsProfiles) {
     }
 }
 
-/// Harness/agent settings loaded from `harness.json5`.
+/// Harness/agent settings loaded from `harness.yaml`.
 ///
 /// Has no `Default` impl on purpose — the baseline lives in
-/// `config/built-in.harness.json5` and is layered in by the loader.
+/// `config/built-in.harness.yaml` and is layered in by the loader.
 /// Use [`HarnessSettings::built_in`] when you need a fresh,
 /// populated value in a test or fallback.
 #[derive(Clone, Debug)]
@@ -323,18 +329,15 @@ pub struct HarnessSettings {
     /// user writes here overrides those per-field, or adds a new
     /// extension.
     ///
-    /// Example `harness.json5`:
-    /// ```json5
-    /// {
-    ///   extensions: {
-    ///     // disable the built-in shell extension
-    ///     "core-shell": { enable: false },
-    ///     // run the OpenAI provider through ssh on a remote box
-    ///     "provider-openai": { prefix: ["ssh", "user@host"] },
-    ///     // a third-party extension
-    ///     mything: { command: ["/usr/local/bin/my-tau-ext"] },
-    ///   },
-    /// }
+    /// Example `harness.yaml`:
+    /// ```yaml
+    /// extensions:
+    ///   core-shell:
+    ///     enable: false
+    ///   provider-openai:
+    ///     prefix: ["ssh", "user@host"]
+    ///   mything:
+    ///     command: ["/usr/local/bin/my-tau-ext"]
     /// ```
     pub extensions: HashMap<String, ExtensionEntry>,
 
@@ -385,9 +388,9 @@ impl<'de> Deserialize<'de> for HarnessSettings {
 
 impl HarnessSettings {
     /// The fully-populated baseline that ships with tau, parsed from
-    /// the embedded `built-in.harness.json5`.
+    /// the embedded `built-in.harness.yaml`.
     pub fn built_in() -> Self {
-        let mut s: Self = parse_built_in("built-in.harness.json5", BUILT_IN_HARNESS_JSON5);
+        let mut s: Self = parse_built_in_yaml("built-in.harness.yaml", BUILT_IN_HARNESS_YAML);
         merge_default_tools_profiles(&mut s.tools_profiles);
         s
     }
@@ -453,7 +456,7 @@ pub struct ExtensionEntry {
 // Harness roles
 // ---------------------------------------------------------------------------
 
-/// Partial harness role settings loaded from `harness.json5` and persisted
+/// Partial harness role settings loaded from `harness.yaml` and persisted
 /// to state. `None` means "use the selected model's fallback" for every field.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
@@ -594,9 +597,9 @@ pub fn sessions_dir() -> Option<PathBuf> {
 /// installations.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TauDirs {
-    /// Where to look for `cli.json5`, `harness.json5`, etc.
+    /// Where to look for `cli.json5`, `harness.yaml`, etc.
     pub config_dir: Option<PathBuf>,
-    /// Where to read/write runtime state like `harness.json5`.
+    /// Where to read/write runtime state like persisted role settings.
     pub state_dir: Option<PathBuf>,
 }
 
@@ -630,7 +633,7 @@ pub fn load_cli_settings_in(dirs: &TauDirs) -> Result<CliSettings, SettingsError
     Ok(settings)
 }
 
-/// Loads harness settings from `harness.json5` with `harness.d/*.json5`
+/// Loads harness settings from `harness.yaml` with `harness.d/*.yaml`
 /// overrides.
 pub fn load_harness_settings() -> Result<HarnessSettings, SettingsError> {
     load_harness_settings_in(&TauDirs::default())
@@ -638,8 +641,8 @@ pub fn load_harness_settings() -> Result<HarnessSettings, SettingsError> {
 
 /// Like [`load_harness_settings`] but reads from an explicit directory layout.
 pub fn load_harness_settings_in(dirs: &TauDirs) -> Result<HarnessSettings, SettingsError> {
-    let mut settings: HarnessSettings = load_json5_layered_with_builtin(
-        BUILT_IN_HARNESS_JSON5,
+    let mut settings: HarnessSettings = load_yaml_layered_with_builtin(
+        BUILT_IN_HARNESS_YAML,
         dirs.config_dir.as_deref(),
         "harness",
     )?;
@@ -682,6 +685,55 @@ fn load_json5_layered_with_builtin<T: for<'de> Deserialize<'de>>(
                 builder = builder.add_source(
                     config::File::from(path)
                         .format(config::FileFormat::Json5)
+                        .required(true),
+                );
+            }
+        }
+    }
+
+    builder
+        .build()?
+        .try_deserialize()
+        .map_err(SettingsError::from)
+}
+
+/// Stacks an embedded built-in YAML string underneath the user's files.
+/// `T` therefore doesn't need a `Default` impl — the built-in layer always
+/// supplies every required field.
+fn load_yaml_layered_with_builtin<T: for<'de> Deserialize<'de>>(
+    built_in_text: &'static str,
+    dir: Option<&Path>,
+    name: &str,
+) -> Result<T, SettingsError> {
+    let mut builder = config::Config::builder()
+        .add_source(config::File::from_str(built_in_text, config::FileFormat::Yaml).required(true));
+
+    if let Some(dir) = dir {
+        let base_path = dir.join(format!("{name}.yaml"));
+        if base_path.exists() {
+            builder = builder.add_source(
+                config::File::from(base_path)
+                    .format(config::FileFormat::Yaml)
+                    .required(true),
+            );
+        }
+
+        let drop_dir = dir.join(format!("{name}.d"));
+        if drop_dir.is_dir() {
+            let mut paths: Vec<PathBuf> = std::fs::read_dir(&drop_dir)
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    p.extension()
+                        .is_some_and(|ext| ext == "yaml" || ext == "yml")
+                })
+                .collect();
+            paths.sort();
+            for path in paths {
+                builder = builder.add_source(
+                    config::File::from(path)
+                        .format(config::FileFormat::Yaml)
                         .required(true),
                 );
             }

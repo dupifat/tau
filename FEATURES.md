@@ -17,7 +17,7 @@ anything else that speaks the protocol, or write a new one in any language.
 
 The default `tau` binary bundles all first-party components and dispatches via
 hidden `tau ext <name>` subcommands; you can replace any of them by editing
-`harness.json5`.
+`harness.yaml`.
 
 ### Persisted event log
 
@@ -54,13 +54,11 @@ See [`docs/interceptors.md`](docs/interceptors.md) and
 Because extensions are stdio child processes, running one on another machine
 is a matter of prefixing its argv with an `ssh` invocation:
 
-```json5
-// harness.json5
-extensions: {
-  "core-shell": {
-    prefix: ["ssh", "user@host"],
-  },
-},
+```yaml
+# harness.yaml
+extensions:
+  core-shell:
+    prefix: ["ssh", "user@host"]
 ```
 
 The harness prepends `prefix` to the resolved command. Anything that gives you
@@ -88,26 +86,24 @@ backends thread through to the provider request:
   toggles Codex's `fast` tier. Backends serialize Codex's exact
   OpenAI wire values: `priority` for Fast and `flex` for Flex.
 
-Defaults are normally selected through agent roles in `harness.json5`:
+Defaults are normally selected through agent roles in `harness.yaml`:
 
-```json5
-roles: {
-  smart: {
-    description: "Balanced coding assistant",
-    model: "chatgpt/gpt-5.5",
-    effort: "medium",
-    toolsProfile: "full",
-  },
-  deep: { effort: "xhigh", thinkingSummary: "detailed" },
-  rush: { effort: "low", serviceTier: "fast" },
-  foreman: { orchestrator: true },
-},
+```yaml
+roles:
+  smart:
+    description: Balanced coding assistant
+    model: chatgpt/gpt-5.5
+    effort: medium
+    toolsProfile: full
+  deep: { effort: xhigh, thinkingSummary: detailed }
+  rush: { effort: low, serviceTier: fast }
+  foreman: { orchestrator: true }
 ```
 
 Roles can include a `description` shown after the model/knob summary in
 `/role ...` completions. Roles can also select a named `toolsProfile`, and
 orchestrator roles append an available sub-task role list to their prompt.
-Profiles live in `harness.json5` under `toolsProfiles` and map tool names to booleans,
+Profiles live in `harness.yaml` under `toolsProfiles` and map tool names to booleans,
 overriding each tool's extension-declared `enabled_by_default` hint. Tau ships
 a built-in `gpt` profile that enables `apply_patch` while disabling direct
 file/search tools (`edit`, `write`, `read`, `grep`, `find`, and `ls`).
@@ -150,7 +146,7 @@ with `tau policy-show`.
 
 Every built-in extension is a regular extension under
 `crates/tau-ext-*/`. Each is configured under `extensions.<name>` in
-`harness.json5` and can be disabled with `enable: false`, swapped via
+`harness.yaml` and can be disabled with `enable: false`, swapped via
 `command:` / `prefix:`, or given free-form `config:` payload that arrives at
 startup as a `LifecycleConfigure` message.
 
@@ -199,7 +195,7 @@ working directory, plus `$HOME/.agents*/skills` and
 machine- or user-specific instructions and skills that should usually be added
 to `.gitignore` instead of checked in.
 
-Role prompts are composable too: each `harness.json5` role may set `prompt` to
+Role prompts are composable too: each `harness.yaml` role may set `prompt` to
 replace the role's built-in prompt, if any, and `extraPrompt` to append local
 instructions after the role prompt. Roles with `orchestrator: true` then get a
 sorted `Available sub-task roles` section appended after the effective role
@@ -259,7 +255,7 @@ tool) is shown in the parent UI alongside the delegate's task name and role.
 
 Proxies a single Exa-backed search tool, advertised to models as
 `web_search`, to Exa's hosted `web_search_exa` MCP endpoint. Disable in
-`harness.json5` when not needed; supply an API key via config.
+`harness.yaml` when not needed; supply an API key via config.
 
 
 ## CLI / UI

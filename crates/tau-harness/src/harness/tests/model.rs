@@ -381,7 +381,7 @@ fn selected_role_params_are_clamped_by_provider_metadata() {
 }
 
 /// Persisted role overrides are the live selection, but the baseline shown for
-/// "reset to role" must come from `harness.json5`, not from state.
+/// "reset to role" must come from `harness.yaml`, not from state.
 #[test]
 fn role_baseline_ignores_persisted_role_overrides() {
     let td = TempDir::new().expect("tempdir");
@@ -395,7 +395,7 @@ fn role_baseline_ignores_persisted_role_overrides() {
     };
 
     std::fs::write(
-        config_dir.join("harness.json5"),
+        config_dir.join("harness.yaml"),
         r#"{
             roles: {
                 smart: { model: "openai/gpt-4.1", effort: "high", verbosity: "medium" },
@@ -404,7 +404,7 @@ fn role_baseline_ignores_persisted_role_overrides() {
     )
     .expect("write harness config");
     std::fs::write(
-        state_dir.join("harness.json5"),
+        state_dir.join("harness.yaml"),
         r#"{
             "role_overrides": {
                 "smart": { "model": "openai/gpt-4.1", "effort": "low", "verbosity": "high" }
@@ -440,7 +440,7 @@ fn role_baseline_ignores_persisted_role_overrides() {
 }
 
 /// Persisted runtime role overrides must never carry prompt text or role
-/// descriptions. Config-only metadata must come from `harness.json5` so changes
+/// descriptions. Config-only metadata must come from `harness.yaml` so changes
 /// are reflected after a restart instead of being shadowed by stale state.
 #[test]
 fn persisted_role_overrides_do_not_shadow_configured_role_metadata() {
@@ -455,7 +455,7 @@ fn persisted_role_overrides_do_not_shadow_configured_role_metadata() {
     };
 
     std::fs::write(
-        config_dir.join("harness.json5"),
+        config_dir.join("harness.yaml"),
         r#"{
             roles: {
                 smart: {
@@ -469,7 +469,7 @@ fn persisted_role_overrides_do_not_shadow_configured_role_metadata() {
     )
     .expect("write harness config");
     std::fs::write(
-        state_dir.join("harness.json5"),
+        state_dir.join("harness.yaml"),
         r#"{
             "last_selected_role": "smart",
             "role_overrides": {
@@ -511,7 +511,7 @@ fn persisted_role_overrides_do_not_shadow_configured_role_metadata() {
     assert!(runtime_override.extra_prompt.is_none());
 
     save_role_overrides(&dirs, &selected_role, &roles);
-    let saved = std::fs::read_to_string(state_dir.join("harness.json5")).expect("read state");
+    let saved = std::fs::read_to_string(state_dir.join("harness.yaml")).expect("read state");
     assert!(
         !saved.contains("description"),
         "saved state must strip description: {saved}"
@@ -589,7 +589,7 @@ fn load_roles_falls_back_to_smart_role_while_models_are_provider_owned() {
     };
 
     std::fs::write(
-        config_dir.join("harness.json5"),
+        config_dir.join("harness.yaml"),
         r#"{
             roles: {
                 smart: { model: "local/smart" },
@@ -599,7 +599,7 @@ fn load_roles_falls_back_to_smart_role_while_models_are_provider_owned() {
     )
     .expect("write harness config");
     std::fs::write(
-        state_dir.join("harness.json5"),
+        state_dir.join("harness.yaml"),
         r#"{
             "last_selected_role": "default",
             "role_overrides": {
@@ -642,7 +642,7 @@ fn role_missing_fields_use_model_defaults() {
     };
 
     std::fs::write(
-        config_dir.join("harness.json5"),
+        config_dir.join("harness.yaml"),
         r#"{
             roles: {
                 smart: { model: "local/smart", effort: "high" },
@@ -652,7 +652,7 @@ fn role_missing_fields_use_model_defaults() {
     )
     .expect("write harness config");
     std::fs::write(
-        state_dir.join("harness.json5"),
+        state_dir.join("harness.yaml"),
         r#"{
             "last_selected_role": "plain"
         }"#,
@@ -723,11 +723,11 @@ fn role_without_verbosity_picks_low_when_supported() {
     );
 }
 
-/// A malformed `harness.json5` must surface in the UI as an `Important`
+/// A malformed `harness.yaml` must surface in the UI as an `Important`
 /// `HarnessInfo`. Without this, the only symptom of a borked file is that
 /// user-configured extensions or roles vanish.
 #[test]
-fn borked_harness_json5_emits_important_info() {
+fn borked_harness_yaml_emits_important_info() {
     let td = TempDir::new().expect("tempdir");
     let config_dir = td.path().join("config");
     let state_dir = td.path().join("state");
@@ -739,14 +739,14 @@ fn borked_harness_json5_emits_important_info() {
     };
 
     std::fs::write(
-        config_dir.join("harness.json5"),
+        config_dir.join("harness.yaml"),
         "{ extensions: { foo: { command: [ \"echo\" ",
     )
     .expect("write borked harness");
 
     let h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
-    let message = find_important_info(&h, "harness.json5")
-        .expect("expected Important HarnessInfo about harness.json5");
+    let message = find_important_info(&h, "harness.yaml")
+        .expect("expected Important HarnessInfo about harness.yaml");
     assert!(
         message.contains("failed to parse"),
         "message should explain what happened, got: {message}"
@@ -918,7 +918,7 @@ fn selected_params_restore_each_field_from_role_override() {
     };
 
     std::fs::write(
-        config_dir.join("harness.json5"),
+        config_dir.join("harness.yaml"),
         r#"{
             roles: {
                 smart: { model: "openai/gpt-5" },
@@ -927,7 +927,7 @@ fn selected_params_restore_each_field_from_role_override() {
     )
     .expect("write harness config");
     std::fs::write(
-        state_dir.join("harness.json5"),
+        state_dir.join("harness.yaml"),
         r#"{
             "role_overrides": {
                 "smart": {

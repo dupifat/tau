@@ -98,7 +98,7 @@ fn harness_settings_user_override_wins_over_built_in() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     std::fs::write(
-        dir.join("harness.json5"),
+        dir.join("harness.yaml"),
         r#"{
                 session_retention_days: 7,
             }"#,
@@ -132,7 +132,7 @@ fn harness_settings_load_tools_profiles() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     std::fs::write(
-        dir.join("harness.json5"),
+        dir.join("harness.yaml"),
         r#"{
                 toolsProfiles: {
                     gpt: {
@@ -180,11 +180,11 @@ fn cli_settings_drop_in_layers_on_top_of_base() {
 #[test]
 fn harness_roles_merge_with_built_ins() {
     // Roles are harness-owned now. This keeps the old merge behavior while
-    // locking the source of truth to harness.json5 instead of a model registry.
+    // locking the source of truth to harness.yaml instead of a model registry.
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     std::fs::write(
-        dir.join("harness.json5"),
+        dir.join("harness.yaml"),
         r#"{
             roles: {
                 smart: { model: "openai/gpt-5.5", toolsProfile: "full" },
@@ -259,7 +259,7 @@ fn harness_foreman_partial_override_keeps_built_in_prompt_and_orchestrator_flag(
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     std::fs::write(
-        dir.join("harness.json5"),
+        dir.join("harness.yaml"),
         r#"{
             roles: {
                 foreman: { model: "openai/gpt-5.5" },
@@ -290,7 +290,7 @@ fn harness_foreman_prompt_override_replaces_built_in_prompt() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     std::fs::write(
-        dir.join("harness.json5"),
+        dir.join("harness.yaml"),
         r#"{
             roles: {
                 foreman: { prompt: "Custom foreman prompt." },
@@ -310,12 +310,12 @@ fn harness_foreman_prompt_override_replaces_built_in_prompt() {
 
 #[test]
 fn harness_role_prompt_fields_parse_as_plain_strings() {
-    // Role prompt customization must keep harness.json5 ergonomic: users write
+    // Role prompt customization must keep harness.yaml ergonomic: users write
     // prompt text directly instead of nested newtype objects.
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     std::fs::write(
-        dir.join("harness.json5"),
+        dir.join("harness.yaml"),
         r#"{
             roles: {
                 custom: {
@@ -341,7 +341,7 @@ fn harness_role_prompt_fields_parse_as_plain_strings() {
 
 #[test]
 fn harness_built_in_roles_load_from_json_with_foreman_prompt() {
-    // Built-in role defaults live in built-in.harness.json5. Foreman has a
+    // Built-in role defaults live in built-in.harness.yaml. Foreman has a
     // visible built-in prompt there; the individual-contributor roles do not.
     let s = HarnessSettings::built_in();
     assert!(s.roles["smart"].prompt.is_none());
@@ -368,7 +368,7 @@ fn harness_default_roles_alias_still_loads() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     std::fs::write(
-        dir.join("harness.json5"),
+        dir.join("harness.yaml"),
         r#"{
             defaultRoles: {
                 custom: { effort: "medium", toolsProfile: "read_only" },
@@ -427,8 +427,8 @@ fn sample_configs_deserialize() {
     )
     .expect("write cli");
     std::fs::write(
-        dir.join("harness.json5"),
-        include_str!("../../../../config/harness.json5"),
+        dir.join("harness.yaml"),
+        include_str!("../../../../config/harness.yaml"),
     )
     .expect("write harness");
 

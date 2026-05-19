@@ -182,13 +182,13 @@ fn resolve_extensions_user_extension_without_command_errors() {
 }
 
 #[test]
-fn resolve_extensions_loads_from_json5() {
-    // End-to-end: a realistic harness.json5 round-trips through the
+fn resolve_extensions_loads_from_yaml() {
+    // End-to-end: a realistic harness.yaml round-trips through the
     // tau-config loader into the tau-harness resolver.
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     std::fs::write(
-        dir.join("harness.json5"),
+        dir.join("harness.yaml"),
         r#"{
                 extensions: {
                     "core-shell": { enable: false },
@@ -226,9 +226,9 @@ fn resolve_extensions_loads_from_json5() {
     );
 }
 
-/// Force a parse of `config/built-in.extensions.json5` so a
+/// Force a parse of `config/built-in.extensions.yaml` so a
 /// malformed file blows up here rather than at user startup.
 #[test]
-fn built_in_extensions_json5_parses() {
+fn built_in_extensions_yaml_parses() {
     let _ = built_in_extension_defs();
 }

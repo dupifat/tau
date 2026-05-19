@@ -447,12 +447,13 @@ fn opaque_item_from_json(item: &str) -> Option<OpaqueProviderItem> {
 }
 
 /// Maps `Effort` to the wire string the OpenAI Responses /
-/// Chat Completions APIs accept. `Off` returns `None` so the field is
-/// omitted from the request entirely.
+/// Chat Completions APIs accept. `Off` maps to OpenAI's explicit
+/// `none` so provider defaults (for example GPT-5.5's `medium`) do
+/// not silently apply.
 pub fn effort_wire(level: tau_proto::Effort) -> Option<&'static str> {
     use tau_proto::Effort::*;
     match level {
-        Off => None,
+        Off => Some("none"),
         Minimal => Some("minimal"),
         Low => Some("low"),
         Medium => Some("medium"),

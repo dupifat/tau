@@ -78,6 +78,32 @@ fn build_request_includes_service_tier_when_configured() {
     assert_eq!(body["service_tier"], "priority");
 }
 
+/// Tau's `off` is a user-visible request for no reasoning, not "use the
+/// provider default". GPT-5.5 defaults omitted effort to `medium`, so the
+/// OpenAI provider must send the explicit `none` value when effort is off.
+#[test]
+fn build_request_maps_off_effort_to_openai_none() {
+    let config = ResponsesConfig {
+        supports_reasoning_effort: true,
+        ..chain_test_config()
+    };
+    let request = PromptPayload {
+        system_prompt: "system",
+        context_items: &[],
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        previous_response: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &tau_proto::SessionId::new("test-session"),
+        share_user_cache_key: false,
+    };
+
+    let body = serde_json::to_value(build_request(&config, &request)).expect("serialize");
+
+    assert_eq!(body["reasoning"]["effort"], "none");
+}
+
 #[test]
 fn build_request_omits_prompt_cache_key_without_seed() {
     let config = ResponsesConfig {

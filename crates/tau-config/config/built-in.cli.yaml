@@ -3,4 +3,9 @@ show_logo: true
 bar_cursor: true
 prompt_symbol: "▶"
 submitted_prompt_symbol: "▌"
+show_diff: false
+show_thinking: true
+show_token_stats: false
+redraw_counter: false
+show_tools: full
 bind: {}

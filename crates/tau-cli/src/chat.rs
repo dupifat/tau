@@ -469,9 +469,11 @@ pub(crate) fn run_chat(
     let renderer_handle = handle.clone();
     let renderer_rx = event_rx;
     // Pre-build the renderer so we can grab its shared state handles
-    // for the input loop. Load the persisted `cli.json` state so
-    // `/set show-*` toggles survive restarts.
-    let cli_state = tau_config::settings::CliState::load(&dirs);
+    // for the input loop. CLI config provides the default UI toggle values;
+    // persisted `cli.json` state overrides them so `/set show-*` changes
+    // survive restarts.
+    let cli_state =
+        tau_config::settings::CliState::load_with_default(&dirs, settings.default_state());
     let renderer = EventRenderer::new_with_state(
         renderer_handle,
         completion_data.clone(),

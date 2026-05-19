@@ -9,6 +9,16 @@ fn dirs_with_config(dir: &std::path::Path) -> TauDirs {
     }
 }
 
+fn dirs_with_config_and_state(
+    config_dir: &std::path::Path,
+    state_dir: &std::path::Path,
+) -> TauDirs {
+    TauDirs {
+        config_dir: Some(config_dir.to_path_buf()),
+        state_dir: Some(state_dir.to_path_buf()),
+    }
+}
+
 #[test]
 fn zero_session_retention_disables_cleanup() {
     let settings = HarnessSettings {
@@ -23,10 +33,16 @@ fn zero_session_retention_disables_cleanup() {
 fn cli_settings_user_scalar_override_wins_over_built_in() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
-    std::fs::write(dir.join("cli.yaml"), r#"{ greeting: false }"#).expect("write");
+    std::fs::write(
+        dir.join("cli.yaml"),
+        r#"{ greeting: false, show_thinking: false, show_tools: "compact" }"#,
+    )
+    .expect("write");
 
     let s = load_cli_settings_in(&dirs_with_config(dir)).expect("load");
     assert!(!s.greeting);
+    assert!(!s.show_thinking);
+    assert_eq!(s.show_tools, ShowTools::Compact);
 }
 
 #[test]
@@ -91,6 +107,52 @@ fn cli_state_loads_legacy_show_tools_on_as_full() {
 
     let loaded = CliState::load(&dirs);
     assert_eq!(loaded.show_tools, crate::settings::ShowTools::Full);
+}
+
+#[test]
+fn cli_state_defaults_to_cli_config_when_state_file_is_missing() {
+    let td = TempDir::new().expect("tempdir");
+    let config_dir = td.path().join("config");
+    let state_dir = td.path().join("state");
+    std::fs::create_dir_all(&config_dir).expect("mkdir config");
+    std::fs::create_dir_all(&state_dir).expect("mkdir state");
+    std::fs::write(
+        config_dir.join("cli.yaml"),
+        r#"{ show_diff: true, show_thinking: false, show_token_stats: true, redraw_counter: true, show_tools: "compact" }"#,
+    )
+    .expect("write");
+
+    let dirs = dirs_with_config_and_state(&config_dir, &state_dir);
+    let settings = load_cli_settings_in(&dirs).expect("load settings");
+    let state = CliState::load_with_default(&dirs, settings.default_state());
+
+    assert_eq!(
+        state,
+        CliState {
+            show_diff: true,
+            show_thinking: false,
+            show_token_stats: true,
+            redraw_counter: true,
+            show_tools: ShowTools::Compact,
+        }
+    );
+}
+
+#[test]
+fn cli_state_file_overrides_cli_config_defaults() {
+    let td = TempDir::new().expect("tempdir");
+    let config_dir = td.path().join("config");
+    let state_dir = td.path().join("state");
+    std::fs::create_dir_all(&config_dir).expect("mkdir config");
+    std::fs::create_dir_all(&state_dir).expect("mkdir state");
+    std::fs::write(config_dir.join("cli.yaml"), r#"{ show_thinking: false }"#).expect("write");
+    std::fs::write(state_dir.join("cli.json"), r#"{"show_thinking":true}"#).expect("write");
+
+    let dirs = dirs_with_config_and_state(&config_dir, &state_dir);
+    let settings = load_cli_settings_in(&dirs).expect("load settings");
+    let state = CliState::load_with_default(&dirs, settings.default_state());
+
+    assert!(state.show_thinking);
 }
 
 #[test]

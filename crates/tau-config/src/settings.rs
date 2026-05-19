@@ -60,6 +60,18 @@ pub struct CliSettings {
     pub prompt_symbol: String,
     /// Symbol shown before submitted prompts in the transcript.
     pub submitted_prompt_symbol: String,
+    /// Whether to render file-mutation diffs in their full expanded
+    /// form by default.
+    pub show_diff: bool,
+    /// Whether to render the agent's reasoning summary by default.
+    pub show_thinking: bool,
+    /// Whether to render per-turn token usage stats by default.
+    pub show_token_stats: bool,
+    /// Whether to render the full-redraw debug counter in the model
+    /// status bar by default.
+    pub redraw_counter: bool,
+    /// How tool calls are rendered in the transcript by default.
+    pub show_tools: ShowTools,
     /// Key bindings for prompt-local shell actions. Defaults to an
     /// empty map at the serde layer; the loader merges
     /// `built-in.cli-bindings.yaml` underneath the user's bindings.
@@ -74,6 +86,18 @@ impl CliSettings {
         let mut s: Self = parse_built_in_yaml("built-in.cli.yaml", BUILT_IN_CLI_YAML);
         s.bind = default_cli_bindings();
         s
+    }
+
+    /// Return the default runtime UI state derived from static CLI config.
+    #[must_use]
+    pub fn default_state(&self) -> CliState {
+        CliState {
+            show_diff: self.show_diff,
+            show_thinking: self.show_thinking,
+            show_token_stats: self.show_token_stats,
+            redraw_counter: self.redraw_counter,
+            show_tools: self.show_tools,
+        }
     }
 }
 
@@ -237,14 +261,22 @@ impl CliState {
     /// Load the persisted CLI state. Missing / malformed file → defaults.
     #[must_use]
     pub fn load(dirs: &TauDirs) -> Self {
+        Self::load_with_default(dirs, Self::default())
+    }
+
+    /// Load the persisted CLI state, using `default` when state is missing or
+    /// malformed. This lets static CLI config provide the initial values while
+    /// `/set` changes still persist as runtime state.
+    #[must_use]
+    pub fn load_with_default(dirs: &TauDirs, default: Self) -> Self {
         let Some(dir) = dirs.state_dir.as_ref() else {
-            return Self::default();
+            return default;
         };
         let path = dir.join("cli.json");
         let Ok(text) = std::fs::read_to_string(&path) else {
-            return Self::default();
+            return default;
         };
-        serde_json::from_str(&text).unwrap_or_default()
+        serde_json::from_str(&text).unwrap_or(default)
     }
 
     /// Persist current state. Best-effort: a slash command never fails

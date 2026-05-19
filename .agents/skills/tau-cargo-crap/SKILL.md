@@ -1,0 +1,58 @@
+---
+name: tau-cargo-crap
+description: "Diagnose and fix Tau cargo-crap/selfci failures. Read before changing the cargo-crap CI gate or refactoring flagged code."
+user-invocable: true
+advertise: true
+---
+
+# Tau cargo-crap
+
+Use this when `selfci check` fails in the `coverage/cargo-crap` step or when working down CRAP-score hotspots.
+
+## Fast diagnosis
+
+```bash
+nix build -L .#ci.testsCcov
+nix build -L .#ci.crap
+nix build -L .#ci.crapReport -o result-crap-report
+sed -n '1,120p' result-crap-report/cargo-crap.md
+```
+
+`.#ci.crapReport` is the non-blocking inventory report. `.#ci.crap` is the blocking gate used by selfci.
+
+## Current CI model
+
+- The blocking gate uses LCOV from the Nix coverage derivation, not a local `cargo llvm-cov` run.
+- `.#ci.crap` compares against `nix/cargo-crap-baseline.json` with `--fail-regression`.
+- The gate is intentionally focused on severe entries with `--threshold 1000 --min 1000`.
+- Do not “fix” failures by raising the threshold. Refactor/decompose flagged code or add meaningful coverage.
+
+## Baseline regeneration
+
+Only regenerate the baseline after an intentional CRAP-score change is accepted on the mainline:
+
+```bash
+nix build -L .#ci.crapBaseline -o result-crap-baseline
+cp result-crap-baseline/cargo-crap-baseline.json nix/cargo-crap-baseline.json
+jj file track nix/cargo-crap-baseline.json
+```
+
+Generate the baseline through Nix. The LCOV paths in this setup are `/build/source/...`; a local `cargo-crap --lcov result/lcov.info` run from `/home/...` will not match coverage paths and will produce bad coverage data.
+
+## cargo-crap pitfalls
+
+- `--fail-regression` fails only existing functions whose CRAP score increased; new high-CRAP functions are reported but do not fail by that flag alone.
+- `--min` filters the current entries before baseline comparison. This is why the CI gate is a severe-regression gate, not a full-repo no-regression gate.
+- cargo-crap v0.2.0 baseline matching keys on `(file, function)` and ignores line numbers. Without `--min 1000`, Tau currently gets false regressions for duplicate same-file function names like multiple `From` impls.
+
+## Refactoring flagged code
+
+For code fixes, preserve behavior first and split dispatch-heavy functions into named helpers with focused tests. A zero-coverage function needs roughly cyclomatic complexity `< 32` to get below a CRAP score of 1000, so extraction without tests may just move the hotspot. Prefer adding regression tests for behavior you touch.
+
+## Validation
+
+```bash
+treefmt
+nix build -L .#ci.crap
+selfci check
+```

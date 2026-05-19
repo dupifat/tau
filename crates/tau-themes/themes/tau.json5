@@ -76,7 +76,7 @@
 
     // -- Banner --
     "banner.accent":        { fg: "yellow" },
-    "banner.logo":          { fg: "yellow" },
+    "banner.logo":          { fg: "white" },
     "banner.name":          { fg: "white", bold: true },
     "banner.version":       { fg: "dark_grey" },
     "banner.build":         { fg: "dark_grey" },

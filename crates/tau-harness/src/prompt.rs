@@ -527,7 +527,9 @@ mod tests {
                     { "extension_name": "tau-ext-shell", "value": "/tmp/a&b<quoted>" }
                 ]
             }),
-            RolePromptTemplateContext { role_name: "smart" },
+            RolePromptTemplateContext {
+                role_name: "engineer",
+            },
         );
 
         assert!(prompt.contains("Current working directory: /tmp/a&b<quoted>"));
@@ -549,12 +551,12 @@ mod tests {
         let skills = std::collections::HashMap::new();
         let fragments = vec![
             tau_proto::PromptFragment::new(
-                "smart.instructions",
+                "engineer.instructions",
                 tau_proto::PromptPriority::new(100),
                 "ROLE {{role.name}} is working in {{#each session_context.cwd}}{{#if @first}}{{value}}{{/if}}{{/each}}.",
             ),
             tau_proto::PromptFragment::new(
-                "smart.extra",
+                "engineer.extra",
                 tau_proto::PromptPriority::new(101),
                 "EXTRA {{role.name}}",
             ),
@@ -569,11 +571,13 @@ mod tests {
                     { "extension_name": "tau-ext-shell", "value": "/tmp/work" }
                 ]
             }),
-            RolePromptTemplateContext { role_name: "smart" },
+            RolePromptTemplateContext {
+                role_name: "engineer",
+            },
         );
 
-        assert!(prompt.contains("ROLE smart is working in /tmp/work"));
-        assert!(prompt.contains("EXTRA smart"));
+        assert!(prompt.contains("ROLE engineer is working in /tmp/work"));
+        assert!(prompt.contains("EXTRA engineer"));
         assert!(!prompt.contains("{{role.name}}"));
     }
 
@@ -596,7 +600,7 @@ mod tests {
             ),
         ]);
         let fragments = vec![tau_proto::PromptFragment::new(
-            "role.smart.skills",
+            "role.engineer.skills",
             tau_proto::PromptPriority::new(100),
             r#"Skills:
 {{#each (sort skills by="name")}}* {{name}} - {{description}}
@@ -608,7 +612,9 @@ mod tests {
             &skills,
             &fragments,
             serde_json::json!({}),
-            RolePromptTemplateContext { role_name: "smart" },
+            RolePromptTemplateContext {
+                role_name: "engineer",
+            },
         );
 
         let alpha = prompt.find("* alpha - first skill").expect("alpha skill");
@@ -648,7 +654,9 @@ mod tests {
             &skills,
             &[],
             serde_json::json!({}),
-            RolePromptTemplateContext { role_name: "smart" },
+            RolePromptTemplateContext {
+                role_name: "engineer",
+            },
         );
 
         // Missing variables keep this role template from rendering in strict
@@ -676,7 +684,7 @@ alpha middle zeta "
     fn build_system_prompt_exposes_session_context_to_handlebars() {
         let skills = std::collections::HashMap::new();
         let fragments = vec![tau_proto::PromptFragment::new(
-            "role.smart.context",
+            "role.engineer.context",
             tau_proto::PromptPriority::new(100),
             "{{#each session_context.skills}}{{extension_name}}={{value.count}}{{/each}}",
         )];
@@ -690,7 +698,9 @@ alpha middle zeta "
                     { "extension_name": "core-skills", "value": { "count": 2 } }
                 ]
             }),
-            RolePromptTemplateContext { role_name: "smart" },
+            RolePromptTemplateContext {
+                role_name: "engineer",
+            },
         );
 
         assert!(prompt.contains("core-skills=2"));
@@ -716,7 +726,9 @@ alpha middle zeta "
                     { "extension_name": "demo-ext", "value": { "answer": 42 } }
                 ]
             }),
-            RolePromptTemplateContext { role_name: "smart" },
+            RolePromptTemplateContext {
+                role_name: "engineer",
+            },
         );
 
         assert!(prompt.contains("fragment=demo-ext:42"));
@@ -732,7 +744,9 @@ alpha middle zeta "
             tau_proto::PromptFragment::new("b", tau_proto::PromptPriority::new(20), "B"),
         ];
         let data = system_prompt_template_data(
-            RolePromptTemplateContext { role_name: "smart" },
+            RolePromptTemplateContext {
+                role_name: "engineer",
+            },
             &std::collections::HashMap::new(),
             &fragments,
             serde_json::json!({}),
@@ -772,7 +786,9 @@ alpha middle zeta "
                     { "extension_name": "tau-ext-shell", "value": "/tmp/work" }
                 ]
             }),
-            RolePromptTemplateContext { role_name: "smart" },
+            RolePromptTemplateContext {
+                role_name: "engineer",
+            },
         );
 
         assert!(prompt.contains("You are Tau, an autonomous coding agent."));
@@ -819,12 +835,12 @@ alpha middle zeta "
                 "TOOL LATE",
             ),
             tau_proto::PromptFragment::new(
-                "smart.instructions",
+                "engineer.instructions",
                 tau_proto::PromptPriority::new(100),
                 "ROLE PROMPT",
             ),
             tau_proto::PromptFragment::new(
-                "smart.extra",
+                "engineer.extra",
                 tau_proto::PromptPriority::new(101),
                 "ROLE EXTRA",
             ),
@@ -839,7 +855,9 @@ alpha middle zeta "
                     { "extension_name": "tau-ext-shell", "value": "/tmp/work" }
                 ]
             }),
-            RolePromptTemplateContext { role_name: "smart" },
+            RolePromptTemplateContext {
+                role_name: "engineer",
+            },
         );
 
         let base = prompt

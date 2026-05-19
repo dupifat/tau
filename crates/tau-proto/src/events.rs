@@ -679,7 +679,7 @@ pub enum Effort {
     High = 4,
     /// `rename_all = "snake_case"` would emit `x_high` for this
     /// variant, but the canonical wire string is `xhigh` everywhere
-    /// else (`/role smart effort xhigh`, OpenAI's `reasoning_effort` field,
+    /// else (`/role engineer effort xhigh`, OpenAI's `reasoning_effort` field,
     /// `Display`, `FromStr`, `effort_wire`). Pin it explicitly so
     /// serde-driven config paths (`default_efforts`,
     /// `reasoningEfforts`) agree with the rest.
@@ -1714,7 +1714,7 @@ pub struct ExtAgentQuery {
     /// conversation's history as a `User` message before dispatch.
     pub instruction: String,
     /// Requested agent role for this side conversation. Tool-backed
-    /// delegate queries default to `smart`; non-tool queries without a role
+    /// delegate queries default to `engineer`; non-tool queries without a role
     /// keep using the currently selected interactive role.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,

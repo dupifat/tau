@@ -393,7 +393,7 @@ pub(crate) fn run_chat(
             "/detach",
             "Leave the UI but keep the harness running for later reattach",
         ),
-        SlashCommand::new("/model", "Switch agent role (e.g. /model smart)"),
+        SlashCommand::new("/model", "Switch agent role (e.g. /model engineer)"),
         SlashCommand::new("/role", "Switch, create, edit, or delete an agent role"),
         SlashCommand::new(
             "/new",
@@ -519,7 +519,7 @@ pub(crate) fn run_chat(
 
     // Terminal input loop — shares the writer with the debounce
     // thread via `WriterHandle`. Theme clone is for printing local
-    // validation errors (e.g. `/role smart effort foo`) through the same
+    // validation errors (e.g. `/role engineer effort foo`) through the same
     // TermHandle as remote events, so they don't garble the TUI like
     // `eprintln!` would.
     let mut active_session_id = session_id.to_owned();
@@ -1097,7 +1097,7 @@ fn terminal_input_loop(
     ctx: TerminalInputLoopCtx,
 ) -> Result<InputLoopExit, CliError> {
     // Cloned `TermHandle` so we can `print_output` for client-side
-    // validation errors (`/role smart effort foo`, `/tree blah`) from this
+    // validation errors (`/role engineer effort foo`, `/tree blah`) from this
     // thread without borrowing `term` while the loop also holds
     // `&mut term` for `get_next_event`.
     let output = LocalTerminalOutput::new(term.handle().clone(), ctx.theme.clone());

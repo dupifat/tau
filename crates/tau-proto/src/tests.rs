@@ -218,13 +218,13 @@ fn representative_events() -> Vec<Event> {
             ],
         }),
         Event::UiRoleUpdate(UiRoleUpdate {
-            role: "smart".to_owned(),
+            role: "engineer".to_owned(),
             action: UiRoleUpdateAction::SetVerbosity {
                 verbosity: Some(Verbosity::High),
             },
         }),
         Event::UiRoleUpdate(UiRoleUpdate {
-            role: "smart".to_owned(),
+            role: "engineer".to_owned(),
             action: UiRoleUpdateAction::SetThinkingSummary {
                 thinking_summary: Some(ThinkingSummary::Auto),
             },
@@ -281,7 +281,7 @@ fn representative_messages() -> Vec<Message> {
         }),
         Message::GetRenderedSystemPrompt(GetRenderedSystemPrompt {
             request_id: "render-prompt-1".to_owned(),
-            role: "smart".to_owned(),
+            role: "engineer".to_owned(),
         }),
         Message::RenderedSystemPromptResult(Box::new(RenderedSystemPromptResult {
             request_id: "render-prompt-1".to_owned(),
@@ -436,11 +436,11 @@ fn harness_role_info_role_description_is_optional_and_round_trips() {
     // Older harnesses only send `description`; the new free-form role metadata
     // must default cleanly while preserving the technical description field.
     let legacy: HarnessRoleInfo = serde_json::from_value(serde_json::json!({
-        "name": "smart",
+        "name": "engineer",
         "description": "model=openai/gpt-4.1, effort=high"
     }))
     .expect("decode legacy role info");
-    assert_eq!(legacy.name, "smart");
+    assert_eq!(legacy.name, "engineer");
     assert_eq!(legacy.role_description, None);
 
     let with_description = HarnessRoleInfo {

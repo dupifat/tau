@@ -4,25 +4,21 @@
 # overrides.
 
 # Optional role defaults. Built-in roles are merged underneath this map:
-# smart = state-of-the-art default, deep = xhigh/detailed,
-# rush = fast/cheap low reasoning, foreman = orchestration/delegation.
+# engineer = state-of-the-art default, assistant = fast/lightweight,
+# manager = orchestration/delegation.
 # Role `description` is shown in `/role ...` completions. Role `prompt`
 # replaces the built-in role prompt, if any; `extraPrompt`
 # appends additional role-specific instructions after it. Set
 # `orchestrator: true` to append available sub-task roles to the role prompt.
 # roles:
-#   smart:
+#   engineer:
 #     description: Balanced coding assistant.
 #     model: chatgpt/gpt-5.5
 #     toolsProfile: read_only
 #     prompt: You are a careful coding assistant.
 #     extraPrompt: Prefer small, reviewable changes.
-#   deep:
-#     effort: xhigh
-#     thinkingSummary: detailed
-#   rush:
-#     effort: low
-#     thinkingSummary: off
+#   assistant:
+#     effort: off
 
 # Optional named per-role tool overlays. Each entry maps tool name to
 # enabled/disabled and overrides that tool's `enabled_by_default` hint.

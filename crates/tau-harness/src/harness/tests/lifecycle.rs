@@ -266,7 +266,7 @@ fn role_disabled_tool_is_reported_without_dispatch() {
         config_dir.join("harness.yaml"),
         r#"{
             roles: {
-                smart: { disableTools: ["shell"] },
+                engineer: { disableTools: ["shell"] },
             },
         }"#,
     )
@@ -278,7 +278,7 @@ fn role_disabled_tool_is_reported_without_dispatch() {
     let mut h = echo_harness_with_dirs("s1", state_dir, dirs).expect("start");
 
     h.selected_model = Some("test/model".into());
-    h.selected_role = "smart".to_owned();
+    h.selected_role = "engineer".to_owned();
     let cid = h.default_conversation_id.clone();
     seed_agent_thinking(&mut h, &cid, "sp-x");
     h.prompt_conversations.insert("sp-x".into(), cid.clone());

@@ -18,22 +18,17 @@ Roles live in `harness.yaml` under `roles`:
 ```json5
 {
   roles: {
-    smart: {
+    engineer: {
       description: "Balanced coding assistant",
       model: "chatgpt/gpt-5.3-codex",
       effort: "medium",
       toolsProfile: "full",
     },
-    deep: {
-      effort: "xhigh",
-      thinkingSummary: "detailed",
-    },
-    rush: {
-      effort: "low",
-      thinkingSummary: "off",
+    assistant: {
+      effort: "off",
       serviceTier: "fast",
     },
-    foreman: {
+    manager: {
       orchestrator: true,
     },
   },
@@ -72,7 +67,7 @@ tool's extension-provided `enabled_by_default` setting. Tau includes a built-in
 
 Missing fields use provider-published fallback knobs for the role's resolved model.
 
-Tau ships built-in `smart`, `deep`, `rush`, and `foreman` roles. `smart` is the startup fallback role; `deep` asks for higher reasoning with detailed thinking summaries; `rush` asks for lower reasoning; `foreman` is an orchestration role with a built-in delegation prompt. For non-trivial work, the built-in `foreman` prompt tells the model to use `delegate` by default for research/scoping, implementation, and review/validation sub-agent steps, then synthesize the results; tiny or purely clerical work may still be handled directly.
+Tau ships built-in `assistant`, `engineer`, and `manager` roles. `engineer` is the startup fallback role and uses the same state-of-the-art individual-contributor defaults as the previous `smart` role. `assistant` is fast and lightweight with effort off. `manager` is an orchestration role with a built-in delegation prompt. For non-trivial work, the built-in `manager` prompt tells the model to use `delegate` by default for research/scoping, implementation, and review/validation sub-agent steps, then synthesize the results; tiny or purely clerical work may still be handled directly.
 
 When a role has `orchestrator: true`, Tau appends an `Available sub-task roles` section listing every role whose model is currently available so an orchestrator can pick an explicit role for delegated work. This list is appended even when the role's `prompt` is overridden.
 
@@ -95,10 +90,10 @@ Use:
 Examples:
 
 ```text
-/role smart model chatgpt/gpt-5.3-codex
-/role deep effort xhigh
-/role rush service-tier fast
-/role smart tools-profile read_only
+/role engineer model chatgpt/gpt-5.3-codex
+/role assistant service-tier fast
+/role manager effort xhigh
+/role engineer tools-profile read_only
 /role temporary model anthropic/claude-sonnet-4-20250514
 /role temporary delete
 ```

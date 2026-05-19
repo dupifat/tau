@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use tau_config::settings::{AgentRole, HarnessSettings};
 use tau_proto::{ModelId, ModelParams, ProviderModelInfo};
 
-const BASE_AGENT_ROLE: &str = "smart";
+const BASE_AGENT_ROLE: &str = "engineer";
 
 /// Load configured roles, persisted role overrides, and the selected role.
 /// Runtime model availability is provider-owned and is therefore not loaded
@@ -38,8 +38,8 @@ pub(crate) fn load_roles(
 }
 
 /// Return the role Tau should select when persisted state does not name a
-/// usable role. Built-ins make `smart` available in normal operation; the final
-/// fallback keeps tests and malformed intermediate states deterministic.
+/// usable role. Built-ins make `engineer` available in normal operation; the
+/// final fallback keeps tests and malformed intermediate states deterministic.
 pub(crate) fn fallback_role(roles: &HashMap<String, AgentRole>) -> String {
     roles
         .contains_key(BASE_AGENT_ROLE)

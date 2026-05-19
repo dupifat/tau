@@ -1154,7 +1154,7 @@ fn gather_tool_definitions_respects_role_tool_lists() {
         config_dir.join("harness.yaml"),
         r#"{
             roles: {
-                smart: { disableTools: ["shell", "skill"] },
+                engineer: { disableTools: ["shell", "skill"] },
             },
         }"#,
     )
@@ -1318,7 +1318,7 @@ fn aliased_tool_name_is_advertised_and_routed_via_internal_tool() {
         config_dir.join("harness.yaml"),
         r#"{
             roles: {
-                smart: { tools: ["test_gpt_shell"], disableTools: ["shell"] },
+                engineer: { tools: ["test_gpt_shell"], disableTools: ["shell"] },
             },
         }"#,
     )

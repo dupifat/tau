@@ -27,22 +27,22 @@ use super::tool_render::{
 fn dev_print_prompt_parses_role_flag() {
     // `tau dev print-prompt -r <role>` is a diagnostic command, so keep
     // the clap shape pinned even though it is hidden from normal help.
-    let cli = super::cli::Cli::parse_from(["tau", "dev", "print-prompt", "-r", "smart"]);
+    let cli = super::cli::Cli::parse_from(["tau", "dev", "print-prompt", "-r", "engineer"]);
     match cli.command {
         Some(super::cli::Command::Dev {
             command: super::cli::DevCommand::PrintPrompt { role },
-        }) => assert_eq!(role, "smart"),
+        }) => assert_eq!(role, "engineer"),
         _ => panic!("unexpected command"),
     }
 }
 
 #[test]
 fn local_slash_commands_are_identified_for_history_rendering() {
-    assert!(is_local_slash_command("/model smart"));
+    assert!(is_local_slash_command("/model engineer"));
     assert!(is_local_slash_command("/set show-tools compact"));
     assert!(is_local_slash_command("/quit"));
     assert!(!is_local_slash_command("/unknown please answer"));
-    assert!(!is_local_slash_command("hello /model smart"));
+    assert!(!is_local_slash_command("hello /model engineer"));
 }
 
 /// Writer that feeds bytes into a vt100::Parser. Bytes are
@@ -359,11 +359,11 @@ fn new_session_preserves_role_status() {
     renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
         model: Some("test/model".into()),
         context_window: Some(100_000),
-        role: "smart".into(),
+        role: "engineer".into(),
         baseline_params: None,
     }));
     sync(&handle);
-    assert!(vt.screen_contains(80, "+smart"));
+    assert!(vt.screen_contains(80, "+engineer"));
 
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "s2".into(),
@@ -371,7 +371,7 @@ fn new_session_preserves_role_status() {
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "+smart"));
+    assert!(vt.screen_contains(80, "+engineer"));
     assert!(vt.screen_contains(80, "@s2"));
     assert!(!vt.screen_contains(80, "no role selected"));
 }
@@ -388,7 +388,7 @@ fn model_status_uses_symbol_prefixed_chips() {
     renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
         model: Some("test/model".into()),
         context_window: Some(200_000),
-        role: "smart".into(),
+        role: "engineer".into(),
         baseline_params: None,
     }));
     renderer.handle(&Event::HarnessVerbosityChanged(HarnessVerbosityChanged {
@@ -410,9 +410,9 @@ fn model_status_uses_symbol_prefixed_chips() {
     let status_row = vt
         .screen_text(80)
         .into_iter()
-        .find(|row| row.contains("+smart"))
+        .find(|row| row.contains("+engineer"))
         .expect("status row");
-    assert!(status_row.starts_with("+smart ~high @tau-agent-test"));
+    assert!(status_row.starts_with("+engineer ~high @tau-agent-test"));
     assert!(status_row.ends_with("#12k/200k"));
     assert!(!vt.screen_contains(80, "=test/model"));
     assert!(!vt.screen_contains(80, "v=high"));
@@ -431,7 +431,7 @@ fn model_status_shows_main_tool_usage_before_context() {
     renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
         model: Some("test/model".into()),
         context_window: Some(200_000),
-        role: "smart".into(),
+        role: "engineer".into(),
         baseline_params: None,
     }));
     renderer.handle(&Event::HarnessContextUsageChanged(
@@ -468,7 +468,7 @@ fn model_status_shows_main_tool_usage_before_context() {
     let status_row = vt
         .screen_text(100)
         .into_iter()
-        .find(|row| row.contains("+smart"))
+        .find(|row| row.contains("+engineer"))
         .expect("status row after side response");
     assert!(status_row.ends_with("#12k/200k"));
     assert!(!status_row.contains('%'));
@@ -494,7 +494,7 @@ fn model_status_shows_main_tool_usage_before_context() {
     let status_row = vt
         .screen_text(100)
         .into_iter()
-        .find(|row| row.contains("+smart"))
+        .find(|row| row.contains("+engineer"))
         .expect("status row after main response");
     assert!(status_row.ends_with("%0/2 #12k/200k"));
 
@@ -521,7 +521,7 @@ fn model_status_shows_main_tool_usage_before_context() {
     let status_row = vt
         .screen_text(100)
         .into_iter()
-        .find(|row| row.contains("+smart"))
+        .find(|row| row.contains("+engineer"))
         .expect("status row after tool result");
     assert!(status_row.ends_with("%1/2 #12k/200k"));
 
@@ -540,7 +540,7 @@ fn model_status_shows_main_tool_usage_before_context() {
     let status_row = vt
         .screen_text(100)
         .into_iter()
-        .find(|row| row.contains("+smart"))
+        .find(|row| row.contains("+engineer"))
         .expect("status row after side prompt starts");
     assert!(status_row.ends_with("#12k/200k"));
     assert!(!status_row.contains('%'));
@@ -557,7 +557,7 @@ fn model_status_shows_main_tool_usage_before_context() {
     let status_row = vt
         .screen_text(100)
         .into_iter()
-        .find(|row| row.contains("+smart"))
+        .find(|row| row.contains("+engineer"))
         .expect("status row after second main tool result during side turn");
     assert!(status_row.ends_with("#12k/200k"));
     assert!(!status_row.contains('%'));
@@ -573,7 +573,7 @@ fn model_status_shows_main_tool_usage_before_context() {
     let status_row = vt
         .screen_text(100)
         .into_iter()
-        .find(|row| row.contains("+smart"))
+        .find(|row| row.contains("+engineer"))
         .expect("status row after main prompt resumes");
     assert!(status_row.ends_with("%2/2 #12k/200k"));
 
@@ -587,7 +587,7 @@ fn model_status_shows_main_tool_usage_before_context() {
     let status_row = vt
         .screen_text(100)
         .into_iter()
-        .find(|row| row.contains("+smart"))
+        .find(|row| row.contains("+engineer"))
         .expect("status row after final main response");
     assert!(status_row.ends_with("#12k/200k"));
     assert!(!status_row.contains('%'));
@@ -604,7 +604,7 @@ fn model_status_shows_main_tool_usage_before_context() {
     let status_row = vt
         .screen_text(100)
         .into_iter()
-        .find(|row| row.contains("+smart"))
+        .find(|row| row.contains("+engineer"))
         .expect("status row after next prompt");
     assert!(status_row.ends_with("#12k/200k"));
     assert!(!status_row.contains('%'));
@@ -687,7 +687,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
     renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
         model: Some("test/model".into()),
         context_window: Some(200_000),
-        role: "smart".into(),
+        role: "engineer".into(),
         baseline_params: None,
     }));
     renderer.handle(&Event::HarnessContextUsageChanged(
@@ -733,7 +733,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
     let status_row = vt
         .screen_text(100)
         .into_iter()
-        .find(|row| row.contains("+smart"))
+        .find(|row| row.contains("+engineer"))
         .expect("status row during delegate side conversation");
     assert!(status_row.ends_with("%0/1 #12k/200k"));
 
@@ -754,7 +754,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
     let status_row = vt
         .screen_text(100)
         .into_iter()
-        .find(|row| row.contains("+smart"))
+        .find(|row| row.contains("+engineer"))
         .expect("status row after delegate cancellation");
     assert!(status_row.ends_with("#12k/200k"));
     assert!(!status_row.contains('%'));
@@ -771,7 +771,7 @@ fn role_default_knobs_are_hidden_and_overrides_follow_role() {
 
     renderer.handle(&Event::HarnessRolesAvailable(HarnessRolesAvailable {
         roles: vec![HarnessRoleInfo {
-            name: "smart".to_owned(),
+            name: "engineer".to_owned(),
             description: "model=test/model, effort=medium, verbosity=medium, thinking-summary=auto"
                 .to_owned(),
             role_description: None,
@@ -780,7 +780,7 @@ fn role_default_knobs_are_hidden_and_overrides_follow_role() {
     renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
         model: Some("test/model".into()),
         context_window: Some(200_000),
-        role: "smart".into(),
+        role: "engineer".into(),
         baseline_params: Some(tau_proto::ModelParams {
             effort: tau_proto::Effort::Medium,
             verbosity: Verbosity::Medium,
@@ -800,7 +800,7 @@ fn role_default_knobs_are_hidden_and_overrides_follow_role() {
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "+smart @s2"));
+    assert!(vt.screen_contains(80, "+engineer @s2"));
     assert!(!vt.screen_contains(80, "^medium"));
     assert!(!vt.screen_contains(80, "~medium"));
 
@@ -809,7 +809,7 @@ fn role_default_knobs_are_hidden_and_overrides_follow_role() {
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "+smart ~high @s2"));
+    assert!(vt.screen_contains(80, "+engineer ~high @s2"));
 }
 
 #[test]
@@ -826,7 +826,7 @@ fn role_state_overrides_are_compared_to_role_baseline() {
     // baseline from HarnessRoleSelected instead.
     renderer.handle(&Event::HarnessRolesAvailable(HarnessRolesAvailable {
         roles: vec![HarnessRoleInfo {
-            name: "smart".to_owned(),
+            name: "engineer".to_owned(),
             description: "model=test/model, effort=low, verbosity=high, thinking-summary=auto"
                 .to_owned(),
             role_description: None,
@@ -835,7 +835,7 @@ fn role_state_overrides_are_compared_to_role_baseline() {
     renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
         model: Some("test/model".into()),
         context_window: None,
-        role: "smart".into(),
+        role: "engineer".into(),
         baseline_params: Some(tau_proto::ModelParams {
             effort: tau_proto::Effort::Medium,
             verbosity: Verbosity::Medium,
@@ -858,7 +858,7 @@ fn role_state_overrides_are_compared_to_role_baseline() {
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "+smart ^low ~high !off @s3"));
+    assert!(vt.screen_contains(80, "+engineer ^low ~high !off @s3"));
 }
 
 #[test]
@@ -1637,7 +1637,7 @@ fn delegate_progress_redraws_live_parent_block() {
     renderer.handle(&Event::ToolDelegateProgress(tau_proto::DelegateProgress {
         call_id: "call-delegate".into(),
         task_name: "probe".into(),
-        role: Some("smart".to_owned()),
+        role: Some("engineer".to_owned()),
         ctx_percent: None,
         ctx_input_tokens: None,
         ctx_window: None,
@@ -1658,7 +1658,7 @@ fn delegate_progress_redraws_live_parent_block() {
     }));
 
     assert!(
-        eventually_screen_contains(&vt, 100, "+smart"),
+        eventually_screen_contains(&vt, 100, "+engineer"),
         "delegate progress should repaint the role suffix without an explicit test redraw: {:?}",
         vt.screen_text(100)
     );
@@ -2216,11 +2216,11 @@ fn render_delegate_display_pulls_legacy_role_args_into_first_suffix() {
     use tau_proto::{ProgressCounter, ProgressUnit, ToolDisplay, ToolDisplayStatus};
 
     // Regression: delegate roles used to be embedded in `ToolDisplay.args`,
-    // which made `+smart` inherit the tool-args color. Rendering delegates now
+    // which made `+engineer` inherit the tool-args color. Rendering delegates now
     // strips that legacy suffix and reinserts the role as the first dedicated
     // suffix so later progress chips keep their existing order.
     let display = ToolDisplay {
-        args: "[probe] +smart".into(),
+        args: "[probe] +engineer".into(),
         progress_counters: vec![ProgressCounter {
             label: Some("tools".into()),
             unit: ProgressUnit::Count,
@@ -2232,13 +2232,13 @@ fn render_delegate_display_pulls_legacy_role_args_into_first_suffix() {
         ..Default::default()
     };
 
-    let rendered = render_delegate_display(&display, Some("smart"));
+    let rendered = render_delegate_display(&display, Some("engineer"));
     assert_eq!(rendered.tool_name, "delegate");
     assert_eq!(rendered.args, "[probe]");
     let texts: Vec<&str> = rendered.suffixes.iter().map(|s| s.text.as_str()).collect();
     assert_eq!(
         texts,
-        vec!["+smart", "%3/3", tau_proto::PROGRESS_INDICATOR_TEXT]
+        vec!["+engineer", "%3/3", tau_proto::PROGRESS_INDICATOR_TEXT]
     );
     assert!(matches!(rendered.suffixes[0].status, ToolStatus::Role));
 }
@@ -2257,13 +2257,13 @@ fn render_delegate_display_styles_role_like_status_bar() {
         ..Default::default()
     };
 
-    let rendered = render_delegate_display(&display, Some("smart"));
+    let rendered = render_delegate_display(&display, Some("engineer"));
     let block = render_tool_block(&theme, &rendered);
     let role_span = block
         .content
         .spans()
         .iter()
-        .find(|span| span.text == "+smart")
+        .find(|span| span.text == "+engineer")
         .expect("delegate role span");
 
     assert_eq!(

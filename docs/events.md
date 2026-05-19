@@ -155,7 +155,7 @@ harness/agent.
   dispatch a side prompt to the agent: instruction text, correlation
   `query_id`, optional requested `role`, optional tool-call attribution,
   and human-readable task name (used by the `delegate` tool). Tool-backed
-  delegate queries default to `smart` when `role` is absent; non-tool
+  delegate queries default to `engineer` when `role` is absent; non-tool
   queries without `role` use the currently selected interactive role.
 - **`extension.agent_query_result`** — The agent's final answer to an
   earlier `extension.agent_query`, routed point-to-point back to the

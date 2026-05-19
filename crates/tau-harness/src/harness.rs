@@ -3456,7 +3456,7 @@ impl Harness {
         let requested = if let Some(role) = query.role.as_deref() {
             role
         } else if query.tool_call_id.is_some() {
-            "smart"
+            "engineer"
         } else {
             self.selected_role.as_str()
         };
@@ -3468,7 +3468,7 @@ impl Harness {
         }
 
         let reason = if query.role.is_none() && query.tool_call_id.is_some() {
-            "delegate requires default role `smart`, but it is not available"
+            "delegate requires default role `engineer`, but it is not available"
         } else if self.available_roles.contains_key(requested) {
             "requested role is not backed by an available model"
         } else {

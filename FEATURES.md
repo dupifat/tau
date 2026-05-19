@@ -90,14 +90,13 @@ Defaults are normally selected through agent roles in `harness.yaml`:
 
 ```yaml
 roles:
-  smart:
+  engineer:
     description: Balanced coding assistant
     model: chatgpt/gpt-5.5
     effort: medium
     toolsProfile: full
-  deep: { effort: xhigh, thinkingSummary: detailed }
-  rush: { effort: low, serviceTier: fast }
-  foreman: { orchestrator: true }
+  assistant: { effort: off, serviceTier: fast }
+  manager: { orchestrator: true }
 ```
 
 Roles can include a `description` shown after the model/knob summary in
@@ -112,8 +111,8 @@ file/search tools (`edit`, `write`, `read`, `grep`, `find`, and `ls`).
 settings, with built-in/configured role overrides persisted. See
 [`docs/agent-roles.md`](docs/agent-roles.md).
 
-In the UI: `/role smart effort medium`, `/role smart verbosity low`,
-`/role smart thinking-summary concise`. Tab cycles to the next agent role.
+In the UI: `/role engineer effort medium`, `/role engineer verbosity low`,
+`/role engineer thinking-summary concise`. Tab cycles to the next agent role.
 Model knobs are slash-command-only today. Asking for an unsupported
 level (e.g. `effort xhigh` on a mini model, `verbosity high` on a provider
 that doesn't support it) degrades and surfaces a `HarnessInfo` notice rather
@@ -240,7 +239,7 @@ agent for a one-sentence idle summary before notifying.
 
 Exposes a `delegate` tool that spawns a side conversation and returns its result
 to the caller. Unless the tool call supplies `role`, delegated sub-agents default
-to the `smart` role. When `role` is supplied, or when the default `smart` role is
+to the `engineer` role. When `role` is supplied, or when the default `engineer` role is
 used, the sub-agent runs with that role's resolved model, model parameters,
 system prompt, and tool profile/filtering. The sub-agent starts with a *fresh*
 context — only the parent's `prompt`, the selected role's system prompt, and the

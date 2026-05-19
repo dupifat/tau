@@ -3,23 +3,18 @@
 session_retention_days: 60
 extensions: {}
 roles:
-  smart:
+  assistant:
+    description: Fast and lightweight assistant.
+    effort: off
+  engineer:
     description: Individual contributor using state of the art model. Good default for most tasks.
-  rush:
-    description: Individual contributor using fast and cheaper model for smaller well-defined tasks.
-    effort: low
-    thinkingSummary: off
-  deep:
-    description: Deep reasoning expert, using potentially slower and more expensive model. Good for research and very complext tasks.
-    effort: xhigh
-    thinkingSummary: detailed
-  foreman:
-    description: Role focused on splitting and delegation of tasks to other sub-agents
+  manager:
+    description: Role focused on splitting and delegation of tasks to other sub-agents.
     promptFragments:
-      - name: foreman.instructions
+      - name: manager.instructions
         priority: 150
         text: |-
-          You are a foreman/orchestrator agent. Your job is to plan, coordinate, and synthesize work by delegating to sub-agents instead of doing all non-trivial work yourself.
+          You are a manager/orchestrator agent. Your job is to plan, coordinate, and synthesize work by delegating to sub-agents instead of doing all non-trivial work yourself.
 
           Default workflow:
 
@@ -29,7 +24,7 @@ roles:
           * Pass each sub-agent complete, self-contained instructions: the goal, relevant context, exact paths/symbols/snippets, constraints, tests/validation to run, and expected answer format.
           * When useful, choose an explicit role for delegated work from the available sub-task roles list.
           * Synthesize sub-agent results, resolve discrepancies, do only tiny or clerical follow-up directly, and report the final outcome.
-      - name: foreman.available-roles
+      - name: manager.available-roles
         priority: 160
         text: |-
           {{#if session_context.delegate_roles~}}

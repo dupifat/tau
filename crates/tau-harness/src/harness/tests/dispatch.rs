@@ -4071,7 +4071,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
     let initial = pop_delegate_progress(&sink, "delegate-call")
         .expect("initial DelegateProgress on side conv spawn");
     assert_eq!(initial.task_name, "look it up");
-    assert_eq!(initial.role.as_deref(), Some("smart"));
+    assert_eq!(initial.role.as_deref(), Some("engineer"));
     assert_eq!(initial.tools_in_flight, 0);
     assert_eq!(initial.tools_total, 0);
     assert_delegate_tools_counter(&initial, Some(0), Some(0));
@@ -4121,7 +4121,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
         .pop()
         .expect("at least one DelegateProgress after side response");
     assert_eq!(latest.task_name, "look it up");
-    assert_eq!(latest.role.as_deref(), Some("smart"));
+    assert_eq!(latest.role.as_deref(), Some("engineer"));
     assert_eq!(latest.tools_in_flight, 1, "websearch is in flight");
     assert_eq!(latest.tools_total, 1, "websearch counts toward total");
     assert_delegate_tools_counter(&latest, Some(0), Some(1));
@@ -4165,24 +4165,24 @@ fn delegate_explicit_role_uses_role_model_params_prompt_and_tools() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    let smart_model: tau_proto::ModelId = "test/smart".into();
+    let engineer_model: tau_proto::ModelId = "test/engineer".into();
     let worker_model: tau_proto::ModelId = "test/worker".into();
     set_available_provider_models(
         &mut h,
         [
-            provider_model_info(smart_model.clone(), 64_000),
+            provider_model_info(engineer_model.clone(), 64_000),
             provider_model_info(worker_model.clone(), 256_000),
         ],
     );
-    h.selected_role = "smart".to_owned();
-    h.selected_model = Some(smart_model.clone());
+    h.selected_role = "engineer".to_owned();
+    h.selected_model = Some(engineer_model.clone());
     h.available_roles = std::collections::HashMap::from([
         (
-            "smart".to_owned(),
+            "engineer".to_owned(),
             tau_config::settings::AgentRole {
-                model: Some(smart_model),
+                model: Some(engineer_model),
                 prompt_fragments: vec![tau_config::settings::RolePromptFragment {
-                    name: "smart.instructions".to_owned(),
+                    name: "engineer.instructions".to_owned(),
                     priority: tau_proto::PromptPriority::new(100),
                     text: tau_proto::PromptContent::new("SMART ROLE PROMPT"),
                 }],
@@ -4401,11 +4401,11 @@ fn delegate_invalid_or_unavailable_role_errors_with_sorted_available_roles() {
     h.shutdown().expect("shutdown");
 }
 
-/// Omitting `role` on the delegate tool means `smart`; if `smart` cannot
+/// Omitting `role` on the delegate tool means `engineer`; if `engineer` cannot
 /// resolve to an available model, the harness reports that compatibility
 /// default as the problem instead of silently falling back to another role.
 #[test]
-fn delegate_missing_default_smart_errors_when_smart_unavailable() {
+fn delegate_missing_default_engineer_errors_when_engineer_unavailable() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -4427,7 +4427,9 @@ fn delegate_missing_default_smart_errors_when_smart_unavailable() {
 
     let error = ext_agent_query_error(&delegate, "q-default").expect("query error");
     assert!(
-        error.contains("delegate requires default role `smart`, but it is not available: `smart`"),
+        error.contains(
+            "delegate requires default role `engineer`, but it is not available: `engineer`"
+        ),
         "got: {error}"
     );
     assert!(

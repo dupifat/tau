@@ -121,7 +121,7 @@ fn harness_settings_load_role_tool_lists() {
         dir.join("harness.yaml"),
         r#"{
             roles: {
-                smart: { tools: ["read", "grep"], disableTools: ["grep"] },
+                engineer: { tools: ["read", "grep"], disableTools: ["grep"] },
             },
         }"#,
     )
@@ -129,14 +129,14 @@ fn harness_settings_load_role_tool_lists() {
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
     assert_eq!(
-        s.roles["smart"].tools.as_ref().expect("tools"),
+        s.roles["engineer"].tools.as_ref().expect("tools"),
         &vec![
             tau_proto::ToolName::new("read"),
             tau_proto::ToolName::new("grep")
         ]
     );
     assert_eq!(
-        s.roles["smart"].disable_tools,
+        s.roles["engineer"].disable_tools,
         vec![tau_proto::ToolName::new("grep")]
     );
 }
@@ -167,19 +167,22 @@ fn harness_roles_merge_with_built_ins() {
         dir.join("harness.yaml"),
         r#"{
             roles: {
-                smart: { model: "openai/gpt-5.5", tools: ["read"] },
+                engineer: { model: "openai/gpt-5.5", tools: ["read"] },
                 custom: { description: "Custom local role", effort: "medium", disableTools: ["shell"] },
-                deep: { model: "openai/gpt-5.5" },
+                manager: { model: "openai/gpt-5.5" },
             },
         }"#,
     )
     .expect("write");
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    assert!(s.roles.contains_key("smart"));
-    assert!(s.roles.contains_key("deep"));
-    assert!(s.roles.contains_key("rush"));
-    assert!(s.roles.contains_key("foreman"));
+    assert!(s.roles.contains_key("engineer"));
+    assert!(s.roles.contains_key("manager"));
+    assert!(s.roles.contains_key("assistant"));
+    assert!(!s.roles.contains_key("smart"));
+    assert!(!s.roles.contains_key("deep"));
+    assert!(!s.roles.contains_key("rush"));
+    assert!(!s.roles.contains_key("foreman"));
     assert!(!s.roles.contains_key("default"));
     assert_eq!(
         s.roles["custom"].description.as_deref(),
@@ -191,7 +194,7 @@ fn harness_roles_merge_with_built_ins() {
         vec![tau_proto::ToolName::new("shell")]
     );
     assert_eq!(
-        s.roles["smart"]
+        s.roles["engineer"]
             .model
             .as_ref()
             .map(ToString::to_string)
@@ -199,34 +202,29 @@ fn harness_roles_merge_with_built_ins() {
         Some("openai/gpt-5.5")
     );
     assert_eq!(
-        s.roles["smart"].tools,
+        s.roles["engineer"].tools,
         Some(vec![tau_proto::ToolName::new("read")])
     );
 
-    let deep = &s.roles["deep"];
+    let assistant = &s.roles["assistant"];
     assert_eq!(
-        deep.description.as_deref(),
-        Some(
-            "Deep reasoning expert, using potentially slower and more expensive model. Good for research and very complext tasks."
-        )
+        assistant.description.as_deref(),
+        Some("Fast and lightweight assistant.")
     );
     assert_eq!(
-        deep.model.as_ref().map(ToString::to_string).as_deref(),
-        Some("openai/gpt-5.5")
+        assistant.model.as_ref().map(ToString::to_string).as_deref(),
+        None
     );
-    assert_eq!(deep.effort, Some(tau_proto::Effort::XHigh));
-    assert_eq!(deep.verbosity, None);
+    assert_eq!(assistant.effort, Some(tau_proto::Effort::Off));
+    assert_eq!(assistant.verbosity, None);
+    assert_eq!(assistant.thinking_summary, None);
+    let manager = &s.roles["manager"];
     assert_eq!(
-        deep.thinking_summary,
-        Some(tau_proto::ThinkingSummary::Detailed)
-    );
-    let foreman = &s.roles["foreman"];
-    assert_eq!(
-        foreman.description.as_deref(),
-        Some("Role focused on splitting and delegation of tasks to other sub-agents")
+        manager.description.as_deref(),
+        Some("Role focused on splitting and delegation of tasks to other sub-agents.")
     );
     assert!(
-        foreman
+        manager
             .prompt_fragments
             .iter()
             .any(|fragment| fragment.text.as_str().contains("use the `delegate` tool"))
@@ -234,9 +232,9 @@ fn harness_roles_merge_with_built_ins() {
 }
 
 #[test]
-fn harness_foreman_partial_override_keeps_built_in_prompt_fragments() {
-    // Built-in foreman prompt fragments are stored in the built-in harness
-    // config, so a user can partially override foreman settings without
+fn harness_manager_partial_override_keeps_built_in_prompt_fragments() {
+    // Built-in manager prompt fragments are stored in the built-in harness
+    // config, so a user can partially override manager settings without
     // accidentally disabling delegation prompt behavior.
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
@@ -244,28 +242,28 @@ fn harness_foreman_partial_override_keeps_built_in_prompt_fragments() {
         dir.join("harness.yaml"),
         r#"{
             roles: {
-                foreman: { model: "openai/gpt-5.5" },
+                manager: { model: "openai/gpt-5.5" },
             },
         }"#,
     )
     .expect("write");
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    let foreman = &s.roles["foreman"];
-    assert!(foreman.prompt_fragments.iter().any(|fragment| {
+    let manager = &s.roles["manager"];
+    assert!(manager.prompt_fragments.iter().any(|fragment| {
         fragment
             .text
             .as_str()
             .contains("self-contained instructions")
     }));
     assert_eq!(
-        foreman.model.as_ref().map(ToString::to_string).as_deref(),
+        manager.model.as_ref().map(ToString::to_string).as_deref(),
         Some("openai/gpt-5.5")
     );
 }
 
 #[test]
-fn harness_foreman_prompt_override_replaces_built_in_prompt() {
+fn harness_manager_prompt_override_replaces_built_in_prompt() {
     // User-provided role prompt fragments replace the built-in role fragments.
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
@@ -273,20 +271,20 @@ fn harness_foreman_prompt_override_replaces_built_in_prompt() {
         dir.join("harness.yaml"),
         r#"{
             roles: {
-                foreman: { promptFragments: [{ name: "foreman.custom", priority: 100, text: "Custom foreman prompt." }] },
+                manager: { promptFragments: [{ name: "manager.custom", priority: 100, text: "Custom manager prompt." }] },
             },
         }"#,
     )
     .expect("write");
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    let foreman = &s.roles["foreman"];
+    let manager = &s.roles["manager"];
     assert_eq!(
-        foreman
+        manager
             .prompt_fragments
             .first()
             .map(|fragment| fragment.text.as_str()),
-        Some("Custom foreman prompt.")
+        Some("Custom manager prompt.")
     );
 }
 
@@ -328,21 +326,20 @@ fn harness_role_prompt_fragments_parse_as_plain_strings() {
 }
 
 #[test]
-fn harness_built_in_roles_load_from_json_with_foreman_prompt() {
-    // Built-in role defaults live in built-in.harness.yaml. Foreman has a
+fn harness_built_in_roles_load_from_json_with_manager_prompt() {
+    // Built-in role defaults live in built-in.harness.yaml. Manager has a
     // visible built-in prompt there; the individual-contributor roles do not.
     let s = HarnessSettings::built_in();
-    assert!(s.roles["smart"].prompt_fragments.is_empty());
-    assert!(s.roles["deep"].prompt_fragments.is_empty());
-    assert!(s.roles["rush"].prompt_fragments.is_empty());
-    let foreman = &s.roles["foreman"];
-    let prompt = foreman
+    assert!(s.roles["engineer"].prompt_fragments.is_empty());
+    assert!(s.roles["assistant"].prompt_fragments.is_empty());
+    let manager = &s.roles["manager"];
+    let prompt = manager
         .prompt_fragments
         .first()
-        .expect("foreman prompt fragment")
+        .expect("manager prompt fragment")
         .text
         .as_str();
-    assert!(prompt.contains("You are a foreman/orchestrator agent"));
+    assert!(prompt.contains("You are a manager/orchestrator agent"));
     assert!(prompt.contains("use the `delegate` tool"));
     assert!(prompt.contains("available sub-task roles list"));
 }
@@ -358,7 +355,7 @@ fn harness_default_roles_alias_still_loads() {
         r#"{
             defaultRoles: {
                 custom: { effort: "medium", tools: ["read"] },
-                foreman: { model: "openai/gpt-5.5" },
+                manager: { model: "openai/gpt-5.5" },
             },
         }"#,
     )
@@ -370,15 +367,15 @@ fn harness_default_roles_alias_still_loads() {
         s.roles["custom"].tools.as_ref().expect("tools"),
         &vec![tau_proto::ToolName::new("read")]
     );
-    let foreman = &s.roles["foreman"];
+    let manager = &s.roles["manager"];
     assert!(
-        foreman
+        manager
             .prompt_fragments
             .iter()
             .any(|fragment| fragment.text.as_str().contains("use the `delegate` tool"))
     );
     assert_eq!(
-        foreman.model.as_ref().map(ToString::to_string).as_deref(),
+        manager.model.as_ref().map(ToString::to_string).as_deref(),
         Some("openai/gpt-5.5")
     );
 }
@@ -391,10 +388,13 @@ fn missing_user_files_load_the_built_in_baseline() {
     let td = TempDir::new().expect("tempdir");
     let _cli = load_cli_settings_in(&dirs_with_config(td.path())).expect("cli");
     let harness = load_harness_settings_in(&dirs_with_config(td.path())).expect("harness");
-    assert!(harness.roles.contains_key("smart"));
-    assert!(harness.roles.contains_key("deep"));
-    assert!(harness.roles.contains_key("rush"));
-    assert!(harness.roles.contains_key("foreman"));
+    assert!(harness.roles.contains_key("engineer"));
+    assert!(harness.roles.contains_key("manager"));
+    assert!(harness.roles.contains_key("assistant"));
+    assert!(!harness.roles.contains_key("smart"));
+    assert!(!harness.roles.contains_key("deep"));
+    assert!(!harness.roles.contains_key("rush"));
+    assert!(!harness.roles.contains_key("foreman"));
 }
 
 #[test]

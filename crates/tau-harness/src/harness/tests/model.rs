@@ -74,7 +74,7 @@ fn role_infos_include_configured_role_description() {
     let model: ModelId = "openai/gpt-4.1".parse().expect("model id");
     let mut roles = std::collections::HashMap::new();
     roles.insert(
-        "smart".to_owned(),
+        "engineer".to_owned(),
         tau_config::settings::AgentRole {
             description: Some("Balanced coding helper".to_owned()),
             model: Some(model.clone()),
@@ -221,19 +221,19 @@ fn provider_models_snapshot_from_ui_client_is_ignored() {
 #[test]
 fn role_without_model_selects_highest_default_affinity() {
     let low: ModelId = "openai/aaa-cheap".parse().expect("model id");
-    let high: ModelId = "openai/zzz-smart".parse().expect("model id");
+    let high: ModelId = "openai/zzz-engineer".parse().expect("model id");
     let mut low_info = provider_model(low.clone(), 128_000);
     low_info.default_affinity = 10;
     let mut high_info = provider_model(high.clone(), 128_000);
     high_info.default_affinity = 100;
     let provider_models = provider_models([low_info, high_info]);
     let roles = std::collections::HashMap::from([(
-        "smart".to_owned(),
+        "engineer".to_owned(),
         tau_config::settings::AgentRole::default(),
     )]);
 
     assert_eq!(
-        select_model_for_role(&provider_models, &roles, "smart"),
+        select_model_for_role(&provider_models, &roles, "engineer"),
         Some(high)
     );
 }
@@ -299,7 +299,7 @@ fn provider_model_metadata_drives_selection_state() {
     )
     .expect("handle provider snapshot");
 
-    assert_eq!(h.selected_role, "smart");
+    assert_eq!(h.selected_role, "engineer");
     assert_eq!(h.selected_model.as_ref(), Some(&model_id));
     assert_eq!(h.selected_params.effort, Effort::High);
     assert_eq!(h.selected_params.verbosity, Verbosity::Low);
@@ -421,7 +421,7 @@ fn role_baseline_ignores_persisted_role_overrides() {
         config_dir.join("harness.yaml"),
         r#"{
             roles: {
-                smart: { model: "openai/gpt-4.1", effort: "high", verbosity: "medium" },
+                engineer: { model: "openai/gpt-4.1", effort: "high", verbosity: "medium" },
             },
         }"#,
     )
@@ -430,7 +430,7 @@ fn role_baseline_ignores_persisted_role_overrides() {
         state_dir.join("harness.json"),
         r#"{
             "role_overrides": {
-                "smart": { "model": "openai/gpt-4.1", "effort": "low", "verbosity": "high" }
+                "engineer": { "model": "openai/gpt-4.1", "effort": "low", "verbosity": "high" }
             }
         }"#,
     )
@@ -453,12 +453,12 @@ fn role_baseline_ignores_persisted_role_overrides() {
     let model =
         select_model_for_role(&provider_models, &roles, &selected_role).expect("selected model");
 
-    let selected = selected_params_for_role(&provider_models, &roles, "smart", &model);
+    let selected = selected_params_for_role(&provider_models, &roles, "engineer", &model);
     assert_eq!(selected.effort, Effort::Low);
     assert_eq!(selected.verbosity, Verbosity::High);
 
     let baseline =
-        baseline_params_for_selection(&harness_settings, &provider_models, "smart", &model);
+        baseline_params_for_selection(&harness_settings, &provider_models, "engineer", &model);
     assert_eq!(baseline.effort, Effort::High);
     assert_eq!(baseline.verbosity, Verbosity::Medium);
 }
@@ -482,12 +482,12 @@ fn persisted_role_overrides_do_not_shadow_configured_role_metadata() {
         config_dir.join("harness.yaml"),
         r#"{
             roles: {
-                smart: {
+                engineer: {
                     description: "CURRENT CONFIG DESCRIPTION",
                     model: "openai/gpt-4.1",
                     promptFragments: [
-                        { name: "smart.prompt", priority: 100, text: "CURRENT CONFIG PROMPT" },
-                        { name: "smart.extra", priority: 200, text: "CURRENT CONFIG EXTRA" },
+                        { name: "engineer.prompt", priority: 100, text: "CURRENT CONFIG PROMPT" },
+                        { name: "engineer.extra", priority: 200, text: "CURRENT CONFIG EXTRA" },
                     ],
                 },
             },
@@ -497,9 +497,9 @@ fn persisted_role_overrides_do_not_shadow_configured_role_metadata() {
     std::fs::write(
         state_dir.join("harness.json"),
         r#"{
-            "last_selected_role": "smart",
+            "last_selected_role": "engineer",
             "role_overrides": {
-                "smart": {
+                "engineer": {
                     "description": "STALE STATE DESCRIPTION",
                     "model": "openai/gpt-4.1-mini"                }
             }
@@ -510,8 +510,8 @@ fn persisted_role_overrides_do_not_shadow_configured_role_metadata() {
     let harness_settings =
         tau_config::settings::load_harness_settings_in(&dirs).expect("load harness settings");
     let (roles, role_overrides, selected_role) = load_roles(&dirs, &harness_settings);
-    let role = roles.get("smart").expect("smart role");
-    assert_eq!(selected_role, "smart");
+    let role = roles.get("engineer").expect("engineer role");
+    assert_eq!(selected_role, "engineer");
     assert_eq!(
         role.model.as_ref().map(ToString::to_string).as_deref(),
         Some("openai/gpt-4.1-mini")
@@ -532,7 +532,7 @@ fn persisted_role_overrides_do_not_shadow_configured_role_metadata() {
             .map(|fragment| fragment.text.as_str()),
         Some("CURRENT CONFIG EXTRA")
     );
-    let runtime_override = role_overrides.get("smart").expect("runtime override");
+    let runtime_override = role_overrides.get("engineer").expect("runtime override");
     assert!(runtime_override.description.is_none());
     assert!(runtime_override.prompt_fragments.is_empty());
 
@@ -583,25 +583,25 @@ fn role_without_effort_picks_middle_provider_effort() {
         },
     ]);
     let roles = std::collections::HashMap::from([(
-        "smart".to_owned(),
+        "engineer".to_owned(),
         tau_config::settings::AgentRole::default(),
     )]);
 
     assert_eq!(
-        selected_params_for_role(&provider_models, &roles, "smart", &openai).effort,
+        selected_params_for_role(&provider_models, &roles, "engineer", &openai).effort,
         Effort::Low,
     );
     assert_eq!(
-        selected_params_for_role(&provider_models, &roles, "smart", &local).effort,
+        selected_params_for_role(&provider_models, &roles, "engineer", &local).effort,
         Effort::Off,
     );
 }
 
 /// A stale saved `default` role is not migrated. Runtime models are
-/// provider-owned, so startup keeps the `smart` role and waits for a provider
-/// snapshot before selecting a model.
+/// provider-owned, so startup keeps the `engineer` role and waits for a
+/// provider snapshot before selecting a model.
 #[test]
-fn load_roles_falls_back_to_smart_role_while_models_are_provider_owned() {
+fn load_roles_falls_back_to_engineer_role_while_models_are_provider_owned() {
     let td = TempDir::new().expect("tempdir");
     let config_dir = td.path().join("config");
     let state_dir = td.path().join("state");
@@ -616,8 +616,8 @@ fn load_roles_falls_back_to_smart_role_while_models_are_provider_owned() {
         config_dir.join("harness.yaml"),
         r#"{
             roles: {
-                smart: { model: "local/smart" },
-                deep: { model: "local/deep" },
+                engineer: { model: "local/engineer" },
+                manager: { model: "local/deep" },
             },
         }"#,
     )
@@ -638,9 +638,9 @@ fn load_roles_falls_back_to_smart_role_while_models_are_provider_owned() {
     let (roles, role_overrides, selected_role) = load_roles(&dirs, &harness_settings);
     assert!(!role_overrides.contains_key("default"));
     assert!(!roles.contains_key("default"));
-    assert_eq!(selected_role, "smart");
+    assert_eq!(selected_role, "engineer");
 
-    let available = ["local/deep".into(), "local/smart".into()];
+    let available = ["local/deep".into(), "local/engineer".into()];
     let provider_models = provider_models(
         available
             .iter()
@@ -652,13 +652,13 @@ fn load_roles_falls_back_to_smart_role_while_models_are_provider_owned() {
             .as_ref()
             .map(ToString::to_string)
             .as_deref(),
-        Some("local/smart")
+        Some("local/engineer")
     );
 }
 
-/// Role settings stand on their own: a non-smart role with no model or effort
-/// uses the first available model and the selected model's default effort, not
-/// smart's configured model or effort.
+/// Role settings stand on their own: a non-engineer role with no model or
+/// effort uses the first available model and the selected model's default
+/// effort, not engineer's configured model or effort.
 #[test]
 fn role_missing_fields_use_model_defaults() {
     let td = TempDir::new().expect("tempdir");
@@ -675,7 +675,7 @@ fn role_missing_fields_use_model_defaults() {
         config_dir.join("harness.yaml"),
         r#"{
             roles: {
-                smart: { model: "local/smart", effort: "high" },
+                engineer: { model: "local/engineer", effort: "high" },
                 plain: {},
             },
         }"#,
@@ -692,7 +692,7 @@ fn role_missing_fields_use_model_defaults() {
     let harness_settings =
         tau_config::settings::load_harness_settings_in(&dirs).expect("load harness settings");
     let (roles, _role_overrides, selected_role) = load_roles(&dirs, &harness_settings);
-    let available = ["local/aaa".into(), "local/smart".into()];
+    let available = ["local/aaa".into(), "local/engineer".into()];
     let available_provider_models = provider_models(
         available
             .iter()
@@ -748,16 +748,16 @@ fn role_without_verbosity_picks_low_when_supported() {
         },
     ]);
     let roles = std::collections::HashMap::from([(
-        "smart".to_owned(),
+        "engineer".to_owned(),
         tau_config::settings::AgentRole::default(),
     )]);
 
     assert_eq!(
-        selected_params_for_role(&provider_models, &roles, "smart", &openai).verbosity,
+        selected_params_for_role(&provider_models, &roles, "engineer", &openai).verbosity,
         Verbosity::Low,
     );
     assert_eq!(
-        selected_params_for_role(&provider_models, &roles, "smart", &local).verbosity,
+        selected_params_for_role(&provider_models, &roles, "engineer", &local).verbosity,
         Verbosity::Medium,
     );
 }
@@ -966,7 +966,7 @@ fn selected_params_restore_each_field_from_role_override() {
         config_dir.join("harness.yaml"),
         r#"{
             roles: {
-                smart: { model: "openai/gpt-5" },
+                engineer: { model: "openai/gpt-5" },
             },
         }"#,
     )
@@ -975,7 +975,7 @@ fn selected_params_restore_each_field_from_role_override() {
         state_dir.join("harness.json"),
         r#"{
             "role_overrides": {
-                "smart": {
+                "engineer": {
                     "model": "openai/gpt-5",
                     "effort": "high",
                     "verbosity": "low",
@@ -989,7 +989,7 @@ fn selected_params_restore_each_field_from_role_override() {
     let harness_settings =
         tau_config::settings::load_harness_settings_in(&dirs).expect("load harness settings");
     let (roles, _role_overrides, selected_role) = load_roles(&dirs, &harness_settings);
-    assert_eq!(selected_role, "smart");
+    assert_eq!(selected_role, "engineer");
 
     let model: ModelId = "openai/gpt-5".parse().expect("model id");
     let provider_models = provider_models([ProviderModelInfo {

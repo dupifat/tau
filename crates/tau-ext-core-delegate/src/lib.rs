@@ -292,7 +292,7 @@ fn tool_spec() -> ToolSpec {
                 },
                 "role": {
                     "type": "string",
-                    "description": "Optional sub-agent role to use. When omitted, Tau defaults delegate calls to `smart` if that role is available and enabled."
+                    "description": "Optional sub-agent role to use. When omitted, Tau defaults delegate calls to `engineer` if that role is available and enabled."
                 }
             },
             "required": ["task_name", "prompt"]

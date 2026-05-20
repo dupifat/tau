@@ -47,6 +47,14 @@ pub struct ChatCompletionsProvider {
     /// Model ids to publish under this provider namespace.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ChatCompletionsModel>,
+    /// Extra JSON fields merged into each Chat Completions request body.
+    ///
+    /// Local and OpenAI-compatible servers use non-standard knobs for reasoning
+    /// (`chat_template_kwargs`, `reasoning`, `enable_thinking`, etc.). Keeping
+    /// this map provider-scoped lets users opt into those fields without Tau
+    /// needing a compatibility switch for every backend.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra_body: BTreeMap<String, serde_json::Value>,
     /// Explicit provider compatibility switches.
     #[serde(default)]
     pub compat: ChatCompletionsCompat,
@@ -159,6 +167,7 @@ fn cmd_add() -> Result<(), Box<dyn Error>> {
                 base_url,
                 api_key,
                 models,
+                extra_body: BTreeMap::new(),
                 compat,
             },
         );
@@ -437,12 +446,12 @@ fn run_prompt<W: Write>(
     model: ChatCompletionsModel,
     writer: &mut FrameWriter<W>,
 ) -> ProviderResponseFinished {
-    let mut on_update = |text: &str| {
+    let mut on_update = |text: &str, thinking: Option<&str>| {
         let _ = writer.write_frame(&Frame::Event(Event::ProviderResponseUpdated(
             ProviderResponseUpdated {
                 session_prompt_id: session_prompt_id.clone(),
                 text: text.to_owned(),
-                thinking: None,
+                thinking: thinking.map(str::to_owned),
                 originator: prompt.originator.clone(),
             },
         )));
@@ -476,6 +485,7 @@ fn missing_backend_finished(
 struct ResolvedProvider {
     base_url: String,
     api_key: String,
+    extra_body: BTreeMap<String, serde_json::Value>,
     compat: ChatCompletionsCompat,
 }
 
@@ -493,6 +503,7 @@ fn resolve_backend(
         ResolvedProvider {
             base_url: provider.base_url.clone(),
             api_key: provider.api_key.clone(),
+            extra_body: provider.extra_body.clone(),
             compat: provider.compat,
         },
         configured_model,
@@ -518,7 +529,7 @@ fn models_for_auth(auth: &ChatCompletionsAuth) -> Vec<ProviderModelInfo> {
                 display_name: model.display_name.clone(),
                 default_affinity: 0,
                 context_window: model.context_window,
-                efforts: vec![tau_proto::Effort::Off],
+                efforts: model_efforts(provider.compat),
                 verbosities: vec![tau_proto::Verbosity::Medium],
                 thinking_summaries: vec![ThinkingSummary::Off],
                 supports_compaction: false,
@@ -526,6 +537,21 @@ fn models_for_auth(auth: &ChatCompletionsAuth) -> Vec<ProviderModelInfo> {
         }
     }
     models
+}
+
+fn model_efforts(compat: ChatCompletionsCompat) -> Vec<tau_proto::Effort> {
+    if compat.reasoning_effort {
+        vec![
+            tau_proto::Effort::Off,
+            tau_proto::Effort::Minimal,
+            tau_proto::Effort::Low,
+            tau_proto::Effort::Medium,
+            tau_proto::Effort::High,
+            tau_proto::Effort::XHigh,
+        ]
+    } else {
+        vec![tau_proto::Effort::Off]
+    }
 }
 
 #[derive(Debug)]
@@ -549,6 +575,9 @@ impl std::fmt::Display for LlmError {
 
 struct StreamState {
     text: String,
+    thinking: String,
+    pending_content: String,
+    in_think_tag: bool,
     tool_calls: HashMap<usize, ToolCallAccumulator>,
     input_tokens: Option<u64>,
     cached_tokens: Option<u64>,
@@ -560,6 +589,9 @@ impl StreamState {
     fn new() -> Self {
         Self {
             text: String::new(),
+            thinking: String::new(),
+            pending_content: String::new(),
+            in_think_tag: false,
             tool_calls: HashMap::new(),
             input_tokens: None,
             cached_tokens: None,
@@ -619,7 +651,7 @@ fn chat_completions_stream(
     provider: &ResolvedProvider,
     model: &ChatCompletionsModel,
     prompt: &tau_proto::SessionPromptCreated,
-    on_update: &mut impl FnMut(&str),
+    on_update: &mut impl FnMut(&str, Option<&str>),
 ) -> Result<StreamState, LlmError> {
     let url = format!(
         "{}/chat/completions",
@@ -659,6 +691,7 @@ fn chat_completions_stream(
         };
         apply_event(&mut state, &event, on_update);
     }
+    flush_pending_content(&mut state, on_update);
     Ok(state)
 }
 
@@ -679,6 +712,8 @@ struct ChatRequest {
     prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'static str>,
+    #[serde(flatten)]
+    extra_body: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -728,6 +763,7 @@ fn build_request(
             .compat
             .reasoning_effort
             .then(|| effort_wire(prompt.model_params.effort)),
+        extra_body: provider.extra_body.clone(),
         tools,
         tool_choice,
     }
@@ -837,7 +873,7 @@ fn convert_tool_definition(tool: &ToolDefinition) -> Option<serde_json::Value> {
 fn apply_event(
     state: &mut StreamState,
     event: &serde_json::Value,
-    on_update: &mut impl FnMut(&str),
+    on_update: &mut impl FnMut(&str, Option<&str>),
 ) {
     if let Some(usage) = event.get("usage") {
         capture_usage(state, usage);
@@ -849,11 +885,22 @@ fn apply_event(
         return;
     };
     let delta = &choice["delta"];
+    let mut changed = false;
+    for key in ["reasoning_content", "reasoning", "thinking"] {
+        if let Some(reasoning) = delta[key].as_str()
+            && !reasoning.is_empty()
+        {
+            state.thinking.push_str(reasoning);
+            changed = true;
+        }
+    }
     if let Some(content) = delta["content"].as_str()
         && !content.is_empty()
     {
-        state.text.push_str(content);
-        on_update(&state.text);
+        changed |= append_content_delta(state, content);
+    }
+    if changed {
+        on_update(&state.text, thinking_for_update(state));
     }
     if let Some(tool_calls) = delta["tool_calls"].as_array() {
         for tool_call in tool_calls {
@@ -880,6 +927,76 @@ fn apply_event(
         Some("stop") => state.stop_reason = ProviderStopReason::EndTurn,
         _ => {}
     }
+}
+
+fn append_content_delta(state: &mut StreamState, content: &str) -> bool {
+    state.pending_content.push_str(content);
+    let mut changed = false;
+    loop {
+        if state.pending_content.is_empty() {
+            return changed;
+        }
+        if state.in_think_tag {
+            if let Some(index) = state.pending_content.find("</think>") {
+                state.thinking.push_str(&state.pending_content[..index]);
+                state.pending_content.drain(..index + "</think>".len());
+                state.in_think_tag = false;
+                changed = true;
+                continue;
+            }
+            let keep = partial_tag_suffix_len(&state.pending_content, "</think>");
+            let emit_len = state.pending_content.len() - keep;
+            if emit_len == 0 {
+                return changed;
+            }
+            state.thinking.push_str(&state.pending_content[..emit_len]);
+            state.pending_content.drain(..emit_len);
+            return true;
+        }
+
+        if let Some(index) = state.pending_content.find("<think>") {
+            state.text.push_str(&state.pending_content[..index]);
+            state.pending_content.drain(..index + "<think>".len());
+            state.in_think_tag = true;
+            changed = true;
+            continue;
+        }
+        let keep = partial_tag_suffix_len(&state.pending_content, "<think>");
+        let emit_len = state.pending_content.len() - keep;
+        if emit_len == 0 {
+            return changed;
+        }
+        state.text.push_str(&state.pending_content[..emit_len]);
+        state.pending_content.drain(..emit_len);
+        return true;
+    }
+}
+
+fn partial_tag_suffix_len(text: &str, tag: &str) -> usize {
+    let mut keep = 0;
+    for len in 1..tag.len() {
+        if text.ends_with(&tag[..len]) {
+            keep = len;
+        }
+    }
+    keep
+}
+
+fn flush_pending_content(state: &mut StreamState, on_update: &mut impl FnMut(&str, Option<&str>)) {
+    if state.pending_content.is_empty() {
+        return;
+    }
+    if state.in_think_tag {
+        state.thinking.push_str(&state.pending_content);
+    } else {
+        state.text.push_str(&state.pending_content);
+    }
+    state.pending_content.clear();
+    on_update(&state.text, thinking_for_update(state));
+}
+
+fn thinking_for_update(state: &StreamState) -> Option<&str> {
+    (!state.thinking.is_empty()).then_some(state.thinking.as_str())
 }
 
 fn capture_usage(state: &mut StreamState, usage: &serde_json::Value) {
@@ -1032,6 +1149,7 @@ mod tests {
                         display_name: None,
                         context_window: 128_000,
                     }],
+                    extra_body: BTreeMap::new(),
                     compat: ChatCompletionsCompat::openai_defaults(),
                 },
             )]),
@@ -1222,6 +1340,105 @@ mod tests {
                 &output,
             ),
             "cancelled: stopped\n\n",
+        );
+    }
+
+    #[test]
+    fn provider_with_reasoning_effort_publishes_effort_levels() {
+        // Role effort selection is clamped to the provider-advertised levels.
+        // Publishing only `off` made `compat.reasoning_effort` unusable because
+        // a role configured with `effort: high` was downgraded before request
+        // construction.
+        let models = models_for_auth(&auth());
+
+        assert!(models[0].efforts.contains(&tau_proto::Effort::High));
+        assert!(models[0].efforts.contains(&tau_proto::Effort::Off));
+    }
+
+    #[test]
+    fn build_request_flattens_extra_body_for_reasoning_knobs() {
+        // OpenAI-compatible local servers disagree on reasoning controls. The
+        // provider-level `extra_body` map is intentionally flattened into the
+        // request so users can pass backend-specific fields like
+        // `chat_template_kwargs.enable_thinking` without Tau hard-coding each
+        // variant.
+        let mut auth = auth();
+        auth.providers
+            .get_mut(&ProviderName::new("openai"))
+            .expect("provider")
+            .extra_body
+            .insert(
+                "chat_template_kwargs".to_owned(),
+                serde_json::json!({ "enable_thinking": true }),
+            );
+        let (provider, model) = resolve_backend(&auth, &"openai/gpt-4o".into()).expect("backend");
+        let prompt = tau_proto::SessionPromptCreated {
+            session_prompt_id: "sp-extra".into(),
+            session_id: "s1".into(),
+            system_prompt: String::new(),
+            context_items: Vec::new(),
+            tools: Vec::new(),
+            tools_ref: None,
+            model: Some("openai/gpt-4o".into()),
+            model_params: tau_proto::ModelParams {
+                effort: tau_proto::Effort::High,
+                ..Default::default()
+            },
+            tool_choice: ToolChoice::Auto,
+            originator: tau_proto::PromptOriginator::User,
+            share_user_cache_key: false,
+            ctx_id: None,
+            previous_response_candidate: None,
+        };
+
+        let request =
+            serde_json::to_value(build_request(&provider, &model, &prompt)).expect("json");
+
+        assert_eq!(request["reasoning_effort"], "high");
+        assert_eq!(request["chat_template_kwargs"]["enable_thinking"], true);
+    }
+
+    #[test]
+    fn apply_event_streams_reasoning_fields_and_think_tags() {
+        // Reasoning-capable Chat Completions servers are not unified: some send
+        // dedicated reasoning deltas, while others leave visible `<think>` tags
+        // in content. Normalize both into ProviderResponseUpdated.thinking and
+        // keep only answer text in the visible response.
+        let mut state = StreamState::new();
+        let mut updates = Vec::new();
+        let mut on_update = |text: &str, thinking: Option<&str>| {
+            updates.push((text.to_owned(), thinking.map(str::to_owned)));
+        };
+
+        apply_event(
+            &mut state,
+            &serde_json::json!({
+                "choices": [{ "delta": { "reasoning_content": "plan " } }]
+            }),
+            &mut on_update,
+        );
+        apply_event(
+            &mut state,
+            &serde_json::json!({
+                "choices": [{ "delta": { "content": "visible <thi" } }]
+            }),
+            &mut on_update,
+        );
+        apply_event(
+            &mut state,
+            &serde_json::json!({
+                "choices": [{ "delta": { "content": "nk>tag</think> answer" } }]
+            }),
+            &mut on_update,
+        );
+        flush_pending_content(&mut state, &mut on_update);
+
+        assert_eq!(state.text, "visible  answer");
+        assert_eq!(state.thinking, "plan tag");
+        assert_eq!(updates.last().expect("update").0, "visible  answer");
+        assert_eq!(
+            updates.last().expect("update").1.as_deref(),
+            Some("plan tag")
         );
     }
 

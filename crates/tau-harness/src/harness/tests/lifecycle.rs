@@ -110,8 +110,11 @@ fn disconnected_tool_completes_pending_call() {
     );
     h.pending_tool_providers
         .insert(call_id.clone(), conn_id.clone().into());
-    h.in_flight_tool_execution_modes
-        .insert(call_id.clone(), tau_proto::ToolExecutionMode::Exclusive);
+    h.tool_turn.record_in_flight_for_test(
+        cid.clone(),
+        call_id.clone(),
+        tau_proto::ToolExecutionMode::Exclusive,
+    );
     if let Some(conv) = h.conversations.get_mut(&cid) {
         conv.turn_state = ConversationTurnState::ToolsRunning {
             remaining_calls: vec![call_id.clone()],
@@ -462,8 +465,7 @@ fn unavailable_tool_name_does_not_panic_and_surfaces_error() {
 
     // The call must be gone from both the pending queue and the
     // in-flight set — rejection fully completes it.
-    assert!(h.pending_tool_invocations.is_empty());
-    assert!(h.in_flight_tool_execution_modes.is_empty());
+    assert!(h.tool_turn.is_empty());
 
     // The error should have been persisted on s1's history so the
     // agent sees it on the next turn — as a Requested + Error pair
@@ -583,8 +585,7 @@ fn empty_tool_call_id_rejects_response_before_commit() {
 
     // No tool work should be scheduled and the malformed assistant
     // response should not be committed to the session tree.
-    assert!(h.pending_tool_invocations.is_empty());
-    assert!(h.in_flight_tool_execution_modes.is_empty());
+    assert!(h.tool_turn.is_empty());
     let session = h.store.session("s1").expect("session");
     assert!(session.nodes().iter().all(|node| {
         !matches!(
@@ -640,8 +641,7 @@ fn cancel_after_agent_thinking_terminalizes_tool_calls_before_dispatch() {
     })
     .expect("response");
 
-    assert!(h.pending_tool_invocations.is_empty());
-    assert!(h.in_flight_tool_execution_modes.is_empty());
+    assert!(h.tool_turn.is_empty());
     assert!(matches!(
         h.conversations.get(&cid).expect("conversation").turn_state,
         ConversationTurnState::Idle
@@ -701,12 +701,11 @@ fn cancel_during_tools_terminalizes_inflight_and_queued_calls() {
     })
     .expect("response");
     assert_eq!(
-        h.in_flight_tool_execution_modes
-            .get(&ToolCallId::from("c1")),
+        h.tool_turn.in_flight_mode(&ToolCallId::from("c1")),
         Some(&Shared)
     );
-    assert_eq!(h.pending_tool_invocations[0].1.id, "c2");
-    assert_eq!(h.pending_tool_invocations[0].2, Exclusive);
+    assert_eq!(h.tool_turn.pending(0).unwrap().invocation.id, "c2");
+    assert_eq!(h.tool_turn.pending(0).unwrap().execution_mode, Exclusive);
 
     h.handle_client_event(
         "ui",
@@ -717,8 +716,7 @@ fn cancel_during_tools_terminalizes_inflight_and_queued_calls() {
     )
     .expect("cancel");
 
-    assert!(h.pending_tool_invocations.is_empty());
-    assert!(h.in_flight_tool_execution_modes.is_empty());
+    assert!(h.tool_turn.is_empty());
     assert!(matches!(
         h.conversations.get(&cid).expect("conversation").turn_state,
         ConversationTurnState::Idle

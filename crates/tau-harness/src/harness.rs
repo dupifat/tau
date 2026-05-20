@@ -58,6 +58,7 @@ use crate::prompt::{
     built_in_system_prompt_templates, cbor_map_bool, render_agents_context_message,
 };
 use crate::settings::{Config, load_harness_settings_or_warn};
+use crate::tool_turn::{PendingToolInvocation, ToolTurnMachine};
 use crate::turn::{PromptSubmission, TurnState};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -666,22 +667,8 @@ pub(crate) struct Harness {
     /// arise under at-least-once delivery (e.g. an agent that reconnects
     /// after a crash and replays its last prompt).
     pub(crate) completed_prompts: std::collections::HashSet<SessionPromptId>,
-    /// Tool invocations from the current agent turn that have not been
-    /// dispatched yet. Drained in FIFO order by
-    /// `drain_pending_tool_invocations` whenever the in-flight set
-    /// allows the next call through. Cleared out implicitly: a turn
-    /// only completes once this is empty and `in_flight_tool_execution_modes`
-    /// is empty.
-    pub(crate) pending_tool_invocations:
-        VecDeque<(ConversationId, AgentToolCall, tau_proto::ToolExecutionMode)>,
-    /// Execution mode of every tool call currently dispatched but not
-    /// yet completed (no `ToolResult`/`ToolError` received). Keyed by
-    /// `call_id`. Used by the dispatch state machine to decide whether
-    /// the next queued invocation can proceed: a `Shared` call may go
-    /// whenever no `Exclusive` is in flight; an `Exclusive` call may go
-    /// only when this set is empty.
-    pub(crate) in_flight_tool_execution_modes:
-        std::collections::HashMap<ToolCallId, tau_proto::ToolExecutionMode>,
+    /// Pure scheduler state for queued and in-flight tool invocations.
+    pub(crate) tool_turn: ToolTurnMachine,
     /// Prompt ids canceled by `/cancel`. Late agent events for these
     /// prompts are ignored and never folded into session state.
     pub(crate) canceled_prompts: std::collections::HashSet<SessionPromptId>,
@@ -1090,8 +1077,7 @@ impl Harness {
             system_prompt_templates,
             initialized_sessions: std::collections::HashSet::new(),
             completed_prompts: std::collections::HashSet::new(),
-            pending_tool_invocations: VecDeque::new(),
-            in_flight_tool_execution_modes: std::collections::HashMap::new(),
+            tool_turn: ToolTurnMachine::default(),
             canceled_prompts: std::collections::HashSet::new(),
             pending_compactions: std::collections::HashMap::new(),
             pending_ext_agent_queries: VecDeque::new(),
@@ -1304,8 +1290,7 @@ impl Harness {
             system_prompt_templates,
             initialized_sessions: std::collections::HashSet::new(),
             completed_prompts: std::collections::HashSet::new(),
-            pending_tool_invocations: VecDeque::new(),
-            in_flight_tool_execution_modes: std::collections::HashMap::new(),
+            tool_turn: ToolTurnMachine::default(),
             canceled_prompts: std::collections::HashSet::new(),
             pending_compactions: std::collections::HashMap::new(),
             pending_ext_agent_queries: VecDeque::new(),
@@ -2873,16 +2858,7 @@ impl Harness {
     ) {
         let remaining: std::collections::HashSet<ToolCallId> =
             remaining_calls.iter().cloned().collect();
-        let queued: Vec<(ToolCallId, ToolName, ToolType)> = self
-            .pending_tool_invocations
-            .iter()
-            .filter(|(call_cid, call, _)| call_cid == cid && remaining.contains(&call.id))
-            .map(|(_, call, _)| (call.id.clone(), call.name.clone(), call.tool_type))
-            .collect();
-        self.pending_tool_invocations
-            .retain(|(call_cid, call, _)| call_cid != cid || !remaining.contains(&call.id));
-
-        let mut to_cancel = queued;
+        let mut to_cancel = self.tool_turn.cancel_queued_for(cid, &remaining);
         for call_id in remaining_calls {
             if to_cancel
                 .iter()
@@ -2905,7 +2881,7 @@ impl Harness {
                     tool_type,
                 }),
             );
-            self.in_flight_tool_execution_modes.remove(&call_id);
+            self.tool_turn.mark_complete(&call_id);
             self.clear_tool_call_tracking(call_id.as_str());
         }
         if let Some(conv) = self.conversations.get_mut(cid) {
@@ -4489,7 +4465,7 @@ impl Harness {
             conv.in_flight_prompt = None;
             conv.turn_state = ConversationTurnState::Idle;
         }
-        self.pending_tool_invocations.clear();
+        self.tool_turn.clear();
         self.tool_conversations.clear();
         self.pending_tools.clear();
         self.pending_tool_providers.clear();
@@ -5728,8 +5704,7 @@ impl Harness {
             // done by `drain_pending_tool_invocations`, which respects
             // the shared/exclusive ordering rule.
             for (call, mode) in normalized_calls {
-                self.pending_tool_invocations
-                    .push_back((cid.clone(), call, mode));
+                self.tool_turn.push(cid.clone(), call, mode);
             }
             self.drain_pending_tool_invocations()?;
         } else {
@@ -5855,94 +5830,24 @@ impl Harness {
         self.resolve_tool_execution_mode(call.name.as_str())
     }
 
-    /// Whether any in-flight tool call belonging to `cid` is `Exclusive`.
-    /// The shared/exclusive ordering rule is per-conversation: tools
-    /// running for a *different* conversation are an independent thread
-    /// of execution and must not gate this one. A parent agent's
-    /// mid-flight tool call must not block the sub-agent it spawned from
-    /// running its own `Shared` tools — otherwise delegation deadlocks
-    /// itself.
-    fn has_exclusive_in_flight_for(&self, cid: &ConversationId) -> bool {
-        self.in_flight_tool_execution_modes
-            .iter()
-            .any(|(call_id, mode)| {
-                matches!(mode, tau_proto::ToolExecutionMode::Exclusive)
-                    && self
-                        .tool_conversations
-                        .get(call_id)
-                        .is_some_and(|owner| owner == cid)
-            })
-    }
-
-    /// Whether `cid` has any tool call currently in flight.
-    fn any_in_flight_for(&self, cid: &ConversationId) -> bool {
-        self.in_flight_tool_execution_modes.keys().any(|call_id| {
-            self.tool_conversations
-                .get(call_id)
-                .is_some_and(|owner| owner == cid)
-        })
-    }
-
-    /// State-machine drain: dispatch queued tool invocations while the
-    /// per-conversation in-flight set allows them through.
-    ///
-    /// Rule (per conversation):
-    /// - `Shared` may dispatch when no same-conversation `Exclusive` is in
-    ///   flight.
-    /// - `Exclusive` may dispatch when no same-conversation call is in flight
-    ///   at all.
-    ///
-    /// The queue can interleave entries from multiple conversations
-    /// (parent + side conversations spawned mid-turn). We scan it and
-    /// dispatch the first entry whose conversation is currently
-    /// unblocked, repeating until no further progress can be made.
-    /// Within a single conversation the per-turn FIFO order — and
-    /// therefore the read-after-write ordering of Shared-then-Exclusive —
-    /// is preserved, because we never skip an entry that is already
-    /// blocked behind an earlier same-conversation entry.
-    ///
-    /// Call this after enqueuing new work or after any in-flight call
-    /// completes.
+    /// Drain scheduler-selected tool invocations into harness side effects.
     fn drain_pending_tool_invocations(&mut self) -> Result<(), HarnessError> {
-        loop {
-            let mut blocked_convs: std::collections::HashSet<ConversationId> =
-                std::collections::HashSet::new();
-            let mut next_idx: Option<usize> = None;
-            for (idx, (cid, _call, mode)) in self.pending_tool_invocations.iter().enumerate() {
-                if blocked_convs.contains(cid) {
-                    continue;
-                }
-                let compatible = match *mode {
-                    tau_proto::ToolExecutionMode::Shared => !self.has_exclusive_in_flight_for(cid),
-                    tau_proto::ToolExecutionMode::Exclusive => !self.any_in_flight_for(cid),
-                };
-                if compatible {
-                    next_idx = Some(idx);
-                    break;
-                }
-                // Preserve per-conversation FIFO: anything later in the
-                // queue from this conversation must wait behind this
-                // entry, so don't consider those entries either.
-                blocked_convs.insert(cid.clone());
-            }
-            let Some(idx) = next_idx else {
-                return Ok(());
-            };
-            let (cid, call, mode) = self
-                .pending_tool_invocations
-                .remove(idx)
-                .expect("index just located");
-            let call_id: ToolCallId = call.id.clone();
-            self.in_flight_tool_execution_modes
-                .insert(call_id.clone(), mode);
+        while let Some(PendingToolInvocation {
+            conversation_id,
+            invocation,
+            execution_mode: _,
+        }) = self.tool_turn.pop_dispatchable()
+        {
+            let call_id = invocation.id.clone();
             // If dispatch fails synchronously, roll back the in-flight
             // entry so a retry or clean-up is not wedged on a phantom
             // slot.
-            if let Err(error) = self.execute_agent_tool_call(&cid, &call) {
-                self.in_flight_tool_execution_modes.remove(&call_id);
+            if let Err(error) = self.execute_agent_tool_call(&conversation_id, &invocation) {
+                self.tool_turn.rollback_dispatch(&call_id);
                 return Err(error);
             }
         }
+        Ok(())
     }
 
     /// Hook called whenever a tool call has finished (result, error,
@@ -5951,7 +5856,7 @@ impl Harness {
     /// calls, and then checks whether the turn is done.
     pub(crate) fn on_tool_call_complete(&mut self, call_id: &str) {
         let owned: ToolCallId = call_id.to_owned().into();
-        self.in_flight_tool_execution_modes.remove(&owned);
+        self.tool_turn.mark_complete(&owned);
         // `tool_conversations` is still populated here: the call
         // sites clear it *after* this function returns. Decrement
         // the conversation's in-flight counter and surface the new

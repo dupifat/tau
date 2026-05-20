@@ -569,33 +569,30 @@ fn shared_exclusive_shared_serializes_through_dispatch_state_machine() {
     let c1_id: ToolCallId = "c1".to_owned().into();
     let c2_id: ToolCallId = "c2".to_owned().into();
     let c3_id: ToolCallId = "c3".to_owned().into();
-    assert_eq!(h.in_flight_tool_execution_modes.len(), 1);
-    assert_eq!(h.in_flight_tool_execution_modes.get(&c1_id), Some(&Shared));
-    assert_eq!(h.pending_tool_invocations.len(), 2);
-    assert_eq!(h.pending_tool_invocations[0].1.id, "c2");
-    assert_eq!(h.pending_tool_invocations[1].1.id, "c3");
+    assert_eq!(h.tool_turn.in_flight_len(), 1);
+    assert_eq!(h.tool_turn.in_flight_mode(&c1_id), Some(&Shared));
+    assert_eq!(h.tool_turn.pending_len(), 2);
+    assert_eq!(h.tool_turn.pending(0).unwrap().invocation.id, "c2");
+    assert_eq!(h.tool_turn.pending(1).unwrap().invocation.id, "c3");
 
     drive_harness_until_call_completes(&mut h, "c1");
 
     // After c1 completes the Exclusive gate opens and c2 dispatches.
     // c3 must stay queued behind it.
-    assert_eq!(h.in_flight_tool_execution_modes.len(), 1);
-    assert_eq!(
-        h.in_flight_tool_execution_modes.get(&c2_id),
-        Some(&Exclusive)
-    );
-    assert_eq!(h.pending_tool_invocations.len(), 1);
-    assert_eq!(h.pending_tool_invocations[0].1.id, "c3");
+    assert_eq!(h.tool_turn.in_flight_len(), 1);
+    assert_eq!(h.tool_turn.in_flight_mode(&c2_id), Some(&Exclusive));
+    assert_eq!(h.tool_turn.pending_len(), 1);
+    assert_eq!(h.tool_turn.pending(0).unwrap().invocation.id, "c3");
 
     drive_harness_until_call_completes(&mut h, "c2");
 
     // With the Exclusive cleared, c3 finally dispatches.
-    assert_eq!(h.in_flight_tool_execution_modes.len(), 1);
-    assert_eq!(h.in_flight_tool_execution_modes.get(&c3_id), Some(&Shared));
-    assert!(h.pending_tool_invocations.is_empty());
+    assert_eq!(h.tool_turn.in_flight_len(), 1);
+    assert_eq!(h.tool_turn.in_flight_mode(&c3_id), Some(&Shared));
+    assert_eq!(h.tool_turn.pending_len(), 0);
 
     drive_harness_until_call_completes(&mut h, "c3");
-    assert!(h.in_flight_tool_execution_modes.is_empty());
+    assert!(h.tool_turn.is_empty());
 
     h.shutdown().expect("shutdown");
 }
@@ -919,7 +916,7 @@ fn tool_calls_stop_reason_without_tool_items_does_not_wedge_turn() {
         h.conversations.get(&cid).expect("default").turn_state,
         ConversationTurnState::Idle
     ));
-    assert!(h.pending_tool_invocations.is_empty());
+    assert_eq!(h.tool_turn.pending_len(), 0);
 
     h.submit_user_prompt("s1".into(), "again".to_owned())
         .expect("submit again");
@@ -3429,8 +3426,9 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
         saw_routed,
         "side conversation's Shared tool must dispatch despite parent's in-flight Exclusive delegate"
     );
-    assert!(
-        h.pending_tool_invocations.is_empty(),
+    assert_eq!(
+        h.tool_turn.pending_len(),
+        0,
         "no entries should be left queued"
     );
 
@@ -3524,15 +3522,15 @@ fn mixed_mode_delegate_calls_dispatch_concurrently_to_ext_scheduler() {
     })
     .expect("main response");
 
-    assert_eq!(h.in_flight_tool_execution_modes.len(), 2);
+    assert_eq!(h.tool_turn.in_flight_len(), 2);
     assert!(
-        h.in_flight_tool_execution_modes
-            .values()
-            .all(|kind| matches!(kind, tau_proto::ToolExecutionMode::Shared)),
+        h.tool_turn
+            .all_in_flight_modes(|kind| matches!(kind, tau_proto::ToolExecutionMode::Shared)),
         "delegate tool invocations should stay Shared even when an argument asks for an exclusive sub-agent",
     );
-    assert!(
-        h.pending_tool_invocations.is_empty(),
+    assert_eq!(
+        h.tool_turn.pending_len(),
+        0,
         "mixed delegate calls should not serialize before reaching the extension",
     );
 
@@ -3968,12 +3966,12 @@ fn exclusive_tools_in_distinct_side_conversations_dispatch_concurrently() {
     let mut_a_id: ToolCallId = "mut-A".to_owned().into();
     let mut_b_id: ToolCallId = "mut-B".to_owned().into();
     assert_eq!(
-        h.in_flight_tool_execution_modes.get(&mut_a_id),
+        h.tool_turn.in_flight_mode(&mut_a_id),
         Some(&ToolExecutionMode::Exclusive),
         "conversation A's exclusive call should be in flight",
     );
     assert_eq!(
-        h.in_flight_tool_execution_modes.get(&mut_b_id),
+        h.tool_turn.in_flight_mode(&mut_b_id),
         Some(&ToolExecutionMode::Exclusive),
         "conversation B's exclusive call should be in flight too",
     );
@@ -3984,8 +3982,9 @@ fn exclusive_tools_in_distinct_side_conversations_dispatch_concurrently() {
         h.tool_conversations.get("mut-B"),
         "exclusive calls must be attributed to different dispatch scopes",
     );
-    assert!(
-        h.pending_tool_invocations.is_empty(),
+    assert_eq!(
+        h.tool_turn.pending_len(),
+        0,
         "cross-conversation Exclusive calls should not queue behind each other",
     );
 

@@ -27,6 +27,7 @@ mod model;
 mod prompt;
 mod session_cleanup;
 mod settings;
+mod tool_turn;
 mod turn;
 pub mod version;
 

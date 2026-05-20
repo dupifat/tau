@@ -20,8 +20,8 @@ use std::collections::VecDeque;
 
 use tau_core::NodeId;
 use tau_proto::{
-    ConnectionId, ModelId, ModelParams, PromptOriginator, ProviderBackend, SessionId,
-    SessionPromptId, ToolCallId, ToolChoice, ToolDefinition, ToolDisplayStats,
+    ConnectionId, ModelId, ModelParams, PromptMessageClass, PromptOriginator, ProviderBackend,
+    SessionId, SessionPromptId, ToolCallId, ToolChoice, ToolDefinition, ToolDisplayStats,
 };
 
 use crate::dedup::ResultDedupMap;
@@ -187,11 +187,11 @@ pub(crate) struct Conversation {
     /// Session prompt id of the prompt currently in flight for this
     /// conversation, or `None` if nothing is pending.
     pub(crate) in_flight_prompt: Option<SessionPromptId>,
-    /// Per-conversation prompt queue: text waiting to be dispatched
+    /// Per-conversation prompt queue: prompts waiting to be dispatched
     /// once this conversation's `turn_state` returns to `Idle`. Other
     /// conversations dispatch independently; the agent extension
     /// serializes its own consumption of `SessionPromptCreated`.
-    pub(crate) pending_prompts: VecDeque<String>,
+    pub(crate) pending_prompts: VecDeque<PendingPrompt>,
     /// Pending user/control-plane request to stop this conversation at
     /// the next stable turn boundary. Stored like queued prompts so
     /// races between provider responses and UI cancel events are
@@ -293,6 +293,57 @@ pub(crate) struct ChainAnchor {
     /// Only used for diagnostics when the aggregate fingerprint
     /// mismatches, so the next session log says which field drifted.
     pub(crate) request_fingerprint_parts: ChainFingerprintParts,
+}
+
+/// A queued prompt plus its user/internal classification.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PendingPrompt {
+    /// Prompt text to fold into the conversation.
+    pub(crate) text: String,
+    /// Whether this queued prompt is visible user text or hidden internal text.
+    pub(crate) message_class: PromptMessageClass,
+}
+
+impl From<String> for PendingPrompt {
+    fn from(text: String) -> Self {
+        Self::user(text)
+    }
+}
+
+impl PartialEq<str> for PendingPrompt {
+    fn eq(&self, other: &str) -> bool {
+        self.text == other
+    }
+}
+
+impl PartialEq<&str> for PendingPrompt {
+    fn eq(&self, other: &&str) -> bool {
+        self.text == *other
+    }
+}
+
+impl PendingPrompt {
+    /// Create a user-visible queued prompt.
+    pub(crate) fn user(text: String) -> Self {
+        Self {
+            text,
+            message_class: PromptMessageClass::User,
+        }
+    }
+
+    /// Create a hidden internal queued prompt.
+    pub(crate) fn internal(text: String) -> Self {
+        Self {
+            text,
+            message_class: PromptMessageClass::Internal,
+        }
+    }
+
+    /// Whether this prompt should be hidden from user-facing UI and metadata.
+    #[must_use]
+    pub(crate) fn is_internal(&self) -> bool {
+        self.message_class.is_internal()
+    }
 }
 
 impl Conversation {

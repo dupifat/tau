@@ -68,6 +68,7 @@ fn representative_events() -> Vec<Event> {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "hello".to_owned(),
+            message_class: PromptMessageClass::User,
             originator: PromptOriginator::User,
             ctx_id: None,
         }),
@@ -608,6 +609,7 @@ fn event_defaults_to_transient_marks_progress_kinds() {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "hi".to_owned(),
+            message_class: PromptMessageClass::User,
             originator: PromptOriginator::User,
             ctx_id: None,
         }),
@@ -619,6 +621,33 @@ fn event_defaults_to_transient_marks_progress_kinds() {
             event.name()
         );
     }
+}
+
+#[test]
+fn prompt_message_class_defaults_to_user_for_legacy_events() {
+    let prompt: UiPromptSubmitted = serde_json::from_value(serde_json::json!({
+        "session_id": "s1",
+        "text": "legacy",
+        "originator": { "kind": "user" }
+    }))
+    .expect("legacy ui prompt decodes");
+    assert_eq!(prompt.message_class, PromptMessageClass::User);
+    assert!(!prompt.message_class.is_internal());
+
+    let queued: SessionPromptQueued = serde_json::from_value(serde_json::json!({
+        "session_id": "s1",
+        "text": "legacy queued"
+    }))
+    .expect("legacy queued prompt decodes");
+    assert_eq!(queued.message_class, PromptMessageClass::User);
+
+    let internal = serde_json::to_value(SessionPromptSteered {
+        session_id: "s1".into(),
+        text: "Tool call `bg` is complete.".into(),
+        message_class: PromptMessageClass::Internal,
+    })
+    .expect("serialize steered prompt");
+    assert_eq!(internal["message_class"], serde_json::json!("internal"));
 }
 
 /// Tool specs serialize the current shared/exclusive execution-mode field while

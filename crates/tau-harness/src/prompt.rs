@@ -1005,6 +1005,7 @@ alpha middle zeta "
         let mut tree = tau_core::SessionTree::from_events("session-1".into(), &[]);
         tree.apply_event(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
             text: "build firefox".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
             session_id: "session-1".into(),
             originator: tau_proto::PromptOriginator::default(),
             ctx_id: None,
@@ -1092,6 +1093,7 @@ alpha middle zeta "
         let mut tree = tau_core::SessionTree::from_events("session-1".into(), &[]);
         tree.apply_event(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
             text: "hi".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
             session_id: "session-1".into(),
             originator: tau_proto::PromptOriginator::default(),
             ctx_id: None,
@@ -1133,6 +1135,7 @@ alpha middle zeta "
         let mut tree = tau_core::SessionTree::from_events("session-1".into(), &[]);
         tree.apply_event(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
             text: "first question".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
             session_id: "session-1".into(),
             originator: tau_proto::PromptOriginator::default(),
             ctx_id: None,
@@ -1165,6 +1168,7 @@ alpha middle zeta "
         }));
         tree.apply_event(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
             text: "continue".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
             session_id: "session-1".into(),
             originator: tau_proto::PromptOriginator::default(),
             ctx_id: None,
@@ -1199,6 +1203,7 @@ alpha middle zeta "
         let mut tree = tau_core::SessionTree::from_events("session-1".into(), &[]);
         tree.apply_event(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
             text: "hi".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
             session_id: "session-1".into(),
             originator: tau_proto::PromptOriginator::default(),
             ctx_id: None,
@@ -1248,6 +1253,7 @@ alpha middle zeta "
         let mut tree = tau_core::SessionTree::from_events("session-1".into(), &[]);
         tree.apply_event(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
             text: "go".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
             session_id: "session-1".into(),
             originator: tau_proto::PromptOriginator::default(),
             ctx_id: None,

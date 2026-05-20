@@ -20,7 +20,7 @@
 
 use tau_proto::{Event, SessionId};
 
-use crate::conversation::{ConversationId, ConversationTurnState};
+use crate::conversation::{ConversationId, ConversationTurnState, PendingPrompt};
 use crate::error::HarnessError;
 use crate::harness::Harness;
 
@@ -38,7 +38,7 @@ impl Harness {
         if self.maybe_start_auto_compaction_for_user_prompt(&cid, &text) {
             return Ok(());
         }
-        self.dispatch_prompt_for_conversation(&cid, text)
+        self.dispatch_prompt_for_conversation(&cid, PendingPrompt::user(text))
     }
 
     /// Dispatches one prompt for `cid`: publishes the
@@ -52,8 +52,9 @@ impl Harness {
     pub(crate) fn dispatch_prompt_for_conversation(
         &mut self,
         cid: &ConversationId,
-        text: String,
+        prompt: impl Into<PendingPrompt>,
     ) -> Result<(), HarnessError> {
+        let prompt = prompt.into();
         let (session_id, originator) = match self.conversations.get(cid) {
             Some(c) => (c.session_id.clone(), c.originator.clone()),
             None => {
@@ -66,7 +67,8 @@ impl Harness {
             cid,
             Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
                 session_id: session_id.clone(),
-                text,
+                text: prompt.text,
+                message_class: prompt.message_class,
                 originator,
                 ctx_id: None,
             }),
@@ -120,12 +122,12 @@ impl Harness {
                 return;
             }
 
-            let text = self
+            let prompt = self
                 .conversations
                 .get_mut(&cid)
                 .and_then(|c| c.pending_prompts.pop_front())
                 .expect("runnable conversation has a prompt");
-            if let Err(error) = self.dispatch_prompt_for_conversation(&cid, text) {
+            if let Err(error) = self.dispatch_prompt_for_conversation(&cid, prompt) {
                 self.emit_info(&format!("failed to dispatch queued prompt: {error}"));
                 // Reset the conversation so it doesn't wedge as
                 // AgentThinking with no in-flight prompt.

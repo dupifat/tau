@@ -259,6 +259,7 @@ fn new_session_clears_session_ui_state() {
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "old prompt".into(),
+        message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
@@ -597,6 +598,7 @@ fn model_status_shows_main_tool_usage_before_context() {
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "next task".into(),
+        message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
@@ -623,6 +625,7 @@ fn agent_in_progress_ignores_completed_replayed_prompt_history() {
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "old prompt".into(),
+        message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
@@ -874,6 +877,7 @@ fn single_prompt_response_cycle() {
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "hello".into(),
+        message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
@@ -922,6 +926,7 @@ fn thinking_renders_as_separate_block_above_response() {
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "hi".into(),
+        message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
@@ -1009,6 +1014,7 @@ fn set_show_thinking_round_trip_restores_history() {
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "hi".into(),
+        message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
@@ -1089,6 +1095,7 @@ fn thinking_created_while_off_stays_invisible_after_toggle_on() {
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "hi".into(),
+        message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
@@ -1127,6 +1134,7 @@ fn no_thinking_block_when_summary_absent() {
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "hi".into(),
+        message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
@@ -1161,6 +1169,7 @@ fn queued_prompt_renders_after_first_completes() {
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "first".into(),
+        message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
@@ -1175,6 +1184,7 @@ fn queued_prompt_renders_after_first_completes() {
     renderer.handle(&Event::SessionPromptQueued(SessionPromptQueued {
         session_id: "s1".into(),
         text: "second".into(),
+        message_class: tau_proto::PromptMessageClass::User,
     }));
     sync(&handle);
     assert!(
@@ -1264,10 +1274,12 @@ fn queued_prompt_then_late_ui_submit_advances_without_duplicate() {
     renderer.handle(&Event::SessionPromptQueued(SessionPromptQueued {
         session_id: "s1".into(),
         text: "late echo".into(),
+        message_class: tau_proto::PromptMessageClass::User,
     }));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "late echo".into(),
+        message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
@@ -1317,6 +1329,7 @@ fn queued_prompt_steered_promotes_without_duplicate() {
     renderer.handle(&Event::SessionPromptQueued(SessionPromptQueued {
         session_id: "s1".into(),
         text: "folded queued prompt".into(),
+        message_class: tau_proto::PromptMessageClass::User,
     }));
     sync(&handle);
     assert!(
@@ -1328,6 +1341,7 @@ fn queued_prompt_steered_promotes_without_duplicate() {
     renderer.handle(&Event::SessionPromptSteered(SessionPromptSteered {
         session_id: "s1".into(),
         text: "folded queued prompt".into(),
+        message_class: tau_proto::PromptMessageClass::User,
     }));
     sync(&handle);
     assert!(
@@ -1352,6 +1366,45 @@ fn queued_prompt_steered_promotes_without_duplicate() {
 }
 
 #[test]
+fn internal_prompt_events_are_hidden() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    // Background tool completion prompts are delivered to the model as
+    // prompt-like events, but they are internal control text and must not show
+    // up in the user's transcript or queued prompt area.
+    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "Tool call `bg` is complete.".into(),
+        message_class: tau_proto::PromptMessageClass::Internal,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }));
+    renderer.handle(&Event::SessionPromptQueued(SessionPromptQueued {
+        session_id: "s1".into(),
+        text: "Tool call `queued` is complete.".into(),
+        message_class: tau_proto::PromptMessageClass::Internal,
+    }));
+    renderer.handle(&Event::SessionPromptSteered(SessionPromptSteered {
+        session_id: "s1".into(),
+        text: "Tool call `steered` is complete.".into(),
+        message_class: tau_proto::PromptMessageClass::Internal,
+    }));
+    sync(&handle);
+
+    assert!(!vt.screen_contains(80, "Tool call"));
+    assert!(
+        vt.screen_text(80)
+            .iter()
+            .all(|row| !row.contains("Tool call"))
+    );
+}
+
+#[test]
 fn queued_prompt_does_not_replace_dispatched_same_text() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
@@ -1367,6 +1420,7 @@ fn queued_prompt_does_not_replace_dispatched_same_text() {
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "repeat".into(),
+        message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
@@ -1376,6 +1430,7 @@ fn queued_prompt_does_not_replace_dispatched_same_text() {
     renderer.handle(&Event::SessionPromptQueued(SessionPromptQueued {
         session_id: "s1".into(),
         text: "repeat".into(),
+        message_class: tau_proto::PromptMessageClass::User,
     }));
     sync(&handle);
 
@@ -1406,6 +1461,7 @@ fn three_queued_prompts_render_sequentially() {
             renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
                 session_id: "s1".into(),
                 text: format!("msg-{i}"),
+                message_class: tau_proto::PromptMessageClass::User,
                 originator: tau_proto::PromptOriginator::User,
                 ctx_id: None,
             }));
@@ -1416,6 +1472,7 @@ fn three_queued_prompts_render_sequentially() {
             renderer.handle(&Event::SessionPromptQueued(SessionPromptQueued {
                 session_id: "s1".into(),
                 text: format!("msg-{i}"),
+                message_class: tau_proto::PromptMessageClass::User,
             }));
         }
     }
@@ -2145,6 +2202,7 @@ fn streaming_block_does_not_duplicate_on_finish() {
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "hi".into(),
+        message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
@@ -2850,6 +2908,7 @@ fn three_prompts_during_streaming_all_render_correctly() {
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "hi".into(),
+        message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
@@ -2875,22 +2934,26 @@ fn three_prompts_during_streaming_all_render_correctly() {
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "hi".into(),
+        message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
     renderer.handle(&Event::SessionPromptQueued(SessionPromptQueued {
         session_id: "s1".into(),
         text: "hi".into(),
+        message_class: tau_proto::PromptMessageClass::User,
     }));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "hi".into(),
+        message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
     renderer.handle(&Event::SessionPromptQueued(SessionPromptQueued {
         session_id: "s1".into(),
         text: "hi".into(),
+        message_class: tau_proto::PromptMessageClass::User,
     }));
 
     // More streaming updates (multi-line, like a real LLM).
@@ -3005,6 +3068,7 @@ fn emoji_in_response_renders_correctly() {
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "hi".into(),
+        message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
@@ -3062,6 +3126,7 @@ fn multiple_emoji_no_column_drift() {
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "hi".into(),
+        message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
@@ -3101,6 +3166,7 @@ fn overflowing_stream_replaced_cleanly_on_finish() {
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "overflow please".into(),
+        message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));

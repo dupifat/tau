@@ -118,6 +118,7 @@ where
                         correct_tao_to_tau(&prompt.text).map(|fixed| {
                             Event::UiPromptSubmitted(UiPromptSubmitted {
                                 text: fixed,
+                                message_class: tau_proto::PromptMessageClass::User,
                                 ..prompt.clone()
                             })
                         })

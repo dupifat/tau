@@ -1902,6 +1902,27 @@ pub struct CustomEvent {
 // UI events — facts from the user interface
 // ---------------------------------------------------------------------------
 
+/// Classifies whether a prompt-like message came from the human user or from
+/// harness internals.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptMessageClass {
+    /// Default — visible user-authored prompt text.
+    #[default]
+    User,
+    /// Hidden control text that still belongs in model context.
+    Internal,
+}
+
+impl PromptMessageClass {
+    /// Returns true for prompt text that should be hidden from user-facing UI
+    /// and latest-user-prompt metadata.
+    #[must_use]
+    pub fn is_internal(self) -> bool {
+        matches!(self, Self::Internal)
+    }
+}
+
 /// The user submitted a prompt in the UI.
 ///
 /// `originator` is normally [`PromptOriginator::User`] — the field
@@ -1915,6 +1936,10 @@ pub struct CustomEvent {
 pub struct UiPromptSubmitted {
     pub session_id: SessionId,
     pub text: String,
+    /// Whether this prompt text is user-authored or hidden internal control
+    /// text.
+    #[serde(default)]
+    pub message_class: PromptMessageClass,
     #[serde(default)]
     pub originator: PromptOriginator,
     /// Free-form correlation tag chosen by the submitter and copied
@@ -2181,6 +2206,10 @@ pub struct SessionPromptQueued {
     pub session_id: SessionId,
     /// Queued prompt text.
     pub text: String,
+    /// Whether this prompt text is user-authored or hidden internal control
+    /// text.
+    #[serde(default)]
+    pub message_class: PromptMessageClass,
 }
 
 /// The harness recalled a previously queued user prompt for editing.
@@ -2206,6 +2235,10 @@ pub struct SessionPromptRecalled {
 pub struct SessionPromptSteered {
     pub session_id: SessionId,
     pub text: String,
+    /// Whether this prompt text is user-authored or hidden internal control
+    /// text.
+    #[serde(default)]
+    pub message_class: PromptMessageClass,
 }
 
 /// Why a `SessionStarted` was published. Lets extensions distinguish
@@ -2255,6 +2288,10 @@ pub struct SessionShutdown {
 pub struct SessionUserMessageInjected {
     pub session_id: SessionId,
     pub text: String,
+    /// Whether this prompt text is user-authored or hidden internal control
+    /// text.
+    #[serde(default)]
+    pub message_class: PromptMessageClass,
 }
 
 /// Who initiated the prompt — the human user via the UI, or an

@@ -23,6 +23,7 @@ fn unavailable_tool_is_reported_without_crashing() {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "shell printf hi".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
         }),
@@ -220,6 +221,7 @@ fn disconnected_tool_is_removed_cleanly() {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "shell printf hi".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
         }),
@@ -290,6 +292,7 @@ fn role_disabled_tool_is_reported_without_dispatch() {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "do it".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
         }),
@@ -429,6 +432,7 @@ fn unavailable_tool_name_does_not_panic_and_surfaces_error() {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "do it".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
         }),
@@ -537,6 +541,7 @@ fn empty_tool_call_id_rejects_response_before_commit() {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "do it".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
         }),

@@ -30,6 +30,7 @@ fn store_user_message(store: &mut SessionStore, session_id: &str, text: &str) ->
             Event::UiPromptSubmitted(UiPromptSubmitted {
                 session_id: session_id.into(),
                 text: text.to_owned(),
+                message_class: tau_proto::PromptMessageClass::User,
                 originator: tau_proto::PromptOriginator::User,
                 ctx_id: None,
             }),
@@ -155,6 +156,7 @@ fn subscribed_clients_only_receive_matching_events() {
     let report = bus.publish(Frame::Event(Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "hello".to_owned(),
+        message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     })));
@@ -194,6 +196,7 @@ fn broadcast_can_skip_execution_client_kinds_for_direct_prompt_routing() {
         Frame::Event(Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "hello".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
         })),
@@ -568,6 +571,7 @@ fn explicit_parent_preserved_across_replay() {
         Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
             session_id: session_id.into(),
             text: text.to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
         })
@@ -652,6 +656,7 @@ fn next_event_id_is_cached_across_appends_and_reopen() {
                     Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
                         session_id: session_id.into(),
                         text: format!("msg-{i}"),
+                        message_class: tau_proto::PromptMessageClass::User,
                         originator: tau_proto::PromptOriginator::User,
                         ctx_id: None,
                     }),
@@ -676,6 +681,7 @@ fn next_event_id_is_cached_across_appends_and_reopen() {
             Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
                 session_id: session_id.into(),
                 text: "after-reopen".to_owned(),
+                message_class: tau_proto::PromptMessageClass::User,
                 originator: tau_proto::PromptOriginator::User,
                 ctx_id: None,
             }),
@@ -695,6 +701,7 @@ fn session_tree_captures_phase_from_provider_response_finished() {
     tree.apply_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "session-1".into(),
         text: "hello".to_owned(),
+        message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
@@ -745,6 +752,7 @@ fn session_tree_captures_compacted_summary() {
     tree.apply_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "session-1".into(),
         text: "hello".to_owned(),
+        message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
@@ -822,6 +830,7 @@ fn session_meta_preview_tracks_only_user_authored_prompts() {
             Event::UiPromptSubmitted(UiPromptSubmitted {
                 session_id: session_id.into(),
                 text: "idle summary side query".to_owned(),
+                message_class: tau_proto::PromptMessageClass::User,
                 originator: PromptOriginator::Extension {
                     name: "std-notifications".into(),
                     query_id: "idle-0".to_owned(),
@@ -837,6 +846,7 @@ fn session_meta_preview_tracks_only_user_authored_prompts() {
             Event::SessionUserMessageInjected(SessionUserMessageInjected {
                 session_id: session_id.into(),
                 text: "harness injected context".to_owned(),
+                message_class: tau_proto::PromptMessageClass::User,
             }),
         )
         .expect("append injected message");
@@ -859,6 +869,7 @@ fn session_meta_preview_tracks_only_user_authored_prompts() {
             Event::SessionPromptSteered(SessionPromptSteered {
                 session_id: session_id.into(),
                 text: "queued user followup".to_owned(),
+                message_class: tau_proto::PromptMessageClass::User,
             }),
         )
         .expect("append queued user prompt");

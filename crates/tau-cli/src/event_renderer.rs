@@ -1793,6 +1793,10 @@ impl EventRenderer {
     }
 
     fn handle_ui_prompt_submitted(&mut self, prompt: &tau_proto::UiPromptSubmitted) {
+        if prompt.message_class.is_internal() {
+            return;
+        }
+
         use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
 
@@ -1814,6 +1818,10 @@ impl EventRenderer {
     }
 
     fn handle_session_prompt_queued(&mut self, queued: &tau_proto::SessionPromptQueued) {
+        if queued.message_class.is_internal() {
+            return;
+        }
+
         use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
 
@@ -1848,6 +1856,10 @@ impl EventRenderer {
     }
 
     fn handle_session_prompt_steered(&mut self, steered: &tau_proto::SessionPromptSteered) {
+        if steered.message_class.is_internal() {
+            return;
+        }
+
         use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
 

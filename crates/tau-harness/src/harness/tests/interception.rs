@@ -58,6 +58,7 @@ fn ext_agent_query_defers_dispatch_when_publish_is_intercepted() {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "go".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
         }),
@@ -620,6 +621,7 @@ fn interception_drop_of_must_pass_event_is_overridden() {
     let prompt = Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "hello".to_owned(),
+        message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     });
@@ -834,6 +836,7 @@ fn interception_mutating_prompt_reaches_agent() {
     let mutated = Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: session_id.clone(),
         text: "I love Tau".to_owned(),
+        message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     });

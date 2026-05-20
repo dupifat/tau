@@ -350,6 +350,7 @@ pub fn send_daemon_message_with_trace(
     peer.send(&Frame::Event(Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: session_id.into(),
         text: message.to_owned(),
+        message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: Some(ctx_id.clone()),
     })))?;

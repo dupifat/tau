@@ -24,7 +24,9 @@ use tau_proto::{
     ToolType, UiCancelPrompt,
 };
 
-use crate::conversation::{Conversation, ConversationId, ConversationTurnState, PendingCancel};
+use crate::conversation::{
+    Conversation, ConversationId, ConversationTurnState, PendingCancel, PendingPrompt,
+};
 use crate::daemon::InteractionOutcome;
 use crate::debug_log::DebugEventLog;
 use crate::dedup::{
@@ -2723,6 +2725,7 @@ impl Harness {
                 Event::SessionPromptQueued(SessionPromptQueued {
                     session_id: prompt.session_id.clone(),
                     text: prompt.text.clone(),
+                    message_class: prompt.message_class,
                 }),
             );
             if self.selected_model.is_none() {
@@ -2783,10 +2786,16 @@ impl Harness {
         if session_id != &self.current_session_id {
             return;
         }
-        let Some(text) = self
+        let Some(prompt) = self
             .conversations
             .get_mut(&self.default_conversation_id)
-            .and_then(|conv| conv.pending_prompts.pop_back())
+            .and_then(|conv| {
+                let index = conv
+                    .pending_prompts
+                    .iter()
+                    .rposition(|prompt| !prompt.is_internal())?;
+                conv.pending_prompts.remove(index)
+            })
         else {
             return;
         };
@@ -2794,7 +2803,7 @@ impl Harness {
             None,
             Event::SessionPromptRecalled(SessionPromptRecalled {
                 session_id: session_id.clone(),
-                text,
+                text: prompt.text,
             }),
         );
     }
@@ -3785,6 +3794,7 @@ impl Harness {
             Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
                 session_id,
                 text: query.instruction,
+                message_class: tau_proto::PromptMessageClass::User,
                 originator: tau_proto::PromptOriginator::Extension {
                     name: extension_name.into(),
                     query_id: query.query_id,
@@ -4312,7 +4322,7 @@ impl Harness {
                 .get_mut(&cid)
                 .expect("default conversation always present")
                 .pending_prompts
-                .push_back(text);
+                .push_back(PendingPrompt::user(text));
             self.try_advance_queue();
             return Ok(PromptSubmission::Queued);
         }
@@ -4747,6 +4757,7 @@ impl Harness {
         let event = Event::SessionUserMessageInjected(tau_proto::SessionUserMessageInjected {
             session_id: session_id.into(),
             text,
+            message_class: tau_proto::PromptMessageClass::User,
         });
         // Publish the injection as an event so it reaches the durable
         // session log and folds into the SessionTree the same way
@@ -4783,6 +4794,7 @@ impl Harness {
         let event = Event::SessionUserMessageInjected(tau_proto::SessionUserMessageInjected {
             session_id: finished.session_id.clone(),
             text,
+            message_class: tau_proto::PromptMessageClass::User,
         });
         // When the shell output belongs to the bound session, stamp
         // the publish with the default conversation so the fold
@@ -5414,9 +5426,8 @@ impl Harness {
         );
 
         match pending.resume {
-            PendingCompactionResume::UserPrompt(text) => {
-                self.dispatch_prompt_for_conversation(&pending.target_cid, text)
-            }
+            PendingCompactionResume::UserPrompt(text) => self
+                .dispatch_prompt_for_conversation(&pending.target_cid, PendingPrompt::user(text)),
             PendingCompactionResume::FollowupTurn => {
                 self.send_prompt_to_agent_for(&pending.target_cid);
                 Ok(())
@@ -6028,7 +6039,9 @@ impl Harness {
     fn queue_background_completion_prompt(&mut self, cid: &ConversationId, call_id: &ToolCallId) {
         if let Some(conv) = self.conversations.get_mut(cid) {
             conv.pending_prompts
-                .push_back(format!("Tool call `{call_id}` is complete."));
+                .push_back(PendingPrompt::internal(format!(
+                    "Tool call `{call_id}` is complete."
+                )));
         }
         self.try_advance_queue();
     }
@@ -6176,17 +6189,18 @@ impl Harness {
             Some(c) => c.session_id.clone(),
             None => return,
         };
-        let pending: Vec<String> = self
+        let pending: Vec<PendingPrompt> = self
             .conversations
             .get_mut(cid)
             .map(|c| c.pending_prompts.drain(..).collect())
             .unwrap_or_default();
-        for text in pending {
+        for prompt in pending {
             self.publish_for_conversation(
                 cid,
                 Event::SessionPromptSteered(tau_proto::SessionPromptSteered {
                     session_id: session_id.clone(),
-                    text,
+                    text: prompt.text,
+                    message_class: prompt.message_class,
                 }),
             );
         }
@@ -6417,6 +6431,7 @@ impl Harness {
             Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
                 session_id: "s1".into(),
                 text: user_message.to_owned(),
+                message_class: tau_proto::PromptMessageClass::User,
                 originator: tau_proto::PromptOriginator::User,
                 ctx_id: None,
             }),

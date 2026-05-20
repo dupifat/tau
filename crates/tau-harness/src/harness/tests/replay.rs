@@ -113,6 +113,7 @@ fn late_joining_ui_client_replays_only_final_session_events() {
         Event::SessionPromptQueued(SessionPromptQueued {
             session_id: "s1".into(),
             text: "queued but not durable-final".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
         }),
     );
     h.publish_event(

@@ -6,7 +6,11 @@ enum TerminalShade {
     Light,
 }
 
+const THEME_ENV: &str = "TAU_THEME";
+
 pub(crate) fn select_theme(mode: CliTheme) -> tau_themes::Theme {
+    let mode = env_theme_override().unwrap_or(mode);
+
     match mode {
         CliTheme::Dark => tau_themes::Theme::builtin_dark(),
         CliTheme::Light => tau_themes::Theme::builtin_light(),
@@ -14,6 +18,20 @@ pub(crate) fn select_theme(mode: CliTheme) -> tau_themes::Theme {
             Some(TerminalShade::Light) => tau_themes::Theme::builtin_light(),
             Some(TerminalShade::Dark) | None => tau_themes::Theme::builtin_dark(),
         },
+    }
+}
+
+fn env_theme_override() -> Option<CliTheme> {
+    let value = std::env::var(THEME_ENV).ok()?;
+    parse_theme_name(&value)
+}
+
+fn parse_theme_name(value: &str) -> Option<CliTheme> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "auto" => Some(CliTheme::Auto),
+        "dark" => Some(CliTheme::Dark),
+        "light" => Some(CliTheme::Light),
+        _ => None,
     }
 }
 
@@ -37,6 +55,14 @@ fn colorfgbg_terminal_shade_from(value: &str) -> Option<TerminalShade> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_theme_env_values() {
+        assert_eq!(parse_theme_name("auto"), Some(CliTheme::Auto));
+        assert_eq!(parse_theme_name("DARK"), Some(CliTheme::Dark));
+        assert_eq!(parse_theme_name(" light "), Some(CliTheme::Light));
+        assert_eq!(parse_theme_name("solarized"), None);
+    }
 
     #[test]
     fn colorfgbg_detects_light_background() {

@@ -49,9 +49,15 @@ Lines containing invalid UTF-8 characters are skipped, and a `invalid-utf8` is d
 and line content is skipped to avoid mistakes and force fallback to more appropriate tools.
 In similar way, lines which are too long show `truncated` flag and have content skipped.
 
-Total outputs that are too long are truncated; `truncated: true`, `lines: {lines}` and `bytes: {bytes}` headers are added.
+Total outputs that are too long are truncated; `truncated: true`,
+`total_lines: {lines}` and `total_bytes: {bytes}` headers are added.
+These total headers are omitted when output is not truncated.
 
-When output is truncated due to line number limit, first and last 1000 lines should be shown with `...` line separating them, instead of usual line prefix.
+When output is truncated due to line number limit, first and last 1000 lines
+should be shown with `...` line separating them, instead of usual line prefix.
+If a single line would exceed the byte budget (currently 50 KB for
+`read`/`shell`), show only the line prefix plus `(truncated)` rather than
+partial content.
 
 
 ### Tool descriptions
@@ -70,6 +76,20 @@ than 5s to execute.
 `shell` tool should reliably timeout operations that take longer than timeout argument,
 but currently 100% reliable child process termination is not implemented and will
 require advanced techniques to implement in the future (e.g. cgroups).
+
+`edit` tool produces unified-diff like output for edits made in the payload, and is
+capped at 100 replacements per call, to limit amount of output it produces. If an
+edit finds no matches, the tool error should include structured details with
+`changed: false` and `replacements: 0`. Hunks that would be too large than
+some sanity threshold (both lines and bytes) or with invalid charactgers, will
+be replaced with:
+
+```
+@@ -1,8 +1,8 @@
+<marker>
+```
+
+Where marker is similiar to ones used in tools like `read`, `shell` output.
 
 Other commands should adhere to pre-existing conventions and naming used in
 standard tools.

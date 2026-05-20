@@ -7,7 +7,7 @@ use tau_proto::{CborValue, Event, Frame, ToolDisplay, ToolDisplayPayload, ToolDi
 use crate::argument::{argument_text, optional_argument_int_strict, optional_argument_text};
 use crate::config::ShellConfig;
 use crate::display::{ToolFailure, ToolOutput, ok_display, text_stats};
-use crate::truncate::{MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, truncate_tail, truncate_tail_from_tail};
+use crate::truncate::{MAX_OUTPUT_LINES, mark_line, truncate_line_oriented_lines};
 
 pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 120;
 pub(crate) const SLOW_COMMAND_EXEC_TIME_THRESHOLD_SECS: u64 = 5;
@@ -50,6 +50,8 @@ pub(crate) fn run_command(
                     timed_out: false,
                     duration_seconds: None,
                     termination_reason: "start_error",
+                    total_lines: None,
+                    total_bytes: None,
                     output: String::new(),
                     truncated: false,
                     valid_utf8: true,
@@ -70,11 +72,7 @@ pub(crate) fn run_command(
     let signal = wait.signal;
     let success = wait.success;
 
-    let output_trunc = truncate_tail_from_tail(
-        &wait.output_tail,
-        wait.output_total_lines,
-        wait.output_total_bytes,
-    );
+    let output_trunc = wait.output.truncate();
     let combined = output_trunc.content.clone();
 
     let result = command_details_value(CommandDetails {
@@ -83,6 +81,12 @@ pub(crate) fn run_command(
         timed_out: wait.timed_out,
         duration_seconds,
         termination_reason: wait.termination_reason,
+        total_lines: output_trunc
+            .was_truncated
+            .then_some(output_trunc.total_lines),
+        total_bytes: output_trunc
+            .was_truncated
+            .then_some(output_trunc.total_bytes),
         output: output_trunc.content,
         truncated: output_trunc.was_truncated,
         valid_utf8: !wait.had_invalid_utf8,
@@ -289,7 +293,7 @@ pub(crate) fn dispatch_user_shell_command(
         }
         merged.push_str(&note);
     }
-    let truncated = truncate_tail(&merged);
+    let truncated = crate::truncate::truncate_tail(&merged);
 
     let _ = tx.send(Frame::Event(Event::ShellCommandFinished(
         tau_proto::ShellCommandFinished {
@@ -653,14 +657,13 @@ fn wait_result_from_parts(
         "unknown"
     };
 
+    let had_invalid_utf8 = output.stdout.had_invalid_utf8 || output.stderr.had_invalid_utf8;
     WaitResult {
         status_code,
         signal,
         success,
-        output_tail: output.render_tail(),
-        output_total_lines: output.total_lines,
-        output_total_bytes: output.total_bytes,
-        had_invalid_utf8: output.stdout.had_invalid_utf8 || output.stderr.had_invalid_utf8,
+        output,
+        had_invalid_utf8,
         timed_out,
         termination_reason,
     }
@@ -670,9 +673,7 @@ struct WaitResult {
     status_code: Option<i32>,
     signal: Option<i32>,
     success: bool,
-    output_tail: String,
-    output_total_lines: usize,
-    output_total_bytes: usize,
+    output: CapturedOutput,
     had_invalid_utf8: bool,
     timed_out: bool,
     termination_reason: &'static str,
@@ -695,21 +696,26 @@ impl OutputStream {
 
 struct OutputLine {
     stream: OutputStream,
-    content: String,
+    content: OutputContent,
+}
+
+#[derive(Clone)]
+enum OutputContent {
+    Text { text: String, no_nl: bool },
+    InvalidUtf8 { no_nl: bool },
 }
 
 #[derive(Default)]
 struct CapturedOutput {
     stdout: StreamDecoder,
     stderr: StreamDecoder,
-    lines: Vec<OutputLine>,
+    head_lines: Vec<OutputLine>,
+    tail_lines: Vec<OutputLine>,
     total_lines: usize,
     total_bytes: usize,
 }
 
 impl CapturedOutput {
-    const MAX_TAIL_BYTES: usize = MAX_OUTPUT_BYTES + MAX_OUTPUT_LINES * 3 + 8192;
-
     fn push_bytes(&mut self, stream: OutputStream, bytes: &[u8]) {
         let decoder = match stream {
             OutputStream::Stdout => &mut self.stdout,
@@ -720,12 +726,19 @@ impl CapturedOutput {
         }
     }
 
-    fn push_line(&mut self, stream: OutputStream, content: String) {
+    fn push_line(&mut self, stream: OutputStream, content: OutputContent) {
         let separator_bytes = usize::from(self.total_lines != 0);
         self.total_bytes += separator_bytes + formatted_output_line_len(stream, &content);
+        let line = OutputLine { stream, content };
+        if self.total_lines < MAX_OUTPUT_LINES / 2 {
+            self.head_lines.push(line);
+        } else {
+            self.tail_lines.push(line);
+            if MAX_OUTPUT_LINES / 2 < self.tail_lines.len() {
+                self.tail_lines.remove(0);
+            }
+        }
         self.total_lines += 1;
-        self.lines.push(OutputLine { stream, content });
-        self.trim_tail();
     }
 
     fn finish(&mut self) {
@@ -748,22 +761,19 @@ impl CapturedOutput {
         }
     }
 
-    fn render_tail(&self) -> String {
-        self.lines
+    fn truncate(&self) -> crate::truncate::Truncated {
+        let mut rendered = self
+            .head_lines
             .iter()
-            .map(|line| format_output_line(line.stream, &line.content))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    fn trim_tail(&mut self) {
-        let mut bytes = self.render_tail().len();
-        while (MAX_OUTPUT_LINES + 128 < self.lines.len() || Self::MAX_TAIL_BYTES < bytes)
-            && !self.lines.is_empty()
-        {
-            self.lines.remove(0);
-            bytes = self.render_tail().len();
-        }
+            .map(render_output_line)
+            .collect::<Vec<_>>();
+        rendered.extend(self.tail_lines.iter().map(render_output_line));
+        let rendered_refs = rendered.iter().map(String::as_str).collect::<Vec<_>>();
+        truncate_line_oriented_lines(
+            rendered_refs.iter().copied(),
+            self.total_lines,
+            self.total_bytes,
+        )
     }
 }
 
@@ -771,11 +781,12 @@ impl CapturedOutput {
 struct StreamDecoder {
     pending_utf8: Vec<u8>,
     pending_line: String,
+    pending_line_invalid: bool,
     had_invalid_utf8: bool,
 }
 
 impl StreamDecoder {
-    fn push_bytes(&mut self, bytes: &[u8]) -> Vec<String> {
+    fn push_bytes(&mut self, bytes: &[u8]) -> Vec<OutputContent> {
         if bytes.is_empty() {
             return Vec::new();
         }
@@ -806,7 +817,7 @@ impl StreamDecoder {
                     }
                     if let Some(error_len) = error.error_len() {
                         self.had_invalid_utf8 = true;
-                        self.push_str("\u{fffd}", &mut lines);
+                        self.pending_line_invalid = true;
                         remaining = &remaining[valid_up_to + error_len..];
                     } else {
                         self.pending_utf8 = remaining[valid_up_to..].to_vec();
@@ -818,37 +829,76 @@ impl StreamDecoder {
         lines
     }
 
-    fn push_str(&mut self, text: &str, lines: &mut Vec<String>) {
+    fn push_str(&mut self, text: &str, lines: &mut Vec<OutputContent>) {
         for segment in text.split_inclusive('\n') {
             if let Some(line) = segment.strip_suffix('\n') {
-                self.pending_line.push_str(line);
-                lines.push(std::mem::take(&mut self.pending_line));
-            } else {
+                if !self.pending_line_invalid {
+                    self.pending_line.push_str(line);
+                }
+                lines.push(self.take_pending_line(false));
+            } else if !self.pending_line_invalid {
                 self.pending_line.push_str(segment);
             }
         }
     }
 
-    fn finish(&mut self) -> Vec<String> {
+    fn finish(&mut self) -> Vec<OutputContent> {
         if !self.pending_utf8.is_empty() {
             self.had_invalid_utf8 = true;
             self.pending_utf8.clear();
-            self.pending_line.push('\u{fffd}');
+            self.pending_line_invalid = true;
         }
-        if self.pending_line.is_empty() {
+        if self.pending_line.is_empty() && !self.pending_line_invalid {
             Vec::new()
         } else {
-            vec![std::mem::take(&mut self.pending_line)]
+            vec![self.take_pending_line(true)]
+        }
+    }
+
+    fn take_pending_line(&mut self, no_nl: bool) -> OutputContent {
+        if std::mem::take(&mut self.pending_line_invalid) {
+            self.pending_line.clear();
+            OutputContent::InvalidUtf8 { no_nl }
+        } else {
+            OutputContent::Text {
+                text: std::mem::take(&mut self.pending_line),
+                no_nl,
+            }
         }
     }
 }
 
-fn format_output_line(stream: OutputStream, content: &str) -> String {
-    format!("{} {content}", stream.fd_number())
+fn render_output_line(line: &OutputLine) -> String {
+    let prefix = line.stream.fd_number().to_string();
+    match &line.content {
+        OutputContent::Text { text, no_nl } => {
+            let marker = no_nl.then_some("no_nl");
+            format_output_line(&prefix, marker, text)
+        }
+        OutputContent::InvalidUtf8 { no_nl } => {
+            let marker = if *no_nl {
+                "invalid-utf8,no_nl"
+            } else {
+                "invalid-utf8"
+            };
+            mark_line(&prefix, marker)
+        }
+    }
 }
 
-fn formatted_output_line_len(stream: OutputStream, content: &str) -> usize {
-    format_output_line(stream, content).len()
+fn format_output_line(prefix: &str, marker: Option<&str>, content: &str) -> String {
+    match marker {
+        Some(marker) => format!("{prefix}({marker}) {content}"),
+        None => format!("{prefix} {content}"),
+    }
+}
+
+fn formatted_output_line_len(stream: OutputStream, content: &OutputContent) -> usize {
+    render_output_line(&OutputLine {
+        stream,
+        content: content.clone(),
+    })
+    .len()
 }
 
 #[cfg(not(unix))]
@@ -919,6 +969,8 @@ pub(crate) struct CommandDetails {
     pub(crate) timed_out: bool,
     pub(crate) duration_seconds: Option<u64>,
     pub(crate) termination_reason: &'static str,
+    pub(crate) total_lines: Option<usize>,
+    pub(crate) total_bytes: Option<usize>,
     pub(crate) output: String,
     pub(crate) truncated: bool,
     pub(crate) valid_utf8: bool,
@@ -931,6 +983,8 @@ pub(crate) fn command_details_value(details: CommandDetails) -> CborValue {
         timed_out,
         duration_seconds,
         termination_reason,
+        total_lines,
+        total_bytes,
         output,
         truncated,
         valid_utf8,
@@ -962,6 +1016,18 @@ pub(crate) fn command_details_value(details: CommandDetails) -> CborValue {
             CborValue::Text("truncated".to_owned()),
             CborValue::Bool(true),
         ));
+        if let Some(total_lines) = total_lines {
+            entries.push((
+                CborValue::Text("total_lines".to_owned()),
+                CborValue::Integer((total_lines as i64).into()),
+            ));
+        }
+        if let Some(total_bytes) = total_bytes {
+            entries.push((
+                CborValue::Text("total_bytes".to_owned()),
+                CborValue::Integer((total_bytes as i64).into()),
+            ));
+        }
     }
     if let Some(status) = status {
         entries.push((

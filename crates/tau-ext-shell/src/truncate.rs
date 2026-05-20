@@ -2,6 +2,10 @@
 
 /// Maximum lines before truncation kicks in.
 pub(crate) const MAX_OUTPUT_LINES: usize = 2000;
+/// Number of leading lines kept when line-count truncation kicks in.
+pub(crate) const TRUNCATED_OUTPUT_HEAD_LINES: usize = MAX_OUTPUT_LINES / 2;
+/// Number of trailing lines kept when line-count truncation kicks in.
+pub(crate) const TRUNCATED_OUTPUT_TAIL_LINES: usize = MAX_OUTPUT_LINES / 2;
 /// Maximum bytes before truncation kicks in.
 pub(crate) const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 
@@ -13,152 +17,112 @@ pub(crate) struct Truncated {
     pub(crate) total_bytes: usize,
 }
 
-pub(crate) fn truncate_head_plain(input: &str) -> Truncated {
-    let total_lines = input.lines().count();
-    let total_bytes = input.len();
-
-    if total_lines <= MAX_OUTPUT_LINES && total_bytes <= MAX_OUTPUT_BYTES {
-        return Truncated {
-            content: input.to_owned(),
-            was_truncated: false,
-            total_lines,
-            total_bytes,
-        };
-    }
-
-    let mut result = String::new();
-    let mut bytes = 0;
-    let mut kept_lines = 0;
-
-    for (line_idx, line) in input.lines().enumerate() {
-        if kept_lines >= MAX_OUTPUT_LINES || bytes + line.len() + 1 > MAX_OUTPUT_BYTES {
-            break;
-        }
-        if line_idx > 0 {
-            result.push('\n');
-            bytes += 1;
-        }
-        result.push_str(line);
-        bytes += line.len();
-        kept_lines = line_idx + 1;
-    }
-
-    Truncated {
-        content: result,
-        was_truncated: true,
-        total_lines,
-        total_bytes,
-    }
-}
-
-/// Truncate from the head (keep first lines).  Used by `read`.
-pub(crate) fn truncate_head(input: &str) -> Truncated {
-    truncate_head_with_notice(input, "Use start_line and line_count to continue reading.")
-}
-
-pub(crate) fn truncate_head_with_notice(input: &str, continuation_hint: &str) -> Truncated {
-    let mut truncated = truncate_head_plain(input);
-    if !truncated.was_truncated {
-        return truncated;
-    }
-
-    let kept_lines = truncated.content.lines().count();
-    truncated.content.push_str(&format!(
-        "\n\n[Showing lines 1-{kept_lines} of {} ({} bytes total). \
-         {continuation_hint}]",
-        truncated.total_lines, truncated.total_bytes
-    ));
-    truncated
-}
-
-/// Truncate from the tail (keep last lines).  Used by `shell`.
-pub(crate) fn truncate_tail(input: &str) -> Truncated {
-    truncate_tail_from_tail(input, input.lines().count(), input.len())
-}
-
-/// Truncate from a bounded tail suffix while preserving original stream totals.
+/// Truncate line-oriented output without adding prose notices.
 ///
-/// `tail` must contain enough of the stream suffix to satisfy the normal shell
-/// tail truncation limits. This lets streaming readers discard older output
-/// without losing the user-visible truncation marker or total line/byte counts.
-pub(crate) fn truncate_tail_from_tail(
-    tail: &str,
+/// When the line count is too high, the first and last 1000 lines are kept with
+/// a literal `...` separator between them. Lines that are individually too long
+/// are replaced by a marker-only line such as `1(truncated)` so no misleading
+/// partial content is shown.
+pub(crate) fn truncate_line_oriented(input: &str) -> Truncated {
+    let lines: Vec<&str> = input.lines().collect();
+    truncate_line_oriented_lines(lines.iter().copied(), lines.len(), input.len())
+}
+
+/// Truncate already-rendered line-oriented output with known original totals.
+pub(crate) fn truncate_line_oriented_lines<'a>(
+    lines: impl IntoIterator<Item = &'a str>,
     total_lines: usize,
     total_bytes: usize,
 ) -> Truncated {
-    if total_lines <= MAX_OUTPUT_LINES && total_bytes <= MAX_OUTPUT_BYTES {
-        return Truncated {
-            content: tail.to_owned(),
-            was_truncated: false,
-            total_lines,
-            total_bytes,
-        };
-    }
-
-    let tail_lines: Vec<&str> = tail.lines().collect();
-
-    // Walk backwards, accumulating lines until we hit a limit.
-    let mut kept: Vec<&str> = Vec::new();
-    let mut bytes = 0;
-
-    for &line in tail_lines.iter().rev() {
-        let next_bytes = bytes + line.len() + 1;
-        if kept.len() < MAX_OUTPUT_LINES && next_bytes <= MAX_OUTPUT_BYTES {
-            bytes = next_bytes;
-            kept.push(line);
-        } else {
-            break;
-        }
-    }
-    kept.reverse();
-
-    let content = if kept.is_empty() && !tail.is_empty() {
-        let last_line = tail_lines.last().copied().unwrap_or(tail);
-        let suffix = valid_utf8_suffix(last_line, MAX_OUTPUT_BYTES);
-        let suffix_bytes = suffix.len();
-        let line_number = total_lines.max(1);
-        format!(
-            "[Showing last {suffix_bytes} bytes of line {line_number} of {total_lines} \
-             ({total_bytes} bytes total). Line was truncated by byte cap.]\n\n{suffix}"
-        )
+    let all_lines: Vec<&str> = lines.into_iter().collect();
+    let line_count_truncated = MAX_OUTPUT_LINES < total_lines;
+    let selected: Vec<Option<&str>> = if line_count_truncated {
+        all_lines
+            .iter()
+            .take(TRUNCATED_OUTPUT_HEAD_LINES)
+            .copied()
+            .map(Some)
+            .chain(std::iter::once(None))
+            .chain(
+                all_lines
+                    .iter()
+                    .skip(all_lines.len().saturating_sub(TRUNCATED_OUTPUT_TAIL_LINES))
+                    .copied()
+                    .map(Some),
+            )
+            .collect()
     } else {
-        let first_kept = total_lines - kept.len() + 1;
-        let last_kept = total_lines;
-        let mut result = format!(
-            "[Showing lines {first_kept}-{last_kept} of {total_lines} ({total_bytes} bytes total)]\n\n"
-        );
-        result.push_str(&kept.join("\n"));
-        result
+        all_lines.iter().copied().map(Some).collect()
     };
 
+    let mut rendered = Vec::with_capacity(selected.len());
+    let mut rendered_bytes = 0usize;
+    let mut was_truncated = line_count_truncated || MAX_OUTPUT_BYTES < total_bytes;
+    for line in selected {
+        let line = match line {
+            Some(line) => line,
+            None => {
+                rendered.push("...".to_owned());
+                rendered_bytes += 3 + usize::from(rendered.len() != 1);
+                continue;
+            }
+        };
+        let separator_bytes = usize::from(!rendered.is_empty());
+        if MAX_OUTPUT_BYTES < line.len()
+            || MAX_OUTPUT_BYTES < rendered_bytes.saturating_add(separator_bytes + line.len())
+        {
+            rendered.push(mark_line(line, "truncated"));
+            rendered_bytes += separator_bytes + rendered.last().map_or(0, String::len);
+            was_truncated = true;
+        } else {
+            rendered.push(line.to_owned());
+            rendered_bytes += separator_bytes + line.len();
+        }
+    }
+
     Truncated {
-        content,
-        was_truncated: true,
+        content: rendered.join("\n"),
+        was_truncated,
         total_lines,
         total_bytes,
     }
 }
 
-fn valid_utf8_suffix(line: &str, max_bytes: usize) -> &str {
-    if max_bytes < line.len() {
-        let mut start = line.len() - max_bytes;
-        while start < line.len() && !line.is_char_boundary(start) {
-            start += 1;
-        }
-        return &line[start..];
+/// Add a marker to a rendered line prefix and skip its content.
+pub(crate) fn mark_line(line: &str, marker: &str) -> String {
+    let prefix = line.split_once(' ').map_or_else(
+        || {
+            if line.chars().all(|ch| ch.is_ascii_digit()) {
+                line
+            } else {
+                ""
+            }
+        },
+        |(prefix, _)| prefix,
+    );
+    if let Some((base, existing)) = prefix.split_once('(')
+        && let Some(existing) = existing.strip_suffix(')')
+    {
+        return format!("{base}({existing},{marker})");
     }
-
-    line
+    format!("{prefix}({marker})")
 }
 
-/// Truncate a single line, appending a marker if truncated.
+/// Truncate from the head (keep first and last lines with a separator).
+pub(crate) fn truncate_head(input: &str) -> Truncated {
+    truncate_line_oriented(input)
+}
+
+/// Truncate from the tail (kept for callers that only need line-oriented
+/// truncation).
+pub(crate) fn truncate_tail(input: &str) -> Truncated {
+    truncate_line_oriented(input)
+}
+
+/// Truncate a single line by marker, skipping line content.
 pub(crate) fn truncate_line(line: &str, max: usize) -> String {
     if line.len() <= max {
         return line.to_owned();
     }
-    let mut end = max;
-    while end > 0 && !line.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}... [truncated]", &line[..end])
+    mark_line(line, "truncated")
 }

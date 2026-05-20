@@ -10,14 +10,13 @@ use crate::diff::{compute_diff, unified_diff};
 use crate::display::{ToolFailure, ToolOutput};
 use crate::tools::read::format_read_range;
 
+const MAX_REPLACEMENTS_PER_CALL: usize = 100;
+
 pub(crate) fn edit_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure> {
     let path = argument_text(arguments, "path").map_err(ToolFailure::from)?;
     let path_buf = PathBuf::from(&path);
     let display_path = path_buf.display().to_string();
     let mut display_args = display_path.clone();
-
-    let original_bytes = fs::read(&path_buf)
-        .map_err(|e| with_display_args(&display_args, ToolFailure::from(e.to_string())))?;
 
     let edits = argument_array(arguments, "edits")
         .map_err(|e| with_display_args(&display_args, ToolFailure::from(e)))?;
@@ -27,6 +26,10 @@ pub(crate) fn edit_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
             ToolFailure::new("edits array must not be empty"),
         ));
     }
+    validate_replacement_request_limit(edits, &display_args)?;
+
+    let original_bytes = fs::read(&path_buf)
+        .map_err(|e| with_display_args(&display_args, ToolFailure::from(e.to_string())))?;
 
     let line_starts = line_starts(&original_bytes);
 
@@ -75,18 +78,12 @@ pub(crate) fn edit_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
             replacements.push((start, end, new_text.as_bytes()));
         }
         if replacements.len() == replacements_before {
-            return Err(with_display_args(
-                &display_args,
-                ToolFailure::new("no matches for edit"),
-            ));
+            return Err(no_matches_failure(&display_args, display_path.clone()));
         }
     }
 
     if replacements.is_empty() {
-        return Err(with_display_args(
-            &display_args,
-            ToolFailure::new("no matches for edit"),
-        ));
+        return Err(no_matches_failure(&display_args, display_path.clone()));
     }
 
     // Sort by start position (descending) so we can apply from end to start
@@ -142,6 +139,31 @@ pub(crate) fn edit_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
         result: edit_result_value(display_path, replacements.len(), changed, diff.as_ref()),
         display,
     })
+}
+
+fn validate_replacement_request_limit(
+    edits: &[CborValue],
+    display_args: &str,
+) -> Result<(), ToolFailure> {
+    let mut requested = 0usize;
+    for edit in edits {
+        let max_matches = parse_optional_count(edit, "max_matches", 1, display_args)?;
+        requested = requested.checked_add(max_matches).ok_or_else(|| {
+            with_display_args(
+                display_args,
+                ToolFailure::new("requested replacement count is too large"),
+            )
+        })?;
+        if MAX_REPLACEMENTS_PER_CALL < requested {
+            return Err(with_display_args(
+                display_args,
+                ToolFailure::new(format!(
+                    "requested replacement count exceeds limit of {MAX_REPLACEMENTS_PER_CALL}"
+                )),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parse_optional_count(
@@ -213,6 +235,11 @@ fn with_display_args(args: &str, failure: ToolFailure) -> ToolFailure {
     failure.with_args(args.to_owned())
 }
 
+fn no_matches_failure(display_args: &str, path: String) -> ToolFailure {
+    with_display_args(display_args, ToolFailure::new("no matches for edit"))
+        .with_details(edit_result_value(path, 0, false, None))
+}
+
 fn edit_display_args(path: &str, ranges: &[String]) -> String {
     if ranges.is_empty() {
         return path.to_owned();
@@ -275,10 +302,10 @@ fn edit_result_value(
         ),
     ];
     if let Some(diff) = diff.and_then(unified_diff) {
-        entries.push((CborValue::Text("diff".to_owned()), CborValue::Text(diff)));
+        entries.push((CborValue::Text("output".to_owned()), CborValue::Text(diff)));
     } else if changed {
         entries.push((
-            CborValue::Text("diff".to_owned()),
+            CborValue::Text("output".to_owned()),
             CborValue::Text("[diff skipped: file is not valid UTF-8]".to_owned()),
         ));
     }

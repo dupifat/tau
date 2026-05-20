@@ -83,15 +83,16 @@ where
             model_visible_name: None,
             description: Some(
                 "Reads a file. Defaults to reading the whole file in one call — \
-                 output is capped at 2000 lines / 50 KB, and if the cap is hit \
-                 the result is truncated and includes a continuation hint. \
+                 output is capped at 2000 lines / 50 KB. Truncated output keeps \
+                 the first 1000 and last 1000 lines separated by a literal `...` line. \
                  Prefer one full read. Pass `start_line`/`line_count` only to \
-                 resume past a previous truncation, or to fetch a specific \
-                 known slice of a file you already know is large. Returned content lines are \
-                 prefixed by their 1-based line number and a space; unusual line endings are \
-                 marked after the number, e.g. `2(crlf)` or `3(no_nl)`. The result includes \
-                 `total_lines`, plus `valid_utf8: false` or `truncated: true` only when \
-                 applicable."
+                 fetch a specific known slice of a file you already know is large. \
+                 Returned content lines are prefixed by their 1-based line number and a space; \
+                 CRLF, CR, and missing final line endings are marked after the number, e.g. \
+                 `2(crlf)`, `3(cr)`, or `4(no_nl)`. Invalid UTF-8 and lines that would exceed \
+                 the 50 KB output budget are marker-only, e.g. `1(invalid-utf8)` or \
+                 `1(truncated)`. Truncated results include `truncated: true`, `total_lines`, \
+                 and `total_bytes`; `valid_utf8: false` is included only when applicable."
                     .to_owned(),
             ),
             tool_type: tau_proto::ToolType::Function,
@@ -153,10 +154,10 @@ where
             description: Some(
                 "Edit a file using exact text replacement. Each edit is matched against \
                  the original file, optionally restricted to start_line and line_count, \
-                 and replaces the first matches in that range up to max_matches. \
-                 Replacement ranges from all edits must not overlap. Returns the path, \
-                 the number of replacements, and optional unified diff text summarizing \
-                 the change against the previous contents."
+                 and replaces the first matches in that range up to max_matches, capped \
+                 at 100 replacements per call. Replacement ranges from all edits must \
+                 not overlap. Returns the path, the number of replacements, and optional \
+                 unified diff-like output summarizing the change against the previous contents."
                     .to_owned(),
             ),
             tool_type: tau_proto::ToolType::Function,
@@ -337,10 +338,14 @@ where
             description: Some(
                 "Execute a shell command via `sh -c`. Non-zero exits and timeouts \
                  are tool errors with output details. Output is capped at 2000 lines / \
-                 50 KB; truncated output keeps the tail. Output lines are prefixed \
-                 with `1 ` for stdout or `2 ` for stderr. Commands taking longer \
-                 than 5 seconds include duration metadata. Prefer dedicated tools \
-                 like `read`, `grep`, and `find` when they fit."
+                 50 KB; truncated output keeps the first 1000 and last 1000 lines \
+                 separated by a literal `...` line. Output lines are prefixed with `1 ` \
+                 for stdout or `2 ` for stderr; missing trailing newlines are marked, e.g. \
+                 `1(no_nl)`. Invalid UTF-8 and lines that would exceed the 50 KB output \
+                 budget are marker-only, e.g. `1(invalid-utf8)` or `2(truncated)`. \
+                 Truncated results include `truncated: true`, `total_lines`, and `total_bytes`. \
+                 Commands taking longer than 5 seconds include duration metadata. Prefer dedicated \
+                 tools like `read`, `grep`, and `find` when they fit."
                     .to_owned(),
             ),
             tool_type: tau_proto::ToolType::Function,
@@ -373,9 +378,12 @@ where
             description: Some(
                 "Run a shell command. Non-zero exits and timeouts are tool errors \
                  with output details. Output is capped at 2000 lines / 50 KB; truncated \
-                 output keeps the tail. Output lines are prefixed with `1 ` for stdout \
-                 or `2 ` for stderr. Commands taking longer than 5 seconds include \
-                 duration metadata. For file changes, prefer apply_patch."
+                 output keeps the first 1000 and last 1000 lines separated by `...`. \
+                 Output lines are prefixed with `1 ` for stdout or `2 ` for stderr; missing \
+                 trailing newlines are marked with `(no_nl)`. Invalid UTF-8 and lines that \
+                 would exceed the 50 KB output budget are marker-only. Truncated results \
+                 include `truncated: true`, `total_lines`, and `total_bytes`. Commands taking \
+                 longer than 5 seconds include duration metadata. For file changes, prefer apply_patch."
                     .to_owned(),
             ),
             tool_type: tau_proto::ToolType::Function,

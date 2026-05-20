@@ -9,7 +9,7 @@ use tau_proto::CborValue;
 
 use crate::argument::{argument_text, optional_argument_int, optional_argument_text};
 use crate::display::{ToolFailure, ToolOutput, text_stats};
-use crate::truncate::truncate_head_plain;
+use crate::truncate::truncate_line_oriented;
 
 pub(crate) const DEFAULT_FIND_LIMIT: usize = 1000;
 
@@ -100,7 +100,7 @@ pub(crate) fn run_find(arguments: &CborValue) -> Result<ToolOutput, ToolFailure>
     let displayed: Vec<String> = matches.into_iter().take(limit).collect();
     let limit_reached = total_matches > displayed.len();
     let mut output_text = displayed.join("\n");
-    let truncated = truncate_head_plain(&output_text);
+    let truncated = truncate_line_oriented(&output_text);
     if truncated.was_truncated {
         output_text = truncated.content;
     }

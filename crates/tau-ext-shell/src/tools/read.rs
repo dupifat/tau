@@ -7,7 +7,7 @@ use tau_proto::CborValue;
 
 use crate::argument::{argument_text, optional_argument_int};
 use crate::display::{ToolFailure, ToolOutput, ok_display, text_stats};
-use crate::truncate::{MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES};
+use crate::truncate::truncate_line_oriented;
 
 pub(crate) fn read_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure> {
     let path = argument_text(arguments, "path").map_err(ToolFailure::from)?;
@@ -33,19 +33,12 @@ pub(crate) fn read_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
         .with_args(display_args));
     }
     let total_lines = sliced.total_lines;
-    let truncated = truncate_read_content(&sliced.content, start_line, total_lines, file_bytes);
+    let truncated = truncate_line_oriented(&sliced.content);
     let content_value = CborValue::Text(truncated.content.clone());
-    debug_assert!(truncated.line_count <= sliced.line_count);
-    let mut entries = vec![
-        (
-            CborValue::Text("line-numbered content".to_owned()),
-            content_value,
-        ),
-        (
-            CborValue::Text("total_lines".to_owned()),
-            CborValue::Integer((total_lines as i64).into()),
-        ),
-    ];
+    let mut entries = vec![(
+        CborValue::Text("line-numbered content".to_owned()),
+        content_value,
+    )];
     if !sliced.valid_utf8 {
         entries.push((
             CborValue::Text("valid_utf8".to_owned()),
@@ -56,6 +49,14 @@ pub(crate) fn read_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
         entries.push((
             CborValue::Text("truncated".to_owned()),
             CborValue::Bool(true),
+        ));
+        entries.push((
+            CborValue::Text("total_lines".to_owned()),
+            CborValue::Integer((total_lines as i64).into()),
+        ));
+        entries.push((
+            CborValue::Text("total_bytes".to_owned()),
+            CborValue::Integer((file_bytes as i64).into()),
         ));
     }
     let mut display = ok_display(display_args);
@@ -68,106 +69,12 @@ pub(crate) fn read_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
 
 pub(crate) struct ReadSlice {
     pub(crate) content: String,
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) line_count: usize,
     pub(crate) valid_utf8: bool,
     /// Total lines in the source. For [`stream_slice_lines`] this is
     /// computed by scanning the rest of the file after the slice ends.
     pub(crate) total_lines: usize,
-}
-
-struct TruncatedRead {
-    content: String,
-    was_truncated: bool,
-    line_count: usize,
-}
-
-fn truncate_read_content(
-    content: &str,
-    start_line: usize,
-    total_lines: usize,
-    file_bytes: usize,
-) -> TruncatedRead {
-    let total_rendered_lines = content.lines().count();
-    let total_rendered_bytes = content.len();
-    let mut was_truncated = false;
-    let mut rendered = String::new();
-    let mut rendered_bytes = 0usize;
-    let mut line_count = 0usize;
-
-    if total_rendered_lines <= MAX_OUTPUT_LINES && total_rendered_bytes <= MAX_OUTPUT_BYTES {
-        rendered.push_str(content);
-        line_count = total_rendered_lines;
-    } else {
-        was_truncated = true;
-        for (line_index, line) in content.lines().enumerate() {
-            if line_count >= MAX_OUTPUT_LINES {
-                break;
-            }
-            let separator_bytes = usize::from(line_index != 0);
-            if rendered_bytes + separator_bytes >= MAX_OUTPUT_BYTES {
-                break;
-            }
-            let remaining = MAX_OUTPUT_BYTES - rendered_bytes - separator_bytes;
-            if line.len() + separator_bytes <= remaining {
-                if line_index != 0 {
-                    rendered.push('\n');
-                    rendered_bytes += 1;
-                }
-                rendered.push_str(line);
-                rendered_bytes += line.len();
-                line_count += 1;
-            } else {
-                let prefix = utf8_prefix(line, remaining);
-                if !prefix.is_empty() {
-                    if line_index != 0 {
-                        rendered.push('\n');
-                    }
-                    rendered.push_str(&mark_line_truncated(prefix));
-                    line_count += 1;
-                }
-                break;
-            }
-        }
-    }
-
-    if was_truncated {
-        let end_line = if line_count == 0 {
-            start_line.saturating_sub(1)
-        } else {
-            start_line.saturating_add(line_count).saturating_sub(1)
-        };
-        let continuation = if rendered.contains("(truncated)") {
-            "Line was truncated by byte cap; line-based continuation cannot resume within a line."
-        } else {
-            "Use start_line and line_count to continue reading."
-        };
-        rendered.push_str(&format!(
-            "\n\n[Showing lines {start_line}-{end_line} of {total_lines} ({file_bytes} bytes total). \
-             {continuation}]"
-        ));
-    }
-
-    TruncatedRead {
-        content: rendered,
-        was_truncated,
-        line_count,
-    }
-}
-
-fn utf8_prefix(input: &str, max_bytes: usize) -> &str {
-    let mut end = max_bytes.min(input.len());
-    while end > 0 && !input.is_char_boundary(end) {
-        end -= 1;
-    }
-    &input[..end]
-}
-
-fn mark_line_truncated(line: &str) -> String {
-    if let Some((line_number, rest)) = line.split_once(' ') {
-        format!("{line_number}(truncated) {rest}...")
-    } else {
-        format!("{line}(truncated) ...")
-    }
 }
 
 /// Stream `[start_line, start_line+count)` from `path` without
@@ -316,13 +223,12 @@ fn render_read_line(line: &ReadLine, default_ending: Option<LineEndingKind>) -> 
     if line.content.is_none() {
         markers.push("invalid-utf8");
     }
-    if line.ending.is_none() || line.ending != default_ending {
-        markers.push(match line.ending {
-            Some(LineEndingKind::Lf) => "lf",
-            Some(LineEndingKind::Crlf) => "crlf",
-            Some(LineEndingKind::Cr) => "cr",
-            None => "no_nl",
-        });
+    match line.ending {
+        Some(LineEndingKind::Lf) if line.ending != default_ending => markers.push("lf"),
+        Some(LineEndingKind::Crlf) => markers.push("crlf"),
+        Some(LineEndingKind::Cr) => markers.push("cr"),
+        None => markers.push("no_nl"),
+        Some(LineEndingKind::Lf) => {}
     }
 
     let marker = if markers.is_empty() {

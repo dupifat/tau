@@ -7,7 +7,7 @@ use tau_proto::CborValue;
 
 use crate::argument::{optional_argument_int, optional_argument_text};
 use crate::display::{ToolFailure, ToolOutput, ok_display};
-use crate::truncate::truncate_head_plain;
+use crate::truncate::truncate_line_oriented;
 
 pub(crate) const DEFAULT_LS_LIMIT: usize = 500;
 
@@ -90,7 +90,7 @@ pub(crate) fn run_ls(arguments: &CborValue) -> Result<ToolOutput, ToolFailure> {
     let displayed: Vec<String> = entries.into_iter().take(limit).collect();
     let limit_reached = total_entries > displayed.len();
     let mut output_text = displayed.join("\n");
-    let truncated = truncate_head_plain(&output_text);
+    let truncated = truncate_line_oriented(&output_text);
     if truncated.was_truncated {
         output_text = truncated.content;
     }

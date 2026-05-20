@@ -25,7 +25,9 @@ use crate::tools::{
     APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, FIND_TOOL_NAME, GPT_SHELL_TOOL_NAME, LS_TOOL_NAME,
     READ_TOOL_NAME, SHELL_TOOL_NAME, WRITE_TOOL_NAME,
 };
-use crate::truncate::{MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, truncate_head, truncate_tail};
+use crate::truncate::{
+    MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, mark_line, truncate_head, truncate_tail,
+};
 
 /// Test-side wrapper around [`FrameReader`] that exposes an `Event`-flavoured
 /// API so the existing tests (which don't care about the message/event split)
@@ -698,7 +700,7 @@ fn write_result_reports_status_without_model_diff() {
     assert_eq!(cbor_int_field(&result, "bytes_written"), Some(22));
     assert_eq!(cbor_bool_field(&result, "created"), Some(false));
     assert_eq!(cbor_bool_field(&result, "changed"), Some(true));
-    assert!(cbor_map_text(&result, "diff").is_none());
+    assert!(cbor_map_text(&result, "output").is_none());
 }
 
 #[test]
@@ -721,7 +723,7 @@ fn write_new_file_reports_created_without_model_diff() {
     assert_eq!(cbor_int_field(&result, "bytes_written"), Some(8));
     assert_eq!(cbor_bool_field(&result, "created"), Some(true));
     assert_eq!(cbor_bool_field(&result, "changed"), Some(true));
-    assert!(cbor_map_text(&result, "diff").is_none());
+    assert!(cbor_map_text(&result, "output").is_none());
     assert!(cbor_map_field(&result, "symlink").is_none());
 }
 
@@ -840,7 +842,149 @@ fn edit_self_replacement_counts_without_diff() {
 
     assert_eq!(cbor_int_field(&result, "replacements"), Some(1));
     assert_eq!(cbor_bool_field(&result, "changed"), Some(false));
+    assert!(cbor_map_text(&result, "output").is_none());
+}
+
+#[test]
+fn edit_no_match_error_includes_unchanged_result_details() {
+    // No-match edit errors should expose the same result counters as successful
+    // edits so provider-facing output can reliably show no file was changed.
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("edit.txt");
+    fs::write(&file_path, "old\n").expect("write fixture");
+
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("path".to_owned()),
+            CborValue::Text(file_path.display().to_string()),
+        ),
+        (
+            CborValue::Text("edits".to_owned()),
+            CborValue::Array(vec![CborValue::Map(vec![
+                (
+                    CborValue::Text("oldText".to_owned()),
+                    CborValue::Text("missing".to_owned()),
+                ),
+                (
+                    CborValue::Text("newText".to_owned()),
+                    CborValue::Text("new".to_owned()),
+                ),
+            ])]),
+        ),
+    ]);
+    let error = edit_file(&args).expect_err("edit should not match");
+    let details = error.details.as_ref().expect("details");
+
+    assert_eq!(error.message, "no matches for edit");
+    assert_eq!(cbor_int_field(details, "replacements"), Some(0));
+    assert_eq!(cbor_bool_field(details, "changed"), Some(false));
+    assert_eq!(fs::read_to_string(&file_path).expect("read back"), "old\n");
+}
+
+#[test]
+fn edit_result_uses_output_payload_for_model_visible_diff() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("edit.txt");
+    fs::write(&file_path, "old\n").expect("write fixture");
+
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("path".to_owned()),
+            CborValue::Text(file_path.display().to_string()),
+        ),
+        (
+            CborValue::Text("edits".to_owned()),
+            CborValue::Array(vec![CborValue::Map(vec![
+                (
+                    CborValue::Text("oldText".to_owned()),
+                    CborValue::Text("old".to_owned()),
+                ),
+                (
+                    CborValue::Text("newText".to_owned()),
+                    CborValue::Text("new".to_owned()),
+                ),
+            ])]),
+        ),
+    ]);
+    let result = edit_file(&args).expect("edit").result;
+
+    assert!(cbor_map_text(&result, "output").is_some());
     assert!(cbor_map_text(&result, "diff").is_none());
+}
+
+#[test]
+fn edit_rejects_replacement_request_over_cap() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("edit.txt");
+    fs::write(&file_path, "x".repeat(150)).expect("write fixture");
+
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("path".to_owned()),
+            CborValue::Text(file_path.display().to_string()),
+        ),
+        (
+            CborValue::Text("edits".to_owned()),
+            CborValue::Array(vec![CborValue::Map(vec![
+                (
+                    CborValue::Text("oldText".to_owned()),
+                    CborValue::Text("x".to_owned()),
+                ),
+                (
+                    CborValue::Text("newText".to_owned()),
+                    CborValue::Text("y".to_owned()),
+                ),
+                (
+                    CborValue::Text("max_matches".to_owned()),
+                    CborValue::Integer(150.into()),
+                ),
+            ])]),
+        ),
+    ]);
+    let error = edit_file(&args).expect_err("edit should reject over-cap request");
+
+    assert_eq!(
+        error.message,
+        "requested replacement count exceeds limit of 100"
+    );
+    assert_eq!(
+        fs::read_to_string(&file_path).expect("read back"),
+        "x".repeat(150)
+    );
+}
+
+#[test]
+fn edit_rejects_replacement_request_over_cap_before_reading_file() {
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("path".to_owned()),
+            CborValue::Text("/definitely/missing/edit-target.txt".to_owned()),
+        ),
+        (
+            CborValue::Text("edits".to_owned()),
+            CborValue::Array(vec![CborValue::Map(vec![
+                (
+                    CborValue::Text("oldText".to_owned()),
+                    CborValue::Text("x".to_owned()),
+                ),
+                (
+                    CborValue::Text("newText".to_owned()),
+                    CborValue::Text("y".to_owned()),
+                ),
+                (
+                    CborValue::Text("max_matches".to_owned()),
+                    CborValue::Integer(101.into()),
+                ),
+            ])]),
+        ),
+    ]);
+
+    let error = edit_file(&args).expect_err("edit should reject arguments first");
+
+    assert_eq!(
+        error.message,
+        "requested replacement count exceeds limit of 100"
+    );
 }
 
 #[test]
@@ -1985,7 +2129,7 @@ fn shell_tool_reports_progress_and_success() {
     assert_eq!(result.tool_name, SHELL_TOOL_NAME);
     assert_eq!(
         optional_argument_text(&result.result, "output"),
-        Some("1 hello".to_owned())
+        Some("1(no_nl) hello".to_owned())
     );
 
     writer
@@ -2025,7 +2169,7 @@ fn gpt_shell_tool_reports_progress_and_success() {
     assert_eq!(result.tool_name, GPT_SHELL_TOOL_NAME);
     assert_eq!(
         optional_argument_text(&result.result, "output"),
-        Some("1 hello".to_owned())
+        Some("1(no_nl) hello".to_owned())
     );
 
     writer
@@ -2079,7 +2223,7 @@ fn shell_tool_applies_configured_prefix_and_command() {
     };
     assert_eq!(
         optional_argument_text(&result.result, "output"),
-        Some("1 ok".to_owned())
+        Some("1(no_nl) ok".to_owned())
     );
 
     writer
@@ -2179,7 +2323,7 @@ fn shell_tool_long_display_args_are_middle_shortened() {
 }
 
 #[test]
-fn shell_tool_replaces_invalid_utf8_stdout_and_marks_output_invalid() {
+fn shell_tool_marks_invalid_utf8_stdout_line_and_marks_output_invalid() {
     // Regression coverage for agent-facing shell output collection: stdout
     // can contain arbitrary bytes, and read_to_string used to drop all output
     // after the first invalid UTF-8 sequence.
@@ -2191,7 +2335,7 @@ fn shell_tool_replaces_invalid_utf8_stdout_and_marks_output_invalid() {
     let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
     assert_eq!(
         cbor_map_text(&output.result, "output"),
-        Some("1 \u{fffd}stdout")
+        Some("1(invalid-utf8,no_nl)")
     );
     assert_eq!(cbor_bool_field(&output.result, "valid_utf8"), Some(false));
 }
@@ -2209,7 +2353,7 @@ fn shell_tool_replaces_invalid_utf8_stderr_and_marks_output_invalid() {
     let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
     assert_eq!(
         cbor_map_text(&output.result, "output"),
-        Some("2 \u{fffd}stderr")
+        Some("2(invalid-utf8,no_nl)")
     );
     assert_eq!(cbor_bool_field(&output.result, "valid_utf8"), Some(false));
 }
@@ -2226,7 +2370,7 @@ fn shell_tool_replaces_invalid_utf8_both_streams_in_combined_output() {
     let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
     assert_eq!(
         cbor_map_text(&output.result, "output"),
-        Some("1 \u{fffd}stdout\n2 \u{fffd}stderr")
+        Some("1(invalid-utf8,no_nl)\n2(invalid-utf8,no_nl)")
     );
     assert_eq!(cbor_bool_field(&output.result, "valid_utf8"), Some(false));
 }
@@ -2266,10 +2410,14 @@ fn shell_tool_reports_truncation_marker_and_original_totals() {
 
     let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
     let combined = cbor_map_text(&output.result, "output").expect("output");
-    assert!(combined.starts_with("[Showing lines "));
+    assert!(combined.starts_with("1 x") || combined.starts_with("2 e"));
+    assert!(combined.contains("\n...\n"));
     assert!(combined.contains("\n1 x") || combined.contains("\n2 e"));
-    assert!(cbor_map_field(&output.result, "total_lines").is_none());
-    assert!(cbor_map_field(&output.result, "total_bytes").is_none());
+    assert_eq!(
+        cbor_int_field(&output.result, "total_lines"),
+        Some((line_count * 2) as i128)
+    );
+    assert!(cbor_int_field(&output.result, "total_bytes").is_some());
     assert_eq!(cbor_bool_field(&output.result, "truncated"), Some(true));
 }
 
@@ -2368,7 +2516,7 @@ fn shell_tool_returns_after_foreground_exit_even_if_background_holds_pipe() {
         "background pipe holder delayed shell result for {elapsed:?}"
     );
     let output = cbor_map_text(&output.result, "output").expect("output");
-    assert_eq!(output, "1 early");
+    assert_eq!(output, "1(no_nl) early");
     assert!(!output.contains("late"));
 }
 
@@ -2409,7 +2557,7 @@ fn shell_tool_timeout_returns_without_waiting_for_escaped_pipe_holder() {
     );
     let details = error.details.as_ref().expect("details");
     let output = cbor_map_text(details, "output").expect("output");
-    assert_eq!(output, "1 early");
+    assert_eq!(output, "1(no_nl) early");
     assert!(!output.contains("late"));
     assert_eq!(cbor_bool_field(details, "timed_out"), Some(true));
     assert_eq!(
@@ -2431,10 +2579,10 @@ fn shell_tool_bounded_huge_output_reports_original_totals() {
 
     let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
     let combined = cbor_map_text(&output.result, "output").expect("output");
-    assert!(combined.starts_with("[Showing lines "));
+    assert!(combined.contains("..."));
     assert!(combined.len() < byte_count);
     assert_eq!(cbor_bool_field(&output.result, "truncated"), Some(true));
-    assert!(cbor_map_field(&output.result, "total_bytes").is_none());
+    assert!(cbor_int_field(&output.result, "total_bytes").is_some());
 }
 
 #[test]
@@ -2579,16 +2727,13 @@ fn truncate_head_limits_by_lines() {
     let result = truncate_head(&input);
     assert!(result.was_truncated);
     assert!(result.content.contains("line 1\n"));
-    assert!(result.content.contains("[Showing lines 1-"));
+    assert!(result.content.contains("\n...\n"));
     assert!(
         result
             .content
-            .contains("Use start_line and line_count to continue reading.")
+            .contains(&format!("line {}", MAX_OUTPUT_LINES + 500))
     );
-    // Should not contain lines beyond the limit.
-    let content_before_notice = result.content.split("\n\n[").next().unwrap_or("");
-    let kept_count = content_before_notice.lines().count();
-    assert!(kept_count <= MAX_OUTPUT_LINES);
+    assert_eq!(result.content.lines().count(), MAX_OUTPUT_LINES + 1);
 }
 
 #[test]
@@ -2599,7 +2744,18 @@ fn truncate_head_limits_by_bytes() {
     let result = truncate_head(&input);
     assert!(result.was_truncated);
     assert!(result.content.starts_with("first"));
-    assert!(result.content.contains("[Showing lines 1-"));
+    assert!(result.content.contains("(truncated)"));
+}
+
+#[test]
+fn mark_line_merges_existing_markers_when_truncating() {
+    // Truncating an already marked rendered line should preserve the single
+    // marker group grammar used by read/shell output.
+    assert_eq!(
+        mark_line("1(no_nl) hello", "truncated"),
+        "1(no_nl,truncated)"
+    );
+    assert_eq!(mark_line("2(crlf) hello", "truncated"), "2(crlf,truncated)");
 }
 
 #[test]
@@ -2677,6 +2833,8 @@ fn command_details_value_records_combined_output_stats() {
         timed_out: false,
         duration_seconds: None,
         termination_reason: "exit",
+        total_lines: None,
+        total_bytes: None,
         output: "1 hi\n2 oops".to_owned(),
         truncated: false,
         valid_utf8: true,
@@ -2699,6 +2857,8 @@ fn command_details_value_records_slow_command_exec_time() {
         timed_out: false,
         duration_seconds: Some(6),
         termination_reason: "exit",
+        total_lines: None,
+        total_bytes: None,
         output: String::new(),
         truncated: false,
         valid_utf8: true,
@@ -2844,9 +3004,8 @@ fn truncate_tail_keeps_last_lines() {
             .content
             .contains(&format!("line {}", MAX_OUTPUT_LINES + 500))
     );
-    assert!(result.content.contains("[Showing lines"));
-    // Should not contain the very first line.
-    assert!(!result.content.contains("line 1\n"));
+    assert!(result.content.contains("\n...\n"));
+    assert!(result.content.contains("line 1\n"));
 }
 
 #[test]
@@ -2856,7 +3015,7 @@ fn truncate_tail_limits_by_bytes() {
     let result = truncate_tail(&input);
     assert!(result.was_truncated);
     assert!(result.content.contains("last"));
-    assert!(result.content.contains("[Showing lines"));
+    assert!(result.content.contains("(truncated)"));
 }
 
 #[test]
@@ -2867,9 +3026,7 @@ fn truncate_tail_keeps_suffix_for_one_huge_line() {
     let result = truncate_tail(&input);
 
     assert!(result.was_truncated);
-    assert!(result.content.contains("Line was truncated by byte cap"));
-    assert!(!result.content.contains("lines 2-1"));
-    assert!(result.content.ends_with(&"x".repeat(MAX_OUTPUT_BYTES)));
+    assert_eq!(result.content, "(truncated)");
 }
 
 #[test]
@@ -2881,9 +3038,9 @@ fn truncate_tail_keeps_suffix_for_huge_final_line() {
     let result = truncate_tail(&input);
 
     assert!(result.was_truncated);
-    assert!(result.content.contains("line 2 of 2"));
-    assert!(result.content.ends_with("TAIL"));
-    assert!(!result.content.contains("first"));
+    assert!(result.content.starts_with("first\n"));
+    assert!(result.content.contains("(truncated)"));
+    assert!(!result.content.contains("TAIL"));
 }
 
 #[test]
@@ -2892,16 +3049,8 @@ fn truncate_tail_preserves_utf8_boundary_for_huge_line_suffix() {
     // shell output truncation can panic or manufacture invalid UTF-8.
     let input = "€".repeat(MAX_OUTPUT_BYTES / "€".len() + 100);
     let result = truncate_tail(&input);
-    let suffix = result
-        .content
-        .split_once("\n\n")
-        .expect("truncation marker separator")
-        .1;
-
     assert!(result.was_truncated);
-    assert!(result.content.contains("Line was truncated by byte cap"));
-    assert!(suffix.len() < MAX_OUTPUT_BYTES + 1);
-    assert!(suffix.chars().all(|ch| ch == '€'));
+    assert_eq!(result.content, "(truncated)");
 }
 
 #[test]
@@ -2948,7 +3097,7 @@ fn read_file_honors_start_line_and_line_count() {
     assert!(cbor_map_field(&result, "path").is_none());
     assert!(cbor_map_field(&result, "start_line").is_none());
     assert!(cbor_map_field(&result, "line_count").is_none());
-    assert_eq!(cbor_int_field(&result, "total_lines"), Some(5));
+    assert!(cbor_map_field(&result, "total_lines").is_none());
     assert!(cbor_map_field(&result, "ends_with_newline").is_none());
     assert!(cbor_map_field(&result, "line_ending").is_none());
 }
@@ -3001,7 +3150,7 @@ fn read_file_reports_empty_file_as_zero_lines() {
     assert_eq!(cbor_map_text(&result, "line-numbered content"), Some(""));
     assert!(cbor_map_field(&result, "start_line").is_none());
     assert!(cbor_map_field(&result, "line_count").is_none());
-    assert_eq!(cbor_int_field(&result, "total_lines"), Some(0));
+    assert!(cbor_map_field(&result, "total_lines").is_none());
     assert!(cbor_map_field(&result, "ends_with_newline").is_none());
     assert!(cbor_map_field(&result, "line_ending").is_none());
 }
@@ -3024,7 +3173,7 @@ fn read_file_reports_no_trailing_newline_as_one_line() {
     );
     assert!(cbor_map_field(&result, "start_line").is_none());
     assert!(cbor_map_field(&result, "line_count").is_none());
-    assert_eq!(cbor_int_field(&result, "total_lines"), Some(1));
+    assert!(cbor_map_field(&result, "total_lines").is_none());
     assert!(cbor_map_field(&result, "ends_with_newline").is_none());
     assert!(cbor_map_field(&result, "line_ending").is_none());
 }
@@ -3080,8 +3229,8 @@ fn read_file_truncates_large_output() {
     let result = read_file(&args).expect("read").result;
     let content = cbor_map_text(&result, "line-numbered content").expect("content field");
     assert!(content.contains("line 1\n"));
-    assert!(content.contains("[Showing lines 1-2000 of 3000"));
-    assert!(content.contains("Use start_line and line_count to continue reading."));
+    assert!(content.contains("\n...\n"));
+    assert!(content.contains("line 3000"));
     assert!(cbor_map_field(&result, "start_line").is_none());
     assert!(cbor_map_field(&result, "line_count").is_none());
     assert_eq!(cbor_int_field(&result, "total_lines"), Some(3000));
@@ -3108,8 +3257,8 @@ fn read_file_truncation_notice_uses_source_line_numbers() {
     let content = cbor_map_text(&result, "line-numbered content").expect("content field");
 
     assert!(content.contains("100 line 100"));
-    assert!(content.contains("2099 line 2099"));
-    assert!(content.contains("[Showing lines 100-2099 of 2105"));
+    assert!(content.contains("\n...\n"));
+    assert!(content.contains("line 2105"));
     assert!(cbor_map_field(&result, "start_line").is_none());
     assert!(cbor_map_field(&result, "line_count").is_none());
     assert_eq!(cbor_int_field(&result, "total_lines"), Some(2105));
@@ -3129,7 +3278,7 @@ fn read_file_reports_crlf_line_endings() {
 
     assert_eq!(
         cbor_map_text(&result, "line-numbered content"),
-        Some("1 one\n2 two")
+        Some("1(crlf) one\n2(crlf) two")
     );
     assert!(cbor_map_field(&result, "ends_with_newline").is_none());
     assert!(cbor_map_field(&result, "line_ending").is_none());
@@ -3149,9 +3298,9 @@ fn read_file_reports_cr_only_line_endings() {
 
     assert_eq!(
         cbor_map_text(&result, "line-numbered content"),
-        Some("1 one\n2 two")
+        Some("1(cr) one\n2(cr) two")
     );
-    assert_eq!(cbor_int_field(&result, "total_lines"), Some(2));
+    assert!(cbor_map_field(&result, "total_lines").is_none());
     assert!(cbor_map_field(&result, "ends_with_newline").is_none());
     assert!(cbor_map_field(&result, "line_ending").is_none());
 }
@@ -3209,13 +3358,9 @@ fn read_file_truncates_single_long_line() {
     let result = read_file(&args).expect("read").result;
     let content = cbor_map_text(&result, "line-numbered content").expect("content");
 
-    assert!(content.starts_with("1(truncated) xxx"));
-    assert!(content.contains("...\n\n[Showing lines 1-1 of 2"));
-    assert!(content.contains(
-        "Line was truncated by byte cap; line-based continuation cannot resume within a line."
-    ));
+    assert_eq!(content, "1(truncated)\n2 second");
     assert!(cbor_map_field(&result, "line_count").is_none());
-    assert!(cbor_map_field(&result, "total_bytes").is_none());
+    assert!(cbor_int_field(&result, "total_bytes").is_some());
 }
 
 #[test]
@@ -3249,7 +3394,7 @@ fn edit_file_handles_invalid_utf8_bytes_without_diff() {
     assert_eq!(cbor_int_field(&result, "replacements"), Some(1));
     assert_eq!(cbor_bool_field(&result, "changed"), Some(true));
     assert_eq!(
-        cbor_map_text(&result, "diff"),
+        cbor_map_text(&result, "output"),
         Some("[diff skipped: file is not valid UTF-8]")
     );
 }

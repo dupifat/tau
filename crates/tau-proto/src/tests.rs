@@ -903,7 +903,7 @@ fn tool_response_renders_headers_blank_line_and_body() {
 
     assert_eq!(
         response.render(),
-        "path: /tmp/file\ntotal_lines: 2\n\nline-numbered content:\n1 hello\n2 world"
+        "path: /tmp/file\ntotal_lines: 2\n\n1 hello\n2 world"
     );
 }
 

@@ -2908,7 +2908,6 @@ fn truncate_tail_preserves_utf8_boundary_for_huge_line_suffix() {
 fn slice_lines_returns_requested_window() {
     let sliced = slice_lines("a\nb\nc\nd", 2, Some(2));
     assert_eq!(sliced.content, "2 b\n3 c");
-    assert_eq!(sliced.start_line, 2);
     assert_eq!(sliced.line_count, 2);
 }
 
@@ -2916,7 +2915,6 @@ fn slice_lines_returns_requested_window() {
 fn slice_lines_clamps_past_end() {
     let sliced = slice_lines("a\nb\nc", 10, Some(5));
     assert_eq!(sliced.content, "");
-    assert_eq!(sliced.start_line, 10);
     assert_eq!(sliced.line_count, 0);
 }
 
@@ -2944,18 +2942,15 @@ fn read_file_honors_start_line_and_line_count() {
     let result = output.result;
     assert_eq!(output.display.args, format!("{} 2..5", path.display()));
     assert_eq!(
-        cbor_map_text(&result, "path"),
-        Some(path.to_string_lossy().as_ref())
-    );
-    assert_eq!(
         cbor_map_text(&result, "line-numbered content"),
         Some("2 line 2\n3 line 3\n4 line 4")
     );
-    assert_eq!(cbor_int_field(&result, "start_line"), Some(2));
-    assert_eq!(cbor_int_field(&result, "line_count"), Some(3));
+    assert!(cbor_map_field(&result, "path").is_none());
+    assert!(cbor_map_field(&result, "start_line").is_none());
+    assert!(cbor_map_field(&result, "line_count").is_none());
     assert_eq!(cbor_int_field(&result, "total_lines"), Some(5));
-    assert_eq!(cbor_bool_field(&result, "ends_with_newline"), Some(true));
-    assert_eq!(cbor_map_text(&result, "line_ending"), Some("lf"));
+    assert!(cbor_map_field(&result, "ends_with_newline").is_none());
+    assert!(cbor_map_field(&result, "line_ending").is_none());
 }
 
 #[test]
@@ -3004,11 +2999,11 @@ fn read_file_reports_empty_file_as_zero_lines() {
     let result = read_file(&args).expect("read").result;
 
     assert_eq!(cbor_map_text(&result, "line-numbered content"), Some(""));
-    assert_eq!(cbor_int_field(&result, "start_line"), Some(1));
-    assert_eq!(cbor_int_field(&result, "line_count"), Some(0));
+    assert!(cbor_map_field(&result, "start_line").is_none());
+    assert!(cbor_map_field(&result, "line_count").is_none());
     assert_eq!(cbor_int_field(&result, "total_lines"), Some(0));
     assert_eq!(cbor_bool_field(&result, "ends_with_newline"), Some(false));
-    assert_eq!(cbor_map_text(&result, "line_ending"), Some("none"));
+    assert!(cbor_map_field(&result, "line_ending").is_none());
 }
 
 #[test]
@@ -3027,11 +3022,11 @@ fn read_file_reports_no_trailing_newline_as_one_line() {
         cbor_map_text(&result, "line-numbered content"),
         Some("1 text")
     );
-    assert_eq!(cbor_int_field(&result, "start_line"), Some(1));
-    assert_eq!(cbor_int_field(&result, "line_count"), Some(1));
+    assert!(cbor_map_field(&result, "start_line").is_none());
+    assert!(cbor_map_field(&result, "line_count").is_none());
     assert_eq!(cbor_int_field(&result, "total_lines"), Some(1));
     assert_eq!(cbor_bool_field(&result, "ends_with_newline"), Some(false));
-    assert_eq!(cbor_map_text(&result, "line_ending"), Some("none"));
+    assert!(cbor_map_field(&result, "line_ending").is_none());
 }
 
 #[test]
@@ -3087,8 +3082,8 @@ fn read_file_truncates_large_output() {
     assert!(content.contains("line 1\n"));
     assert!(content.contains("[Showing lines 1-2000 of 3000"));
     assert!(content.contains("Use start_line and line_count to continue reading."));
-    assert_eq!(cbor_int_field(&result, "start_line"), Some(1));
-    assert_eq!(cbor_int_field(&result, "line_count"), Some(2000));
+    assert!(cbor_map_field(&result, "start_line").is_none());
+    assert!(cbor_map_field(&result, "line_count").is_none());
     assert_eq!(cbor_int_field(&result, "total_lines"), Some(3000));
 }
 
@@ -3115,8 +3110,8 @@ fn read_file_truncation_notice_uses_source_line_numbers() {
     assert!(content.contains("100 line 100"));
     assert!(content.contains("2099 line 2099"));
     assert!(content.contains("[Showing lines 100-2099 of 2105"));
-    assert_eq!(cbor_int_field(&result, "start_line"), Some(100));
-    assert_eq!(cbor_int_field(&result, "line_count"), Some(2000));
+    assert!(cbor_map_field(&result, "start_line").is_none());
+    assert!(cbor_map_field(&result, "line_count").is_none());
     assert_eq!(cbor_int_field(&result, "total_lines"), Some(2105));
 }
 
@@ -3136,8 +3131,8 @@ fn read_file_reports_crlf_line_endings() {
         cbor_map_text(&result, "line-numbered content"),
         Some("1 one\n2 two")
     );
-    assert_eq!(cbor_bool_field(&result, "ends_with_newline"), Some(true));
-    assert_eq!(cbor_map_text(&result, "line_ending"), Some("crlf"));
+    assert!(cbor_map_field(&result, "ends_with_newline").is_none());
+    assert!(cbor_map_field(&result, "line_ending").is_none());
 }
 
 #[test]
@@ -3157,8 +3152,27 @@ fn read_file_reports_cr_only_line_endings() {
         Some("1 one\n2 two")
     );
     assert_eq!(cbor_int_field(&result, "total_lines"), Some(2));
-    assert_eq!(cbor_bool_field(&result, "ends_with_newline"), Some(true));
-    assert_eq!(cbor_map_text(&result, "line_ending"), Some("cr"));
+    assert!(cbor_map_field(&result, "ends_with_newline").is_none());
+    assert!(cbor_map_field(&result, "line_ending").is_none());
+}
+
+#[test]
+fn read_file_marks_line_ending_outliers() {
+    let td = TempDir::new().expect("tempdir");
+    let path = td.path().join("mixed.txt");
+    std::fs::write(&path, b"one\ntwo\nthree\r\nfour\rfive").expect("write");
+
+    let args = CborValue::Map(vec![(
+        CborValue::Text("path".to_owned()),
+        CborValue::Text(path.display().to_string()),
+    )]);
+    let result = read_file(&args).expect("read").result;
+
+    assert_eq!(
+        cbor_map_text(&result, "line-numbered content"),
+        Some("1 one\n2 two\n3(crlf) three\n4(cr) four\n5(no_ln) five")
+    );
+    assert_eq!(cbor_bool_field(&result, "ends_with_newline"), Some(false));
 }
 
 #[test]
@@ -3177,9 +3191,9 @@ fn read_file_handles_invalid_utf8_per_line() {
         cbor_map_text(&result, "line-numbered content"),
         Some("1(non-utf-8)\n2 second")
     );
-    assert_eq!(cbor_int_field(&result, "line_count"), Some(2));
+    assert!(cbor_map_field(&result, "line_count").is_none());
     assert_eq!(cbor_bool_field(&result, "valid_utf8"), Some(false));
-    assert_eq!(cbor_int_field(&result, "total_bytes"), Some(15));
+    assert!(cbor_map_field(&result, "total_bytes").is_none());
 }
 
 #[test]
@@ -3200,8 +3214,8 @@ fn read_file_truncates_single_long_line() {
     assert!(content.contains(
         "Line was truncated by byte cap; line-based continuation cannot resume within a line."
     ));
-    assert_eq!(cbor_int_field(&result, "line_count"), Some(1));
-    assert_eq!(cbor_int_field(&result, "total_bytes"), Some(61448));
+    assert!(cbor_map_field(&result, "line_count").is_none());
+    assert!(cbor_map_field(&result, "total_bytes").is_none());
 }
 
 #[test]

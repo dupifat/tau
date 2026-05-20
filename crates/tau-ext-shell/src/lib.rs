@@ -87,11 +87,11 @@ where
                  the result is truncated and includes a continuation hint. \
                  Prefer one full read. Pass `start_line`/`line_count` only to \
                  resume past a previous truncation, or to fetch a specific \
-                 known slice of a file you already know is large. Each returned \
-                 `line-numbered content` line is prefixed by its 1-based line number and a space. \
-                 The result returns `path`, `line-numbered content`, the `start_line`, \
-                 `line_count` returned, the file's `total_lines`, `total_bytes`, `valid_utf8`, \
-                 `ends_with_newline`, and `line_ending` (`lf`, `crlf`, `cr`, `mixed`, or `none`)."
+                 known slice of a file you already know is large. Returned content lines are \
+                 prefixed by their 1-based line number and a space; unusual line endings are \
+                 marked after the number, e.g. `2(crlf)` or `3(no_ln)`. The result includes \
+                 `total_lines`, plus `valid_utf8: false`, `ends_with_newline: false`, or \
+                 `truncated: true` only when applicable."
                     .to_owned(),
             ),
             tool_type: tau_proto::ToolType::Function,

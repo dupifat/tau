@@ -455,9 +455,9 @@ pub(crate) fn cbor_to_text(v: &tau_proto::CborValue) -> String {
                     other => cbor_to_text(other),
                 };
                 let value = cbor_to_text(val);
-                if key == "output" {
+                if key == "output" || key == "line-numbered content" {
                     parts.push(value);
-                } else if value.contains('\n') || key == "line-numbered content" {
+                } else if value.contains('\n') {
                     parts.push(format!("{key}:\n{value}"));
                 } else {
                     parts.push(format!("{key}: {value}"));
@@ -921,7 +921,7 @@ alpha middle zeta "
             CborValue::Text("1 only".to_owned()),
         )]));
 
-        assert_eq!(text, "line-numbered content:\n1 only");
+        assert_eq!(text, "1 only");
     }
 
     /// Tool errors must surface their `details` payload to the LLM,

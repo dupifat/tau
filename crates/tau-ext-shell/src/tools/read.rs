@@ -35,46 +35,29 @@ pub(crate) fn read_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
     let total_lines = sliced.total_lines;
     let truncated = truncate_read_content(&sliced.content, start_line, total_lines, file_bytes);
     let content_value = CborValue::Text(truncated.content.clone());
-    let returned_line_count = truncated.line_count;
-    debug_assert!(returned_line_count <= sliced.line_count);
+    debug_assert!(truncated.line_count <= sliced.line_count);
     let mut entries = vec![
-        (
-            CborValue::Text("path".to_owned()),
-            CborValue::Text(display_path),
-        ),
         (
             CborValue::Text("line-numbered content".to_owned()),
             content_value,
         ),
         (
-            CborValue::Text("start_line".to_owned()),
-            CborValue::Integer((sliced.start_line as i64).into()),
-        ),
-        (
-            CborValue::Text("line_count".to_owned()),
-            CborValue::Integer((returned_line_count as i64).into()),
-        ),
-        (
             CborValue::Text("total_lines".to_owned()),
             CborValue::Integer((total_lines as i64).into()),
         ),
-        (
-            CborValue::Text("ends_with_newline".to_owned()),
-            CborValue::Bool(sliced.ends_with_newline),
-        ),
-        (
-            CborValue::Text("line_ending".to_owned()),
-            CborValue::Text(sliced.line_ending.clone()),
-        ),
-        (
-            CborValue::Text("valid_utf8".to_owned()),
-            CborValue::Bool(sliced.valid_utf8),
-        ),
-        (
-            CborValue::Text("total_bytes".to_owned()),
-            CborValue::Integer((file_bytes as i64).into()),
-        ),
     ];
+    if !sliced.ends_with_newline {
+        entries.push((
+            CborValue::Text("ends_with_newline".to_owned()),
+            CborValue::Bool(false),
+        ));
+    }
+    if !sliced.valid_utf8 {
+        entries.push((
+            CborValue::Text("valid_utf8".to_owned()),
+            CborValue::Bool(false),
+        ));
+    }
     if truncated.was_truncated {
         entries.push((
             CborValue::Text("truncated".to_owned()),
@@ -91,10 +74,8 @@ pub(crate) fn read_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
 
 pub(crate) struct ReadSlice {
     pub(crate) content: String,
-    pub(crate) start_line: usize,
     pub(crate) line_count: usize,
     pub(crate) ends_with_newline: bool,
-    pub(crate) line_ending: String,
     pub(crate) valid_utf8: bool,
     /// Total lines in the source. For [`stream_slice_lines`] this is
     /// computed by scanning the rest of the file after the slice ends.
@@ -241,19 +222,24 @@ fn stream_slice_lines(
 }
 
 struct SliceState {
-    content: String,
+    lines: Vec<ReadLine>,
     start_line: usize,
     take: usize,
-    kept: usize,
     total_lines: usize,
-    saw_lf: bool,
-    saw_crlf: bool,
-    saw_cr: bool,
+    lf_count: usize,
+    crlf_count: usize,
+    cr_count: usize,
     ends_with_newline: bool,
     valid_utf8: bool,
 }
 
-#[derive(Clone, Copy)]
+struct ReadLine {
+    number: usize,
+    content: Option<String>,
+    ending: Option<LineEndingKind>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum LineEndingKind {
     Lf,
     Crlf,
@@ -263,14 +249,13 @@ enum LineEndingKind {
 impl SliceState {
     fn new(start_line: usize, take: usize) -> Self {
         Self {
-            content: String::new(),
+            lines: Vec::new(),
             start_line,
             take,
-            kept: 0,
             total_lines: 0,
-            saw_lf: false,
-            saw_crlf: false,
-            saw_cr: false,
+            lf_count: 0,
+            crlf_count: 0,
+            cr_count: 0,
             ends_with_newline: false,
             valid_utf8: true,
         }
@@ -280,9 +265,9 @@ impl SliceState {
         self.total_lines += 1;
         self.ends_with_newline = ending.is_some();
         match ending {
-            Some(LineEndingKind::Lf) => self.saw_lf = true,
-            Some(LineEndingKind::Crlf) => self.saw_crlf = true,
-            Some(LineEndingKind::Cr) => self.saw_cr = true,
+            Some(LineEndingKind::Lf) => self.lf_count += 1,
+            Some(LineEndingKind::Crlf) => self.crlf_count += 1,
+            Some(LineEndingKind::Cr) => self.cr_count += 1,
             None => {}
         }
 
@@ -290,45 +275,75 @@ impl SliceState {
         if valid_line.is_none() {
             self.valid_utf8 = false;
         }
-        if self.total_lines >= self.start_line && self.kept < self.take {
-            if self.kept > 0 {
-                self.content.push('\n');
-            }
-            let line_number = self.total_lines;
-            if let Some(line) = valid_line {
-                self.content.push_str(&format!("{line_number} {line}"));
-            } else {
-                self.content.push_str(&format!("{line_number}(non-utf-8)"));
-            }
-            self.kept += 1;
+        if self.start_line <= self.total_lines && self.lines.len() < self.take {
+            self.lines.push(ReadLine {
+                number: self.total_lines,
+                content: valid_line.map(ToOwned::to_owned),
+                ending,
+            });
         }
     }
 
     fn finish(self) -> ReadSlice {
+        let default_ending = self.default_line_ending();
+        let content = self
+            .lines
+            .iter()
+            .map(|line| render_read_line(line, default_ending))
+            .collect::<Vec<_>>()
+            .join("\n");
         ReadSlice {
-            content: self.content,
-            start_line: self.start_line,
-            line_count: self.kept,
+            content,
+            line_count: self.lines.len(),
             ends_with_newline: self.ends_with_newline,
-            line_ending: line_ending_label(self.saw_lf, self.saw_crlf, self.saw_cr).to_owned(),
             valid_utf8: self.valid_utf8,
             total_lines: self.total_lines,
         }
     }
+
+    fn default_line_ending(&self) -> Option<LineEndingKind> {
+        let counts = [
+            (self.lf_count, LineEndingKind::Lf),
+            (self.crlf_count, LineEndingKind::Crlf),
+            (self.cr_count, LineEndingKind::Cr),
+        ];
+        let (max_count, default) = counts.iter().copied().max_by_key(|(count, _)| *count)?;
+        if max_count == 0
+            || counts
+                .iter()
+                .filter(|(count, _)| *count == max_count)
+                .count()
+                != 1
+        {
+            None
+        } else {
+            Some(default)
+        }
+    }
 }
 
-fn line_ending_label(saw_lf: bool, saw_crlf: bool, saw_cr: bool) -> &'static str {
-    let kinds = usize::from(saw_lf) + usize::from(saw_crlf) + usize::from(saw_cr);
-    if kinds == 0 {
-        "none"
-    } else if kinds != 1 {
-        "mixed"
-    } else if saw_lf {
-        "lf"
-    } else if saw_crlf {
-        "crlf"
+fn render_read_line(line: &ReadLine, default_ending: Option<LineEndingKind>) -> String {
+    let mut markers = Vec::new();
+    if line.content.is_none() {
+        markers.push("non-utf-8");
+    }
+    if line.ending != default_ending {
+        markers.push(match line.ending {
+            Some(LineEndingKind::Lf) => "lf",
+            Some(LineEndingKind::Crlf) => "crlf",
+            Some(LineEndingKind::Cr) => "cr",
+            None => "no_ln",
+        });
+    }
+
+    let marker = if markers.is_empty() {
+        String::new()
     } else {
-        "cr"
+        format!("({})", markers.join(","))
+    };
+    match &line.content {
+        Some(content) => format!("{}{marker} {content}", line.number),
+        None => format!("{}{marker}", line.number),
     }
 }
 
@@ -375,15 +390,8 @@ pub(crate) fn slice_lines(input: &str, start_line: usize, line_count: Option<usi
             .map(|(index, line)| format!("{} {line}", start_idx + index + 1))
             .collect::<Vec<_>>()
             .join("\n"),
-        start_line,
         line_count: end_idx.saturating_sub(start_idx),
         ends_with_newline: input.ends_with('\n'),
-        line_ending: line_ending_label(
-            input.contains('\n') && !input.contains("\r\n"),
-            input.contains("\r\n"),
-            input.contains('\r') && !input.contains("\r\n"),
-        )
-        .to_owned(),
         valid_utf8: true,
         total_lines,
     }

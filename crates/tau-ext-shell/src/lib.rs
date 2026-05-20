@@ -89,9 +89,9 @@ where
                  resume past a previous truncation, or to fetch a specific \
                  known slice of a file you already know is large. Returned content lines are \
                  prefixed by their 1-based line number and a space; unusual line endings are \
-                 marked after the number, e.g. `2(crlf)` or `3(no_ln)`. The result includes \
-                 `total_lines`, plus `valid_utf8: false`, `ends_with_newline: false`, or \
-                 `truncated: true` only when applicable."
+                 marked after the number, e.g. `2(crlf)` or `3(no_nl)`. The result includes \
+                 `total_lines`, plus `valid_utf8: false` or `truncated: true` only when \
+                 applicable."
                     .to_owned(),
             ),
             tool_type: tau_proto::ToolType::Function,

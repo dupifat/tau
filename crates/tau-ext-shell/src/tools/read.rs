@@ -46,12 +46,6 @@ pub(crate) fn read_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
             CborValue::Integer((total_lines as i64).into()),
         ),
     ];
-    if !sliced.ends_with_newline {
-        entries.push((
-            CborValue::Text("ends_with_newline".to_owned()),
-            CborValue::Bool(false),
-        ));
-    }
     if !sliced.valid_utf8 {
         entries.push((
             CborValue::Text("valid_utf8".to_owned()),
@@ -75,7 +69,6 @@ pub(crate) fn read_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
 pub(crate) struct ReadSlice {
     pub(crate) content: String,
     pub(crate) line_count: usize,
-    pub(crate) ends_with_newline: bool,
     pub(crate) valid_utf8: bool,
     /// Total lines in the source. For [`stream_slice_lines`] this is
     /// computed by scanning the rest of the file after the slice ends.
@@ -229,7 +222,6 @@ struct SliceState {
     lf_count: usize,
     crlf_count: usize,
     cr_count: usize,
-    ends_with_newline: bool,
     valid_utf8: bool,
 }
 
@@ -256,14 +248,12 @@ impl SliceState {
             lf_count: 0,
             crlf_count: 0,
             cr_count: 0,
-            ends_with_newline: false,
             valid_utf8: true,
         }
     }
 
     fn push_line(&mut self, line: &[u8], ending: Option<LineEndingKind>) {
         self.total_lines += 1;
-        self.ends_with_newline = ending.is_some();
         match ending {
             Some(LineEndingKind::Lf) => self.lf_count += 1,
             Some(LineEndingKind::Crlf) => self.crlf_count += 1,
@@ -295,7 +285,6 @@ impl SliceState {
         ReadSlice {
             content,
             line_count: self.lines.len(),
-            ends_with_newline: self.ends_with_newline,
             valid_utf8: self.valid_utf8,
             total_lines: self.total_lines,
         }
@@ -327,12 +316,12 @@ fn render_read_line(line: &ReadLine, default_ending: Option<LineEndingKind>) -> 
     if line.content.is_none() {
         markers.push("non-utf-8");
     }
-    if line.ending != default_ending {
+    if line.ending.is_none() || line.ending != default_ending {
         markers.push(match line.ending {
             Some(LineEndingKind::Lf) => "lf",
             Some(LineEndingKind::Crlf) => "crlf",
             Some(LineEndingKind::Cr) => "cr",
-            None => "no_ln",
+            None => "no_nl",
         });
     }
 
@@ -391,7 +380,6 @@ pub(crate) fn slice_lines(input: &str, start_line: usize, line_count: Option<usi
             .collect::<Vec<_>>()
             .join("\n"),
         line_count: end_idx.saturating_sub(start_idx),
-        ends_with_newline: input.ends_with('\n'),
         valid_utf8: true,
         total_lines,
     }

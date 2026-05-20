@@ -637,7 +637,7 @@ fn extension_reads_file() {
     assert_eq!(result.tool_name, READ_TOOL_NAME);
     assert_eq!(
         optional_argument_text(&result.result, "line-numbered content"),
-        Some("1 hello from file".to_owned())
+        Some("1(no_nl) hello from file".to_owned())
     );
 
     writer
@@ -3002,7 +3002,7 @@ fn read_file_reports_empty_file_as_zero_lines() {
     assert!(cbor_map_field(&result, "start_line").is_none());
     assert!(cbor_map_field(&result, "line_count").is_none());
     assert_eq!(cbor_int_field(&result, "total_lines"), Some(0));
-    assert_eq!(cbor_bool_field(&result, "ends_with_newline"), Some(false));
+    assert!(cbor_map_field(&result, "ends_with_newline").is_none());
     assert!(cbor_map_field(&result, "line_ending").is_none());
 }
 
@@ -3020,12 +3020,12 @@ fn read_file_reports_no_trailing_newline_as_one_line() {
 
     assert_eq!(
         cbor_map_text(&result, "line-numbered content"),
-        Some("1 text")
+        Some("1(no_nl) text")
     );
     assert!(cbor_map_field(&result, "start_line").is_none());
     assert!(cbor_map_field(&result, "line_count").is_none());
     assert_eq!(cbor_int_field(&result, "total_lines"), Some(1));
-    assert_eq!(cbor_bool_field(&result, "ends_with_newline"), Some(false));
+    assert!(cbor_map_field(&result, "ends_with_newline").is_none());
     assert!(cbor_map_field(&result, "line_ending").is_none());
 }
 
@@ -3170,9 +3170,9 @@ fn read_file_marks_line_ending_outliers() {
 
     assert_eq!(
         cbor_map_text(&result, "line-numbered content"),
-        Some("1 one\n2 two\n3(crlf) three\n4(cr) four\n5(no_ln) five")
+        Some("1 one\n2 two\n3(crlf) three\n4(cr) four\n5(no_nl) five")
     );
-    assert_eq!(cbor_bool_field(&result, "ends_with_newline"), Some(false));
+    assert!(cbor_map_field(&result, "ends_with_newline").is_none());
 }
 
 #[test]

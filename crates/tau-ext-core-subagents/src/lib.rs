@@ -880,7 +880,7 @@ fn wait_tool_spec() -> ToolSpec {
         name: tau_proto::ToolName::new(WAIT_TOOL_NAME),
         model_visible_name: None,
         description: Some(
-            "Wait for a tool call by `tool_call_id` and return its completed result. Tau will notify you via marked internal messages about tool calls running in the background, and when they complete. Only call this after Tau reports completion for efficiency reasons, but it works and will await result of a call that is still running."
+            "Wait for a tool call by `tool_call_id` and return its completed result. Tau will notify you via marked internal messages about tool calls running in the background, and when they complete. Prefer calling this after Tau reports completion for efficiency reasons; it also works for calls that are still running."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,

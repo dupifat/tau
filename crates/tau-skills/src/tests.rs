@@ -519,7 +519,7 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
         .expect("built-in tau self-knowledge skill");
     assert_eq!(
         skill.description,
-        "Built-in information about Tau coding harness you are running in."
+        "Use this skill when the user asks about the Tau coding agent they are running in, including what Tau is, how it works, built-in self-knowledge, configuration, debugging, source code, community links, or where to find Tau-specific help."
     );
     assert!(skill.add_to_prompt);
     assert!(skill.content.contains("# Tau self-knowledge"));

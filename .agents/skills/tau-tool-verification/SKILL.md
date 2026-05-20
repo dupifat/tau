@@ -1,6 +1,9 @@
 ---
 name: tau-tool-verification
-description: Use when asked to verify Tau skills
+description: >
+  Use this skill when asked to verify Tau harness tools or tool output behavior,
+  especially read, write, edit, shell, line-oriented output, truncation,
+  metadata headers, UTF-8 handling, diffs, timeouts, or skill/tool conformance.
 ---
 
 # Tau Tool Verification

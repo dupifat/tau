@@ -1,6 +1,9 @@
 ---
 name: preview-site
-description: "Take a screenshot of the site and visually inspect it. Use when making changes to site/ and wanting to verify the result."
+description: >
+  Use this skill when changing or reviewing Tau's static site under site/ and
+  needing visual verification of layout, spacing, colors, alignment, desktop
+  rendering, mobile rendering, or screenshot-based regressions.
 user-invocable: true
 ---
 

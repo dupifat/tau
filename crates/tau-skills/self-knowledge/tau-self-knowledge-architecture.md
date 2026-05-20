@@ -1,6 +1,9 @@
 ---
 name: tau-self-knowledge-architecture
-description: High-level overview of Tau architecture and core components.
+description: >
+  Use this skill when the user asks how Tau is architected, including the harness
+  daemon, UI clients, Unix socket connections, sessions, event flow, model
+  orchestration, tool routing, or extension processes.
 advertise: false
 ---
 

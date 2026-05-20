@@ -1,6 +1,9 @@
 ---
 name: tau-self-knowledge-source-code
-description: How to fetch Tau source code for debugging or detailed understanding.
+description: >
+  Use this skill when the user needs Tau source code for debugging, inspection,
+  detailed understanding, local checkout setup, upstream Radicle project details,
+  clone commands, or the GitHub mirror.
 advertise: false
 ---
 

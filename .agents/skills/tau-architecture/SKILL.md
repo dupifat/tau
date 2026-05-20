@@ -1,6 +1,10 @@
 ---
 name: tau-architecture
-description: Procedure to use when adding or changing big changes or it interacts other pieces in weird ways
+description: >
+  Use this skill before substantial Tau design or architecture changes,
+  especially changes that affect multiple crates, harness/session semantics,
+  extension boundaries, protocol behavior, tool routing, or other cross-cutting
+  interactions.
 ---
 
 Everything in tau is designed with extreme care. The archicture is beauitiful

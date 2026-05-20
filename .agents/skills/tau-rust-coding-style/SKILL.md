@@ -1,6 +1,9 @@
 ---
 name: tau-rust-coding-style
-description: "Tau Rust coding style. Read before making changes to Tau rust code"
+description: >
+  Use this skill before writing, reviewing, or refactoring Rust code in Tau,
+  especially public APIs, data structures, tests, regression coverage, or
+  documentation comments.
 user-invocable: true
 advertise: true
 ---

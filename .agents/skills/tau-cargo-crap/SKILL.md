@@ -1,6 +1,9 @@
 ---
 name: tau-cargo-crap
-description: "Diagnose and fix Tau cargo-crap/selfci failures. Read before changing the cargo-crap CI gate or refactoring flagged code."
+description: >
+  Use this skill when selfci, Nix CI, coverage, cargo-crap, CRAP-score,
+  crapRegression, crapAbsolute, or crapReport checks fail in Tau, or before
+  changing the cargo-crap gates, baseline, thresholds, or flagged complex code.
 user-invocable: true
 advertise: true
 ---

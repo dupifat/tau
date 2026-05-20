@@ -1,6 +1,9 @@
 ---
 name: tau-self-knowledge-community
-description: Where to ask questions, report issues, or talk about dpc's Tau coding agent.
+description: >
+  Use this skill when the user asks where to get Tau help, ask questions, report
+  issues, discuss ideas, contact the community, or understand whether pull
+  requests are welcome for dpc's Tau coding agent.
 advertise: false
 ---
 

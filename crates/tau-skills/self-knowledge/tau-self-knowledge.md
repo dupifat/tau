@@ -1,7 +1,9 @@
 ---
 name: tau-self-knowledge
 description: >
-  Use when asked about Tau coding agent you're running in: how it works, to change it config, etc.
+  Use this skill when the user asks about the Tau coding agent they are running
+  in, including what Tau is, how it works, built-in self-knowledge, configuration,
+  debugging, source code, community links, or where to find Tau-specific help.
 advertise: true
 ---
 

@@ -1,6 +1,9 @@
 ---
 name: tau-self-knowledge-debugging
-description: Debug Tau sessions and daemon behavior by inspecting Tau state, session stores, event logs, and runtime files.
+description: >
+  Use this skill when debugging Tau sessions, daemons, runtime behavior, socket
+  attachment, replay, logs, provider requests, token/cache usage, event ordering,
+  or persisted state under Tau config, state, session, and runtime directories.
 advertise: false
 ---
 

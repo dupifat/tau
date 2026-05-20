@@ -34,11 +34,10 @@
 
 ## Common commands
 
-- `nix develop` — enter the dev shell
 - `cargo check --workspace --all-targets` or `just check` — check Rust code
-- `cargo test` or `just test` — run tests
+- `cargo nextest run` or `just test` — run tests
 - `treefmt` or `just format` — format code
-- `selfci check` — full local verification
+- `selfci check` — full local CI verification; WARNING: slow, try running in parallel and/or only as a final verification step
 
 ## Definition of done
 

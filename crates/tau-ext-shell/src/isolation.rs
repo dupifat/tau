@@ -6,6 +6,31 @@
 
 use std::process::Command;
 
+const CARGO_BUILD_ENV_VARS: &[&str] = &[
+    "CARGO",
+    "CARGO_BIN_NAME",
+    "CARGO_CRATE_NAME",
+    "CARGO_MANIFEST_DIR",
+    "CARGO_MANIFEST_LINKS",
+    "CARGO_MANIFEST_PATH",
+    "CARGO_PKG_AUTHORS",
+    "CARGO_PKG_DESCRIPTION",
+    "CARGO_PKG_HOMEPAGE",
+    "CARGO_PKG_LICENSE",
+    "CARGO_PKG_LICENSE_FILE",
+    "CARGO_PKG_NAME",
+    "CARGO_PKG_README",
+    "CARGO_PKG_REPOSITORY",
+    "CARGO_PKG_RUST_VERSION",
+    "CARGO_PKG_VERSION",
+    "CARGO_PKG_VERSION_MAJOR",
+    "CARGO_PKG_VERSION_MINOR",
+    "CARGO_PKG_VERSION_PATCH",
+    "CARGO_PKG_VERSION_PRE",
+    "CARGO_PRIMARY_PACKAGE",
+    "OUT_DIR",
+];
+
 /// Sanitize a `Command` so the child is fully detached from the
 /// harness's controlling terminal:
 ///
@@ -22,9 +47,14 @@ use std::process::Command;
 pub(crate) fn apply_command_isolation(cmd: &mut Command) {
     cmd.env("TERM", "dumb")
         .env("NO_COLOR", "1")
-        .env("CLICOLOR", "0")
-        .env_remove("CARGO_MANIFEST_DIR")
-        .env_remove("CARGO_PKG_NAME");
+        .env("CLICOLOR", "0");
+
+    // Work around Cargo leaking build-time environment into commands run during
+    // development, which can make nested Cargo invocations rebuild needlessly:
+    // https://github.com/rust-lang/cargo/issues/16134
+    for env_var in CARGO_BUILD_ENV_VARS {
+        cmd.env_remove(env_var);
+    }
 
     cmd.stdin(std::process::Stdio::null());
 

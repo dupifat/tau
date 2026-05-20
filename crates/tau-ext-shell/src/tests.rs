@@ -2253,19 +2253,54 @@ fn command_isolation_preserves_explicit_environment() {
 
 #[test]
 fn command_isolation_clears_cargo_build_environment() {
+    let cargo_env_vars = [
+        "CARGO",
+        "CARGO_BIN_NAME",
+        "CARGO_CRATE_NAME",
+        "CARGO_MANIFEST_DIR",
+        "CARGO_MANIFEST_LINKS",
+        "CARGO_MANIFEST_PATH",
+        "CARGO_PKG_AUTHORS",
+        "CARGO_PKG_DESCRIPTION",
+        "CARGO_PKG_HOMEPAGE",
+        "CARGO_PKG_LICENSE",
+        "CARGO_PKG_LICENSE_FILE",
+        "CARGO_PKG_NAME",
+        "CARGO_PKG_README",
+        "CARGO_PKG_REPOSITORY",
+        "CARGO_PKG_RUST_VERSION",
+        "CARGO_PKG_VERSION",
+        "CARGO_PKG_VERSION_MAJOR",
+        "CARGO_PKG_VERSION_MINOR",
+        "CARGO_PKG_VERSION_PATCH",
+        "CARGO_PKG_VERSION_PRE",
+        "CARGO_PRIMARY_PACKAGE",
+        "OUT_DIR",
+    ];
+    let script = cargo_env_vars
+        .iter()
+        .map(|env_var| format!("printf '%s=%s\\n' {env_var} \"${{{env_var}-unset}}\""))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let expected = cargo_env_vars
+        .iter()
+        .map(|env_var| format!("{env_var}=unset\n"))
+        .collect::<String>();
+
     let mut cmd = std::process::Command::new("sh");
     cmd.arg("-c")
-        .arg("printf '%s %s' \"${CARGO_MANIFEST_DIR-unset}\" \"${CARGO_PKG_NAME-unset}\"")
-        .env("CARGO_MANIFEST_DIR", "/should/not/leak")
-        .env("CARGO_PKG_NAME", "tau-ext-shell")
+        .arg(script)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    for env_var in cargo_env_vars {
+        cmd.env(env_var, "should-not-leak");
+    }
     crate::isolation::apply_command_isolation(&mut cmd);
     let output = cmd.output().expect("run env probe");
     assert!(output.status.success(), "env probe failed: {output:?}");
     assert_eq!(
         String::from_utf8(output.stdout).expect("utf8 stdout"),
-        "unset unset"
+        expected
     );
 }
 

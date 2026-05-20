@@ -182,5 +182,5 @@ inherits = "dev"
 lto = "off"
 
 [profile.release]
-debug = "line-tables-only"
+debug = false
 lto = "fat"

@@ -23,7 +23,8 @@ pub(crate) fn apply_command_isolation(cmd: &mut Command) {
     cmd.env("TERM", "dumb")
         .env("NO_COLOR", "1")
         .env("CLICOLOR", "0")
-        .env_remove("CARGO_MANIFEST_DIR");
+        .env_remove("CARGO_MANIFEST_DIR")
+        .env_remove("CARGO_PKG_NAME");
 
     cmd.stdin(std::process::Stdio::null());
 

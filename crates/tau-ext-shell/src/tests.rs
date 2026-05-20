@@ -2252,11 +2252,12 @@ fn command_isolation_preserves_explicit_environment() {
 }
 
 #[test]
-fn command_isolation_clears_cargo_manifest_dir() {
+fn command_isolation_clears_cargo_build_environment() {
     let mut cmd = std::process::Command::new("sh");
     cmd.arg("-c")
-        .arg("printf %s \"${CARGO_MANIFEST_DIR-unset}\"")
+        .arg("printf '%s %s' \"${CARGO_MANIFEST_DIR-unset}\" \"${CARGO_PKG_NAME-unset}\"")
         .env("CARGO_MANIFEST_DIR", "/should/not/leak")
+        .env("CARGO_PKG_NAME", "tau-ext-shell")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     crate::isolation::apply_command_isolation(&mut cmd);
@@ -2264,7 +2265,7 @@ fn command_isolation_clears_cargo_manifest_dir() {
     assert!(output.status.success(), "env probe failed: {output:?}");
     assert_eq!(
         String::from_utf8(output.stdout).expect("utf8 stdout"),
-        "unset"
+        "unset unset"
     );
 }
 

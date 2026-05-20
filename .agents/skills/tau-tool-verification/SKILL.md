@@ -80,11 +80,12 @@ than 5s to execute.
 but currently 100% reliable child process termination is not implemented and will
 require advanced techniques to implement in the future (e.g. cgroups).
 
-`edit` tool produces unified-diff like output for edits made in the payload, and is
-capped at 100 replacements per call, to limit amount of output it produces. If an
-edit finds no matches, the tool error should include structured details with
-`changed: false` and `replacements: 0`. Hunks that would be too large than
-some sanity threshold (both lines and bytes) or with invalid charactgers, will
+`edit` tool produces unified-diff like output for edits made in the payload, and
+allows at most 100 replacements per call, to limit amount of output it produces.
+Requests for more than 100 replacements must error out immediately before making
+any changes. If an edit finds no matches, the tool error should include structured
+details with `changed: false` and `replacements: 0`. Hunks that would be too large
+than some sanity threshold (both lines and bytes) or with invalid characters, will
 be replaced with:
 
 ```
@@ -92,7 +93,7 @@ be replaced with:
 <marker>
 ```
 
-Where marker is similiar to ones used in tools like `read`, `shell` output.
+Where marker is similar to ones used in tools like `read`, `shell` output.
 
 Other commands should adhere to pre-existing conventions and naming used in
 standard tools.

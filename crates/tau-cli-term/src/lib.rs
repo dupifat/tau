@@ -34,6 +34,8 @@ pub enum Event {
     Line(String),
     /// The user signalled EOF (Ctrl-D on empty line).
     Eof,
+    /// The user requested prompt cancellation with a second consecutive Ctrl-C.
+    CancelPrompt,
     /// The terminal was resized.
     Resize { width: u16, height: u16 },
     /// The input buffer changed (or the completion menu cycled,
@@ -219,6 +221,12 @@ impl HighTerm {
                 RawEvent::Eof => {
                     self.sync_menu_block();
                     return Ok(Event::Eof);
+                }
+
+                RawEvent::CancelPrompt => {
+                    self.sync_menu_block();
+                    self.handle.redraw_sync();
+                    return Ok(Event::CancelPrompt);
                 }
 
                 RawEvent::Resize { width, height } => {

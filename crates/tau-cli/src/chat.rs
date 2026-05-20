@@ -763,6 +763,10 @@ impl<'a> TerminalInputSession<'a> {
         match event {
             TermEvent::Line(line) => self.handle_line(&line),
             TermEvent::Eof => Ok(self.handle_eof()),
+            TermEvent::CancelPrompt => {
+                self.send_cancel_prompt();
+                Ok(None)
+            }
             other => {
                 self.handle_non_exit_event(other);
                 Ok(None)
@@ -783,7 +787,7 @@ impl<'a> TerminalInputSession<'a> {
             TermEvent::BufferChanged => self.update_draft(),
             TermEvent::FastToggle => self.toggle_fast_service_tier(),
             TermEvent::RoleCycle => self.cycle_role(),
-            TermEvent::BackTab | TermEvent::Line(_) | TermEvent::Eof => {}
+            TermEvent::BackTab | TermEvent::Line(_) | TermEvent::Eof | TermEvent::CancelPrompt => {}
         }
     }
 
@@ -855,17 +859,7 @@ impl<'a> TerminalInputSession<'a> {
             return Ok(CommandOutcome::Exit(InputLoopExit::Quit));
         }
         if text == "/cancel" {
-            let _ = send_event(
-                self.writer,
-                &Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
-                    session_id: self.session_id.as_str().into(),
-                    // Broadcast cancel — abort whatever's in
-                    // flight, regardless of spid. The targeted
-                    // variant is used by the harness for
-                    // surgical preempts.
-                    session_prompt_id: None,
-                }),
-            );
+            self.send_cancel_prompt();
             return Ok(CommandOutcome::Continue);
         }
         if text == "/detach" {
@@ -894,6 +888,19 @@ impl<'a> TerminalInputSession<'a> {
         }
 
         Ok(CommandOutcome::NotHandled)
+    }
+
+    fn send_cancel_prompt(&self) {
+        let _ = send_event(
+            self.writer,
+            &Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
+                session_id: self.session_id.as_str().into(),
+                // Broadcast cancel — abort whatever's in flight, regardless of
+                // spid. The targeted variant is used by the harness for
+                // surgical preempts.
+                session_prompt_id: None,
+            }),
+        );
     }
 
     fn handle_tree_or_compact_command(&self, text: &str) -> bool {

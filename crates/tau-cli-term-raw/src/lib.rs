@@ -171,6 +171,8 @@ struct SharedState {
     history_nav: Option<HistoryNav>,
     /// Active completion menu, if any. Independent of `history_nav`.
     completion: Option<CompletionMenu>,
+    /// Whether an empty-prompt Ctrl-C has armed cancel for a second press.
+    ctrl_c_cancel_armed: bool,
     width: usize,
     height: usize,
     /// Set by Term::drop to signal the redraw thread to exit.
@@ -217,6 +219,7 @@ impl SharedState {
             current_redo: Vec::new(),
             history_nav: None,
             completion: None,
+            ctrl_c_cancel_armed: false,
             width,
             height,
             shutdown: false,
@@ -556,6 +559,8 @@ pub enum Event {
     Line(String),
     /// The user signalled EOF (Ctrl-D on empty line).
     Eof,
+    /// The user requested prompt cancellation with a second consecutive Ctrl-C.
+    CancelPrompt,
     /// The terminal was resized.
     Resize { width: u16, height: u16 },
     /// The input buffer or completion menu state changed. Fires for
@@ -1362,6 +1367,11 @@ impl Term {
             "handling key event"
         );
 
+        let ctrl_c = matches!(key.code, KeyCode::Char('c')) && ctrl;
+        if !ctrl_c {
+            self.handle.lock().ctrl_c_cancel_armed = false;
+        }
+
         match key.code {
             KeyCode::Enter if shift || alt => {
                 // Shift+Enter / Alt+Enter both insert a newline into
@@ -1427,8 +1437,17 @@ impl Term {
             KeyCode::Char('c') if ctrl => {
                 let mut st = self.handle.lock();
                 if st.buffer.is_empty() {
-                    return Ok(Some(Event::Notice("Use Ctrl+D to exit".to_owned())));
+                    if st.ctrl_c_cancel_armed {
+                        st.ctrl_c_cancel_armed = false;
+                        return Ok(Some(Event::CancelPrompt));
+                    }
+                    st.ctrl_c_cancel_armed = true;
+                    return Ok(Some(Event::Notice(
+                        "Press Ctrl-C again to cancel the current response; use Ctrl-D to exit"
+                            .to_owned(),
+                    )));
                 }
+                st.ctrl_c_cancel_armed = false;
                 st.record_undo();
                 st.buffer.clear();
                 st.history_nav = None;

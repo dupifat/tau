@@ -113,6 +113,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             },
             Event::Eof => break,
+            Event::CancelPrompt => {
+                handle.print_output("demo-cancel", "cancel requested");
+            }
             Event::Resize { width, height } => {
                 handle.set_block(
                     STATUS_ID,

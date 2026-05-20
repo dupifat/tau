@@ -24,7 +24,7 @@
     "tool.status.success":  { fg: "green" },
     "tool.status.error":    { fg: "red" },
     "tool.status.info":     { fg: "blue" },
-    "tool.status.time":     { fg: "dark_yellow" },
+    "tool.status.time":     { fg: "dark_grey" },
     "shell.output":         { },
     "progress.indicator":   { fg: "cyan", bold: true },
 

@@ -170,6 +170,9 @@ fn builtin_theme_parses() {
     let tool_ok = theme.resolve_style(&StyleName::new("tool.status.success"));
     assert_eq!(tool_ok.fg, Some(Color::Green));
 
+    let tool_time = theme.resolve_style(&StyleName::new(crate::names::TOOL_STATUS_TIME));
+    assert_eq!(tool_time.fg, Some(Color::DarkGrey));
+
     let progress = theme.resolve_style(&StyleName::new(crate::names::PROGRESS_INDICATOR));
     assert_eq!(progress.fg, Some(Color::Cyan));
     assert!(progress.bold);
@@ -210,6 +213,9 @@ fn builtin_light_theme_parses() {
 
     let tool_ok = theme.resolve_style(&StyleName::new("tool.status.success"));
     assert_eq!(tool_ok.fg, Some(Color::DarkGreen));
+
+    let tool_time = theme.resolve_style(&StyleName::new(crate::names::TOOL_STATUS_TIME));
+    assert_eq!(tool_time.fg, Some(Color::DarkGrey));
 
     let progress = theme.resolve_style(&StyleName::new(crate::names::PROGRESS_INDICATOR));
     assert_eq!(progress.fg, Some(Color::DarkCyan));

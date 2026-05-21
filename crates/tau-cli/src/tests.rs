@@ -1869,7 +1869,7 @@ fn running_tool_call_shows_ellipsis_until_result() {
 }
 
 #[test]
-fn backgrounded_tool_removes_foreground_block_until_background_result() {
+fn backgrounded_tool_stays_visibly_running_until_background_result() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -1909,7 +1909,7 @@ fn backgrounded_tool_removes_foreground_block_until_background_result() {
     );
     sync(&handle);
     assert!(in_progress.load(std::sync::atomic::Ordering::Relaxed));
-    assert!(!vt.screen_contains(80, "shell sleep 10 0s …"));
+    assert!(vt.screen_contains(80, "shell sleep 10 0s …"));
     assert!(!vt.screen_contains(80, "shell 1s ok"));
     assert!(vt.screen_contains(80, "0/1"));
 

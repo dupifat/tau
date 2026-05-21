@@ -2307,7 +2307,7 @@ impl EventRenderer {
     fn create_prompt_tool_summary(&mut self, summary: ToolSummaryDisplay) -> tau_cli_term::BlockId {
         let block = self.render_summary_block(&summary);
         let id = self.handle.new_block("tool-summary:prompt", block);
-        self.handle.push_above_sticky(id);
+        self.handle.push_above_active(id);
         self.tool_summaries.insert(id, summary);
         self.prompt_tool_summary = Some(id);
         self.prompt_tool_summary_active = true;
@@ -2337,7 +2337,7 @@ impl EventRenderer {
         };
         let block = self.render_summary_block(&summary);
         let id = self.handle.new_block("tool-summary:turn", block);
-        self.handle.push_above_sticky(id);
+        self.handle.push_above_active(id);
         self.tool_summaries.insert(id, summary);
         id
     }
@@ -2381,7 +2381,7 @@ impl EventRenderer {
             format!("tool-call-live:{}:{}", call.name, call.call_id),
             live_block,
         );
-        self.handle.push_above_sticky(live_id);
+        self.handle.push_above_active(live_id);
         let history_id = self.handle.new_block(
             format!("tool-call-history:{}:{}", call.name, call.call_id),
             Self::empty_block(),
@@ -2621,23 +2621,15 @@ impl EventRenderer {
     }
 
     fn handle_tool_background_placeholder(&mut self, call_id: &str) {
-        let Some(state) = self.tool_calls.get_mut(call_id) else {
+        let Some(state) = self.tool_calls.get(call_id) else {
             return;
         };
         if state.is_sub_agent {
             return;
         }
-        let block_id = state.block_id.take();
         self.main_backgrounded_tools.insert(call_id.to_owned());
         self.main_tools_visible = true;
         self.render_model_status();
-        if let Some(block_id) = block_id {
-            if let Some(timer) = &self.tool_timer {
-                timer.tool_finished(call_id);
-            }
-            self.handle.remove_block(block_id);
-            self.handle.redraw();
-        }
     }
 
     fn handle_tool_background_result(

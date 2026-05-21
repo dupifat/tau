@@ -198,10 +198,6 @@ impl EventName {
         Self::from_static(EventCategory::Tool, "background_result");
     pub const TOOL_BACKGROUND_ERROR: Self =
         Self::from_static(EventCategory::Tool, "background_error");
-    pub const TOOL_BACKGROUND_NOTIFICATION_SUPPRESS: Self =
-        Self::from_static(EventCategory::Tool, "background_notification_suppress");
-    pub const TOOL_BACKGROUND_NOTIFICATION_UNSUPPRESS: Self =
-        Self::from_static(EventCategory::Tool, "background_notification_unsuppress");
     pub const TOOL_PROGRESS: Self = Self::from_static(EventCategory::Tool, "progress");
     pub const TOOL_CANCEL: Self = Self::from_static(EventCategory::Tool, "cancel");
     pub const TOOL_CANCELLED: Self = Self::from_static(EventCategory::Tool, "cancelled");
@@ -1481,20 +1477,6 @@ pub struct ToolBackgroundError {
     pub originator: PromptOriginator,
 }
 
-/// Suppresses the model-visible internal completion prompt for a backgrounded
-/// tool call. The real background result/error event is still emitted.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ToolBackgroundNotificationSuppress {
-    pub call_id: ToolCallId,
-}
-
-/// Cancels a prior background completion prompt suppression for a tool call.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ToolBackgroundNotificationUnsuppress {
-    /// Tool call whose background completion prompt may be delivered again.
-    pub call_id: ToolCallId,
-}
-
 /// UI display descriptor for one finished tool call.
 ///
 /// Populated by the tool side (in-tree dispatchers or out-of-tree
@@ -1806,14 +1788,17 @@ pub struct ExtPromptFragmentPublish {
     pub fragment: PromptFragment,
 }
 
-/// An extension's request for the harness to dispatch a side prompt
-/// to the agent.
+/// A request for the harness to dispatch a side prompt to the agent.
+///
+/// Extension clients can send this event directly. The harness-owned
+/// `delegate` tool also uses the same payload internally and completes the
+/// original tool call when the side prompt finishes.
 ///
 /// The harness spawns a fresh conversation off the user's current
 /// branch, treats the side prompt like any other turn (LLM call,
-/// optional tool calls, final response), then routes the agent's
-/// final text back to the requesting extension as
-/// [`ExtAgentQueryResult`] with the same `query_id`.
+/// optional tool calls, final response), then routes the agent's final text
+/// back to the requester as [`ExtAgentQueryResult`] with the same `query_id`
+/// or as the terminal result of the harness-owned delegate tool.
 ///
 /// Side conversations are persisted as real branches in the session
 /// tree but tagged via [`PromptOriginator::Extension`] so UIs can
@@ -2322,16 +2307,16 @@ pub struct SessionUserMessageInjected {
     pub message_class: PromptMessageClass,
 }
 
-/// Who initiated the prompt — the human user via the UI, or an
-/// extension via [`ExtAgentQuery`].
+/// Who initiated the prompt — the human user via the UI, or a side query from
+/// an extension or harness-owned tool via [`ExtAgentQuery`].
 ///
 /// The provider's only obligation is to copy the originator from the
 /// incoming [`SessionPromptCreated`] onto its outgoing
 /// [`ProviderResponseFinished`]. The harness reads it on the way back
 /// to decide whether the response is a normal turn (route to UI,
 /// keep `default_conversation` advancing) or a side-query reply
-/// (route an [`ExtAgentQueryResult`] to the requesting extension and
-/// tear the conversation down).
+/// (route an [`ExtAgentQueryResult`] to the requester and tear the conversation
+/// down).
 ///
 /// UIs filter on `originator.is_user()` to ignore side conversations.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
@@ -2340,7 +2325,9 @@ pub enum PromptOriginator {
     /// Default — interactive prompt submitted through the UI.
     #[default]
     User,
-    /// Side prompt requested by an extension via [`ExtAgentQuery`].
+    /// Side prompt requested by an extension or harness-owned tool via
+    /// [`ExtAgentQuery`]. The harness uses `__harness__` here for its own
+    /// tools.
     Extension {
         name: ExtensionName,
         query_id: String,
@@ -3096,10 +3083,6 @@ pub enum Event {
     ToolBackgroundResult(ToolBackgroundResult),
     #[serde(rename = "tool.background_error")]
     ToolBackgroundError(ToolBackgroundError),
-    #[serde(rename = "tool.background_notification_suppress")]
-    ToolBackgroundNotificationSuppress(ToolBackgroundNotificationSuppress),
-    #[serde(rename = "tool.background_notification_unsuppress")]
-    ToolBackgroundNotificationUnsuppress(ToolBackgroundNotificationUnsuppress),
     #[serde(rename = "tool.progress")]
     ToolProgress(ToolProgress),
     #[serde(rename = "tool.cancel")]
@@ -3253,12 +3236,6 @@ impl Event {
             Self::ToolError(_) => EventName::TOOL_ERROR,
             Self::ToolBackgroundResult(_) => EventName::TOOL_BACKGROUND_RESULT,
             Self::ToolBackgroundError(_) => EventName::TOOL_BACKGROUND_ERROR,
-            Self::ToolBackgroundNotificationSuppress(_) => {
-                EventName::TOOL_BACKGROUND_NOTIFICATION_SUPPRESS
-            }
-            Self::ToolBackgroundNotificationUnsuppress(_) => {
-                EventName::TOOL_BACKGROUND_NOTIFICATION_UNSUPPRESS
-            }
             Self::ToolProgress(_) => EventName::TOOL_PROGRESS,
             Self::ToolCancel(_) => EventName::TOOL_CANCEL,
             Self::ToolCancelled(_) => EventName::TOOL_CANCELLED,

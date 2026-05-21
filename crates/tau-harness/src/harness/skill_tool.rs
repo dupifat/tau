@@ -22,8 +22,8 @@ use crate::error::HarnessError;
 use crate::harness::{AgentToolCall, HARNESS_CONNECTION_ID, Harness, PendingTool};
 
 impl Harness {
-    /// Register harness-owned tools (e.g. `skill`).
-    pub(crate) fn register_harness_tools(&mut self) {
+    /// Register the harness-owned `skill` tool.
+    pub(crate) fn register_skill_tool(&mut self) {
         let _ = self.registry.register(
             HARNESS_CONNECTION_ID,
             tau_proto::ToolSpec {
@@ -98,6 +98,7 @@ impl Harness {
             },
         );
         self.bump_tools_started_for(cid);
+        self.record_wait_tool_request(&call_id);
         self.publish_for_conversation(
             cid,
             Event::ToolRequest(ToolRequest {
@@ -114,6 +115,11 @@ impl Harness {
         // Publish, then drop the in-flight tracking — order matters:
         // `session_id_for_event` reads `tool_conversations` to
         // attribute the persisted record before we clear it.
+        match &result_event {
+            Event::ToolResult(result) => self.record_wait_tool_result(result.clone()),
+            Event::ToolError(error) => self.record_wait_tool_error(error.clone()),
+            _ => {}
+        }
         self.publish_for_conversation(cid, result_event);
         self.on_tool_call_complete(&call.id);
         self.clear_tool_call_tracking(call_id.as_str());

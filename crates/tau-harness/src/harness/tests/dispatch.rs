@@ -1,8 +1,6 @@
-use tau_proto::{ToolBackgroundNotificationSuppress, ToolBackgroundNotificationUnsuppress};
-
 use super::*;
 use crate::conversation::{Conversation, ConversationId, PendingPrompt};
-use crate::harness::background_completion_prompt;
+use crate::harness::{PendingTool, background_completion_prompt};
 
 fn responses_backend() -> tau_proto::ProviderBackend {
     tau_proto::ProviderBackend {
@@ -2406,9 +2404,9 @@ fn delegate_followup_auto_compacts_from_own_context_signal() {
     let mut h = echo_harness(&sp).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
 
-    let side_cid = ConversationId::new("extq-core-subagents-delegate-1");
+    let side_cid = ConversationId::new("extq-__harness__-delegate-1");
     let originator = tau_proto::PromptOriginator::Extension {
-        name: "core-subagents".into(),
+        name: HARNESS_CONNECTION_ID.into(),
         query_id: "delegate-1".to_owned(),
     };
     let mut side_conv = Conversation::new(
@@ -2416,7 +2414,7 @@ fn delegate_followup_auto_compacts_from_own_context_signal() {
         "s1".into(),
         originator.clone(),
         None,
-        Some("conn-delegate".into()),
+        Some(HARNESS_CONNECTION_ID.into()),
     );
     side_conv.parent_tool_call_id = Some("call-delegate".into());
     side_conv.context_input_tokens = Some(950);
@@ -2444,7 +2442,7 @@ fn delegate_followup_auto_compacts_from_own_context_signal() {
     assert!(matches!(
         summary_prompt.originator,
         tau_proto::PromptOriginator::Extension { ref name, ref query_id }
-            if name.as_str() == HARNESS_CONNECTION_ID && query_id == "auto-compact-extq-core-subagents-delegate-1"
+            if name.as_str() == HARNESS_CONNECTION_ID && query_id == "auto-compact-extq-__harness__-delegate-1"
     ));
 
     let mut cursor = baseline_seq;
@@ -2472,16 +2470,16 @@ fn side_conversation_auto_compaction_ignores_default_context_signal() {
     let mut h = echo_harness(&sp).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
 
-    let side_cid = ConversationId::new("extq-core-subagents-delegate-1");
+    let side_cid = ConversationId::new("extq-__harness__-delegate-1");
     let mut side_conv = Conversation::new(
         side_cid.clone(),
         "s1".into(),
         tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
+            name: HARNESS_CONNECTION_ID.into(),
             query_id: "delegate-1".to_owned(),
         },
         None,
-        Some("conn-delegate".into()),
+        Some(HARNESS_CONNECTION_ID.into()),
     );
     side_conv.parent_tool_call_id = Some("call-delegate".into());
     h.conversations.insert(side_cid.clone(), side_conv);
@@ -2569,7 +2567,7 @@ fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
     h.registry.register(
         "conn-delegate",
         ToolSpec {
-            name: tau_proto::ToolName::new("delegate"),
+            name: tau_proto::ToolName::new("side_source"),
             model_visible_name: None,
             description: None,
             parameters: None,
@@ -2598,7 +2596,7 @@ fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
         session_prompt_id: spid,
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "delegate-call".into(),
-            name: tau_proto::ToolName::new("delegate"),
+            name: tau_proto::ToolName::new("side_source"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(Vec::new()),
         })],
@@ -3689,13 +3687,7 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
     })
     .expect("background tool call");
 
-    h.handle_extension_event_inner(
-        "conn-fail",
-        Event::ToolBackgroundNotificationSuppress(ToolBackgroundNotificationSuppress {
-            call_id: "fail-call".into(),
-        }),
-    )
-    .expect("suppress background prompt");
+    h.suppress_background_completion_prompt("fail-call".into());
     h.handle_extension_event_inner(
         "conn-fail",
         Event::ToolError(tau_proto::ToolError {
@@ -3742,20 +3734,8 @@ fn background_notification_unsuppress_before_completion_allows_later_prompt() {
     let cid = h.default_conversation_id.clone();
     let call_id: ToolCallId = "bg-unsuppress-before".into();
 
-    h.handle_extension_event_inner(
-        "conn-wait",
-        Event::ToolBackgroundNotificationSuppress(ToolBackgroundNotificationSuppress {
-            call_id: call_id.clone(),
-        }),
-    )
-    .expect("suppress background prompt");
-    h.handle_extension_event_inner(
-        "conn-wait",
-        Event::ToolBackgroundNotificationUnsuppress(ToolBackgroundNotificationUnsuppress {
-            call_id: call_id.clone(),
-        }),
-    )
-    .expect("unsuppress background prompt");
+    h.suppress_background_completion_prompt(call_id.clone());
+    h.unsuppress_background_completion_prompt(call_id.clone());
 
     h.conversations
         .get_mut(&cid)
@@ -3807,13 +3787,7 @@ fn background_notification_unsuppress_after_suppressed_completion_queues_prompt(
         .turn_state = ConversationTurnState::ToolsRunning {
         remaining_calls: Vec::new(),
     };
-    h.handle_extension_event_inner(
-        "conn-wait",
-        Event::ToolBackgroundNotificationUnsuppress(ToolBackgroundNotificationUnsuppress {
-            call_id: call_id.clone(),
-        }),
-    )
-    .expect("unsuppress background prompt");
+    h.unsuppress_background_completion_prompt(call_id.clone());
 
     let conv = h
         .conversations
@@ -4047,22 +4021,6 @@ fn mixed_mode_delegate_calls_dispatch_concurrently_to_ext_scheduler() {
     let mut h = echo_harness(&sp).expect("start");
 
     h.selected_model = Some("test/model".into());
-    let delegate_events = connect_test_tool(&mut h, "conn-delegate");
-    h.registry.register(
-        "conn-delegate",
-        ToolSpec {
-            name: tau_proto::ToolName::new("delegate"),
-            model_visible_name: None,
-            description: None,
-            parameters: None,
-            tool_type: tau_proto::ToolType::Function,
-            format: None,
-            enabled_by_default: true,
-            execution_mode: ToolExecutionMode::Shared,
-            background_support: None,
-        },
-    );
-
     let cid = h.default_conversation_id.clone();
     let main_spid: SessionPromptId = "sp-main".into();
     seed_agent_thinking(&mut h, &cid, "sp-main");
@@ -4078,14 +4036,34 @@ fn mixed_mode_delegate_calls_dispatch_concurrently_to_ext_scheduler() {
             ctx_id: None,
         }),
     );
-    let exclusive_args = CborValue::Map(vec![(
-        CborValue::Text("execution_mode".to_owned()),
-        CborValue::Text("exclusive".to_owned()),
-    )]);
-    let shared_args = CborValue::Map(vec![(
-        CborValue::Text("execution_mode".to_owned()),
-        CborValue::Text("shared".to_owned()),
-    )]);
+    let exclusive_args = CborValue::Map(vec![
+        (
+            CborValue::Text("task_name".to_owned()),
+            CborValue::Text("exclusive".to_owned()),
+        ),
+        (
+            CborValue::Text("prompt".to_owned()),
+            CborValue::Text("exclusive task".to_owned()),
+        ),
+        (
+            CborValue::Text("execution_mode".to_owned()),
+            CborValue::Text("exclusive".to_owned()),
+        ),
+    ]);
+    let shared_args = CborValue::Map(vec![
+        (
+            CborValue::Text("task_name".to_owned()),
+            CborValue::Text("shared".to_owned()),
+        ),
+        (
+            CborValue::Text("prompt".to_owned()),
+            CborValue::Text("shared task".to_owned()),
+        ),
+        (
+            CborValue::Text("execution_mode".to_owned()),
+            CborValue::Text("shared".to_owned()),
+        ),
+    ]);
     h.handle_provider_response_finished(ProviderResponseFinished {
         session_prompt_id: main_spid,
         output_items: vec![
@@ -4133,38 +4111,12 @@ fn mixed_mode_delegate_calls_dispatch_concurrently_to_ext_scheduler() {
         "mixed delegate calls should not serialize before reaching the extension",
     );
 
-    let requested_delegate_calls: std::collections::HashSet<String> = delegate_events
-        .lock()
-        .expect("delegate events")
-        .iter()
-        .filter_map(|routed| match &routed.frame {
-            Frame::Event(Event::ToolInvoke(invoke)) if invoke.tool_name.as_str() == "delegate" => {
-                Some(invoke.call_id.as_str().to_owned())
-            }
-            _ => None,
-        })
-        .collect();
-    assert!(requested_delegate_calls.contains("delegate-exclusive"));
-    assert!(requested_delegate_calls.contains("delegate-shared"));
-
-    let mut exclusive_query = ext_query("q-exclusive", ToolExecutionMode::Exclusive);
-    exclusive_query.tool_call_id = Some("delegate-exclusive".into());
-    exclusive_query.task_name = Some("exclusive".to_owned());
-    h.handle_ext_agent_query("conn-delegate", exclusive_query)
-        .expect("exclusive ext query");
-    let exclusive_cid = ext_query_cid(&h, "q-exclusive").expect("exclusive query started");
-
-    let mut shared_query = ext_query("q-shared", ToolExecutionMode::Shared);
-    shared_query.tool_call_id = Some("delegate-shared".into());
-    shared_query.task_name = Some("shared".to_owned());
-    h.handle_ext_agent_query("conn-delegate", shared_query)
-        .expect("shared ext query reaches scheduler");
-
-    assert!(ext_query_cid(&h, "q-shared").is_none());
+    let exclusive_cid = ext_query_cid(&h, "delegate-0").expect("exclusive query started");
+    assert!(ext_query_cid(&h, "delegate-1").is_none());
     assert_eq!(h.pending_ext_agent_queries.len(), 1);
 
-    finish_ext_query(&mut h, &exclusive_cid, "q-exclusive");
-    assert!(ext_query_cid(&h, "q-shared").is_some());
+    finish_ext_query(&mut h, &exclusive_cid, "delegate-0");
+    assert!(ext_query_cid(&h, "delegate-1").is_some());
     assert!(h.pending_ext_agent_queries.is_empty());
 }
 
@@ -4310,6 +4262,65 @@ fn nested_ext_agent_query_under_active_exclusive_is_allowed() {
     assert_ne!(outer_cid, nested_cid);
     assert!(h.pending_ext_agent_queries.is_empty());
     assert_eq!(h.active_ext_agent_queries.len(), 2);
+
+    h.shutdown().expect("shutdown");
+}
+
+/// A wait that is already blocked on a tool call must be released even when the
+/// terminal event is a harness-synthesized routing error instead of a provider
+/// response. Otherwise `wait` can hang forever after unavailable-tool paths.
+#[test]
+fn wait_resolves_on_synthetic_tool_error() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = h.default_conversation_id.clone();
+    let target_call_id: ToolCallId = "target-call".into();
+
+    h.tool_conversations
+        .insert(target_call_id.clone(), cid.clone());
+    h.pending_tools.insert(
+        target_call_id.clone(),
+        PendingTool {
+            name: ToolName::new("missing"),
+            tool_type: tau_proto::ToolType::Function,
+        },
+    );
+    h.record_wait_tool_request(&target_call_id);
+
+    let wait_call = AgentToolCall {
+        id: "wait-call".into(),
+        name: ToolName::new("wait"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("tool_call_id".to_owned()),
+            CborValue::Text(target_call_id.to_string()),
+        )]),
+        display: None,
+    };
+    h.handle_wait_tool_call(&cid, &wait_call, ToolName::new("wait"))
+        .expect("start wait");
+
+    h.publish_terminal_tool_error(
+        Some(&cid),
+        None,
+        tau_proto::ToolError {
+            call_id: target_call_id,
+            tool_name: ToolName::new("missing"),
+            tool_type: tau_proto::ToolType::Function,
+            message: "tool is not available".to_owned(),
+            details: None,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        },
+    );
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolError(error)
+            if error.call_id.as_str() == "wait-call"
+                && error.message == "tool is not available"
+    )));
 
     h.shutdown().expect("shutdown");
 }

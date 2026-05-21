@@ -8,13 +8,12 @@
 - `crates/tau-cli-term-raw` — raw terminal rendering/input layer
 - `crates/tau-config` — user and project configuration loading
 - `crates/tau-core` — event bus, routing, state, sessions, policy, and tool registry
-- `crates/tau-ext-core-subagents` — built-in delegate/sub-agent extension
 - `crates/tau-ext-std-notifications` — built-in notification extension
 - `crates/tau-ext-shell` — shell- and filesystem-oriented extension
 - `crates/tau-ext-test-dummy` — test-only dummy extension
 - `crates/tau-ext-websearch-exa` — opt-in Exa web search extension
 - `crates/tau-extension` — extension-side protocol/runtime helpers
-- `crates/tau-harness` — harness daemon: extensions, bus, sessions, socket server
+- `crates/tau-harness` — harness daemon: extensions, bus, sessions, socket server, harness-owned delegate/wait tools
 - `crates/tau-provider` — provider credential/config library (storage, OAuth helpers, resolver)
 - `crates/tau-provider-cli` — interactive `tau provider {add,remove,list,login,list-models}` subcommands
 - `crates/tau-proto` — shared protocol types and CBOR codec helpers

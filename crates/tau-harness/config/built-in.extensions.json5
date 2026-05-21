@@ -32,13 +32,6 @@
         config: {},
     },
     {
-        name: "core-subagents",
-        suffix: ["ext", "ext-core-subagents"],
-        role: "tool",
-        enable: true,
-        config: {},
-    },
-    {
         name: "std-notifications",
         suffix: ["ext", "ext-std-notifications"],
         role: "tool",

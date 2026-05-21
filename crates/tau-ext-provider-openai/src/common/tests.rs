@@ -114,7 +114,7 @@ fn ws_stream_error_without_type_suffix_is_retryable() {
 #[test]
 fn mix_originator_passes_through_absent_base() {
     let ext = PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::new("core-subagents"),
+        name: tau_proto::ExtensionName::new("__harness__"),
         query_id: "delegate-1".into(),
     };
     assert_eq!(
@@ -159,15 +159,15 @@ fn prompt_cache_key_distinct_base_urls_diverge() {
     );
 }
 
-/// An extension-originated turn must NOT inherit the user's wire key —
-/// otherwise parallel delegate runs pile onto the user agent's
+/// A side-query turn must NOT inherit the user's wire key — otherwise
+/// parallel delegate runs pile onto the user agent's
 /// routing bucket and push the `(prefix, prompt_cache_key)` pair past
 /// the ~15 RPM threshold the OpenAI deployment checklist warns about.
 #[test]
 fn mix_originator_extension_diverges_from_user() {
     let base = "tau-abc123";
     let ext = PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::new("core-subagents"),
+        name: tau_proto::ExtensionName::new("__harness__"),
         query_id: "delegate-1".into(),
     };
     let user_key = mix_originator_into_cache_key(Some(base), &PromptOriginator::User, false);
@@ -176,13 +176,13 @@ fn mix_originator_extension_diverges_from_user() {
     assert_ne!(user_key, ext_key);
 }
 
-/// Two distinct extensions must route to distinct cache buckets so
+/// Two distinct side-query originators must route to distinct cache buckets so
 /// e.g. a websearch helper and a delegate sub-agent don't share load.
 #[test]
 fn mix_originator_distinct_extensions_diverge() {
     let base = "tau-abc123";
     let delegate = PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::new("core-subagents"),
+        name: tau_proto::ExtensionName::new("__harness__"),
         query_id: "q-1".into(),
     };
     let websearch = PromptOriginator::Extension {
@@ -203,11 +203,11 @@ fn mix_originator_distinct_extensions_diverge() {
 fn mix_originator_ignores_extension_query_id() {
     let base = "tau-abc123";
     let first = PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::new("core-subagents"),
+        name: tau_proto::ExtensionName::new("__harness__"),
         query_id: "delegate-1".into(),
     };
     let second = PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::new("core-subagents"),
+        name: tau_proto::ExtensionName::new("__harness__"),
         query_id: "delegate-2".into(),
     };
     assert_eq!(
@@ -217,8 +217,8 @@ fn mix_originator_ignores_extension_query_id() {
 }
 
 /// When the harness flags a side query as "share the user's bucket"
-/// (`share_user_bucket=true`), an extension-originated turn must
-/// produce the user's base key — not the per-extension hash — so the
+/// (`share_user_bucket=true`), the side-query turn must produce the user's
+/// base key — not the per-originator hash — so the
 /// single-shot probe (idle-summary) hits the user's already-warm
 /// prefix cache instead of cold-starting its own.
 #[test]
@@ -242,7 +242,7 @@ fn mix_originator_share_user_bucket_overrides_extension_split() {
 fn mix_originator_is_deterministic() {
     let base = "tau-abc123";
     let ext = PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::new("core-subagents"),
+        name: tau_proto::ExtensionName::new("__harness__"),
         query_id: "delegate-1".into(),
     };
     assert_eq!(

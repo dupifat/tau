@@ -133,10 +133,10 @@ of the bar to keep it compact.
 For providers that support it, Tau emits stable `prompt_cache_key` routing
 keys (derived from base URL and session id) so cache hits survive restarts
 within a session, and sets `prompt_cache_retention` where
-available. Extension-originated turns (e.g. `core-subagents` sub-agents) get a
-distinct key so parallel delegations don't pile onto the user agent's routing
-bucket and trip OpenAI's `>15 RPM`-per-key overflow heuristic. Provider
-compatibility flags live next to the model entry (`supports_prompt_cache_key`,
+available. Side-query turns (e.g. delegated sub-agents) get a distinct key so
+parallel delegations don't pile onto the user agent's routing bucket and trip
+OpenAI's `>15 RPM`-per-key overflow heuristic. Provider compatibility flags live
+next to the model entry (`supports_prompt_cache_key`,
 `supports_prompt_cache_retention`). Toggle the status-bar hit-rate readout with
 `/set show-cache-stats <true|false>`.
 
@@ -149,11 +149,12 @@ with `tau policy-show`.
 
 ## Built-in extensions
 
-Every built-in extension is a regular extension under
-`crates/tau-ext-*/`. Each is configured under `extensions.<name>` in
-`harness.yaml` and can be disabled with `enable: false`, swapped via
-`command:` / `prefix:`, or given free-form `config:` payload that arrives at
-startup as a `LifecycleConfigure` message.
+Most built-in integrations are regular extensions under `crates/tau-ext-*/`.
+They are configured under `extensions.<name>` in `harness.yaml` and can be
+disabled with `enable: false`, swapped via `command:` / `prefix:`, or given
+free-form `config:` payload that arrives at startup as a `LifecycleConfigure`
+message. Some core tools, such as `delegate`, `wait`, and `skill`, are
+harness-owned instead of extension processes.
 
 ```json5
 extensions: {
@@ -239,20 +240,22 @@ when a long task finishes while you're in another window. Set
 `config.idle_agent_summary: true` to restore the old behavior that asks the
 agent for a one-sentence idle summary before notifying.
 
-### `core-subagents` — sub-task delegation
+### Harness-owned `delegate` / `wait` — sub-task delegation
 
-Exposes a `delegate` tool that spawns a side conversation and returns its result
-to the caller. Unless the tool call supplies `role`, delegated sub-agents default
-to the `engineer` role. When `role` is supplied, or when the default `engineer` role is
-used, the sub-agent runs with that role's resolved model, model parameters,
-system prompt, and tool profile/filtering. The sub-agent starts with a *fresh*
-context — only the parent's `prompt`, the selected role's system prompt, and the
-selected role's tools — with no visibility into the parent conversation's prior
-turns, tool results, or in-flight state. The same isolation applies at every
-nesting depth, so sub-sub-agents don't see ancestor task framing and can't be
-tricked into re-delegating it. Parent agents are responsible for putting
-everything the sub-agent needs into the `prompt`. Live progress (turns, current
-tool) is shown in the parent UI alongside the delegate's task name and role.
+The harness exposes a `delegate` tool that spawns a side conversation and returns
+its result to the caller, plus a `wait` tool for collecting background tool
+results. Unless the `delegate` call supplies `role`, delegated sub-agents default
+to the `engineer` role. When `role` is supplied, or when the default `engineer`
+role is used, the sub-agent runs with that role's resolved model, model
+parameters, system prompt, and tool profile/filtering. The sub-agent starts with
+a *fresh* context — only the parent's `prompt`, the selected role's system
+prompt, and the selected role's tools — with no visibility into the parent
+conversation's prior turns, tool results, or in-flight state. The same isolation
+applies at every nesting depth, so sub-sub-agents don't see ancestor task framing
+and can't be tricked into re-delegating it. Parent agents are responsible for
+putting everything the sub-agent needs into the `prompt`. Live progress (turns,
+current tool) is shown in the parent UI alongside the delegate's task name and
+role.
 
 ### `std-websearch-exa` — opt-in web search
 
@@ -283,7 +286,7 @@ Type `/` for menu autocompletion. The built-in set:
 
 Available `/set` names: `show-diff` (expanded vs. compact diffs),
 `show-thinking` (agent reasoning summaries), `show-cache-stats`
-(prompt-cache hit stats in status bar), `show-token-stats` (per-turn
+(prompt-cache hit stats in status bar), `show-turn-stats` (per-turn
 token usage below responses). All take `true` / `false`. The first-arg
 completion menu shows each setting's current value; the second-arg
 menu shows the meaning of each allowed value. State is persisted to

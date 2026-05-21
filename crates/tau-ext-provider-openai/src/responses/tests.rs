@@ -351,20 +351,20 @@ fn build_request_chain_turn_still_emits_prompt_cache_key() {
     assert!(body["prompt_cache_key"].is_string());
 }
 
-/// The Responses backend must split the wire `prompt_cache_key` for
-/// extension-originated turns just like the Chat Completions backend
-/// does. Both paths share the same `mix_originator_into_cache_key`
+/// The Responses backend must split the wire `prompt_cache_key` for side-query
+/// turns just like the Chat Completions backend does. Both paths share the same
+/// `mix_originator_into_cache_key`
 /// helper, but this test pins the wiring at the request-build layer
 /// so a future refactor can't silently regress it on one path.
 #[test]
-fn build_request_prompt_cache_key_differs_for_extension_originator() {
+fn build_request_prompt_cache_key_differs_for_side_query_originator() {
     let config = ResponsesConfig {
         surface: ResponsesSurface::ChatGpt,
         supports_prompt_cache_key: true,
         ..chain_test_config()
     };
     let ext = tau_proto::PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::new("core-subagents"),
+        name: tau_proto::ExtensionName::new("__harness__"),
         query_id: "delegate-1".into(),
     };
     let user_request = PromptPayload {

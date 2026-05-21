@@ -17,7 +17,6 @@ workspace = true
 
 [dependencies]
 tau-cli.workspace = true
-tau-ext-core-subagents.workspace = true
 tau-ext-provider-chat-completions.workspace = true
 tau-ext-provider-openai.workspace = true
 tau-ext-shell.workspace = true

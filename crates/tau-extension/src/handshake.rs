@@ -10,10 +10,10 @@
 //! it once and lets each extension declare only what differs.
 //!
 //! ```ignore
-//! tau_extension::Handshake::tool("tau-ext-core-subagents")
-//!     .subscribe([EventName::TOOL_INVOKE, EventName::EXTENSION_AGENT_QUERY_RESULT])
+//! tau_extension::Handshake::tool("tau-ext-websearch-exa")
+//!     .subscribe([EventName::TOOL_INVOKE])
 //!     .register_tool(tool_spec())
-//!     .ready_message("core-subagents ready")
+//!     .ready_message("websearch ready")
 //!     .run(&mut writer)?;
 //! ```
 //!

@@ -158,6 +158,113 @@ fn ext_agent_query_defers_dispatch_when_publish_is_intercepted() {
     h.shutdown().expect("shutdown");
 }
 
+/// Regression for `tau-agent-jkodod`: an instant-background harness
+/// `delegate` starts a side conversation while the parent tool turn
+/// also becomes ready to continue. If the side `UiPromptSubmitted` is
+/// intercepted, the parent follow-up must wait for interception to go
+/// idle without stealing the side conversation's deferred dispatch.
+#[test]
+fn intercepted_harness_delegate_dispatches_side_before_parent_followup() {
+    use tau_proto::ExtensionName;
+
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let _interceptor_events = connect_test_tool(&mut h, "conn-interceptor");
+    h.interceptors.replace_for_connection(
+        "conn-interceptor",
+        ExtensionName::from("test-interceptor"),
+        vec![EventSelector::Exact(
+            tau_proto::EventName::UI_PROMPT_SUBMITTED,
+        )],
+        InterceptionPriority::new(0),
+    );
+
+    let cid = h.default_conversation_id.clone();
+    let main_spid: SessionPromptId = "sp-main".into();
+    seed_agent_thinking(&mut h, &cid, "sp-main");
+    h.prompt_conversations
+        .insert(main_spid.clone(), cid.clone());
+    h.publish_for_conversation(
+        &cid,
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "go".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        }),
+    );
+    h.handle_intercept_reply(
+        "conn-interceptor",
+        InterceptReply {
+            action: InterceptAction::Pass(None),
+        },
+    );
+
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("task_name".to_owned()),
+            CborValue::Text("side".to_owned()),
+        ),
+        (
+            CborValue::Text("prompt".to_owned()),
+            CborValue::Text("side instruction".to_owned()),
+        ),
+    ]);
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        session_prompt_id: main_spid,
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "delegate-call".into(),
+            name: ToolName::new("delegate"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: args,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("main response");
+
+    assert_eq!(h.pending_user_prompt_dispatches.len(), 1);
+    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+    assert!(
+        h.prompt_conversations
+            .iter()
+            .all(|(_, prompt_cid)| prompt_cid == &cid),
+        "no follow-up prompt should dispatch while the side prompt is intercepted",
+    );
+
+    h.handle_intercept_reply(
+        "conn-interceptor",
+        InterceptReply {
+            action: InterceptAction::Pass(None),
+        },
+    );
+
+    let mut prompts: Vec<_> = h
+        .prompt_conversations
+        .iter()
+        .filter_map(|(spid, prompt_cid)| (spid.as_str() != "sp-main").then_some((spid, prompt_cid)))
+        .collect();
+    prompts.sort_by_key(|(spid, _)| spid.as_str().to_owned());
+    assert_eq!(prompts.len(), 2);
+    assert_ne!(prompts[0].1, &cid, "side prompt must dispatch first");
+    assert_eq!(prompts[1].1, &cid, "parent follow-up dispatches after side");
+    let side_prompt = read_prompt_created(&h, prompts[0].0);
+    assert!(matches!(
+        side_prompt.originator,
+        tau_proto::PromptOriginator::Extension { ref query_id, .. } if query_id == "delegate-0"
+    ));
+
+    h.shutdown().expect("shutdown");
+}
+
 #[test]
 fn interception_exact_selector_intercepts_before_log() {
     let tmp = TempDir::new().expect("tempdir");

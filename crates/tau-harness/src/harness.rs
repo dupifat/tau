@@ -614,6 +614,11 @@ pub(crate) struct Harness {
     /// list will actually contain it. Without this, the agent
     /// receives a stale message list (the "Ready" loop bug).
     pub(crate) pending_user_prompt_dispatches: VecDeque<ConversationId>,
+    /// Conversations whose next agent prompt is ready except that an
+    /// unrelated publish is still parked in the interception chain.
+    /// These do not wait for another user-message fold; they drain
+    /// once interception and deferred publishes are idle.
+    pub(crate) pending_publish_idle_dispatches: VecDeque<ConversationId>,
     /// All available models.
     pub(crate) available_models: Vec<ModelId>,
     /// Model snapshots published by provider extensions, keyed by sender
@@ -1080,6 +1085,7 @@ impl Harness {
             pending_intercept: None,
             deferred_publishes: VecDeque::new(),
             pending_user_prompt_dispatches: VecDeque::new(),
+            pending_publish_idle_dispatches: VecDeque::new(),
             available_models,
             provider_models_by_extension: HashMap::new(),
             provider_model_info: HashMap::new(),
@@ -1297,6 +1303,7 @@ impl Harness {
             pending_intercept: None,
             deferred_publishes: VecDeque::new(),
             pending_user_prompt_dispatches: VecDeque::new(),
+            pending_publish_idle_dispatches: VecDeque::new(),
             available_models,
             provider_models_by_extension: HashMap::new(),
             provider_model_info: HashMap::new(),
@@ -6306,7 +6313,7 @@ impl Harness {
             // interceptor matched, the publishes committed inline
             // and we can dispatch immediately.
             if self.pending_intercept.is_some() || !self.deferred_publishes.is_empty() {
-                self.pending_user_prompt_dispatches.push_back(cid.clone());
+                self.pending_publish_idle_dispatches.push_back(cid.clone());
             } else {
                 self.send_prompt_to_agent_for(&cid);
             }

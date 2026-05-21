@@ -338,6 +338,7 @@ impl Harness {
         }
         self.advance_pending_intercept(pending, reply.action);
         self.drain_deferred_publishes();
+        self.drain_publish_idle_dispatches();
     }
 
     /// Resolve a pending intercept whose responder disconnected.
@@ -358,6 +359,7 @@ impl Harness {
         );
         self.advance_pending_intercept(pending, InterceptAction::Pass(None));
         self.drain_deferred_publishes();
+        self.drain_publish_idle_dispatches();
     }
 
     /// Apply an [`InterceptAction`] to a pending intercept and drive
@@ -443,6 +445,17 @@ impl Harness {
                 deferred.sync_head_for,
                 None,
             );
+        }
+    }
+
+    fn drain_publish_idle_dispatches(&mut self) {
+        while self.pending_intercept.is_none() && self.deferred_publishes.is_empty() {
+            let Some(cid) = self.pending_publish_idle_dispatches.pop_front() else {
+                break;
+            };
+            if self.conversations.contains_key(&cid) {
+                self.send_prompt_to_agent_for(&cid);
+            }
         }
     }
 }

@@ -78,6 +78,8 @@ pub const COMPLETION_SELECTED: &str = "completion.selected";
 
 // -- Prompt --
 pub const PROMPT_MARKER: &str = "prompt.marker";
+/// Current working directory shown in the right prompt.
+pub const PROMPT_CWD: &str = "prompt.cwd";
 pub const PROMPT_MARKER_SUBMITTED: &str = "prompt.marker.submitted";
 
 // -- Banner --

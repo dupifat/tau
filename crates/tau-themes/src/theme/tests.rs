@@ -177,6 +177,9 @@ fn builtin_theme_parses() {
     assert_eq!(progress.fg, Some(Color::Cyan));
     assert!(progress.bold);
 
+    let prompt_cwd = theme.resolve_style(&StyleName::new(crate::names::PROMPT_CWD));
+    assert_eq!(prompt_cwd.fg, Some(Color::Blue));
+
     let extension_status = theme.resolve_style(&StyleName::new("extension.status"));
     assert_eq!(extension_status, ThemeStyle::default());
 
@@ -220,6 +223,9 @@ fn builtin_light_theme_parses() {
     let progress = theme.resolve_style(&StyleName::new(crate::names::PROGRESS_INDICATOR));
     assert_eq!(progress.fg, Some(Color::DarkCyan));
     assert!(progress.bold);
+
+    let prompt_cwd = theme.resolve_style(&StyleName::new(crate::names::PROMPT_CWD));
+    assert_eq!(prompt_cwd.fg, Some(Color::DarkBlue));
 
     let selected = theme.resolve_style(&StyleName::new("completion.selected"));
     assert!(selected.bold);

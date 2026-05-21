@@ -267,7 +267,8 @@ Proxies a single Exa-backed search tool, advertised to models as
 ## CLI / UI
 
 Tau ships a terminal UI that aims for *every pixel of estate is content* —
-fast startup, no chrome.
+fast startup, no chrome. The prompt's right side shows the current working
+directory, with `$HOME` shortened to `~`.
 
 ### Slash commands
 
@@ -487,9 +488,10 @@ The UI ships with built-in dark and light "tau" themes. `cli.yaml` can set
 `theme: dark`, `theme: light`, or `theme: auto`; `TAU_THEME=dark|light|auto`
 overrides config for one process. Auto currently uses terminal background hints
 such as `COLORFGBG` and falls back to dark. Themes map semantic style names
-(`prompt.marker`, `banner.accent`, `system.info`, diff hunks, reasoning blocks,
-…) to terminal attributes. See `crates/tau-themes/themes/tau.json5` and
-`tau-light.json5` for the full style key list.
+(`prompt.marker`, `prompt.cwd`, `banner.accent`, `system.info`, diff hunks,
+reasoning blocks, …) to terminal attributes. See
+`crates/tau-themes/themes/tau.json5` and `tau-light.json5` for the full style
+key list.
 
 ### Session resume and detach
 

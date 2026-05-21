@@ -442,6 +442,9 @@ pub(crate) fn run_chat(
         .map_err(|error| CliError::Participant(format!("cli.yaml failed to parse:\n{error}")))?;
     let theme = crate::theme::select_theme(settings.theme);
     let prompt = crate::theme::active_prompt_marker(&theme, &settings.prompt_symbol, None);
+    let cwd = std::env::current_dir()?;
+    let home_dir = dirs::home_dir();
+    let right_prompt = crate::theme::cwd_right_prompt(&theme, &cwd, home_dir.as_deref());
     let cursor_shape = if settings.bar_cursor {
         tau_cli_term::CursorShape::Bar
     } else {
@@ -468,6 +471,7 @@ pub(crate) fn run_chat(
         bindings,
         input_history,
     )?;
+    handle.set_right_prompt(right_prompt);
 
     // Show logo if enabled.
     if settings.show_logo {

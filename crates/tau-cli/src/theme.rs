@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use tau_config::settings::CliTheme;
 use tau_themes::{SpanTree, ThemedText};
 
@@ -30,6 +32,30 @@ pub(crate) fn active_prompt_marker(
 
     text.push_tree(marker);
     tau_cli_term::resolve::themed_text(theme, &text)
+}
+
+pub(crate) fn cwd_right_prompt(
+    theme: &tau_themes::Theme,
+    cwd: &Path,
+    home: Option<&Path>,
+) -> tau_cli_term::StyledText {
+    let mut text = ThemedText::new();
+    let cwd_style = text.add_style(tau_themes::names::PROMPT_CWD);
+    text.push(cwd_style, display_cwd(cwd, home));
+    tau_cli_term::resolve::themed_text(theme, &text)
+}
+
+fn display_cwd(cwd: &Path, home: Option<&Path>) -> String {
+    if let Some(home) = home.filter(|home| !home.as_os_str().is_empty())
+        && let Ok(relative) = cwd.strip_prefix(home)
+    {
+        if relative.as_os_str().is_empty() {
+            return "~".to_owned();
+        }
+        return format!("~/{}", relative.display());
+    }
+
+    cwd.display().to_string()
 }
 
 fn prompt_marker_role_style(role: &str) -> String {
@@ -120,5 +146,39 @@ mod tests {
     fn colorfgbg_ignores_malformed_values() {
         assert_eq!(colorfgbg_terminal_shade_from(""), None);
         assert_eq!(colorfgbg_terminal_shade_from("0;wat"), None);
+    }
+
+    #[test]
+    fn display_cwd_replaces_home_prefix() {
+        assert_eq!(
+            display_cwd(
+                Path::new("/home/alice/project"),
+                Some(Path::new("/home/alice"))
+            ),
+            "~/project"
+        );
+        assert_eq!(
+            display_cwd(Path::new("/home/alice"), Some(Path::new("/home/alice"))),
+            "~"
+        );
+        assert_eq!(
+            display_cwd(
+                Path::new("/home/alice2/project"),
+                Some(Path::new("/home/alice"))
+            ),
+            "/home/alice2/project"
+        );
+    }
+
+    #[test]
+    fn cwd_right_prompt_uses_prompt_cwd_style() {
+        let prompt = cwd_right_prompt(
+            &tau_themes::Theme::builtin(),
+            Path::new("/tmp/project"),
+            None,
+        );
+
+        assert_eq!(prompt.spans()[0].text, "/tmp/project");
+        assert_eq!(prompt.spans()[0].style.fg, Some(tau_cli_term::Color::Blue));
     }
 }

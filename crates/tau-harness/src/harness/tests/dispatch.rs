@@ -4508,6 +4508,79 @@ fn wait_resolves_on_synthetic_tool_error() {
     h.shutdown().expect("shutdown");
 }
 
+/// Regression: `wait` is harness-owned and publishes its answer inline, but the
+/// answer still must be folded as a provider-terminal tool output. Otherwise
+/// the next full replay contains the `wait` ToolCall without a matching
+/// ToolResult, which OpenAI rejects with `No tool output found for function
+/// call …`.
+#[test]
+fn wait_tool_reply_is_folded_into_followup_prompt() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let cid = h.default_conversation_id.clone();
+    append_user_message_via_event(&mut h, "s1", "wait on missing call");
+    seed_agent_thinking(&mut h, &cid, "sp-wait");
+    let spid: SessionPromptId = "sp-wait".into();
+    h.prompt_conversations.insert(spid.clone(), cid.clone());
+
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        session_prompt_id: spid.clone(),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "wait-call".into(),
+            name: ToolName::new("wait"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("tool_call_id".to_owned()),
+                CborValue::Text("missing-target".to_owned()),
+            )]),
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("wait response");
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ProviderToolError(error) if error.call_id.as_str() == "wait-call"
+    )));
+    let followup_spid = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(prompt_id, prompt_cid)| {
+            (prompt_id != &spid && prompt_cid == &cid).then_some(prompt_id.clone())
+        })
+        .expect("follow-up prompt id");
+    let prompt = read_prompt_created(&h, &followup_spid);
+    let tool_uses: Vec<&str> = prompt
+        .context_items
+        .iter()
+        .filter_map(tool_call_id)
+        .collect();
+    let tool_results: Vec<&str> = prompt
+        .context_items
+        .iter()
+        .filter_map(tool_result_id)
+        .collect();
+
+    assert!(
+        tool_uses.iter().any(|id| *id == "wait-call"),
+        "follow-up prompt must include the wait ToolCall; got: {tool_uses:?}",
+    );
+    assert!(
+        tool_results.iter().any(|id| *id == "wait-call"),
+        "follow-up prompt must include the matching wait ToolResult; got: {tool_results:?}",
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Regression: older delegate callers may still send the legacy `read_only`
 /// flag. The harness keeps accepting it as a compatibility alias for shared
 /// execution while the agent-visible schema advertises only `execution_mode`.

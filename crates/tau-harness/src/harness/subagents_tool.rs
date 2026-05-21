@@ -315,31 +315,42 @@ impl Harness {
             let Some(cid) = self.tool_conversations.get(&wait_call_id).cloned() else {
                 continue;
             };
-            let event = match reply.kind {
-                WaitReplyKind::Result { result, display } => Event::ToolResult(ToolResult {
-                    call_id: reply.wait_call_id,
-                    tool_name: reply.wait_tool_name,
-                    tool_type: ToolType::Function,
-                    result,
-                    kind: ToolResultKind::Final,
-                    display,
-                    originator: tau_proto::PromptOriginator::User,
-                }),
+            match reply.kind {
+                WaitReplyKind::Result { result, display } => {
+                    self.publish_terminal_tool_result(
+                        Some(&cid),
+                        None,
+                        ToolResult {
+                            call_id: reply.wait_call_id,
+                            tool_name: reply.wait_tool_name,
+                            tool_type: ToolType::Function,
+                            result,
+                            kind: ToolResultKind::Final,
+                            display,
+                            originator: tau_proto::PromptOriginator::User,
+                        },
+                    );
+                }
                 WaitReplyKind::Error {
                     message,
                     details,
                     display,
-                } => Event::ToolError(ToolError {
-                    call_id: reply.wait_call_id,
-                    tool_name: reply.wait_tool_name,
-                    tool_type: ToolType::Function,
-                    message,
-                    details,
-                    display,
-                    originator: tau_proto::PromptOriginator::User,
-                }),
-            };
-            self.publish_for_conversation(&cid, event);
+                } => {
+                    self.publish_terminal_tool_error(
+                        Some(&cid),
+                        None,
+                        ToolError {
+                            call_id: reply.wait_call_id,
+                            tool_name: reply.wait_tool_name,
+                            tool_type: ToolType::Function,
+                            message,
+                            details,
+                            display,
+                            originator: tau_proto::PromptOriginator::User,
+                        },
+                    );
+                }
+            }
             self.on_tool_call_complete(wait_call_id.as_str());
             self.clear_tool_call_tracking(wait_call_id.as_str());
         }

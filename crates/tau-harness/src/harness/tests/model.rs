@@ -30,7 +30,7 @@ fn provider_model(id: ModelId, context_window: u64) -> ProviderModelInfo {
         display_name: None,
         default_affinity: 0,
         context_window,
-        efforts: vec![Effort::Off, Effort::High],
+        efforts: vec![Effort::High],
         verbosities: vec![Verbosity::Low, Verbosity::High],
         thinking_summaries: vec![ThinkingSummary::Off, ThinkingSummary::Auto],
         supports_compaction: false,

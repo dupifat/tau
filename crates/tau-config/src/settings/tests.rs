@@ -565,9 +565,19 @@ fn harness_role_prompt_fragments_parse_as_plain_strings() {
 #[test]
 fn harness_built_in_roles_load_from_json_with_manager_prompt() {
     // Built-in role defaults live in built-in.harness.yaml. Manager has a
-    // visible built-in prompt there; the individual-contributor roles do not.
+    // visible orchestration prompt there. Engineer has a lightweight follow-up
+    // prompt for delegated tasks, while assistant keeps no built-in prompt.
     let s = HarnessSettings::built_in();
-    assert!(s.roles["engineer"].prompt_fragments.is_empty());
+    let engineer = &s.roles["engineer"];
+    assert_eq!(
+        engineer.prompt_fragments[0].priority,
+        PromptPriority::new(5)
+    );
+    assert!(
+        engineer.prompt_fragments[0]
+            .text
+            .contains("Trust the `<instructions>`")
+    );
     assert!(s.roles["assistant"].prompt_fragments.is_empty());
     let manager = &s.roles["manager"];
     let prompt = manager

@@ -178,6 +178,64 @@ fn build_request_first_turn_replays_full_history_without_chain() {
     );
 }
 
+/// Regression: a daemon restore can repair an interrupted foreground tool call
+/// by writing a durable synthetic internal tool error before the user sends the
+/// next prompt. With no chain anchor after restore, Responses must replay the
+/// repaired assistant tool call, its matching output, and the new user message
+/// without sending a stale `previous_response_id`.
+#[test]
+fn build_request_full_replay_serializes_restored_tool_error_before_next_user_message() {
+    let config = chain_test_config();
+    let messages = vec![
+        assistant_tool_call(
+            "call-restored",
+            "shell",
+            tau_proto::ToolType::Function,
+            tau_proto::CborValue::Map(vec![(
+                tau_proto::CborValue::Text("command".to_owned()),
+                tau_proto::CborValue::Text("sleep 30".to_owned()),
+            )]),
+        ),
+        restored_internal_tool_error("call-restored", "partial stdout before restart"),
+        user_text("after restart"),
+    ];
+    let request = PromptPayload {
+        system_prompt: "sys",
+        context_items: &messages,
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        previous_response: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &tau_proto::SessionId::new("test-session"),
+        share_user_cache_key: false,
+    };
+
+    let body = serde_json::to_value(build_request(&config, &request)).expect("serialize");
+    let object = body.as_object().expect("request body is an object");
+    assert!(
+        object.get("previous_response_id").is_none(),
+        "restored full replay must not send a stale chain id"
+    );
+
+    let input = body["input"].as_array().expect("input array");
+    assert_eq!(
+        input.len(),
+        3,
+        "restored full replay must keep the repaired tool round balanced"
+    );
+    assert_eq!(input[0]["type"], "function_call");
+    assert_eq!(input[0]["call_id"], "call-restored");
+    assert_eq!(input[1]["type"], "function_call_output");
+    assert_eq!(input[1]["call_id"], "call-restored");
+    let output = input[1]["output"].as_str().expect("tool output");
+    assert!(output.contains("error: tau_internal: true"));
+    assert!(output.contains("Tool call `call-restored` was interrupted"));
+    assert!(output.contains("partial stdout before restart"));
+    assert_eq!(input[2]["role"], "user");
+    assert_eq!(input[2]["content"][0]["text"], "after restart");
+}
+
 #[test]
 fn build_compact_request_omits_store_field() {
     let config = chain_test_config();
@@ -597,6 +655,20 @@ fn assistant_tool_call(
         name: tau_proto::ToolName::new(name),
         tool_type,
         arguments: input,
+    })
+}
+
+fn restored_internal_tool_error(call_id: &str, body: &str) -> ContextItem {
+    ContextItem::ToolResult(ToolResultItem {
+        call_id: call_id.into(),
+        tool_type: tau_proto::ToolType::Function,
+        status: ToolResultStatus::Error {
+            message: format!(
+                "{}: true\n\nTool call `{call_id}` was interrupted due to session restart. Side effects may have occurred.",
+                tau_proto::TAU_INTERNAL_HEADER_NAME
+            ),
+        },
+        output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(body.to_owned())),
     })
 }
 

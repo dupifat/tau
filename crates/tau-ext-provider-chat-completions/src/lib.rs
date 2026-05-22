@@ -1159,6 +1159,44 @@ mod tests {
         }
     }
 
+    fn user_text(text: &str) -> ContextItem {
+        ContextItem::Message(tau_proto::MessageItem {
+            role: ContextRole::User,
+            content: vec![ContentPart::Text {
+                text: text.to_owned(),
+            }],
+            phase: None,
+        })
+    }
+
+    fn restored_tool_call(call_id: &str) -> ContextItem {
+        ContextItem::ToolCall(ToolCallItem {
+            call_id: call_id.into(),
+            name: tau_proto::ToolName::new("shell"),
+            tool_type: ToolType::Function,
+            arguments: tau_proto::CborValue::Map(vec![(
+                tau_proto::CborValue::Text("command".to_owned()),
+                tau_proto::CborValue::Text("sleep 30".to_owned()),
+            )]),
+        })
+    }
+
+    fn restored_internal_tool_error(call_id: &str, body: &str) -> ContextItem {
+        ContextItem::ToolResult(tau_proto::ToolResultItem {
+            call_id: call_id.into(),
+            tool_type: ToolType::Function,
+            status: ToolResultStatus::Error {
+                message: format!(
+                    "{}: true\n\nTool call `{call_id}` was interrupted due to session restart. Side effects may have occurred.",
+                    tau_proto::TAU_INTERNAL_HEADER_NAME
+                ),
+            },
+            output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Text(
+                body.to_owned(),
+            )),
+        })
+    }
+
     #[test]
     fn parse_model_list_rejects_empty_lists() {
         // Provider-specific CLI setup should not write a provider entry that
@@ -1399,6 +1437,68 @@ mod tests {
 
         assert_eq!(request["reasoning_effort"], "high");
         assert_eq!(request["chat_template_kwargs"]["enable_thinking"], true);
+    }
+
+    #[test]
+    fn build_request_full_replay_serializes_restored_tool_error_before_next_user_message() {
+        // A restored session can contain a repaired foreground tool round: the
+        // assistant tool call, the synthetic internal error result, then the
+        // user's next prompt. Chat Completions has no chain field, so it must
+        // ignore any candidate and serialize the full balanced transcript.
+        let (provider, model) = resolve_backend(&auth(), &"openai/gpt-4o".into()).expect("backend");
+        let prompt = tau_proto::SessionPromptCreated {
+            session_prompt_id: "sp-restored".into(),
+            session_id: "s1".into(),
+            system_prompt: String::new(),
+            context_items: vec![
+                restored_tool_call("call-restored"),
+                restored_internal_tool_error("call-restored", "partial stdout before restart"),
+                user_text("after restart"),
+            ],
+            tools: Vec::new(),
+            tools_ref: None,
+            model: Some("openai/gpt-4o".into()),
+            model_params: Default::default(),
+            tool_choice: ToolChoice::Auto,
+            originator: tau_proto::PromptOriginator::User,
+            share_user_cache_key: false,
+            ctx_id: None,
+            previous_response_candidate: Some(tau_proto::PreviousResponseCandidate {
+                provider_response_id: "resp_stale_after_restore".to_owned(),
+                next_item_index: 2,
+                backend: ProviderBackend {
+                    kind: ProviderBackendKind::Responses,
+                    base_url: "https://chatgpt.com/backend-api".to_owned(),
+                    transport: ProviderBackendTransport::HttpSse,
+                    stale_chain_fallback: false,
+                },
+            }),
+        };
+
+        let request =
+            serde_json::to_value(build_request(&provider, &model, &prompt)).expect("json");
+        let object = request.as_object().expect("request object");
+        assert!(object.get("previous_response_id").is_none());
+        assert!(object.get("previous_response_candidate").is_none());
+
+        let messages = request["messages"].as_array().expect("messages");
+        assert_eq!(
+            messages.len(),
+            3,
+            "chat completions must ignore chain hints and replay every restored item"
+        );
+        assert_eq!(messages[0]["role"], "assistant");
+        assert!(messages[0]["content"].is_null());
+        assert_eq!(messages[0]["tool_calls"][0]["id"], "call-restored");
+        assert_eq!(messages[0]["tool_calls"][0]["function"]["name"], "shell");
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["tool_call_id"], "call-restored");
+        let output = messages[1]["content"].as_str().expect("tool output");
+        assert!(output.contains("error: tau_internal: true"));
+        assert!(output.contains("Tool call `call-restored` was interrupted"));
+        assert!(output.contains("partial stdout before restart"));
+        assert_eq!(messages[2]["role"], "user");
+        assert_eq!(messages[2]["content"], "after restart");
     }
 
     #[test]

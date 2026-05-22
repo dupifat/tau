@@ -10,7 +10,7 @@ use crate::harness::PendingTool;
 /// The dispatch must defer onto `pending_user_prompt_dispatches` and
 /// run only after the user message commits.
 #[test]
-fn ext_agent_query_defers_dispatch_when_publish_is_intercepted() {
+fn start_agent_request_defers_dispatch_when_publish_is_intercepted() {
     use tau_proto::ExtensionName;
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
@@ -97,9 +97,9 @@ fn ext_agent_query_defers_dispatch_when_publish_is_intercepted() {
     })
     .expect("main response");
 
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-delegate",
-        ExtAgentQuery {
+        StartAgentRequest {
             query_id: "q-side".to_owned(),
             instruction: "side instruction".to_owned(),
             role: None,
@@ -109,7 +109,7 @@ fn ext_agent_query_defers_dispatch_when_publish_is_intercepted() {
             task_name: Some("side".to_owned()),
         },
     )
-    .expect("ext query");
+    .expect("start-agent request");
 
     // The side conv's UserMessage is parked for interception.
     // No SPC should have been emitted for it yet.

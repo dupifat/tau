@@ -654,17 +654,17 @@ struct PendingCompaction {
 }
 
 #[derive(Debug)]
-struct PendingExtAgentQuery {
+struct PendingStartAgentRequest {
     source_id: String,
     extension_name: String,
-    query: tau_proto::ExtAgentQuery,
+    query: tau_proto::StartAgentRequest,
     role: String,
     cid: ConversationId,
     parent_cid: ConversationId,
 }
 
 #[derive(Debug)]
-struct ActiveExtAgentQuery {
+struct ActiveStartAgentRequest {
     execution_mode: tau_proto::ToolExecutionMode,
 }
 
@@ -697,7 +697,7 @@ struct ExtensionActivationStage {
     /// Session-init acknowledgements received before `Ready`, in wire order.
     context_ready_events: Vec<tau_proto::ExtensionContextReady>,
     /// Extension-started agent queries received before `Ready`, in wire order.
-    agent_queries: Vec<tau_proto::ExtAgentQuery>,
+    agent_queries: Vec<tau_proto::StartAgentRequest>,
     /// Generic extension emits/events withheld until `Ready`.
     emitted_events: Vec<StagedExtensionPublish>,
 }
@@ -951,12 +951,13 @@ pub(crate) struct Harness {
     pending_compactions: std::collections::HashMap<ConversationId, PendingCompaction>,
     /// Extension-started side-agent conversations waiting for the harness-owned
     /// global execution-mode scheduler. This queue is independent from normal
-    /// per-conversation tool scheduling and applies to every `ExtAgentQuery`,
-    /// whether it came from delegate, notifications, or a future extension.
-    pending_ext_agent_queries: VecDeque<PendingExtAgentQuery>,
+    /// per-conversation tool scheduling and applies to every
+    /// `StartAgentRequest`, whether it came from delegate, notifications,
+    /// or a future extension.
+    pending_start_agent_requests: VecDeque<PendingStartAgentRequest>,
     /// Active extension-started side-agent conversations participating in the
     /// global sub-agent scheduler.
-    active_ext_agent_queries: std::collections::HashMap<ConversationId, ActiveExtAgentQuery>,
+    active_start_agent_requests: std::collections::HashMap<ConversationId, ActiveStartAgentRequest>,
     /// State for harness-owned delegate/wait tools.
     pub(crate) subagents: SubagentToolState,
     /// Directory layout (config + state) the harness reads and writes.
@@ -1375,8 +1376,8 @@ impl Harness {
             background_completion_targets: HashMap::new(),
             canceled_prompts: std::collections::HashSet::new(),
             pending_compactions: std::collections::HashMap::new(),
-            pending_ext_agent_queries: VecDeque::new(),
-            active_ext_agent_queries: std::collections::HashMap::new(),
+            pending_start_agent_requests: VecDeque::new(),
+            active_start_agent_requests: std::collections::HashMap::new(),
             subagents: SubagentToolState::default(),
             dirs,
         };
@@ -1591,8 +1592,8 @@ impl Harness {
             background_completion_targets: HashMap::new(),
             canceled_prompts: std::collections::HashSet::new(),
             pending_compactions: std::collections::HashMap::new(),
-            pending_ext_agent_queries: VecDeque::new(),
-            active_ext_agent_queries: std::collections::HashMap::new(),
+            pending_start_agent_requests: VecDeque::new(),
+            active_start_agent_requests: std::collections::HashMap::new(),
             subagents: SubagentToolState::default(),
             dirs,
         };
@@ -2708,7 +2709,7 @@ impl Harness {
             .push(ready);
     }
 
-    fn stage_ext_agent_query(&mut self, source_id: &str, query: tau_proto::ExtAgentQuery) {
+    fn stage_start_agent_request(&mut self, source_id: &str, query: tau_proto::StartAgentRequest) {
         self.extension_activation_stage_mut(source_id)
             .agent_queries
             .push(query);
@@ -2840,7 +2841,7 @@ impl Harness {
         source_id: &str,
     ) -> (
         Vec<tau_proto::ExtensionContextReady>,
-        Vec<tau_proto::ExtAgentQuery>,
+        Vec<tau_proto::StartAgentRequest>,
     ) {
         let Some(stage) = self.extension_activation_staging.remove(source_id) else {
             return (Vec::new(), Vec::new());
@@ -2930,7 +2931,7 @@ impl Harness {
                     self.publish_extension_context_ready(source_id, ready)?;
                 }
                 for query in agent_queries {
-                    self.handle_ext_agent_query(source_id, query)?;
+                    self.handle_start_agent_request(source_id, query)?;
                 }
                 self.drain_pending_tool_invocations()?;
                 self.try_advance_queue();
@@ -3211,11 +3212,11 @@ impl Harness {
                     self.publish_extension_prompt_fragment(source_id, publish);
                 }
             }
-            Event::ExtAgentQuery(query) => {
+            Event::StartAgentRequest(query) => {
                 if self.should_stage_extension_capabilities(source_id) {
-                    self.stage_ext_agent_query(source_id, query);
+                    self.stage_start_agent_request(source_id, query);
                 } else {
-                    self.handle_ext_agent_query(source_id, query)?;
+                    self.handle_start_agent_request(source_id, query)?;
                 }
             }
             Event::ProviderPromptSubmitted(submitted) => {
@@ -3771,7 +3772,7 @@ impl Harness {
                 self.subagents.canceled_delegates.remove(&old_call_id);
             }
         }
-        self.pending_ext_agent_queries.retain(|pending| {
+        self.pending_start_agent_requests.retain(|pending| {
             pending.query.query_id != query_id
                 && pending.query.tool_call_id.as_ref() != Some(target_call_id)
         });
@@ -3826,7 +3827,7 @@ impl Harness {
                 }),
             );
         }
-        self.release_ext_agent_query(&cid);
+        self.release_start_agent_request(&cid);
         self.transfer_background_completion_target_before_teardown(&cid);
         self.conversations.remove(&cid);
         self.try_advance_queue();
@@ -4489,9 +4490,9 @@ impl Harness {
         }
     }
 
-    fn resolve_ext_agent_query_role(
+    fn resolve_start_agent_request_role(
         &self,
-        query: &tau_proto::ExtAgentQuery,
+        query: &tau_proto::StartAgentRequest,
     ) -> Result<String, String> {
         let requested = if let Some(role) = query.role.as_deref() {
             role
@@ -4520,7 +4521,7 @@ impl Harness {
         ))
     }
 
-    fn fail_ext_agent_query(&mut self, source_id: &str, query_id: String, error: String) {
+    fn fail_start_agent_request(&mut self, source_id: &str, query_id: String, error: String) {
         if source_id == HARNESS_CONNECTION_ID {
             self.complete_harness_delegate(
                 &self.default_conversation_id.clone(),
@@ -4530,7 +4531,7 @@ impl Harness {
             );
             return;
         }
-        let result = tau_proto::ExtAgentQueryResult {
+        let result = tau_proto::StartAgentResult {
             query_id,
             text: String::new(),
             error: Some(error),
@@ -4538,7 +4539,7 @@ impl Harness {
         let _ = self.bus.send_to(
             source_id,
             None,
-            Frame::Event(Event::ExtAgentQueryResult(result)),
+            Frame::Event(Event::StartAgentResult(result)),
         );
     }
 
@@ -4547,42 +4548,42 @@ impl Harness {
     ///
     /// Normal tool calls still use the per-conversation scheduler in
     /// `drain_pending_tool_invocations`. This queue is only for
-    /// `ExtAgentQuery` side conversations, so delegate, notifications, and
+    /// `StartAgentRequest` side conversations, so delegate, notifications, and
     /// future extension-owned sub-agents all share one global lane.
-    fn handle_ext_agent_query(
+    fn handle_start_agent_request(
         &mut self,
         source_id: &str,
-        query: tau_proto::ExtAgentQuery,
+        query: tau_proto::StartAgentRequest,
     ) -> Result<(), HarnessError> {
         let extension_name = self
             .extensions
             .get(source_id)
             .map(|e| e.name.clone())
             .unwrap_or_else(|| source_id.to_owned());
-        let role = match self.resolve_ext_agent_query_role(&query) {
+        let role = match self.resolve_start_agent_request_role(&query) {
             Ok(role) => role,
             Err(error) => {
-                self.fail_ext_agent_query(source_id, query.query_id, error);
+                self.fail_start_agent_request(source_id, query.query_id, error);
                 return Ok(());
             }
         };
-        let cid = ConversationId::new(format!("extq-{}-{}", extension_name, query.query_id));
+        let cid = ConversationId::new(format!("start-agent-{}-{}", extension_name, query.query_id));
         if self.conversations.contains_key(&cid)
             || self
-                .pending_ext_agent_queries
+                .pending_start_agent_requests
                 .iter()
                 .any(|pending| pending.cid == cid)
         {
             self.emit_info(&format!(
-                "ignoring duplicate ext-query `{}` from `{}` — already in flight",
+                "ignoring duplicate start-agent-request `{}` from `{}` — already in flight",
                 query.query_id, extension_name
             ));
             return Ok(());
         }
 
-        // Resolve the parent conversation at enqueue time: tool-backed queries
+        // Resolve the parent conversation at enqueue time: tool-backed requests
         // inherit from the conversation that owns the triggering tool call;
-        // non-tool queries inherit from the default user conversation.
+        // non-tool requests inherit from the default user conversation.
         let parent_cid = query
             .tool_call_id
             .as_ref()
@@ -4590,8 +4591,8 @@ impl Harness {
             .cloned()
             .unwrap_or_else(|| self.default_conversation_id.clone());
 
-        self.pending_ext_agent_queries
-            .push_back(PendingExtAgentQuery {
+        self.pending_start_agent_requests
+            .push_back(PendingStartAgentRequest {
                 source_id: source_id.to_owned(),
                 extension_name,
                 query,
@@ -4599,11 +4600,11 @@ impl Harness {
                 cid,
                 parent_cid,
             });
-        self.drain_pending_ext_agent_queries()
+        self.drain_pending_start_agent_requests()
     }
 
-    /// Dispatch queued `ExtAgentQuery`s while the global sub-agent scheduler
-    /// allows them through.
+    /// Dispatch queued `StartAgentRequest`s while the global sub-agent
+    /// scheduler allows them through.
     ///
     /// Rules:
     /// - Shared may start when no incompatible active Exclusive sub-agent
@@ -4612,8 +4613,8 @@ impl Harness {
     ///   sub-agent exists.
     /// - Exclusive may start when no incompatible active sub-agent exists.
     /// - FIFO is preserved for independent work: once an Update or Exclusive
-    ///   reaches the front and is blocked, later independent compatible queries
-    ///   do not jump it.
+    ///   reaches the front and is blocked, later independent compatible
+    ///   requests do not jump it.
     /// - Reentrant descendants of an active Exclusive are allowed to pass as
     ///   part of that exclusive subtree. Without this exception, an exclusive
     ///   delegate that asks its own sub-agent to delegate would deadlock behind
@@ -4621,23 +4622,23 @@ impl Harness {
     ///   share with Shared work. Descendancy is computed from the side
     ///   conversation's stored parent conversation, with the older
     ///   `parent_tool_call_id` mapping as a fallback for manually seeded tests.
-    fn drain_pending_ext_agent_queries(&mut self) -> Result<(), HarnessError> {
+    fn drain_pending_start_agent_requests(&mut self) -> Result<(), HarnessError> {
         loop {
-            let Some(idx) = self.next_dispatchable_ext_agent_query_index() else {
+            let Some(idx) = self.next_dispatchable_start_agent_request_index() else {
                 return Ok(());
             };
             let pending = self
-                .pending_ext_agent_queries
+                .pending_start_agent_requests
                 .remove(idx)
                 .expect("index just located");
-            self.start_ext_agent_query(pending)?;
+            self.start_agent_request(pending)?;
         }
     }
 
-    fn next_dispatchable_ext_agent_query_index(&self) -> Option<usize> {
+    fn next_dispatchable_start_agent_request_index(&self) -> Option<usize> {
         let mut blocked_barrier_ahead = false;
-        for (idx, pending) in self.pending_ext_agent_queries.iter().enumerate() {
-            let can_start = self.ext_agent_query_can_start(pending);
+        for (idx, pending) in self.pending_start_agent_requests.iter().enumerate() {
+            let can_start = self.start_agent_request_can_start(pending);
             if !can_start {
                 if pending.query.execution_mode.blocks_fifo_when_waiting() {
                     blocked_barrier_ahead = true;
@@ -4653,11 +4654,11 @@ impl Harness {
         None
     }
 
-    fn ext_agent_query_can_start(&self, pending: &PendingExtAgentQuery) -> bool {
-        self.active_ext_agent_queries
+    fn start_agent_request_can_start(&self, pending: &PendingStartAgentRequest) -> bool {
+        self.active_start_agent_requests
             .iter()
             .all(|(active_cid, active)| {
-                !self.active_ext_agent_query_is_incompatible(
+                !self.active_start_agent_request_is_incompatible(
                     active_cid,
                     active,
                     &pending.parent_cid,
@@ -4666,10 +4667,10 @@ impl Harness {
             })
     }
 
-    fn active_ext_agent_query_is_incompatible(
+    fn active_start_agent_request_is_incompatible(
         &self,
         active_cid: &ConversationId,
-        active: &ActiveExtAgentQuery,
+        active: &ActiveStartAgentRequest,
         candidate_parent_cid: &ConversationId,
         candidate_mode: tau_proto::ToolExecutionMode,
     ) -> bool {
@@ -4686,7 +4687,7 @@ impl Harness {
     }
 
     fn active_exclusive_ancestor_for(&self, cid: &ConversationId) -> Option<ConversationId> {
-        self.active_ext_agent_queries
+        self.active_start_agent_requests
             .iter()
             .find_map(|(active_cid, active)| {
                 matches!(
@@ -4726,10 +4727,10 @@ impl Harness {
     }
 
     /// Spawn a fresh side conversation for an extension's
-    /// [`tau_proto::ExtAgentQuery`] and dispatch it after the global scheduler
-    /// admits it.
+    /// [`tau_proto::StartAgentRequest`] and dispatch it after the global
+    /// scheduler admits it.
     ///
-    /// Two forking modes depending on whether the query is tool-backed:
+    /// Two forking modes depending on whether the request is tool-backed:
     ///
     /// - **Tool-backed (`tool_call_id: Some(...)`, e.g. `delegate`)**: the
     ///   sub-agent starts with a *fresh* context — only the delegated
@@ -4747,8 +4748,11 @@ impl Harness {
     ///   summarizing. Sharing the prefix also lets prompt caching reuse the
     ///   parent's cached transcript verbatim, since the only delta is the
     ///   appended instruction.
-    fn start_ext_agent_query(&mut self, pending: PendingExtAgentQuery) -> Result<(), HarnessError> {
-        let PendingExtAgentQuery {
+    fn start_agent_request(
+        &mut self,
+        pending: PendingStartAgentRequest,
+    ) -> Result<(), HarnessError> {
+        let PendingStartAgentRequest {
             source_id,
             extension_name,
             query,
@@ -4801,8 +4805,8 @@ impl Harness {
         conv.delegate_execution_mode = delegate_execution_mode;
         conv.chain_anchor = initial_chain_anchor;
         self.conversations.insert(cid.clone(), conv);
-        self.active_ext_agent_queries
-            .insert(cid.clone(), ActiveExtAgentQuery { execution_mode });
+        self.active_start_agent_requests
+            .insert(cid.clone(), ActiveStartAgentRequest { execution_mode });
 
         // Emit the initial progress snapshot (`%0/0`, no ctx
         // info yet) so the parent's tool block flips from `…` to the
@@ -4845,17 +4849,17 @@ impl Harness {
         Ok(())
     }
 
-    fn release_ext_agent_query(&mut self, cid: &ConversationId) {
-        if self.active_ext_agent_queries.remove(cid).is_some()
-            && let Err(error) = self.drain_pending_ext_agent_queries()
+    fn release_start_agent_request(&mut self, cid: &ConversationId) {
+        if self.active_start_agent_requests.remove(cid).is_some()
+            && let Err(error) = self.drain_pending_start_agent_requests()
         {
-            self.emit_info(&format!("queued ext-agent dispatch failed: {error}"));
+            self.emit_info(&format!("queued start-agent dispatch failed: {error}"));
         }
     }
 
     /// Publish a `DelegateProgress` snapshot for `cid` if it is a side
     /// conversation backing a `delegate` tool call. No-op for the
-    /// default conversation and for non-tool ext queries.
+    /// default conversation and for non-tool start-agent requests.
     fn emit_delegate_progress(&mut self, cid: &ConversationId) {
         let Some(conv) = self.conversations.get(cid) else {
             return;
@@ -5423,7 +5427,7 @@ impl Harness {
                 conv.turn_state = ConversationTurnState::Idle;
                 conv.pending_prompts.clear();
             }
-            self.release_ext_agent_query(cid);
+            self.release_start_agent_request(cid);
             self.publish_prompt_terminated(
                 prompt_session_id.clone(),
                 spid.clone(),
@@ -5576,8 +5580,8 @@ impl Harness {
         self.pending_restore_background_notices.clear();
         self.pending_tool_availability_notices.clear();
         self.unavailable_tool_notices_delivered.clear();
-        self.pending_ext_agent_queries.clear();
-        self.active_ext_agent_queries.clear();
+        self.pending_start_agent_requests.clear();
+        self.active_start_agent_requests.clear();
         self.subagents = SubagentToolState::default();
 
         // Token and context accounting are session-scoped. Reset them
@@ -7121,8 +7125,8 @@ impl Harness {
             .insert(response.session_prompt_id.clone());
 
         // Side-conversation handling: if this prompt originated from
-        // an extension via ExtAgentQuery, route the final text back
-        // to the requesting extension as ExtAgentQueryResult and
+        // an extension via StartAgentRequest, route the final text back
+        // to the requesting extension as StartAgentResult and
         // tear down the side conversation. The harness routes tool
         // calls per-conversation, so any in-flight
         // pending_tool_invocations entries for this side conversation
@@ -7146,7 +7150,7 @@ impl Harness {
             } else {
                 None
             };
-            let result = tau_proto::ExtAgentQueryResult {
+            let result = tau_proto::StartAgentResult {
                 query_id: query_id.clone(),
                 text: assistant_text.clone().unwrap_or_default(),
                 error,
@@ -7157,15 +7161,15 @@ impl Harness {
                 let _ = self.bus.send_to(
                     source.as_str(),
                     None,
-                    Frame::Event(Event::ExtAgentQueryResult(result)),
+                    Frame::Event(Event::StartAgentResult(result)),
                 );
             } else {
                 // Should never happen — `source_connection` is set in
-                // `handle_ext_agent_query` when the conversation is
+                // `handle_start_agent_request` when the conversation is
                 // spawned. Surface it via `harness.info` rather than
                 // silently dropping so a future regression is visible.
                 self.emit_info(&format!(
-                    "ext-query result for `{}` (extension `{}`) had no source connection — \
+                    "start-agent-request result for `{}` (extension `{}`) had no source connection — \
                          dropping",
                     query_id, name
                 ));
@@ -7178,7 +7182,7 @@ impl Harness {
             // descendants can still resolve their parent conversation while
             // starting. Active descendants keep their own copied state after
             // the parent is torn down.
-            self.release_ext_agent_query(&cid);
+            self.release_start_agent_request(&cid);
             self.transfer_background_completion_target_before_teardown(&cid);
             self.conversations.remove(&cid);
             self.try_advance_queue();
@@ -7349,11 +7353,12 @@ impl Harness {
     ///
     /// `delegate` registers as `Shared` so multiple sub-agent requests can be
     /// handed to the extension from one parent turn. The delegate call's
-    /// `execution_mode` argument belongs to the emitted `ExtAgentQuery`, not to
-    /// this parent-conversation tool invocation; per-delegation exclusivity is
-    /// enforced later by the harness-owned `ExtAgentQuery` scheduler. The
-    /// legacy `read_only` argument is still accepted for older callers as a
-    /// shared-mode alias, but it is not advertised to agents.
+    /// `execution_mode` argument belongs to the emitted `StartAgentRequest`,
+    /// not to this parent-conversation tool invocation; per-delegation
+    /// exclusivity is enforced later by the harness-owned
+    /// `StartAgentRequest` scheduler. The legacy `read_only` argument is
+    /// still accepted for older callers as a shared-mode alias, but it is
+    /// not advertised to agents.
     fn resolve_tool_execution_mode_for_call(
         &self,
         call: &AgentToolCall,

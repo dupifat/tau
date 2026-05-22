@@ -3,7 +3,7 @@
 //! A *conversation* is one logical thread of prompts/responses
 //! within a session: the user's interactive UI prompts on one branch,
 //! plus any side conversations spawned by extensions via
-//! [`tau_proto::ExtAgentQuery`] on their own branches. Each
+//! [`tau_proto::StartAgentRequest`] on their own branches. Each
 //! conversation has its own local cursor (`head`) into the session
 //! tree so multiple in-flight conversations can coexist without their
 //! tree positions clobbering each other.
@@ -182,8 +182,8 @@ pub(crate) struct Conversation {
     pub(crate) head: Option<NodeId>,
     /// For [`PromptOriginator::Extension`] conversations: the
     /// connection id of the extension that issued the
-    /// [`tau_proto::ExtAgentQuery`], so the harness knows where to
-    /// route the matching [`tau_proto::ExtAgentQueryResult`].
+    /// [`tau_proto::StartAgentRequest`], so the harness knows where to
+    /// route the matching [`tau_proto::StartAgentResult`].
     pub(crate) source_connection: Option<ConnectionId>,
     /// Session prompt id of the prompt currently in flight for this
     /// conversation, or `None` if nothing is pending.

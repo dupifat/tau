@@ -16,12 +16,12 @@ use tau_core::{
     RoutedFrame, SessionEntry,
 };
 use tau_proto::{
-    CborValue, ContentPart, ContextItem, ContextRole, Disconnect, Event, EventSelector,
-    ExtAgentQuery, Frame, FrameReader, FrameWriter, Intercept, InterceptAction, InterceptReply,
-    InterceptionPriority, Message, MessageItem, ProviderResponseFinished, ProviderResponseUpdated,
+    CborValue, ContentPart, ContextItem, ContextRole, Disconnect, Event, EventSelector, Frame,
+    FrameReader, FrameWriter, Intercept, InterceptAction, InterceptReply, InterceptionPriority,
+    Message, MessageItem, ProviderResponseFinished, ProviderResponseUpdated,
     SessionCompactionRequested, SessionPromptCreated, SessionPromptId, SessionPromptQueued,
-    Subscribe, ToolCallId, ToolCallItem, ToolExecutionMode, ToolName, ToolResult, ToolResultItem,
-    ToolResultStatus, ToolSpec, UiPromptDraft, UiPromptSubmitted,
+    StartAgentRequest, Subscribe, ToolCallId, ToolCallItem, ToolExecutionMode, ToolName,
+    ToolResult, ToolResultItem, ToolResultStatus, ToolSpec, UiPromptDraft, UiPromptSubmitted,
 };
 use tau_session_inspect::{
     default_session_id, format_session_entry, open_session_store, policy_lines, session_lines,

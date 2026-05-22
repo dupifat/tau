@@ -217,9 +217,12 @@ impl Harness {
         if self.tool_turn.mark_backgrounded(&call_id) {
             self.publish_synthetic_background_result(&call_id);
         }
-        self.handle_ext_agent_query(
+        // `delegate` is harness-owned and already inside the main event loop, so
+        // publishing a bus event would only echo an internal command. Use the
+        // same shared handler that external `agent.start_request` events reach.
+        self.handle_start_agent_request(
             HARNESS_CONNECTION_ID,
-            tau_proto::ExtAgentQuery {
+            tau_proto::StartAgentRequest {
                 query_id,
                 instruction: format!("{DELEGATE_PREFIX}{}", parsed.prompt),
                 role: parsed.role,

@@ -12,12 +12,12 @@
 //!   → `user-text-notification = {"urgency": "normal", "title": "Agent idle:
 //!   <host>:<cwd>", "body": "Waiting for user input", "app_name": "tau"}`. If
 //!   `config.idle_agent_summary` is true, the extension first sends an
-//!   `ExtAgentQuery` side-prompt asking for a one-sentence summary and uses the
-//!   result as the body, falling back to the static text after 10s. `app_name`
-//!   follows the schema `user-text-notification.sh` emits so downstream
-//!   consumers can use it as the desktop notification's source-app indicator
-//!   instead of us baking it into the title. The idle timer resets on every
-//!   user-originated `ui.prompt_submitted` / `provider.prompt_submitted`.
+//!   `StartAgentRequest` side-prompt asking for a one-sentence summary and uses
+//!   the result as the body, falling back to the static text after 10s.
+//!   `app_name` follows the schema `user-text-notification.sh` emits so
+//!   downstream consumers can use it as the desktop notification's source-app
+//!   indicator instead of us baking it into the title. The idle timer resets on
+//!   every user-originated `ui.prompt_submitted` / `provider.prompt_submitted`.
 //!   Tunable via the extension's `config.idle_seconds` field in `harness.yaml`.
 //!
 //! The downstream tooling (typically a terminal multiplexer status
@@ -34,7 +34,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use tau_proto::{
-    ConfigError, Event, ExtAgentQuery, Frame, FrameReader, FrameWriter, Message, Osc1337SetUserVar,
+    ConfigError, Event, Frame, FrameReader, FrameWriter, Message, Osc1337SetUserVar,
+    StartAgentRequest,
 };
 
 /// `tracing` target for events emitted from this extension. Matches
@@ -266,7 +267,7 @@ where
             // Side-query results come back point-to-point from the
             // harness, but we subscribe defensively so the broadcast
             // form (if it ever appears) also reaches us.
-            tau_proto::EventName::EXTENSION_AGENT_QUERY_RESULT,
+            tau_proto::EventName::AGENT_START_RESULT,
         ])
         .ready_message("std-notifications ready")
         .run(&mut writer)?;
@@ -536,7 +537,7 @@ where
                             }
                         }
                     }
-                    Event::ExtAgentQueryResult(result) => {
+                    Event::StartAgentResult(result) => {
                         tracing::debug!(
                             target: LOG_TARGET,
                             query_id = %result.query_id,
@@ -547,7 +548,7 @@ where
                                 Some(IdleState::WaitingIdle { .. }) => "waiting_idle",
                                 Some(IdleState::WaitingSummary { .. }) => "waiting_summary",
                             },
-                            "received ExtAgentQueryResult",
+                            "received StartAgentResult",
                         );
                         // Match against the in-flight query id; ignore
                         // stragglers from cancelled / superseded
@@ -596,18 +597,20 @@ where
                             query_id = %query_id,
                             "idle deadline elapsed, requesting agent summary",
                         );
-                        writer.write_frame(&Frame::Event(Event::ExtAgentQuery(ExtAgentQuery {
-                            query_id: query_id.clone(),
-                            instruction: SUMMARY_INSTRUCTION.to_owned(),
-                            role: None,
-                            execution_mode: tau_proto::ToolExecutionMode::Shared,
-                            input_stats: tau_proto::ToolDisplayStats::default(),
-                            // Notifications doesn't implement a tool —
-                            // these fields are only meaningful for the
-                            // `delegate` flow.
-                            tool_call_id: None,
-                            task_name: None,
-                        })))?;
+                        writer.write_frame(&Frame::Event(Event::StartAgentRequest(
+                            StartAgentRequest {
+                                query_id: query_id.clone(),
+                                instruction: SUMMARY_INSTRUCTION.to_owned(),
+                                role: None,
+                                execution_mode: tau_proto::ToolExecutionMode::Shared,
+                                input_stats: tau_proto::ToolDisplayStats::default(),
+                                // Notifications doesn't implement a tool —
+                                // these fields are only meaningful for the
+                                // `delegate` flow.
+                                tool_call_id: None,
+                                task_name: None,
+                            },
+                        )))?;
                         writer.flush()?;
                         idle = Some(IdleState::WaitingSummary {
                             query_id,

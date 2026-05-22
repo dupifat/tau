@@ -3001,7 +3001,7 @@
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
-      "function": "Harness::resolve_ext_agent_query_role",
+      "function": "Harness::resolve_start_agent_request_role",
       "line": 3260,
       "cyclomatic": 8.0,
       "coverage": 100.0,
@@ -4000,7 +4000,7 @@
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
-      "function": "Harness::next_dispatchable_ext_agent_query_index",
+      "function": "Harness::next_dispatchable_start_agent_request_index",
       "line": 3392,
       "cyclomatic": 6.0,
       "coverage": 100.0,
@@ -4009,7 +4009,7 @@
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
-      "function": "Harness::start_ext_agent_query",
+      "function": "Harness::start_agent_request",
       "line": 3511,
       "cyclomatic": 6.0,
       "coverage": 100.0,
@@ -4441,7 +4441,7 @@
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
-      "function": "Harness::handle_ext_agent_query",
+      "function": "Harness::handle_start_agent_request",
       "line": 3311,
       "cyclomatic": 5.0,
       "coverage": 88.63636363636364,
@@ -4549,7 +4549,7 @@
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
-      "function": "Harness::active_ext_agent_query_is_incompatible",
+      "function": "Harness::active_start_agent_request_is_incompatible",
       "line": 3428,
       "cyclomatic": 5.0,
       "coverage": 94.11764705882352,
@@ -5827,7 +5827,7 @@
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
-      "function": "Harness::release_ext_agent_query",
+      "function": "Harness::release_start_agent_request",
       "line": 3610,
       "cyclomatic": 3.0,
       "coverage": 71.42857142857143,
@@ -9535,7 +9535,7 @@
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness/tests/dispatch.rs",
-      "function": "ext_agent_query_error",
+      "function": "start_agent_request_error",
       "line": 4298,
       "cyclomatic": 1.0,
       "coverage": null,
@@ -13864,7 +13864,7 @@
     },
     {
       "file": "/build/source/crates/tau-proto/src/events.rs",
-      "function": "default_ext_agent_query_execution_mode",
+      "function": "default_start_agent_request_execution_mode",
       "line": 1701,
       "cyclomatic": 1.0,
       "coverage": 100.0,
@@ -14539,7 +14539,7 @@
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
-      "function": "Harness::fail_ext_agent_query",
+      "function": "Harness::fail_start_agent_request",
       "line": 3291,
       "cyclomatic": 1.0,
       "coverage": 100.0,
@@ -14548,7 +14548,7 @@
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness.rs",
-      "function": "Harness::ext_agent_query_can_start",
+      "function": "Harness::start_agent_request_can_start",
       "line": 3415,
       "cyclomatic": 1.0,
       "coverage": 100.0,

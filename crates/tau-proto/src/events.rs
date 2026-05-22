@@ -40,6 +40,8 @@ fn is_default_affinity_neutral(value: &i32) -> bool {
 #[derive(Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub enum EventCategory {
     Tool,
+    /// Harness-owned side/sub-agent command events.
+    Agent,
     Extension,
     Provider,
     Harness,
@@ -61,6 +63,7 @@ impl EventCategory {
     pub fn as_str(&self) -> &str {
         match self {
             Self::Tool => "tool",
+            Self::Agent => "agent",
             Self::Extension => "extension",
             Self::Provider => "provider",
             Self::Harness => "harness",
@@ -78,6 +81,7 @@ impl EventCategory {
     pub fn from_wire(s: &str) -> Self {
         match s {
             "tool" => Self::Tool,
+            "agent" => Self::Agent,
             "extension" => Self::Extension,
             "provider" => Self::Provider,
             "harness" => Self::Harness,
@@ -219,10 +223,8 @@ impl EventName {
         Self::from_static(EventCategory::Extension, "session_context_publish");
     pub const EXTENSION_PROMPT_FRAGMENT_PUBLISH: Self =
         Self::from_static(EventCategory::Extension, "prompt_fragment_publish");
-    pub const EXTENSION_AGENT_QUERY: Self =
-        Self::from_static(EventCategory::Extension, "agent_query");
-    pub const EXTENSION_AGENT_QUERY_RESULT: Self =
-        Self::from_static(EventCategory::Extension, "agent_query_result");
+    pub const AGENT_START_REQUEST: Self = Self::from_static(EventCategory::Agent, "start_request");
+    pub const AGENT_START_RESULT: Self = Self::from_static(EventCategory::Agent, "start_result");
     pub const PROVIDER_MODELS_UPDATED: Self =
         Self::from_static(EventCategory::Provider, "models_updated");
     pub const PROVIDER_TOOL_RESULT: Self =
@@ -1821,7 +1823,7 @@ pub struct ExtPromptFragmentPublish {
     pub fragment: PromptFragment,
 }
 
-/// A request for the harness to dispatch a side prompt to the agent.
+/// A request for the harness to start a side/sub-agent conversation.
 ///
 /// Extension clients can send this event directly. The harness-owned
 /// `delegate` tool also uses the same payload internally and completes the
@@ -1830,14 +1832,14 @@ pub struct ExtPromptFragmentPublish {
 /// The harness spawns a fresh conversation off the user's current
 /// branch, treats the side prompt like any other turn (LLM call,
 /// optional tool calls, final response), then routes the agent's final text
-/// back to the requester as [`ExtAgentQueryResult`] with the same `query_id`
+/// back to the requester as [`StartAgentResult`] with the same `query_id`
 /// or as the terminal result of the harness-owned delegate tool.
 ///
 /// Side conversations are persisted as real branches in the session
 /// tree but tagged via [`PromptOriginator::Extension`] so UIs can
 /// filter them out.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ExtAgentQuery {
+pub struct StartAgentRequest {
     /// Extension-assigned correlation id, echoed back on the result.
     pub query_id: String,
     /// User-style instruction text. Appended to the current
@@ -1856,7 +1858,7 @@ pub struct ExtAgentQuery {
     /// block later independent sub-agent queries until they finish.
     /// Defaults to Shared for compatibility with older extensions that did
     /// not declare global scheduling needs.
-    #[serde(default = "default_ext_agent_query_execution_mode")]
+    #[serde(default = "default_start_agent_request_execution_mode")]
     pub execution_mode: ToolExecutionMode,
     /// Input stats for the extension-provided instruction, excluding
     /// any private prefix the extension may have added.
@@ -1877,17 +1879,20 @@ pub struct ExtAgentQuery {
     pub task_name: Option<String>,
 }
 
-const fn default_ext_agent_query_execution_mode() -> ToolExecutionMode {
+const fn default_start_agent_request_execution_mode() -> ToolExecutionMode {
     ToolExecutionMode::Shared
 }
 
-/// Reply to an [`ExtAgentQuery`], routed point-to-point back to the
+/// Reply to a [`StartAgentRequest`], routed point-to-point back to the
 /// extension that issued it. `text` is the agent's final answer
 /// (empty when `error` is set).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ExtAgentQueryResult {
+pub struct StartAgentResult {
+    /// Request correlation id copied from [`StartAgentRequest::query_id`].
     pub query_id: String,
+    /// Final agent answer. Empty when [`Self::error`] is set.
     pub text: String,
+    /// Failure message when the request could not be started or completed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -2342,14 +2347,14 @@ pub struct SessionUserMessageInjected {
 }
 
 /// Who initiated the prompt — the human user via the UI, or a side query from
-/// an extension or harness-owned tool via [`ExtAgentQuery`].
+/// an extension or harness-owned tool via [`StartAgentRequest`].
 ///
 /// The provider's only obligation is to copy the originator from the
 /// incoming [`SessionPromptCreated`] onto its outgoing
 /// [`ProviderResponseFinished`]. The harness reads it on the way back
 /// to decide whether the response is a normal turn (route to UI,
 /// keep `default_conversation` advancing) or a side-query reply
-/// (route an [`ExtAgentQueryResult`] to the requester and tear the conversation
+/// (route an [`StartAgentResult`] to the requester and tear the conversation
 /// down).
 ///
 /// UIs filter on `originator.is_user()` to ignore side conversations.
@@ -2360,7 +2365,7 @@ pub enum PromptOriginator {
     #[default]
     User,
     /// Side prompt requested by an extension or harness-owned tool via
-    /// [`ExtAgentQuery`]. The harness uses `__harness__` here for its own
+    /// [`StartAgentRequest`]. The harness uses `__harness__` here for its own
     /// tools.
     Extension {
         name: ExtensionName,
@@ -3172,10 +3177,10 @@ pub enum Event {
     ExtSessionContextPublish(ExtSessionContextPublish),
     #[serde(rename = "extension.prompt_fragment_publish")]
     ExtPromptFragmentPublish(ExtPromptFragmentPublish),
-    #[serde(rename = "extension.agent_query")]
-    ExtAgentQuery(ExtAgentQuery),
-    #[serde(rename = "extension.agent_query_result")]
-    ExtAgentQueryResult(ExtAgentQueryResult),
+    #[serde(rename = "agent.start_request")]
+    StartAgentRequest(StartAgentRequest),
+    #[serde(rename = "agent.start_result")]
+    StartAgentResult(StartAgentResult),
     #[serde(rename = "extension.event")]
     ExtensionEvent(CustomEvent),
     #[serde(rename = "provider.models_updated")]
@@ -3316,8 +3321,8 @@ impl Event {
             Self::ExtensionContextReady(_) => EventName::EXTENSION_CONTEXT_READY,
             Self::ExtSessionContextPublish(_) => EventName::EXTENSION_SESSION_CONTEXT_PUBLISH,
             Self::ExtPromptFragmentPublish(_) => EventName::EXTENSION_PROMPT_FRAGMENT_PUBLISH,
-            Self::ExtAgentQuery(_) => EventName::EXTENSION_AGENT_QUERY,
-            Self::ExtAgentQueryResult(_) => EventName::EXTENSION_AGENT_QUERY_RESULT,
+            Self::StartAgentRequest(_) => EventName::AGENT_START_REQUEST,
+            Self::StartAgentResult(_) => EventName::AGENT_START_RESULT,
             Self::ExtensionEvent(event) => event.name.clone(),
             Self::ProviderModelsUpdated(_) => EventName::PROVIDER_MODELS_UPDATED,
             Self::ProviderToolResult(_) => EventName::PROVIDER_TOOL_RESULT,

@@ -862,32 +862,33 @@ fn tool_register_prompt_is_optional_and_round_trips_when_present() {
 }
 
 /// Older extensions did not send `execution_mode` or `role` on
-/// `ExtAgentQuery`. The harness-owned global sub-agent scheduler must treat the
-/// mode as Shared and leave role selection to the harness compatibility path.
+/// `StartAgentRequest`. The harness-owned global sub-agent scheduler must treat
+/// the mode as Shared and leave role selection to the harness compatibility
+/// path.
 #[test]
-fn ext_agent_query_execution_mode_defaults_to_shared() {
-    let parsed: ExtAgentQuery = serde_json::from_value(serde_json::json!({
+fn start_agent_request_execution_mode_defaults_to_shared() {
+    let parsed: StartAgentRequest = serde_json::from_value(serde_json::json!({
         "query_id": "q1",
         "instruction": "summarize"
     }))
-    .expect("deserialize ext agent query");
+    .expect("deserialize start-agent request");
     assert_eq!(parsed.execution_mode, ToolExecutionMode::Shared);
     assert_eq!(parsed.role, None);
 
-    let exclusive: ExtAgentQuery = serde_json::from_value(serde_json::json!({
+    let exclusive: StartAgentRequest = serde_json::from_value(serde_json::json!({
         "query_id": "q2",
         "instruction": "mutate carefully",
         "execution_mode": "exclusive"
     }))
-    .expect("deserialize exclusive ext agent query");
+    .expect("deserialize exclusive start-agent request");
     assert_eq!(exclusive.execution_mode, ToolExecutionMode::Exclusive);
 
-    let update: ExtAgentQuery = serde_json::from_value(serde_json::json!({
+    let update: StartAgentRequest = serde_json::from_value(serde_json::json!({
         "query_id": "q3",
         "instruction": "edit carefully",
         "execution_mode": "update"
     }))
-    .expect("deserialize update ext agent query");
+    .expect("deserialize update start-agent request");
     assert_eq!(update.execution_mode, ToolExecutionMode::Update);
 }
 

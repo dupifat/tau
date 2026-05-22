@@ -43,12 +43,12 @@ user-var with the static "Waiting for user input" body.
 If `idle_agent_summary` is set to `true`, the extension uses the old
 summary path instead:
 
-1. The extension sends an `extension.agent_query` to the harness
+1. The extension sends an `agent.start_request` to the harness
    asking the agent for a one-sentence summary of the conversation
    (instruction is hard-coded; matches Pi's wording).
 2. The harness spawns a side conversation off the user's current
    branch, dispatches the prompt to the agent, and routes the
-   matching `extension.agent_query_result` back point-to-point.
+   matching `agent.start_result` back point-to-point.
 3. The extension fires the `user-text-notification` user-var with
    the model's summary as the body. If the result doesn't arrive
    within `SUMMARY_TIMEOUT_SECONDS` (10s) — wedged agent, no
@@ -165,7 +165,7 @@ The extension uses the `std-notifications` tracing target:
 TAU_EXT_LOG=std-notifications=debug tau …
 ```
 
-`debug` shows `received ExtAgentQueryResult { idle_state, query_id,
+`debug` shows `received StartAgentResult { idle_state, query_id,
 text_len, error }` and idle-deadline transitions; `trace` adds one
 line per ignored event for protocol-level debugging.
 

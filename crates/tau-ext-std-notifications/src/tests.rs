@@ -506,7 +506,7 @@ fn idle_timeout_defaults_to_static_notification() {
     assert_eq!(osc.value, VALUE_AGENT_END);
 
     // Then, after the (short) idle window, the static fallback text
-    // notification. There must be no intervening ExtAgentQuery.
+    // notification. There must be no intervening StartAgentRequest.
     let fallback = reader.read_event().expect("read").expect("fallback event");
     let Event::Osc1337SetUserVar(osc) = fallback else {
         panic!("expected fallback OSC, got {fallback:?}");
@@ -528,7 +528,7 @@ fn idle_timeout_defaults_to_static_notification() {
 }
 
 /// When `idle_agent_summary` is enabled, idle window elapsing must
-/// trigger an `ExtAgentQuery` to the agent for a one-sentence summary.
+/// trigger an `StartAgentRequest` to the agent for a one-sentence summary.
 /// When no result arrives within the summary timeout, the extension
 /// falls back to the static [`FALLBACK_BODY`] so the user still gets
 /// nudged.
@@ -565,9 +565,12 @@ fn idle_timeout_requests_summary_when_enabled_then_falls_back() {
     assert_eq!(osc.name, SOUND_VAR_NAME);
     assert_eq!(osc.value, VALUE_AGENT_END);
 
-    let query = reader.read_event().expect("read").expect("ext-query event");
-    let Event::ExtAgentQuery(query) = query else {
-        panic!("expected ExtAgentQuery, got {query:?}");
+    let query = reader
+        .read_event()
+        .expect("read")
+        .expect("start-agent-request event");
+    let Event::StartAgentRequest(query) = query else {
+        panic!("expected StartAgentRequest, got {query:?}");
     };
     assert!(
         !query.query_id.is_empty(),
@@ -585,13 +588,13 @@ fn idle_timeout_requests_summary_when_enabled_then_falls_back() {
     assert_eq!(payload["body"], FALLBACK_BODY);
 }
 
-/// When a matching `ExtAgentQueryResult` arrives before the
+/// When a matching `StartAgentResult` arrives before the
 /// summary timeout, the text notification's body must be the
 /// agent's summary text rather than the static fallback.
 ///
 /// Coordinates with the running extension via a UnixStream pair:
 /// the test thread reads each emitted event and only writes the
-/// `ExtAgentQueryResult` *after* observing the `ExtAgentQuery`,
+/// `StartAgentResult` *after* observing the `StartAgentRequest`,
 /// so the result lands while the extension is in the
 /// `WaitingSummary` state (not the earlier `WaitingIdle`).
 #[test]
@@ -630,18 +633,16 @@ fn summary_result_populates_notification_body() {
     // end-of-turn sound, then the side-query.
     let _end = reader.read_event().expect("read").expect("end");
     let query = reader.read_event().expect("read").expect("query");
-    let Event::ExtAgentQuery(query) = query else {
-        panic!("expected ExtAgentQuery, got {query:?}");
+    let Event::StartAgentRequest(query) = query else {
+        panic!("expected StartAgentRequest, got {query:?}");
     };
 
     writer
-        .write_event(&Event::ExtAgentQueryResult(
-            tau_proto::ExtAgentQueryResult {
-                query_id: query.query_id.clone(),
-                text: "  refactoring the harness state, awaiting next prompt  ".into(),
-                error: None,
-            },
-        ))
+        .write_event(&Event::StartAgentResult(tau_proto::StartAgentResult {
+            query_id: query.query_id.clone(),
+            text: "  refactoring the harness state, awaiting next prompt  ".into(),
+            error: None,
+        }))
         .expect("write");
     writer.flush().expect("flush");
 
@@ -793,8 +794,8 @@ fn prompt_draft_during_waiting_summary_does_not_cancel() {
 
     let _end = reader.read_event().expect("read").expect("end");
     let query = reader.read_event().expect("read").expect("query");
-    let Event::ExtAgentQuery(query) = query else {
-        panic!("expected ExtAgentQuery, got {query:?}");
+    let Event::StartAgentRequest(query) = query else {
+        panic!("expected StartAgentRequest, got {query:?}");
     };
 
     // User starts typing AFTER we've dispatched the side query.
@@ -809,13 +810,11 @@ fn prompt_draft_during_waiting_summary_does_not_cancel() {
 
     // Now deliver the summary result.
     writer
-        .write_event(&Event::ExtAgentQueryResult(
-            tau_proto::ExtAgentQueryResult {
-                query_id: query.query_id,
-                text: "the model's summary".into(),
-                error: None,
-            },
-        ))
+        .write_event(&Event::StartAgentResult(tau_proto::StartAgentResult {
+            query_id: query.query_id,
+            text: "the model's summary".into(),
+            error: None,
+        }))
         .expect("write");
     writer.flush().expect("flush");
 

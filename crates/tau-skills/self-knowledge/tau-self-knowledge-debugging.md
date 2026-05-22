@@ -131,7 +131,7 @@ PY
 
 Red flags found in past sessions:
 
-- Internal extension prompts, especially `std-notifications` idle summaries, can create normal `ui.prompt_submitted` / `session.prompt_created` / `provider.prompt_submitted` sequences with originator `{kind: "extension"}`. If they resend full history, cache continuity may collapse and waste many uncached tokens for tiny outputs. Check lines around `extension.agent_query`, `ui.prompt_submitted`, and the following `provider.response_finished`.
+- Internal extension prompts, especially `std-notifications` idle summaries, can create normal `ui.prompt_submitted` / `session.prompt_created` / `provider.prompt_submitted` sequences with originator `{kind: "extension"}`. If they resend full history, cache continuity may collapse and waste many uncached tokens for tiny outputs. Check lines around `agent.start_request`, `ui.prompt_submitted`, and the following `provider.response_finished`.
 - `harness.context_usage_changed` currently follows all `provider.response_finished` events, including extension-originated prompts. Treat context/token stats carefully if side-channel prompts are present.
 - Large tool outputs in `session.prompt_created` messages can dominate context: repeated large `read` slices, cargo/check output, clippy output, or colorized `jj diff`. Grep for `┄total <n>┄` markers in `events.jsonl` to find compacted large payloads.
 - For exact, uncompacted provider payloads, check `debug/provider-requests/*-{request,response}.json`. Request files are especially useful for cache misses involving `previous_response_id`, multi-tool-call suffixes, tool-use/tool-result ordering, or mismatches between `session.prompt_created` and the serialized upstream `body.input`; response files show Tau's parsed `provider.response_finished` shape plus the raw terminal provider event (`response.completed` / `response.done`) when available.
@@ -141,7 +141,7 @@ Quick checks for side-channel waste:
 
 ```bash
 # Show extension-originated prompt/response activity.
-grep -n 'extension.agent_query\|std-notifications\|"kind":"extension"' ~/.local/state/tau/sessions/<session_id>/events.jsonl
+grep -n 'agent.start_request\|std-notifications\|"kind":"extension"' ~/.local/state/tau/sessions/<session_id>/events.jsonl
 
 # Search logs for runtime errors; no matches does not rule out token waste.
 grep -RniE 'error|warn|panic|cache|token' ~/.local/state/tau/sessions/<session_id>/logs

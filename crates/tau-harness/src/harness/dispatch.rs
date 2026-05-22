@@ -11,7 +11,7 @@
 //! interactive submission on the default conversation;
 //! [`Harness::dispatch_prompt_for_conversation`] is the shared
 //! per-conversation primitive (also used by side queries spawned via
-//! `ExtAgentQuery`). [`Harness::try_advance_queue`] is the
+//! `StartAgentRequest`). [`Harness::try_advance_queue`] is the
 //! react-to-state-change drain that picks the next runnable
 //! conversation and dispatches one prompt from its queue.
 //!

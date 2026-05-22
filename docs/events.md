@@ -158,14 +158,15 @@ harness/agent.
 - **`extension.context_ready`** — The extension finished publishing
   refreshed prompt context for one session (the reply to
   `session.started`).
-- **`extension.agent_query`** — The extension asks the harness to
-  dispatch a side prompt to the agent: instruction text, correlation
-  `query_id`, optional requested `role`, optional tool-call attribution,
-  and human-readable task name (used by the `delegate` tool). Tool-backed
-  delegate queries default to `engineer` when `role` is absent; non-tool
-  queries without `role` use the currently selected interactive role.
-- **`extension.agent_query_result`** — The agent's final answer to an
-  earlier `extension.agent_query`, routed point-to-point back to the
+- **`agent.start_request`** — An extension or harness-owned tool asks
+  the harness to start a side/sub-agent conversation: instruction text,
+  correlation `query_id`, optional requested `role`, optional tool-call
+  attribution, and human-readable task name (used by the `delegate` tool).
+  Tool-backed delegate requests default to `engineer` when `role` is
+  absent; non-tool requests without `role` use the currently selected
+  interactive role.
+- **`agent.start_result`** — The agent's final answer to an
+  earlier `agent.start_request`, routed point-to-point back to the
   requesting extension. Carries the same `query_id`.
 - **`extension.event`** — Custom extension-defined event with a free-form
   dotted name and CBOR payload. The harness routes it like any other

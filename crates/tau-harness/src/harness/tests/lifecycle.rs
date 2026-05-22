@@ -706,8 +706,8 @@ fn interceptor_registration_is_staged_until_ready() {
 }
 
 #[test]
-fn extension_emit_and_agent_query_are_staged_until_ready() {
-    // Generic emits are visible bus state, and ExtAgentQuery starts prompt
+fn extension_emit_and_start_agent_request_are_staged_until_ready() {
+    // Generic emits are visible bus state, and StartAgentRequest starts prompt
     // dispatch. Both are held until Ready so a handshaking extension cannot
     // publish or start side-agent work early.
     let td = TempDir::new().expect("tempdir");
@@ -731,9 +731,9 @@ fn extension_emit_and_agent_query_are_staged_until_ready() {
     .expect("stage emit");
     h.handle_extension_event(
         conn_id,
-        Frame::Event(Event::ExtAgentQuery(ExtAgentQuery {
+        Frame::Event(Event::StartAgentRequest(StartAgentRequest {
             query_id: "q-staged".to_owned(),
-            instruction: "STAGED EXT QUERY".to_owned(),
+            instruction: "STAGED START AGENT REQUEST".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
             input_stats: tau_proto::ToolDisplayStats::default(),
@@ -772,7 +772,7 @@ fn extension_emit_and_agent_query_are_staged_until_ready() {
     assert!(
         h.prompt_snapshots
             .values()
-            .any(|prompt| prompt_context_contains(prompt, "STAGED EXT QUERY"))
+            .any(|prompt| prompt_context_contains(prompt, "STAGED START AGENT REQUEST"))
     );
 
     h.shutdown().expect("shutdown");

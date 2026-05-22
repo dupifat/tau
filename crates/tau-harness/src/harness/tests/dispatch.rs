@@ -1,7 +1,7 @@
 use super::*;
 use crate::conversation::{Conversation, ConversationId, PendingPrompt};
 use crate::harness::{
-    PendingExtAgentQuery, PendingTool, background_completion_prompt,
+    PendingStartAgentRequest, PendingTool, background_completion_prompt,
     extension_disconnected_background_tool_call_error_message,
     extension_disconnected_tool_call_error_message, is_restore_notice_prompt_text,
     restore_notice_prompt_for_elapsed, unavailable_tool_error_message,
@@ -598,8 +598,8 @@ fn tool_progress(call_id: &str, tool_name: &str, message: &str) -> tau_proto::To
     }
 }
 
-fn ext_query(query_id: &str, execution_mode: ToolExecutionMode) -> ExtAgentQuery {
-    ExtAgentQuery {
+fn ext_query(query_id: &str, execution_mode: ToolExecutionMode) -> StartAgentRequest {
+    StartAgentRequest {
         query_id: query_id.to_owned(),
         instruction: format!("instruction {query_id}"),
         role: None,
@@ -676,7 +676,7 @@ fn finish_ext_query(h: &mut Harness, cid: &ConversationId, query_id: &str) {
         provider_response_id: None,
         ws_pool_delta: None,
     })
-    .expect("finish ext query");
+    .expect("finish start-agent request");
 }
 
 /// Regression: a backgrounded update call still owns the serialized lane after
@@ -4947,7 +4947,7 @@ fn delegate_followup_auto_compacts_from_own_context_signal() {
     let mut h = echo_harness(&sp).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
 
-    let side_cid = ConversationId::new("extq-__harness__-delegate-1");
+    let side_cid = ConversationId::new("start-agent-__harness__-delegate-1");
     let originator = tau_proto::PromptOriginator::Extension {
         name: HARNESS_CONNECTION_ID.into(),
         query_id: "delegate-1".to_owned(),
@@ -4985,7 +4985,7 @@ fn delegate_followup_auto_compacts_from_own_context_signal() {
     assert!(matches!(
         summary_prompt.originator,
         tau_proto::PromptOriginator::Extension { ref name, ref query_id }
-            if name.as_str() == HARNESS_CONNECTION_ID && query_id == "auto-compact-extq-__harness__-delegate-1"
+            if name.as_str() == HARNESS_CONNECTION_ID && query_id == "auto-compact-start-agent-__harness__-delegate-1"
     ));
 
     let mut cursor = baseline_seq;
@@ -5013,7 +5013,7 @@ fn side_conversation_auto_compaction_ignores_default_context_signal() {
     let mut h = echo_harness(&sp).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
 
-    let side_cid = ConversationId::new("extq-__harness__-delegate-1");
+    let side_cid = ConversationId::new("start-agent-__harness__-delegate-1");
     let mut side_conv = Conversation::new(
         side_cid.clone(),
         "s1".into(),
@@ -5100,7 +5100,7 @@ fn incoming_user_prompt_does_not_preempt_compaction_summary() {
 /// side conv finishes, leaving the parent unable to receive its
 /// `ToolResult`. Uses the real delegate shape (`tool_call_id: Some`).
 #[test]
-fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
+fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -5172,9 +5172,9 @@ fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
         default_turn,
         ConversationTurnState::ToolsRunning { .. }
     ));
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-delegate",
-        ExtAgentQuery {
+        StartAgentRequest {
             query_id: "q1".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
@@ -5247,7 +5247,7 @@ fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
     let result = events
         .iter()
         .find_map(|routed| match &routed.frame {
-            Frame::Event(Event::ExtAgentQueryResult(result)) if result.query_id == "q1" => {
+            Frame::Event(Event::StartAgentResult(result)) if result.query_id == "q1" => {
                 Some(result)
             }
             _ => None,
@@ -5257,7 +5257,7 @@ fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
     h.shutdown().expect("shutdown");
 }
 
-/// A tool-backed `ExtAgentQuery` (`tool_call_id: Some(...)`) is the
+/// A tool-backed `StartAgentRequest` (`tool_call_id: Some(...)`) is the
 /// `delegate` path: it dispatches *while the parent's tool call is
 /// still in flight*, so the parent conv's tip is a `ToolUse` block
 /// with no matching `ToolResult` yet. The side conv must therefore
@@ -5267,9 +5267,9 @@ fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
 /// and (b) the sub-agent would see the user's framing and might
 /// recursively re-delegate the same task. (Contrast with the
 /// non-tool path, where `tool_call_id: None` deliberately inherits
-/// the parent — see `non_tool_ext_agent_query_inherits_parent_branch`.)
+/// the parent — see `non_tool_start_agent_request_inherits_parent_branch`.)
 #[test]
-fn ext_agent_query_during_tool_call_branches_off_unresolved_tool_use() {
+fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -5332,9 +5332,9 @@ fn ext_agent_query_during_tool_call_branches_off_unresolved_tool_use() {
     })
     .expect("tool response");
 
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-delegate",
-        ExtAgentQuery {
+        StartAgentRequest {
             query_id: "q1".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
@@ -5399,7 +5399,7 @@ fn ext_agent_query_during_tool_call_branches_off_unresolved_tool_use() {
     h.shutdown().expect("shutdown");
 }
 
-/// A non-tool `ExtAgentQuery` (`tool_call_id: None`, e.g.
+/// A non-tool `StartAgentRequest` (`tool_call_id: None`, e.g.
 /// `std-notifications`' idle summary) is **not** a delegate. Its
 /// purpose is to summarize what the user just did, so the side conv
 /// must inherit the parent conversation's branch — assembling the
@@ -5413,7 +5413,7 @@ fn ext_agent_query_during_tool_call_branches_off_unresolved_tool_use() {
 /// instruction as a delta. Verified here by comparing the assembled
 /// prompt to what the parent conv sees.
 #[test]
-fn non_tool_ext_agent_query_inherits_parent_branch() {
+fn non_tool_start_agent_request_inherits_parent_branch() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -5476,9 +5476,9 @@ fn non_tool_ext_agent_query_inherits_parent_branch() {
 
     // std-notifications-shaped query: no tool_call_id, just an
     // instruction asking the model to summarize.
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-notifications",
-        ExtAgentQuery {
+        StartAgentRequest {
             query_id: "idle-0".to_owned(),
             instruction: "Summarize in one sentence.".to_owned(),
             role: None,
@@ -5488,7 +5488,7 @@ fn non_tool_ext_agent_query_inherits_parent_branch() {
             task_name: None,
         },
     )
-    .expect("ext query");
+    .expect("start-agent request");
 
     let side_spid = h
         .prompt_conversations
@@ -5551,7 +5551,7 @@ fn non_tool_ext_agent_query_inherits_parent_branch() {
     assert_eq!(
         side_prompt.tool_choice,
         tau_proto::ToolChoice::Auto,
-        "non-tool ext-agent query must preserve wire tool_choice for cache compatibility",
+        "non-tool start-agent request must preserve wire tool_choice for cache compatibility",
     );
 
     // The parent conv's head must not have moved sideways because of
@@ -5567,7 +5567,7 @@ fn non_tool_ext_agent_query_inherits_parent_branch() {
     h.shutdown().expect("shutdown");
 }
 
-/// A non-tool ext-agent query (idle-summary path) must not execute
+/// A non-tool start-agent request (idle-summary path) must not execute
 /// tools, but it also must not mutate provider-visible request fields
 /// to enforce that policy. The side conv inherits the parent's
 /// `previous_response_id` so the upstream prompt cache is reused
@@ -5577,7 +5577,7 @@ fn non_tool_ext_agent_query_inherits_parent_branch() {
 /// observed to collapse cache usage to near zero even with a valid
 /// `previous_response_id`.
 #[test]
-fn non_tool_ext_agent_query_preserves_chain_anchor_and_tool_choice() {
+fn non_tool_start_agent_request_preserves_chain_anchor_and_tool_choice() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -5621,9 +5621,9 @@ fn non_tool_ext_agent_query_preserves_chain_anchor_and_tool_choice() {
 
     // std-notifications-shaped query — `tool_call_id: None` triggers
     // the `tool_choice: None` branch in `send_prompt_to_agent_for`.
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-notifications",
-        ExtAgentQuery {
+        StartAgentRequest {
             query_id: "idle-0".to_owned(),
             instruction: "Summarize in one sentence.".to_owned(),
             role: None,
@@ -5633,7 +5633,7 @@ fn non_tool_ext_agent_query_preserves_chain_anchor_and_tool_choice() {
             task_name: None,
         },
     )
-    .expect("ext query");
+    .expect("start-agent request");
 
     let side_spid = h
         .prompt_conversations
@@ -5660,7 +5660,7 @@ fn non_tool_ext_agent_query_preserves_chain_anchor_and_tool_choice() {
     assert_eq!(prev.provider_response_id, "resp_parent");
 }
 
-/// Counterpart to `non_tool_ext_agent_query_inherits_parent_branch`.
+/// Counterpart to `non_tool_start_agent_request_inherits_parent_branch`.
 /// The harness picks `tool_choice` per conversation in
 /// `send_prompt_to_agent_for`; if that discriminator ever
 /// over-matches (e.g. flips on `originator.is_extension()` alone),
@@ -5669,7 +5669,7 @@ fn non_tool_ext_agent_query_preserves_chain_anchor_and_tool_choice() {
 /// into a one-shot text response. Asserts the inverse leg: when
 /// `tool_call_id: Some(...)`, `ToolChoice::Auto` is preserved.
 #[test]
-fn delegate_ext_agent_query_keeps_tool_choice_auto() {
+fn delegate_start_agent_request_keeps_tool_choice_auto() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -5733,9 +5733,9 @@ fn delegate_ext_agent_query_keeps_tool_choice_auto() {
     })
     .expect("main response");
 
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-delegate",
-        ExtAgentQuery {
+        StartAgentRequest {
             query_id: "q1".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
@@ -5783,9 +5783,9 @@ fn user_prompt_preempts_in_flight_non_tool_ext_side_conversation() {
     // Seed an in-flight idle-summary side conv with a previously
     // dispatched spid that's notionally still being retried by the
     // agent.
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-notifications",
-        ExtAgentQuery {
+        StartAgentRequest {
             query_id: "idle-0".to_owned(),
             instruction: "Summarize in one sentence.".to_owned(),
             role: None,
@@ -5795,7 +5795,7 @@ fn user_prompt_preempts_in_flight_non_tool_ext_side_conversation() {
             task_name: None,
         },
     )
-    .expect("ext query");
+    .expect("start-agent request");
 
     let (side_cid, side_spid) = h
         .prompt_conversations
@@ -5935,11 +5935,11 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
     })
     .expect("main response");
 
-    // Delegate extension turns it into an ExtAgentQuery; the harness
+    // Delegate extension turns it into an StartAgentRequest; the harness
     // spawns a side conversation and dispatches its prompt.
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-delegate",
-        ExtAgentQuery {
+        StartAgentRequest {
             query_id: "q1".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
@@ -6089,7 +6089,7 @@ fn background_completion_from_removed_side_conversation_queues_on_parent() {
 
     let mut query = ext_query("q-bg", ToolExecutionMode::Shared);
     query.tool_call_id = Some("delegate-call".into());
-    h.handle_ext_agent_query("conn-delegate", query)
+    h.handle_start_agent_request("conn-delegate", query)
         .expect("side query");
     let side_cid = ext_query_cid(&h, "q-bg").expect("side conversation");
     let side_spid = h
@@ -6298,7 +6298,7 @@ fn nested_harness_delegate_background_survives_parent_side_teardown() {
     let mut outer_query = ext_query("q-parent", ToolExecutionMode::Shared);
     outer_query.tool_call_id = Some("outer-call".into());
     outer_query.task_name = Some("outer".to_owned());
-    h.handle_ext_agent_query("conn-outer", outer_query)
+    h.handle_start_agent_request("conn-outer", outer_query)
         .expect("outer query");
     let outer_cid = ext_query_cid(&h, "q-parent").expect("outer side conversation");
     let outer_spid = h
@@ -6869,10 +6869,10 @@ fn instant_delegate_placeholder_is_committed_before_side_prompt() {
 
 /// Mixed-mode `delegate` calls issued in the same agent turn must still
 /// dispatch to the delegate extension concurrently. The call argument
-/// `execution_mode: "exclusive"` belongs to the `ExtAgentQuery` emitted by the
-/// extension, not to the parent conversation's `delegate` tool invocation;
+/// `execution_mode: "exclusive"` belongs to the `StartAgentRequest` emitted by
+/// the extension, not to the parent conversation's `delegate` tool invocation;
 /// global exclusivity is enforced only after those queries enter the harness
-/// `ExtAgentQuery` scheduler.
+/// `StartAgentRequest` scheduler.
 #[test]
 fn mixed_mode_delegate_calls_dispatch_concurrently_to_ext_scheduler() {
     use tau_proto::CborValue;
@@ -6974,16 +6974,17 @@ fn mixed_mode_delegate_calls_dispatch_concurrently_to_ext_scheduler() {
 
     let exclusive_cid = ext_query_cid(&h, "delegate-0").expect("exclusive query started");
     assert!(ext_query_cid(&h, "delegate-1").is_none());
-    assert_eq!(h.pending_ext_agent_queries.len(), 1);
+    assert_eq!(h.pending_start_agent_requests.len(), 1);
 
     finish_ext_query(&mut h, &exclusive_cid, "delegate-0");
     assert!(ext_query_cid(&h, "delegate-1").is_some());
-    assert!(h.pending_ext_agent_queries.is_empty());
+    assert!(h.pending_start_agent_requests.is_empty());
 }
 
 /// Canceling a delegate that is still queued in the global sub-agent scheduler
-/// must remove the queued `ExtAgentQuery`. Otherwise the cancel succeeds but
-/// the side conversation can still start after the exclusive blocker finishes.
+/// must remove the queued `StartAgentRequest`. Otherwise the cancel succeeds
+/// but the side conversation can still start after the exclusive blocker
+/// finishes.
 #[test]
 fn cancel_tool_removes_queued_delegate_before_it_can_start() {
     let td = TempDir::new().expect("tempdir");
@@ -7052,7 +7053,7 @@ fn cancel_tool_removes_queued_delegate_before_it_can_start() {
 
     let exclusive_cid = ext_query_cid(&h, "delegate-0").expect("exclusive query started");
     assert!(ext_query_cid(&h, "delegate-1").is_none());
-    assert_eq!(h.pending_ext_agent_queries.len(), 1);
+    assert_eq!(h.pending_start_agent_requests.len(), 1);
 
     let cancel_call = AgentToolCall {
         id: "cancel-queued".into(),
@@ -7067,7 +7068,7 @@ fn cancel_tool_removes_queued_delegate_before_it_can_start() {
     h.handle_cancel_tool_call(&parent_cid, &cancel_call, ToolName::new("cancel"))
         .expect("cancel handled");
 
-    assert!(h.pending_ext_agent_queries.is_empty());
+    assert!(h.pending_start_agent_requests.is_empty());
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
         Event::ToolBackgroundError(error)
@@ -7077,16 +7078,16 @@ fn cancel_tool_removes_queued_delegate_before_it_can_start() {
 
     finish_ext_query(&mut h, &exclusive_cid, "delegate-0");
     assert!(ext_query_cid(&h, "delegate-1").is_none());
-    assert!(h.pending_ext_agent_queries.is_empty());
+    assert!(h.pending_start_agent_requests.is_empty());
 
     h.shutdown().expect("shutdown");
 }
 
 /// Global sub-agent scheduling is harness-owned, not a delegate-extension local
-/// concern. Shared `ExtAgentQuery`s from independent extensions should both be
-/// admitted immediately so read/research fan-out can overlap.
+/// concern. Shared `StartAgentRequest`s from independent extensions should both
+/// be admitted immediately so read/research fan-out can overlap.
 #[test]
-fn shared_ext_agent_queries_start_concurrently() {
+fn shared_start_agent_requests_start_concurrently() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -7094,15 +7095,15 @@ fn shared_ext_agent_queries_start_concurrently() {
     let _ = connect_test_tool(&mut h, "conn-a");
     let _ = connect_test_tool(&mut h, "conn-b");
 
-    h.handle_ext_agent_query("conn-a", ext_query("q-a", ToolExecutionMode::Shared))
+    h.handle_start_agent_request("conn-a", ext_query("q-a", ToolExecutionMode::Shared))
         .expect("query a");
-    h.handle_ext_agent_query("conn-b", ext_query("q-b", ToolExecutionMode::Shared))
+    h.handle_start_agent_request("conn-b", ext_query("q-b", ToolExecutionMode::Shared))
         .expect("query b");
 
     assert!(ext_query_cid(&h, "q-a").is_some());
     assert!(ext_query_cid(&h, "q-b").is_some());
-    assert!(h.pending_ext_agent_queries.is_empty());
-    assert_eq!(h.active_ext_agent_queries.len(), 2);
+    assert!(h.pending_start_agent_requests.is_empty());
+    assert_eq!(h.active_start_agent_requests.len(), 2);
 
     h.shutdown().expect("shutdown");
 }
@@ -7111,7 +7112,7 @@ fn shared_ext_agent_queries_start_concurrently() {
 /// update lane runs at a time. A blocked update also acts as a FIFO barrier so
 /// later independent shared work cannot jump ahead and starve updates.
 #[test]
-fn update_ext_agent_query_overlaps_with_shared_and_blocks_later_fifo_jump() {
+fn update_start_agent_request_overlaps_with_shared_and_blocks_later_fifo_jump() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -7121,23 +7122,23 @@ fn update_ext_agent_query_overlaps_with_shared_and_blocks_later_fifo_jump() {
     let _ = connect_test_tool(&mut h, "conn-c");
     let _ = connect_test_tool(&mut h, "conn-d");
 
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-a",
         ext_query("q-update-active", ToolExecutionMode::Update),
     )
     .expect("active update query");
     let active_update_cid = ext_query_cid(&h, "q-update-active").expect("active update started");
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-b",
         ext_query("q-shared-active", ToolExecutionMode::Shared),
     )
     .expect("active shared query");
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-c",
         ext_query("q-update-blocked", ToolExecutionMode::Update),
     )
     .expect("blocked update query");
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-d",
         ext_query("q-later-shared", ToolExecutionMode::Shared),
     )
@@ -7146,22 +7147,22 @@ fn update_ext_agent_query_overlaps_with_shared_and_blocks_later_fifo_jump() {
     assert!(ext_query_cid(&h, "q-shared-active").is_some());
     assert!(ext_query_cid(&h, "q-update-blocked").is_none());
     assert!(ext_query_cid(&h, "q-later-shared").is_none());
-    assert_eq!(h.pending_ext_agent_queries.len(), 2);
+    assert_eq!(h.pending_start_agent_requests.len(), 2);
 
     finish_ext_query(&mut h, &active_update_cid, "q-update-active");
 
     assert!(ext_query_cid(&h, "q-update-blocked").is_some());
     assert!(ext_query_cid(&h, "q-later-shared").is_some());
-    assert!(h.pending_ext_agent_queries.is_empty());
+    assert!(h.pending_start_agent_requests.is_empty());
 
     h.shutdown().expect("shutdown");
 }
 
 /// An Exclusive sub-agent is process-global for independent sub-agent work: it
 /// waits for all incompatible side conversations and then blocks later shared
-/// or exclusive `ExtAgentQuery`s until its result is routed back.
+/// or exclusive `StartAgentRequest`s until its result is routed back.
 #[test]
-fn exclusive_ext_agent_query_blocks_independent_queries_globally() {
+fn exclusive_start_agent_request_blocks_independent_queries_globally() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -7170,15 +7171,15 @@ fn exclusive_ext_agent_query_blocks_independent_queries_globally() {
     let _ = connect_test_tool(&mut h, "conn-b");
     let _ = connect_test_tool(&mut h, "conn-c");
 
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-a",
         ext_query("q-exclusive", ToolExecutionMode::Exclusive),
     )
     .expect("exclusive query");
     let exclusive_cid = ext_query_cid(&h, "q-exclusive").expect("exclusive started");
-    h.handle_ext_agent_query("conn-b", ext_query("q-shared", ToolExecutionMode::Shared))
+    h.handle_start_agent_request("conn-b", ext_query("q-shared", ToolExecutionMode::Shared))
         .expect("shared query");
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-c",
         ext_query("q-exclusive-2", ToolExecutionMode::Exclusive),
     )
@@ -7186,7 +7187,7 @@ fn exclusive_ext_agent_query_blocks_independent_queries_globally() {
 
     assert!(ext_query_cid(&h, "q-shared").is_none());
     assert!(ext_query_cid(&h, "q-exclusive-2").is_none());
-    assert_eq!(h.pending_ext_agent_queries.len(), 2);
+    assert_eq!(h.pending_start_agent_requests.len(), 2);
 
     finish_ext_query(&mut h, &exclusive_cid, "q-exclusive");
 
@@ -7196,7 +7197,7 @@ fn exclusive_ext_agent_query_blocks_independent_queries_globally() {
         ext_query_cid(&h, "q-exclusive-2").is_none(),
         "second exclusive must wait for the shared query that was ahead of it"
     );
-    assert_eq!(h.pending_ext_agent_queries.len(), 1);
+    assert_eq!(h.pending_start_agent_requests.len(), 1);
 
     h.shutdown().expect("shutdown");
 }
@@ -7214,15 +7215,15 @@ fn queued_exclusive_prevents_later_shared_from_jumping_fifo() {
     let _ = connect_test_tool(&mut h, "conn-b");
     let _ = connect_test_tool(&mut h, "conn-c");
 
-    h.handle_ext_agent_query("conn-a", ext_query("q-active", ToolExecutionMode::Shared))
+    h.handle_start_agent_request("conn-a", ext_query("q-active", ToolExecutionMode::Shared))
         .expect("active shared query");
     let active_cid = ext_query_cid(&h, "q-active").expect("active shared started");
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-b",
         ext_query("q-exclusive", ToolExecutionMode::Exclusive),
     )
     .expect("queued exclusive query");
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-c",
         ext_query("q-later-shared", ToolExecutionMode::Shared),
     )
@@ -7230,7 +7231,7 @@ fn queued_exclusive_prevents_later_shared_from_jumping_fifo() {
 
     assert!(ext_query_cid(&h, "q-exclusive").is_none());
     assert!(ext_query_cid(&h, "q-later-shared").is_none());
-    assert_eq!(h.pending_ext_agent_queries.len(), 2);
+    assert_eq!(h.pending_start_agent_requests.len(), 2);
 
     finish_ext_query(&mut h, &active_cid, "q-active");
 
@@ -7239,7 +7240,7 @@ fn queued_exclusive_prevents_later_shared_from_jumping_fifo() {
         ext_query_cid(&h, "q-later-shared").is_none(),
         "later shared query must remain queued behind the exclusive"
     );
-    assert_eq!(h.pending_ext_agent_queries.len(), 1);
+    assert_eq!(h.pending_start_agent_requests.len(), 1);
 
     h.shutdown().expect("shutdown");
 }
@@ -7248,14 +7249,14 @@ fn queued_exclusive_prevents_later_shared_from_jumping_fifo() {
 /// harness treats them as part of the exclusive subtree instead of making the
 /// parent wait on itself forever.
 #[test]
-fn nested_ext_agent_query_under_active_exclusive_is_allowed() {
+fn nested_start_agent_request_under_active_exclusive_is_allowed() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
     let _ = connect_test_tool(&mut h, "conn-delegate");
 
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-delegate",
         ext_query("q-outer", ToolExecutionMode::Exclusive),
     )
@@ -7267,13 +7268,13 @@ fn nested_ext_agent_query_under_active_exclusive_is_allowed() {
     let mut nested = ext_query("q-nested", ToolExecutionMode::Shared);
     nested.tool_call_id = Some("nested-call".into());
     nested.task_name = Some("nested".to_owned());
-    h.handle_ext_agent_query("conn-delegate", nested)
+    h.handle_start_agent_request("conn-delegate", nested)
         .expect("nested query");
 
     let nested_cid = ext_query_cid(&h, "q-nested").expect("nested started");
     assert_ne!(outer_cid, nested_cid);
-    assert!(h.pending_ext_agent_queries.is_empty());
-    assert_eq!(h.active_ext_agent_queries.len(), 2);
+    assert!(h.pending_start_agent_requests.is_empty());
+    assert_eq!(h.active_start_agent_requests.len(), 2);
 
     h.shutdown().expect("shutdown");
 }
@@ -7282,14 +7283,14 @@ fn nested_ext_agent_query_under_active_exclusive_is_allowed() {
 /// descendants. A nested update must wait for the parent update to finish so
 /// two update lanes are never active together.
 #[test]
-fn nested_update_ext_agent_query_under_active_update_waits() {
+fn nested_update_start_agent_request_under_active_update_waits() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
     let _ = connect_test_tool(&mut h, "conn-delegate");
 
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-delegate",
         ext_query("q-outer", ToolExecutionMode::Update),
     )
@@ -7301,15 +7302,15 @@ fn nested_update_ext_agent_query_under_active_update_waits() {
     let mut nested = ext_query("q-nested", ToolExecutionMode::Update);
     nested.tool_call_id = Some("nested-call".into());
     nested.task_name = Some("nested".to_owned());
-    h.handle_ext_agent_query("conn-delegate", nested)
+    h.handle_start_agent_request("conn-delegate", nested)
         .expect("nested query");
 
     assert!(ext_query_cid(&h, "q-nested").is_none());
-    assert_eq!(h.pending_ext_agent_queries.len(), 1);
+    assert_eq!(h.pending_start_agent_requests.len(), 1);
 
     finish_ext_query(&mut h, &outer_cid, "q-outer");
     assert!(ext_query_cid(&h, "q-nested").is_some());
-    assert!(h.pending_ext_agent_queries.is_empty());
+    assert!(h.pending_start_agent_requests.is_empty());
 
     h.shutdown().expect("shutdown");
 }
@@ -7500,7 +7501,7 @@ fn legacy_read_only_delegate_argument_maps_to_shared_execution_mode() {
     assert_eq!(
         h.resolve_tool_execution_mode_for_call(&explicit_call),
         ToolExecutionMode::Shared,
-        "delegate execution_mode affects the emitted ExtAgentQuery, not the parent tool invocation"
+        "delegate execution_mode affects the emitted StartAgentRequest, not the parent tool invocation"
     );
 
     h.shutdown().expect("shutdown");
@@ -7598,9 +7599,9 @@ fn exclusive_tools_in_distinct_side_conversations_dispatch_concurrently() {
     })
     .expect("main response");
 
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-delegate",
-        ExtAgentQuery {
+        StartAgentRequest {
             query_id: "q-A".to_owned(),
             instruction: "side task A".to_owned(),
             role: None,
@@ -7611,9 +7612,9 @@ fn exclusive_tools_in_distinct_side_conversations_dispatch_concurrently() {
         },
     )
     .expect("query A");
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-delegate",
-        ExtAgentQuery {
+        StartAgentRequest {
             query_id: "q-B".to_owned(),
             instruction: "side task B".to_owned(),
             role: None,
@@ -7813,9 +7814,9 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
 
     let sink = collect_event_sink(&mut h);
     let input_stats = tau_proto::ToolDisplayStats::for_text("prompt\nbody");
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-delegate",
-        ExtAgentQuery {
+        StartAgentRequest {
             query_id: "q1".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
@@ -8000,9 +8001,9 @@ fn provider_disconnect_for_backgrounded_delegate_tool_updates_progress_and_targe
     .expect("main response");
 
     let sink = collect_event_sink(&mut h);
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-delegate",
-        ExtAgentQuery {
+        StartAgentRequest {
             query_id: "q-disconnect".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
@@ -8213,9 +8214,9 @@ fn delegate_explicit_role_uses_role_model_params_prompt_and_tools() {
 
     let _delegate = connect_test_tool(&mut h, "conn-delegate");
     let sink = collect_event_sink(&mut h);
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-delegate",
-        ExtAgentQuery {
+        StartAgentRequest {
             query_id: "q-worker".to_owned(),
             instruction: "side task".to_owned(),
             role: Some("worker".to_owned()),
@@ -8270,13 +8271,16 @@ fn delegate_explicit_role_uses_role_model_params_prompt_and_tools() {
     h.shutdown().expect("shutdown");
 }
 
-fn ext_agent_query_error(frames: &Arc<Mutex<Vec<RoutedFrame>>>, query_id: &str) -> Option<String> {
+fn start_agent_request_error(
+    frames: &Arc<Mutex<Vec<RoutedFrame>>>,
+    query_id: &str,
+) -> Option<String> {
     frames
         .lock()
         .expect("frames")
         .iter()
         .find_map(|routed| match &routed.frame {
-            Frame::Event(Event::ExtAgentQueryResult(result)) if result.query_id == query_id => {
+            Frame::Event(Event::StartAgentResult(result)) if result.query_id == query_id => {
                 result.error.clone()
             }
             _ => None,
@@ -8330,9 +8334,9 @@ fn delegate_invalid_or_unavailable_role_errors_with_sorted_available_roles() {
             "requested role is not backed by an available model",
         ),
     ] {
-        h.handle_ext_agent_query(
+        h.handle_start_agent_request(
             "conn-delegate",
-            ExtAgentQuery {
+            StartAgentRequest {
                 query_id: query_id.to_owned(),
                 instruction: "side task".to_owned(),
                 role: Some(role.to_owned()),
@@ -8343,7 +8347,7 @@ fn delegate_invalid_or_unavailable_role_errors_with_sorted_available_roles() {
             },
         )
         .expect("query");
-        let error = ext_agent_query_error(&delegate, query_id).expect("query error");
+        let error = start_agent_request_error(&delegate, query_id).expect("query error");
         assert!(error.contains(expected_reason), "got: {error}");
         assert!(
             error.contains("available roles: alpha, beta"),
@@ -8369,9 +8373,9 @@ fn delegate_missing_default_engineer_errors_when_engineer_unavailable() {
     configure_delegate_error_roles(&mut h);
 
     let delegate = connect_test_tool(&mut h, "conn-delegate");
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-delegate",
-        ExtAgentQuery {
+        StartAgentRequest {
             query_id: "q-default".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
@@ -8383,7 +8387,7 @@ fn delegate_missing_default_engineer_errors_when_engineer_unavailable() {
     )
     .expect("query");
 
-    let error = ext_agent_query_error(&delegate, "q-default").expect("query error");
+    let error = start_agent_request_error(&delegate, "q-default").expect("query error");
     assert!(
         error.contains(
             "delegate requires default role `engineer`, but it is not available: `engineer`"
@@ -8474,9 +8478,9 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
     .expect("main response");
 
     // Spawn the outer side conversation.
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-delegate",
-        ExtAgentQuery {
+        StartAgentRequest {
             query_id: "q-outer".to_owned(),
             instruction: "outer task".to_owned(),
             role: None,
@@ -8489,7 +8493,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
     .expect("query");
 
     // Have the outer sub-agent emit a *nested* delegate. The harness
-    // should issue another ExtAgentQuery for it, which we then ack
+    // should issue another StartAgentRequest for it, which we then ack
     // with a fresh side conversation. This is the exact pattern that
     // produced the misplacement: outer side conv runs teardown
     // (snap_to_default) before nested side conv's tool result lands.
@@ -8527,9 +8531,9 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         ws_pool_delta: None,
     })
     .expect("outer response");
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-delegate",
-        ExtAgentQuery {
+        StartAgentRequest {
             query_id: "q-nested".to_owned(),
             instruction: "nested task".to_owned(),
             role: None,
@@ -8589,7 +8593,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
     })
     .expect("nested final");
 
-    // The delegate extension would route the nested ExtAgentQueryResult
+    // The delegate extension would route the nested StartAgentResult
     // back as a ToolResult — simulate that here.
     h.handle_extension_event(
         "conn-delegate",
@@ -8653,7 +8657,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
 /// from the main branch into the nested sub-agent prompt, which OpenAI
 /// rejects with `No tool output found for function call …`.
 #[test]
-fn nested_ext_agent_query_branches_from_tool_owner_conversation() {
+fn nested_start_agent_request_branches_from_tool_owner_conversation() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -8717,9 +8721,9 @@ fn nested_ext_agent_query_branches_from_tool_owner_conversation() {
     })
     .expect("main response");
 
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-delegate",
-        ExtAgentQuery {
+        StartAgentRequest {
             query_id: "q-outer".to_owned(),
             instruction: "outer task".to_owned(),
             role: None,
@@ -8766,9 +8770,9 @@ fn nested_ext_agent_query_branches_from_tool_owner_conversation() {
     })
     .expect("outer response");
 
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-delegate",
-        ExtAgentQuery {
+        StartAgentRequest {
             query_id: "q-nested".to_owned(),
             instruction: "nested task".to_owned(),
             role: None,
@@ -8872,9 +8876,9 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
     })
     .expect("main response");
 
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-delegate",
-        ExtAgentQuery {
+        StartAgentRequest {
             query_id: "q-outer".to_owned(),
             instruction: "outer task".to_owned(),
             role: None,
@@ -9024,9 +9028,9 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
     })
     .expect("main response");
 
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-delegate",
-        ExtAgentQuery {
+        StartAgentRequest {
             query_id: "q-top".to_owned(),
             instruction: "TOP: delegate exactly two more subtasks".to_owned(),
             role: None,
@@ -9073,9 +9077,9 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
     })
     .expect("top response");
 
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-delegate",
-        ExtAgentQuery {
+        StartAgentRequest {
             query_id: "q-leaf".to_owned(),
             instruction: "LEAF: do one terminal search only".to_owned(),
             role: None,
@@ -9367,9 +9371,9 @@ fn parallel_side_convs_do_not_share_branch_cursor() {
     })
     .expect("main response");
 
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-delegate",
-        ExtAgentQuery {
+        StartAgentRequest {
             query_id: "q-A".to_owned(),
             instruction: "instr A".to_owned(),
             role: None,
@@ -9380,9 +9384,9 @@ fn parallel_side_convs_do_not_share_branch_cursor() {
         },
     )
     .expect("query A");
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-delegate",
-        ExtAgentQuery {
+        StartAgentRequest {
             query_id: "q-B".to_owned(),
             instruction: "instr B".to_owned(),
             role: None,
@@ -9572,9 +9576,9 @@ fn tool_events_carry_owning_conversation_originator() {
     .expect("main response");
 
     // Spawn the sub-agent and have IT call a tool too.
-    h.handle_ext_agent_query(
+    h.handle_start_agent_request(
         "conn-delegate",
-        ExtAgentQuery {
+        StartAgentRequest {
             query_id: "q-sub".to_owned(),
             instruction: "sub task".to_owned(),
             role: None,
@@ -9688,7 +9692,7 @@ fn cancel_tool_cancels_delegate_side_conversation() {
     h.tool_turn.mark_backgrounded(&delegate_call_id);
     h.record_wait_tool_request(&delegate_call_id);
 
-    let side_cid = ConversationId::new("extq-__harness__-delegate-1");
+    let side_cid = ConversationId::new("start-agent-__harness__-delegate-1");
     let side_spid: SessionPromptId = "side-spid".into();
     let mut side_conv = Conversation::new(
         side_cid.clone(),
@@ -9732,14 +9736,15 @@ fn cancel_tool_cancels_delegate_side_conversation() {
     );
     h.tool_turn
         .mark_backgrounded(&"nested-delegate-call".into());
-    h.pending_ext_agent_queries.push_back(PendingExtAgentQuery {
-        source_id: HARNESS_CONNECTION_ID.to_owned(),
-        extension_name: "core-subagents".to_owned(),
-        query: ext_query("delegate-nested", tau_proto::ToolExecutionMode::Shared),
-        role: "worker".to_owned(),
-        cid: ConversationId::new("extq-__harness__-delegate-nested"),
-        parent_cid: side_cid.clone(),
-    });
+    h.pending_start_agent_requests
+        .push_back(PendingStartAgentRequest {
+            source_id: HARNESS_CONNECTION_ID.to_owned(),
+            extension_name: "core-subagents".to_owned(),
+            query: ext_query("delegate-nested", tau_proto::ToolExecutionMode::Shared),
+            role: "worker".to_owned(),
+            cid: ConversationId::new("start-agent-__harness__-delegate-nested"),
+            parent_cid: side_cid.clone(),
+        });
 
     let cancel_call = AgentToolCall {
         id: "cancel-call".into(),
@@ -9783,7 +9788,7 @@ fn cancel_tool_cancels_delegate_side_conversation() {
             .contains_key("delegate-nested")
     );
     assert!(
-        !h.pending_ext_agent_queries
+        !h.pending_start_agent_requests
             .iter()
             .any(|pending| pending.query.query_id == "delegate-nested")
     );

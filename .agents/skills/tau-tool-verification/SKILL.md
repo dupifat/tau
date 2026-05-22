@@ -131,11 +131,161 @@ A completed background result is consumed by the first successful `wait`. Later 
 
 ### Background tool `cancel`
 
-`cancel` requires `tool_call_id` and never backgrounds. It currently supports only running `delegate` tool calls. A successful cancel request returns `Tool cancelation sent`, emits a harness info event containing `tool call cancelation request`, and targets only the sub-agent spawned by that delegate call. The canceled delegate should complete as a background error so `wait` can observe the cancellation instead of hanging.
+`cancel` requires `tool_call_id` and never backgrounds. It currently supports only running `delegate` tool calls. A successful cancel request returns `Tool cancellation sent`, emits a harness info event containing `tool call cancellation request`, and targets only the sub-agent spawned by that delegate call. The canceled delegate should complete as a background error so `wait` can observe the cancellation instead of hanging.
 
 Calling `cancel` for an unknown, completed, or unsupported tool call should return a tool error. Calling it twice for the same target should return a tool error like `Tool call already canceled`.
 
 When verifying this behavior, check that the synthetic foreground result is visible to the model, the completion notification is delivered to the model but hidden from UI unless `wait` suppressed it, and `wait` returns a completed result once and only once.
+
+
+### Cancel tool verification plan
+
+Use this plan when asked to verify the `cancel` tool, especially around background `delegate` calls, `wait`, duplicate requests, and leaked work from a canceled sub-agent. The goal is to prove that cancel targets exactly one running delegate call, reports success or errors clearly, and leaves no orphaned tool completions behind.
+
+Do not rely on memory. Give every sub-agent a self-contained prompt. A delegated agent starts with a clean context and does not know this skill, the parent conversation, or the IDs of other agents unless you include them in its prompt or later messages.
+
+Create a scratch directory in `/tmp`, such as `/tmp/tau-cancel-verification.*`, before running shell probes. Keep all sleeps short except where a background transition or leak check requires a longer wait.
+
+#### What to verify
+
+Record all of these observations:
+
+* The delegate placeholder includes `tau_internal: true`, `self_agent_id`, `sub_agent_id`, and the background delegate tool call ID.
+* `cancel` must be called with the delegate `tool_call_id`, not the `sub_agent_id`.
+* A successful cancel returns exactly `Tool cancellation sent` and does not background.
+* The harness emits a `HarnessInfo` event containing `tool call cancellation request` if event logs are available.
+* The canceled delegate produces a background error that `wait` can collect.
+* `wait({"tool_call_id": id})` returns the canceled result once and only once.
+* `wait({})` can collect a canceled completion and includes `original_tool_call_id`.
+* Waiting before the delegate has completed suppresses the later model-visible completion prompt.
+* Duplicate cancel requests race cleanly: one succeeds, later or parallel ones fail with `Tool call already canceled` or another clear duplicate error.
+* Canceling an unknown id, completed delegate id, unsupported running tool id, empty id, or `sub_agent_id` returns a tool error.
+* Canceling one delegate does not cancel a sibling delegate.
+* Slow canceled delegates include `duration_seconds` after about 5 seconds.
+* A canceled delegate does not leak completions from its own in-flight or backgrounded inner tool calls into the parent conversation.
+* The user-visible UI does not show hidden internal completion prompts unless the current UI settings intentionally expose them.
+
+#### Phase 1: running delegate happy path
+
+Start a shared delegate with this prompt:
+
+```text
+You are a Tau cancel-tool verification sub-agent. Goal: stay alive until the parent cancels this delegate call.
+
+Procedure:
+1. Immediately send a message to `user` exactly: `READY cancel-ready-probe: entering long sleep`.
+2. Run `sleep 60` using the shell tool.
+3. If you are not canceled, final answer exactly: `UNEXPECTED cancel-ready-probe completed without cancellation`.
+
+Do not do anything else.
+```
+
+After the placeholder result returns, record `self_agent_id`, `sub_agent_id`, and the delegate tool call ID. Call `cancel` with that delegate tool call ID. Expect the foreground result to be exactly:
+
+```text
+Tool cancellation sent
+```
+
+Then wait for the same tool call ID. Expect a background tool error like:
+
+```text
+error: Tool call canceled
+self_agent_id: ...
+sub_agent_id: ...
+```
+
+Call `wait` for the same ID again. Expect an already-consumed error. Call `cancel` for the same ID again. Expect `Tool call already canceled`.
+
+#### Phase 2: no-arg wait and wait suppression
+
+Start another long-sleeping delegate. Cancel it, then call `wait({})`. Expect the canceled error and an `original_tool_call_id` header matching the delegate call ID.
+
+Start a third long-sleeping delegate. Call `cancel` and `wait({"tool_call_id": id})` in parallel or as close together as possible. Expect `wait` to return the canceled result. The later `[tau-internal] Tool call ... is complete.` prompt for that same call should be suppressed. If the prompt still appears after `wait` consumed the result, record it as a discrepancy.
+
+#### Phase 3: invalid targets and duplicate requests
+
+Verify each error case independently:
+
+* `cancel({"tool_call_id": ""})` returns `` `tool_call_id` must not be empty ``.
+* A clearly unknown call ID returns `Tool call is not a running cancellable tool call` and echoes `tool_call_id`.
+* A completed delegate ID returns `Tool call is not a running cancellable tool call`.
+* A `sub_agent_id` returns `Tool call is not a running cancellable tool call`; this proves the tool wants the delegate call ID.
+* Two parallel `cancel` calls for the same live delegate produce one success and one duplicate-cancel error.
+
+For the completed-delegate case, spawn a delegate that immediately returns:
+
+```text
+You are a Tau cancel-tool verification sub-agent. Return immediately with exactly: `FINAL cancel-completed-probe normal completion`.
+```
+
+Wait until the completion prompt arrives, then try to cancel it. After that, call `wait` and verify the normal final answer is still available once.
+
+#### Phase 4: unsupported running background tool
+
+Start a shell command long enough to background, such as `sleep 20`. When the shell placeholder gives a tool call ID, call `cancel` for that ID. Expect `Tool call is not a running cancellable tool call`. Then call `wait` for the shell call and verify it completes normally with `status: 0` and a `duration_seconds` header.
+
+This proves that current cancel support is limited to running delegates.
+
+#### Phase 5: target isolation
+
+Start two delegates in parallel. The target should sleep for a long time. The survivor should sleep briefly and return `FINAL cancel-survivor unaffected`.
+
+Cancel only the target delegate. Then wait for both IDs. Expect:
+
+* Target: `error: Tool call canceled`.
+* Survivor: normal final answer.
+
+Any sibling cancellation, missing survivor result, or cross-talk between IDs is a bug.
+
+#### Phase 6: slow cancellation and duration
+
+Start a long-sleeping delegate. Let it run long enough to cross the delegate duration threshold, usually about 6 seconds. Cancel it and wait for the result. Expect the canceled delegate result to include `duration_seconds` with an approximate whole-second value.
+
+Do not require an exact duration. Internal overhead and scheduling can add jitter.
+
+#### Phase 7: nested and inner-tool leak check
+
+This phase is important. A canceled delegate can have its own foreground or background tool call in flight. Canceling the delegate must not leave an orphaned inner tool completion that later wakes the parent conversation.
+
+Start a shared delegate with this prompt:
+
+```text
+You are a Tau cancel-tool verification sub-agent for inner-tool leak testing. Goal: start an inner tool call, then be canceled by the parent.
+
+Procedure:
+1. Run `sleep 12` using the shell tool.
+2. If you are not canceled, final answer exactly: `UNEXPECTED cancel-inner-tool-leak completed without cancellation`.
+
+Do not send messages. Do not do anything else.
+```
+
+Let the delegate run long enough for the inner shell call to background, usually about 6 seconds. Then cancel the delegate and wait for the delegate result. Expect `error: Tool call canceled`.
+
+After the delegate cancel result is consumed, watch for stray completion prompts for any other tool call ID, especially the inner shell call. If a stray `[tau-internal] Tool call ... is complete.` prompt appears, call `wait` for that ID and record the full result. Treat this as a leak unless there is a clear documented reason it belongs to the parent conversation.
+
+If no stray completion appears before the inner `sleep 12` would have finished, record that no leak was observed. This check caught a prior manual discrepancy where a canceled delegate's inner `sleep` later produced a parent-visible completion.
+
+#### Optional event-log checks
+
+If you have direct access to harness event logs, verify:
+
+* Successful cancel emitted `HarnessInfo` with `tool call cancellation request`.
+* The canceled delegate emitted `ToolBackgroundError` with `Tool call canceled`.
+* No `SessionPromptSteered` or queued pending prompt remains for canceled nested delegate completions.
+* Completed results are consumed once, and the consumed result is not available to later `wait` calls.
+
+#### Reporting format for `cancel` verification
+
+Report concise but complete findings:
+
+* List each tested route and whether it passed: running delegate, no-arg wait, wait suppression, duplicate cancel, unknown id, empty id, completed delegate, unsupported tool, `sub_agent_id`, sibling isolation, slow duration, and inner-tool leak.
+* Include exact unexpected errors or output.
+* Mention any timing surprises, missed completion prompts, duplicate prompts, leaked inner completions, or ordering uncertainty.
+* Confirm the `cancel` success output is only `Tool cancellation sent`; it is a request, not a delivery receipt for child cleanup.
+* Include whether errors distinguish completed delegates from unknown ids. Current behavior may use the same not-running-cancellable error for both.
+* Include whether the `delegate` placeholder made the target ID clear enough, and whether `self_agent_id` and `sub_agent_id` were present without redundant aliases.
+* Include whether slow canceled delegates reported `duration_seconds`.
+* Include whether the UI hid completion prompts that should be hidden, or whether that could not be directly verified.
 
 
 ### Message tool verification plan

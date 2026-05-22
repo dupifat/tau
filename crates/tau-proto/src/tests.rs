@@ -891,28 +891,34 @@ fn ext_agent_query_execution_mode_defaults_to_shared() {
     assert_eq!(update.execution_mode, ToolExecutionMode::Update);
 }
 
-/// `DelegateProgress.role` is additive UI metadata. Omitting it must keep older
-/// serialized progress events readable by newer clients.
+/// `DelegateProgress` UI metadata is additive. Omitting role and execution mode
+/// must keep older serialized progress events readable by newer clients.
 #[test]
-fn delegate_progress_role_is_backward_compatible() {
+fn delegate_progress_role_and_mode_are_backward_compatible() {
     let parsed: DelegateProgress = serde_json::from_value(serde_json::json!({
         "call_id": "call-1",
         "task_name": "audit",
         "tools_in_flight": 0,
         "tools_total": 0
     }))
-    .expect("deserialize progress without role");
+    .expect("deserialize progress without role or mode");
     assert_eq!(parsed.role, None);
+    assert_eq!(parsed.execution_mode, None);
 
-    let with_role: DelegateProgress = serde_json::from_value(serde_json::json!({
+    let with_metadata: DelegateProgress = serde_json::from_value(serde_json::json!({
         "call_id": "call-1",
         "task_name": "audit",
         "role": "rush",
+        "execution_mode": "update",
         "tools_in_flight": 0,
         "tools_total": 0
     }))
-    .expect("deserialize progress with role");
-    assert_eq!(with_role.role.as_deref(), Some("rush"));
+    .expect("deserialize progress with role and mode");
+    assert_eq!(with_metadata.role.as_deref(), Some("rush"));
+    assert_eq!(
+        with_metadata.execution_mode,
+        Some(ToolExecutionMode::Update)
+    );
 }
 
 /// `Verbosity::next_in` mirrors `Effort::next_in`. Even though the CLI

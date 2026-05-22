@@ -22,6 +22,7 @@ use tau_core::NodeId;
 use tau_proto::{
     ConnectionId, ModelId, ModelParams, PromptMessageClass, PromptOriginator, ProviderBackend,
     SessionId, SessionPromptId, ToolCallId, ToolChoice, ToolDefinition, ToolDisplayStats,
+    ToolExecutionMode,
 };
 
 use crate::dedup::ResultDedupMap;
@@ -231,6 +232,9 @@ pub(crate) struct Conversation {
     /// Agent role used for this conversation. `None` means the conversation
     /// follows the harness's globally selected interactive role.
     pub(crate) role: Option<String>,
+    /// Scheduling mode requested for this delegate side conversation. `None`
+    /// for the default conversation and non-tool side conversations.
+    pub(crate) delegate_execution_mode: Option<ToolExecutionMode>,
     /// Number of tool calls currently in flight on this conversation.
     pub(crate) tools_in_flight: u32,
     /// Cumulative tool calls this conversation has started (in-flight
@@ -376,6 +380,7 @@ impl Conversation {
             task_name: None,
             delegate_input_stats: ToolDisplayStats::default(),
             role: None,
+            delegate_execution_mode: None,
             tools_in_flight: 0,
             tools_total: 0,
             context_input_tokens: None,

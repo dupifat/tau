@@ -4590,6 +4590,7 @@ impl Harness {
             None
         };
         let execution_mode = query.execution_mode;
+        let delegate_execution_mode = parent_call_id.as_ref().map(|_| execution_mode);
         let parent_conv = self
             .conversations
             .get(&parent_cid)
@@ -4623,6 +4624,7 @@ impl Harness {
         conv.task_name = task_name;
         conv.delegate_input_stats = query.input_stats;
         conv.role = conversation_role;
+        conv.delegate_execution_mode = delegate_execution_mode;
         conv.chain_anchor = initial_chain_anchor;
         self.conversations.insert(cid.clone(), conv);
         self.active_ext_agent_queries
@@ -4690,6 +4692,7 @@ impl Harness {
             return;
         };
         let role = conv.role.clone();
+        let execution_mode = conv.delegate_execution_mode;
         let ctx_window = conv.context_input_tokens.and_then(|_| {
             self.model_for_conversation_role(conv)
                 .as_ref()
@@ -4708,6 +4711,7 @@ impl Harness {
             call_id,
             task_name,
             role,
+            execution_mode,
             ctx_percent: conv.context_percent_used,
             ctx_input_tokens: conv.context_input_tokens,
             ctx_window,
@@ -8191,9 +8195,9 @@ fn shell_command_payload(command: &str) -> Option<tau_proto::ToolDisplayPayload>
 
 /// Build the [`ToolDisplay`] descriptor the renderer paints for a
 /// running `delegate` tool block. Carries the sub-task name as the
-/// args label and two progress counters (tools and context); the role
-/// stays on [`tau_proto::DelegateProgress`] so the UI can paint it with
-/// the status-bar role style. The tools counter is completed/total so
+/// args label and two progress counters (tools and context); the role and
+/// execution mode stay on [`tau_proto::DelegateProgress`] so the UI can paint
+/// them as dedicated chips. The tools counter is completed/total so
 /// users can infer the currently running count as `total - completed`.
 /// The trailing chip is set to
 /// [`ToolDisplayStatus::InProgress`] so the renderer paints

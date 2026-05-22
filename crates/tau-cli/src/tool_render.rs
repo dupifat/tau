@@ -470,16 +470,16 @@ fn abbreviate_inline_text(text: &str) -> String {
     format!("{head}┄{tail}")
 }
 
-/// Render a `delegate` display with the agent role as a dedicated
-/// status-bar-colored suffix. Completed delegates show input stats
-/// (`↘︎`) before output stats (`↖︎`), then progress counters and the
-/// final status. Current descriptors keep the role on
-/// [`tau_proto::DelegateProgress`], but legacy cached descriptors may
-/// still have ` +role` embedded in `args`; strip that copy so the line
-/// does not render the role twice.
+/// Render a `delegate` display with dedicated suffixes for the agent role and
+/// scheduling mode. Completed delegates show input stats (`↘︎`) before output
+/// stats (`↖︎`), then progress counters and the final status. Current
+/// descriptors keep the role and mode on [`tau_proto::DelegateProgress`], but
+/// legacy cached descriptors may still have ` +role` embedded in `args`; strip
+/// that copy so the line does not render the role twice.
 pub(crate) fn render_delegate_display(
     display: &ToolDisplay,
     role: Option<&str>,
+    execution_mode: Option<tau_proto::ToolExecutionMode>,
 ) -> ToolCallDisplay {
     let mut rendered = render_tool_display("delegate", display);
     let stats_chip = format_tool_display_stats(&display.stats);
@@ -505,18 +505,32 @@ pub(crate) fn render_delegate_display(
         move_delegate_completion_stats_first(&mut rendered.suffixes, &stats_chip);
     }
 
-    let Some(role) = role.filter(|role| !role.is_empty()) else {
-        return rendered;
-    };
-
-    let legacy_suffix = format!(" +{role}");
-    if let Some(args) = rendered.args.strip_suffix(&legacy_suffix) {
-        rendered.args = args.to_owned();
+    let mut prefix_count = 0;
+    if let Some(role) = role.filter(|role| !role.is_empty()) {
+        let legacy_suffix = format!(" +{role}");
+        if let Some(args) = rendered.args.strip_suffix(&legacy_suffix) {
+            rendered.args = args.to_owned();
+        }
+        rendered
+            .suffixes
+            .insert(0, tool_suffix(format!("+{role}"), ToolStatus::Role));
+        prefix_count += 1;
+    }
+    if let Some(execution_mode) = execution_mode {
+        rendered.suffixes.insert(
+            prefix_count,
+            info_suffix(delegate_execution_mode_marker(execution_mode).to_owned()),
+        );
     }
     rendered
-        .suffixes
-        .insert(0, tool_suffix(format!("+{role}"), ToolStatus::Role));
-    rendered
+}
+
+fn delegate_execution_mode_marker(mode: tau_proto::ToolExecutionMode) -> &'static str {
+    match mode {
+        tau_proto::ToolExecutionMode::Exclusive => "x",
+        tau_proto::ToolExecutionMode::Update => "u",
+        tau_proto::ToolExecutionMode::Shared => "s",
+    }
 }
 
 fn normalize_delegate_input_stats_suffix(suffix: &mut ToolSuffixSegment) {

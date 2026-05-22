@@ -784,6 +784,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
         call_id: "delegate-call".into(),
         task_name: "probe".into(),
         role: Some("engineer".to_owned()),
+        execution_mode: Some(tau_proto::ToolExecutionMode::Update),
         ctx_percent: None,
         ctx_input_tokens: None,
         ctx_window: None,
@@ -1770,6 +1771,7 @@ fn delegate_progress_redraws_live_parent_block() {
         call_id: "call-delegate".into(),
         task_name: "probe".into(),
         role: Some("engineer".to_owned()),
+        execution_mode: Some(tau_proto::ToolExecutionMode::Exclusive),
         ctx_percent: None,
         ctx_input_tokens: None,
         ctx_window: None,
@@ -2597,7 +2599,7 @@ fn render_delegate_display_pulls_legacy_role_args_into_first_suffix() {
         ..Default::default()
     };
 
-    let rendered = render_delegate_display(&display, Some("engineer"));
+    let rendered = render_delegate_display(&display, Some("engineer"), None);
     assert_eq!(rendered.tool_name, "delegate");
     assert_eq!(rendered.args, "[probe]");
     let texts: Vec<&str> = rendered.suffixes.iter().map(|s| s.text.as_str()).collect();
@@ -2606,6 +2608,65 @@ fn render_delegate_display_pulls_legacy_role_args_into_first_suffix() {
         vec!["+engineer", "%3/3", tau_proto::PROGRESS_INDICATOR_TEXT]
     );
     assert!(matches!(rendered.suffixes[0].status, ToolStatus::Role));
+}
+
+#[test]
+fn render_delegate_display_adds_execution_mode_marker_after_role() {
+    use tau_proto::{ToolDisplay, ToolDisplayStatus, ToolExecutionMode};
+
+    // Delegate scheduling mode is a compact chip beside the role so users can
+    // see whether a sub-agent is shared (`s`), update-locked (`u`), or exclusive
+    // (`x`) without reading the full tool arguments.
+    let display = ToolDisplay {
+        args: "[probe]".into(),
+        status: ToolDisplayStatus::InProgress,
+        status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
+        ..Default::default()
+    };
+
+    for (mode, marker) in [
+        (ToolExecutionMode::Exclusive, "x"),
+        (ToolExecutionMode::Update, "u"),
+        (ToolExecutionMode::Shared, "s"),
+    ] {
+        let rendered = render_delegate_display(&display, Some("engineer"), Some(mode));
+        let texts: Vec<&str> = rendered.suffixes.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["+engineer", marker, tau_proto::PROGRESS_INDICATOR_TEXT]
+        );
+        assert!(matches!(rendered.suffixes[1].status, ToolStatus::Info));
+    }
+
+    let rendered = render_delegate_display(&display, None, Some(ToolExecutionMode::Shared));
+    let texts: Vec<&str> = rendered.suffixes.iter().map(|s| s.text.as_str()).collect();
+    assert_eq!(texts, vec!["s", tau_proto::PROGRESS_INDICATOR_TEXT]);
+}
+
+#[test]
+fn render_delegate_completion_keeps_execution_mode_marker() {
+    use tau_proto::{ToolDisplay, ToolDisplayStats, ToolDisplayStatus, ToolExecutionMode};
+
+    // Completion rendering is rebuilt from the cached DelegateProgress. Keep the
+    // mode chip when the running line becomes the final `ok` / `err` line.
+    let cached = ToolDisplay {
+        args: "[audit]".into(),
+        stats: ToolDisplayStats {
+            matches: None,
+            lines: Some(10),
+            bytes: Some(200),
+        },
+        status: ToolDisplayStatus::InProgress,
+        status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
+        ..Default::default()
+    };
+    let display =
+        build_delegate_completion_display(Some(&cached), &CborValue::Text("ok\nmore".into()), None);
+
+    let rendered =
+        render_delegate_display(&display, Some("engineer"), Some(ToolExecutionMode::Update));
+    let texts: Vec<&str> = rendered.suffixes.iter().map(|s| s.text.as_str()).collect();
+    assert_eq!(texts, vec!["+engineer", "u", "↘︎10L, 200B", "↖︎2L, 7B", "ok"]);
 }
 
 #[test]
@@ -2625,7 +2686,7 @@ fn render_delegate_display_marks_input_and_output_stats() {
         status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
         ..Default::default()
     };
-    let rendered = render_delegate_display(&input, None);
+    let rendered = render_delegate_display(&input, None, None);
     let texts: Vec<&str> = rendered.suffixes.iter().map(|s| s.text.as_str()).collect();
     assert_eq!(texts, vec!["↘︎2L, 12B", tau_proto::PROGRESS_INDICATOR_TEXT]);
 
@@ -2647,7 +2708,7 @@ fn render_delegate_display_marks_input_and_output_stats() {
         info_chips: vec!["↘︎2L, 12B".into()],
         ..Default::default()
     };
-    let rendered = render_delegate_display(&output, None);
+    let rendered = render_delegate_display(&output, None, None);
     let texts: Vec<&str> = rendered.suffixes.iter().map(|s| s.text.as_str()).collect();
     assert_eq!(texts, vec!["↘︎2L, 12B", "↖︎3L, 24B", "%2/2", "ok"]);
 }
@@ -2666,7 +2727,7 @@ fn render_delegate_display_styles_role_like_status_bar() {
         ..Default::default()
     };
 
-    let rendered = render_delegate_display(&display, Some("engineer"));
+    let rendered = render_delegate_display(&display, Some("engineer"), None);
     let block = render_tool_block(&theme, &rendered);
     let role_span = block
         .content

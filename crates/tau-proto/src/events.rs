@@ -1683,6 +1683,10 @@ pub struct DelegateProgress {
     /// Role used by the delegated sub-agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// Scheduling mode requested for the delegated sub-agent. Older progress
+    /// events omit this; clients should hide the mode marker when it is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_mode: Option<ToolExecutionMode>,
     /// Most recent percent-of-context-window the sub-agent reported,
     /// when its model's window size is known.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -6879,7 +6879,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
             query_id: "q1".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
-            execution_mode: ToolExecutionMode::Shared,
+            execution_mode: ToolExecutionMode::Update,
             input_stats,
             tool_call_id: Some("delegate-call".into()),
             task_name: Some("look it up".to_owned()),
@@ -6893,6 +6893,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
         .expect("initial DelegateProgress on side conv spawn");
     assert_eq!(initial.task_name, "look it up");
     assert_eq!(initial.role.as_deref(), Some("engineer"));
+    assert_eq!(initial.execution_mode, Some(ToolExecutionMode::Update));
     assert_eq!(initial.tools_in_flight, 0);
     assert_eq!(initial.tools_total, 0);
     assert_delegate_tools_counter(&initial, Some(0), Some(0));
@@ -6944,6 +6945,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
         .expect("at least one DelegateProgress after side response");
     assert_eq!(latest.task_name, "look it up");
     assert_eq!(latest.role.as_deref(), Some("engineer"));
+    assert_eq!(latest.execution_mode, Some(ToolExecutionMode::Update));
     assert_eq!(latest.tools_in_flight, 1, "websearch is in flight");
     assert_eq!(latest.tools_total, 1, "websearch counts toward total");
     assert_delegate_tools_counter(&latest, Some(0), Some(1));
@@ -6972,6 +6974,10 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
     let after_complete = drain_delegate_progress(&sink, "delegate-call")
         .pop()
         .expect("DelegateProgress after sub-tool completion");
+    assert_eq!(
+        after_complete.execution_mode,
+        Some(ToolExecutionMode::Update)
+    );
     assert_eq!(after_complete.tools_in_flight, 0);
     assert_eq!(after_complete.tools_total, 1);
     assert_delegate_tools_counter(&after_complete, Some(1), Some(1));

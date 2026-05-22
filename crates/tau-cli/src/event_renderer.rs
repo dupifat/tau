@@ -3333,6 +3333,11 @@ impl EventRenderer {
             Some(&selected.role),
         );
         self.handle.set_left_prompt(prompt);
+        self.handle
+            .set_input_placeholder(crate::theme::prompt_input_placeholder(
+                &self.theme,
+                Some(&selected.role),
+            ));
         self.handle.redraw();
         self.current_context_window = selected.context_window;
         self.render_model_status();

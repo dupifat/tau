@@ -151,6 +151,7 @@ struct SharedState {
 
     left_prompt: StyledText,
     right_prompt: StyledText,
+    input_placeholder: StyledText,
     buffer: String,
     cursor: usize,
     /// Visual column the cursor "wants" to be on for vertical motion
@@ -211,6 +212,7 @@ impl SharedState {
             below: Vec::new(),
             left_prompt,
             right_prompt: StyledText::new(),
+            input_placeholder: StyledText::new(),
             buffer: String::new(),
             cursor: 0,
             sticky_col: None,
@@ -916,6 +918,11 @@ impl TermHandle {
     /// Updates the right prompt.
     pub fn set_right_prompt(&self, text: impl Into<StyledText>) {
         self.lock().right_prompt = text.into();
+    }
+
+    /// Updates the placeholder shown when the input buffer is empty.
+    pub fn set_input_placeholder(&self, text: impl Into<StyledText>) {
+        self.lock().input_placeholder = text.into();
     }
 
     /// Queues a raw byte string (typically a terminal escape sequence
@@ -2057,7 +2064,13 @@ fn layout_all(st: &SharedState) -> LayoutAll {
     let above_end = all_lines.len();
 
     let mut input_content = st.left_prompt.clone();
-    input_content.push(Span::plain(&st.buffer));
+    if st.buffer.is_empty() {
+        for span in st.input_placeholder.spans() {
+            input_content.push(span.clone());
+        }
+    } else {
+        input_content.push(Span::plain(&st.buffer));
+    }
     // Preserve a trailing-newline blank row so a buffer ending in
     // `\n` (the user just hit Shift+Enter / Alt+Enter) gives the
     // cursor somewhere to sit and the prompt grows immediately

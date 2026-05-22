@@ -326,6 +326,31 @@ fn full_render_then_diff_render() {
     assert!(!buf2.is_empty(), "diff should produce output");
 }
 
+/// Empty prompt rendering may show hint text, but the editable buffer and
+/// cursor must stay empty so typing replaces the hint instead of appending to
+/// it.
+#[test]
+fn empty_input_renders_placeholder_without_moving_cursor() {
+    let mut st = SharedState::new(80, 24, "> ".into());
+    st.input_placeholder = Span::new(
+        "Write message to the engineer...",
+        Style::default().fg(Color::DarkGrey).italic(),
+    )
+    .into();
+
+    let layout = layout_all(&st);
+
+    assert_eq!(
+        line_text(&layout.all_lines[0]),
+        "> Write message to the engineer..."
+    );
+    assert_eq!(layout.cursor_row, 0);
+    assert_eq!(layout.cursor_col, 2);
+    assert_eq!(st.buffer, "");
+    assert_eq!(st.cursor, 0);
+    assert!(layout.all_lines[0][2].style.italic);
+}
+
 /// Documents the prompt-history contract: submitted entries are navigable while
 /// the unsent draft is restored at the end.
 #[test]

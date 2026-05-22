@@ -62,7 +62,8 @@ impl Harness {
                             "description": "When true, also search the first 64 KiB of the skill file after stripping frontmatter from that prefix. Default false."
                         }
                     },
-                    "required": ["query"]
+                    "required": ["query"],
+                    "additionalProperties": false
                 })),
                 format: None,
                 enabled_by_default: true,

@@ -1694,14 +1694,12 @@ impl EventRenderer {
             Event::ToolResult(result) | Event::ProviderToolResult(result) => {
                 if result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder {
                     self.agent_activity.background_tool(&result.call_id);
-                } else if matches!(event, Event::ToolResult(_)) {
+                } else {
                     self.agent_activity.finish_tool(&result.call_id);
                 }
             }
             Event::ToolError(error) | Event::ProviderToolError(error) => {
-                if matches!(event, Event::ToolError(_)) {
-                    self.agent_activity.finish_tool(&error.call_id);
-                }
+                self.agent_activity.finish_tool(&error.call_id);
             }
             Event::ToolBackgroundResult(result) => {
                 self.agent_activity.finish_background_tool(&result.call_id);
@@ -1946,16 +1944,14 @@ impl EventRenderer {
         let Event::AgentMessage(message) = event else {
             return false;
         };
-        if message.recipient_id != "user" {
-            return true;
-        }
         let block = self.submitted_prompt_block(
             tau_themes::names::SYSTEM_INFO,
-            format!("Message from {}:\n{}", message.sender_id, message.message),
+            format!(
+                "Messages from {} to {}:\n{}",
+                message.sender_id, message.recipient_id, message.message
+            ),
         );
-        let id = self.handle.new_block("agent-message", block);
-        self.handle.push_above_active(id);
-        self.handle.redraw();
+        self.handle.print_output("agent-message", block);
         true
     }
 
@@ -2564,6 +2560,18 @@ impl EventRenderer {
                 if result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder =>
             {
                 self.handle_tool_background_placeholder(result.call_id.as_str());
+                true
+            }
+            Event::ProviderToolResult(result)
+                if self.tool_calls.contains_key(result.call_id.as_str()) =>
+            {
+                self.handle_tool_result(result, recorded_at);
+                true
+            }
+            Event::ProviderToolError(error)
+                if self.tool_calls.contains_key(error.call_id.as_str()) =>
+            {
+                self.handle_tool_error(error, recorded_at);
                 true
             }
             Event::ToolResult(result) => {

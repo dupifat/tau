@@ -3,7 +3,7 @@
 //! [`tau_core::SessionTree`] into item-based prompt context.
 
 use tau_core::SessionEntry;
-use tau_proto::{CborValue, ContextItem, PromptFragment};
+use tau_proto::{ContextItem, PromptFragment};
 
 use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill};
 
@@ -445,17 +445,6 @@ pub(crate) fn assemble_prompt_context_from(
     AssembledPromptContext { context_items }
 }
 
-/// Extract a boolean value from a CBOR map by key.
-pub(crate) fn cbor_map_bool(map: &CborValue, key: &str) -> Option<bool> {
-    match map {
-        CborValue::Map(entries) => entries.iter().find_map(|(k, v)| match (k, v) {
-            (CborValue::Text(k), CborValue::Bool(b)) if k == key => Some(*b),
-            _ => None,
-        }),
-        _ => None,
-    }
-}
-
 /// Converts a CBOR value to human-readable text for tool results.
 #[cfg(test)]
 pub(crate) fn cbor_to_text(v: &tau_proto::CborValue) -> String {
@@ -498,7 +487,8 @@ pub(crate) fn cbor_to_text(v: &tau_proto::CborValue) -> String {
 #[cfg(test)]
 mod tests {
     use tau_proto::{
-        ContentPart, ContextItem, ContextRole, Event, MessageItem, ToolError, ToolResultStatus,
+        CborValue, ContentPart, ContextItem, ContextRole, Event, MessageItem, ToolError,
+        ToolResultStatus,
     };
 
     use super::*;

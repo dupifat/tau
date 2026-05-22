@@ -15,7 +15,7 @@ use crate::memory::{MemoryInbox, MemorySink, memory_connection};
 use crate::policy::{DefaultSubscriptionPolicy, PolicyStore, SubscriptionApproval};
 use crate::session::{NodeId, SessionEntry};
 use crate::session_store::{SessionStore, SessionStoreError, list_session_metas};
-use crate::tool_registry::{ToolRegistry, ToolRegistryWarning};
+use crate::tool_registry::{ToolRegistry, ToolRegistryWarning, validate_tool_arguments};
 
 /// Helper used by the SessionStore-focused unit tests below: append
 /// one `UiPromptSubmitted` event and return the resulting head.
@@ -294,6 +294,90 @@ fn connection_abstraction_is_transport_independent_for_in_memory_clients() {
 
     assert_eq!(tool_inbox.snapshot().len(), 1);
     assert_eq!(provider_inbox.snapshot().len(), 1);
+}
+
+fn schema_test_tool(parameters: serde_json::Value) -> ToolSpec {
+    ToolSpec {
+        name: tau_proto::ToolName::new("schema_test"),
+        model_visible_name: None,
+        description: None,
+        tool_type: ToolType::Function,
+        parameters: Some(parameters),
+        format: None,
+        enabled_by_default: true,
+        execution_mode: ToolExecutionMode::Shared,
+        background_support: None,
+    }
+}
+
+#[test]
+fn tool_argument_validation_rejects_unknown_top_level_properties() {
+    let tool = schema_test_tool(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "path": { "type": "string" }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+    }));
+    let err = validate_tool_arguments(
+        &tool,
+        &CborValue::Map(vec![
+            (
+                CborValue::Text("path".to_owned()),
+                CborValue::Text("/tmp/file".to_owned()),
+            ),
+            (CborValue::Text("extra".to_owned()), CborValue::Bool(true)),
+        ]),
+    )
+    .expect_err("extra argument should fail");
+
+    assert_eq!(err.to_string(), "unexpected argument `extra`");
+}
+
+#[test]
+fn tool_argument_validation_checks_nested_items() {
+    let tool = schema_test_tool(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "edits": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "oldText": { "type": "string" },
+                        "max_matches": { "type": "integer", "minimum": 1 }
+                    },
+                    "required": ["oldText"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["edits"],
+        "additionalProperties": false
+    }));
+    let err = validate_tool_arguments(
+        &tool,
+        &CborValue::Map(vec![(
+            CborValue::Text("edits".to_owned()),
+            CborValue::Array(vec![CborValue::Map(vec![
+                (
+                    CborValue::Text("oldText".to_owned()),
+                    CborValue::Text("before".to_owned()),
+                ),
+                (
+                    CborValue::Text("max_matches".to_owned()),
+                    CborValue::Integer(0.into()),
+                ),
+            ])]),
+        )]),
+    )
+    .expect_err("nested minimum should fail");
+
+    assert_eq!(
+        err.to_string(),
+        "$.edits[0].max_matches: must be at least 1"
+    );
 }
 
 #[test]

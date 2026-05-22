@@ -33,6 +33,6 @@ pub use session_store::{
     AppendOutcome, SessionStore, SessionStoreError, list_session_metas, session_is_locked,
 };
 pub use tool_registry::{
-    RegisterToolReport, ToolProvider, ToolRegistry, ToolRegistryWarning, ToolRouteError,
-    ToolRouteReport,
+    RegisterToolReport, ToolArgumentValidationError, ToolProvider, ToolRegistry,
+    ToolRegistryWarning, ToolRouteError, ToolRouteReport, validate_tool_arguments,
 };

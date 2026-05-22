@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use tau_core::{
     Connection, ConnectionMetadata, ConnectionOrigin, DefaultSubscriptionPolicy, EventBus,
     PolicyStore, RouteError, SessionStore, SessionStoreError, ToolRegistry, ToolRouteError,
+    validate_tool_arguments,
 };
 use tau_proto::{
     BackgroundSupport, CborValue, ClientKind, ContentPart, ContextItem, ContextRole, Disconnect,
@@ -64,7 +65,7 @@ use crate::model::{
 use crate::prompt::{
     BUILT_IN_SYSTEM_TEMPLATE_NAME, RolePromptTemplateContext, assemble_conversation_from,
     assemble_prompt_context_from, build_system_prompt_with_template_context,
-    built_in_system_prompt_templates, cbor_map_bool, render_agents_context_message,
+    built_in_system_prompt_templates, render_agents_context_message,
 };
 use crate::settings::{Config, load_harness_settings_or_warn};
 use crate::tool_turn::{ForegroundAction, PendingToolInvocation, ToolTurnMachine};
@@ -420,6 +421,10 @@ fn random_agent_id_suffix() -> String {
     hex_bytes(&bytes)
 }
 
+fn mint_agent_id_for_role(role: &str) -> String {
+    format!("{role}_{}", random_agent_id_suffix())
+}
+
 fn built_in_discovered_skills() -> HashMap<tau_proto::SkillName, DiscoveredSkill> {
     tau_skills::built_in_skills()
         .into_iter()
@@ -668,6 +673,8 @@ struct PendingStartAgentRequest {
     role: String,
     cid: ConversationId,
     parent_cid: ConversationId,
+    agent_id: String,
+    pending_agent_messages: VecDeque<PendingPrompt>,
 }
 
 #[derive(Debug)]
@@ -2258,22 +2265,40 @@ impl Harness {
         self.send_prompt_to_agent_for(&cid);
     }
 
+    /// Return whether a non-user message recipient can receive a hidden prompt.
+    pub(crate) fn agent_message_recipient_exists(&self, recipient_id: &str) -> bool {
+        self.agent_conversations.contains_key(recipient_id)
+            || self
+                .pending_start_agent_requests
+                .iter()
+                .any(|pending| pending.agent_id == recipient_id)
+    }
+
     fn deliver_agent_message(&mut self, message: &tau_proto::AgentMessage) {
         if message.recipient_id == "user" {
             return;
         }
-        let Some(cid) = self.agent_conversations.get(&message.recipient_id).cloned() else {
-            return;
-        };
         let text = format!(
             "[tau-internal]: You have received a message from {}\n\n<message>\n{}\n</message>",
             message.sender_id, message.message
         );
-        if let Some(conv) = self.conversations.get_mut(&cid) {
-            conv.pending_prompts
+        if let Some(cid) = self.agent_conversations.get(&message.recipient_id).cloned() {
+            if let Some(conv) = self.conversations.get_mut(&cid) {
+                conv.pending_prompts
+                    .push_back(PendingPrompt::agent_message(text));
+            }
+            self.try_advance_queue();
+            return;
+        }
+        if let Some(pending) = self
+            .pending_start_agent_requests
+            .iter_mut()
+            .find(|pending| pending.agent_id == message.recipient_id)
+        {
+            pending
+                .pending_agent_messages
                 .push_back(PendingPrompt::agent_message(text));
         }
-        self.try_advance_queue();
     }
 
     /// Persists `event` to the durable per-session log and folds it
@@ -4591,18 +4616,47 @@ impl Harness {
         source_id: &str,
         query: tau_proto::StartAgentRequest,
     ) -> Result<(), HarnessError> {
+        let query_id = query.query_id.clone();
+        let pending = match self.prepare_start_agent_request(source_id, query) {
+            Ok(Some(pending)) => pending,
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                self.fail_start_agent_request(source_id, query_id, error);
+                return Ok(());
+            }
+        };
+        self.pending_start_agent_requests.push_back(pending);
+        self.drain_pending_start_agent_requests()
+    }
+
+    /// Enqueue a harness-owned delegate start request and return its minted
+    /// agent id.
+    ///
+    /// The caller drains the start-agent scheduler after it has published the
+    /// delegate background placeholder containing this id.
+    pub(crate) fn enqueue_harness_delegate_start_agent_request_without_draining(
+        &mut self,
+        query: tau_proto::StartAgentRequest,
+    ) -> Result<String, String> {
+        let Some(pending) = self.prepare_start_agent_request(HARNESS_CONNECTION_ID, query)? else {
+            return Err("duplicate delegate start-agent request".to_owned());
+        };
+        let agent_id = pending.agent_id.clone();
+        self.pending_start_agent_requests.push_back(pending);
+        Ok(agent_id)
+    }
+
+    fn prepare_start_agent_request(
+        &mut self,
+        source_id: &str,
+        query: tau_proto::StartAgentRequest,
+    ) -> Result<Option<PendingStartAgentRequest>, String> {
         let extension_name = self
             .extensions
             .get(source_id)
             .map(|e| e.name.clone())
             .unwrap_or_else(|| source_id.to_owned());
-        let role = match self.resolve_start_agent_request_role(&query) {
-            Ok(role) => role,
-            Err(error) => {
-                self.fail_start_agent_request(source_id, query.query_id, error);
-                return Ok(());
-            }
-        };
+        let role = self.resolve_start_agent_request_role(&query)?;
         let cid = ConversationId::new(format!("start-agent-{}-{}", extension_name, query.query_id));
         if self.conversations.contains_key(&cid)
             || self
@@ -4614,7 +4668,7 @@ impl Harness {
                 "ignoring duplicate start-agent-request `{}` from `{}` — already in flight",
                 query.query_id, extension_name
             ));
-            return Ok(());
+            return Ok(None);
         }
 
         // Resolve the parent conversation at enqueue time: tool-backed requests
@@ -4626,17 +4680,18 @@ impl Harness {
             .and_then(|call_id| self.tool_conversations.get(call_id))
             .cloned()
             .unwrap_or_else(|| self.default_conversation_id.clone());
+        let agent_id = mint_agent_id_for_role(&role);
 
-        self.pending_start_agent_requests
-            .push_back(PendingStartAgentRequest {
-                source_id: source_id.to_owned(),
-                extension_name,
-                query,
-                role,
-                cid,
-                parent_cid,
-            });
-        self.drain_pending_start_agent_requests()
+        Ok(Some(PendingStartAgentRequest {
+            source_id: source_id.to_owned(),
+            extension_name,
+            query,
+            role,
+            cid,
+            parent_cid,
+            agent_id,
+            pending_agent_messages: VecDeque::new(),
+        }))
     }
 
     /// Dispatch queued `StartAgentRequest`s while the global sub-agent
@@ -4795,6 +4850,8 @@ impl Harness {
             role,
             cid,
             parent_cid,
+            agent_id,
+            pending_agent_messages,
         } = pending;
         let parent_call_id = query.tool_call_id.clone();
         let task_name = query.task_name.clone();
@@ -4838,8 +4895,11 @@ impl Harness {
         conv.task_name = task_name;
         conv.delegate_input_stats = query.input_stats;
         conv.role = conversation_role;
+        conv.agent_id = Some(agent_id.clone());
         conv.delegate_execution_mode = delegate_execution_mode;
         conv.chain_anchor = initial_chain_anchor;
+        conv.pending_prompts = pending_agent_messages;
+        self.agent_conversations.insert(agent_id, cid.clone());
         self.conversations.insert(cid.clone(), conv);
         self.active_start_agent_requests
             .insert(cid.clone(), ActiveStartAgentRequest { execution_mode });
@@ -6261,7 +6321,7 @@ impl Harness {
             }
             self.role_name_for_conversation(conv)
         };
-        let agent_id = format!("{role}_{}", random_agent_id_suffix());
+        let agent_id = mint_agent_id_for_role(&role);
         if let Some(conv) = self.conversations.get_mut(cid) {
             conv.agent_id = Some(agent_id.clone());
         }
@@ -6674,32 +6734,38 @@ impl Harness {
         })
     }
 
-    fn resolve_enabled_tool_name_for_role(
+    fn resolve_enabled_tool_spec_for_role(
         &self,
         requested_name: &ToolName,
         role_name: &str,
-    ) -> Option<(ToolName, ToolName)> {
+    ) -> Option<&tau_proto::ToolSpec> {
         let mut visible_match: Option<&tau_proto::ToolSpec> = None;
         for spec in self.registry.all_tools() {
             if !self.is_tool_enabled_for_role(spec, role_name) {
                 continue;
             }
             if spec.name == *requested_name {
-                return Some((
-                    spec.name.clone(),
-                    self.tool_model_visible_name(spec).clone(),
-                ));
+                return Some(spec);
             }
             if self.tool_model_visible_name(spec) == requested_name && visible_match.is_none() {
                 visible_match = Some(spec);
             }
         }
-        visible_match.map(|spec| {
-            (
-                spec.name.clone(),
-                self.tool_model_visible_name(spec).clone(),
-            )
-        })
+        visible_match
+    }
+
+    fn resolve_enabled_tool_name_for_role(
+        &self,
+        requested_name: &ToolName,
+        role_name: &str,
+    ) -> Option<(ToolName, ToolName)> {
+        self.resolve_enabled_tool_spec_for_role(requested_name, role_name)
+            .map(|spec| {
+                (
+                    spec.name.clone(),
+                    self.tool_model_visible_name(spec).clone(),
+                )
+            })
     }
 
     fn is_tool_enabled_for_role(&self, spec: &tau_proto::ToolSpec, role_name: &str) -> bool {
@@ -7420,26 +7486,18 @@ impl Harness {
             .unwrap_or_else(BackgroundSupport::default_effective)
     }
 
-    /// Same as [`resolve_tool_execution_mode`] but keeps legacy per-call
-    /// compatibility where needed.
+    /// Same as [`resolve_tool_execution_mode`] for a concrete tool call.
     ///
     /// `delegate` registers as `Shared` so multiple sub-agent requests can be
     /// handed to the extension from one parent turn. The delegate call's
     /// `execution_mode` argument belongs to the emitted `StartAgentRequest`,
     /// not to this parent-conversation tool invocation; per-delegation
     /// exclusivity is enforced later by the harness-owned
-    /// `StartAgentRequest` scheduler. The legacy `read_only` argument is
-    /// still accepted for older callers as a shared-mode alias, but it is
-    /// not advertised to agents.
+    /// `StartAgentRequest` scheduler.
     fn resolve_tool_execution_mode_for_call(
         &self,
         call: &AgentToolCall,
     ) -> tau_proto::ToolExecutionMode {
-        if call.name.as_str() == "delegate"
-            && cbor_map_bool(&call.arguments, "read_only").unwrap_or(false)
-        {
-            return tau_proto::ToolExecutionMode::Shared;
-        }
         self.resolve_tool_execution_mode(call.name.as_str())
     }
 
@@ -7490,14 +7548,35 @@ impl Harness {
     }
 
     fn publish_synthetic_background_result(&mut self, call_id: &ToolCallId) {
+        self.publish_synthetic_background_result_inner(call_id, None);
+    }
+
+    /// Publish the instant background placeholder for a delegate, including its
+    /// agent id.
+    pub(crate) fn publish_synthetic_background_result_with_agent_id(
+        &mut self,
+        call_id: &ToolCallId,
+        agent_id: &str,
+    ) {
+        self.publish_synthetic_background_result_inner(call_id, Some(agent_id));
+    }
+
+    fn publish_synthetic_background_result_inner(
+        &mut self,
+        call_id: &ToolCallId,
+        agent_id: Option<&str>,
+    ) {
         let Some(cid) = self.tool_conversations.get(call_id).cloned() else {
             return;
         };
         let Some(tool) = self.pending_tools.get(call_id).cloned() else {
             return;
         };
+        let agent_id_header = agent_id
+            .map(|agent_id| format!("agent_id: {agent_id}\n"))
+            .unwrap_or_default();
         let content = format!(
-            "{}: true\n\nTool call `{call_id}` is running in the background.",
+            "{}: true\n{agent_id_header}\nTool call `{call_id}` is running in the background.",
             tau_proto::TAU_INTERNAL_HEADER_NAME
         );
         let result = ToolResult {
@@ -7994,6 +8073,31 @@ impl Harness {
         self.publish_prompts_as_steered(cid, pending);
     }
 
+    fn reject_agent_tool_call_before_dispatch(
+        &mut self,
+        cid: &ConversationId,
+        call: &AgentToolCall,
+        tool_name: ToolName,
+        message: String,
+    ) {
+        let call_id: ToolCallId = call.id.clone();
+        self.tool_conversations.insert(call_id.clone(), cid.clone());
+        self.publish_for_conversation(
+            cid,
+            Event::ProviderToolError(ToolError {
+                call_id: call_id.clone(),
+                tool_name,
+                tool_type: call.tool_type,
+                message,
+                details: None,
+                display: None,
+                originator: tau_proto::PromptOriginator::User,
+            }),
+        );
+        self.on_tool_call_complete(call_id.as_str());
+        self.clear_tool_call_tracking(call_id.as_str());
+    }
+
     fn execute_agent_tool_call(
         &mut self,
         cid: &ConversationId,
@@ -8002,8 +8106,7 @@ impl Harness {
         let tool_name = call.name.clone();
         let role_name = self.role_name_for_conversation_id(cid).to_owned();
 
-        let Some((internal_tool_name, visible_tool_name)) =
-            self.resolve_enabled_tool_name_for_role(&tool_name, &role_name)
+        let Some(tool_spec) = self.resolve_enabled_tool_spec_for_role(&tool_name, &role_name)
         else {
             let message = if self.has_registered_tool_name(&tool_name) {
                 "tool is not enabled for the current role".to_owned()
@@ -8046,6 +8149,17 @@ impl Harness {
             self.clear_tool_call_tracking(call_id.as_str());
             return Ok(());
         };
+        let internal_tool_name = tool_spec.name.clone();
+        let visible_tool_name = self.tool_model_visible_name(tool_spec).clone();
+        if let Err(error) = validate_tool_arguments(tool_spec, &call.arguments) {
+            self.reject_agent_tool_call_before_dispatch(
+                cid,
+                call,
+                visible_tool_name,
+                format!("invalid arguments for tool `{tool_name}`: {error}"),
+            );
+            return Ok(());
+        }
 
         // Handle harness-owned tools directly.
         if internal_tool_name.as_str() == "skill" {

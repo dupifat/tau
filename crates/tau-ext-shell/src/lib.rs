@@ -113,7 +113,8 @@ where
                         "description": "Optional. Omit to read to end of file (the default and preferred mode). Set this only to continue past a previous truncation, or to fetch a known specific slice of a large file — do NOT pre-slice an ordinary file you haven't already established is large."
                     }
                 },
-                "required": ["path"]
+                "required": ["path"],
+                "additionalProperties": false
             })),
             format: None,
             enabled_by_default: true,
@@ -144,7 +145,8 @@ where
                         "description": "File contents, written verbatim. Embed real newlines directly — do NOT use backslash-n escape sequences."
                     }
                 },
-                "required": ["path", "content"]
+                "required": ["path", "content"],
+                "additionalProperties": false
             })),
             format: None,
             enabled_by_default: true,
@@ -201,11 +203,13 @@ where
                                     "description": "Optional number of lines to search starting at start_line. Defaults to the rest of the file."
                                 }
                             },
-                            "required": ["oldText", "newText"]
+                            "required": ["oldText", "newText"],
+                            "additionalProperties": false
                         }
                     }
                 },
-                "required": ["path", "edits"]
+                "required": ["path", "edits"],
+                "additionalProperties": false
             })),
             format: None,
             enabled_by_default: true,
@@ -272,7 +276,8 @@ where
                         "description": "Maximum number of matches to return (default: 100)"
                     }
                 },
-                "required": ["pattern"]
+                "required": ["pattern"],
+                "additionalProperties": false
             })),
             format: None,
             enabled_by_default: true,
@@ -306,7 +311,8 @@ where
                         "description": "Maximum number of results to return (default: 1000)"
                     }
                 },
-                "required": ["pattern"]
+                "required": ["pattern"],
+                "additionalProperties": false
             })),
             format: None,
             enabled_by_default: true,
@@ -333,7 +339,8 @@ where
                         "type": "integer",
                         "description": "Maximum number of entries to return (default: 500)"
                     }
-                }
+                },
+                "additionalProperties": false
             })),
             format: None,
             enabled_by_default: true,
@@ -374,7 +381,8 @@ where
                         "description": "Optional working directory for the command"
                     }
                 },
-                "required": ["command"]
+                "required": ["command"],
+                "additionalProperties": false
             })),
             format: None,
             enabled_by_default: true,
@@ -414,7 +422,8 @@ where
                         "description": "Optional working directory for the command"
                     }
                 },
-                "required": ["command"]
+                "required": ["command"],
+                "additionalProperties": false
             })),
             format: None,
             enabled_by_default: false,

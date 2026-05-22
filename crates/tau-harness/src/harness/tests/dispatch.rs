@@ -465,6 +465,93 @@ fn tool_invoke_call_ids(events: &Arc<Mutex<Vec<RoutedFrame>>>) -> Vec<String> {
         .collect()
 }
 
+/// Invalid model arguments must be rejected before the logical tool pipeline.
+/// This keeps bad calls out of the event log as `ToolRequest`/`ToolInvoke`
+/// while still returning a provider-facing tool error to the model.
+#[test]
+fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let tool_events = connect_test_tool(&mut h, "conn-strict-tool");
+    let mut spec = shared_test_tool_spec("strict_tool");
+    spec.parameters = Some(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "allowed": { "type": "string" }
+        },
+        "required": ["allowed"],
+        "additionalProperties": false
+    }));
+    h.registry.register("conn-strict-tool", spec);
+
+    let cid = h.default_conversation_id.clone();
+    let spid: SessionPromptId = "sp-invalid-tool-args".into();
+    seed_agent_thinking(&mut h, &cid, spid.as_str());
+    h.prompt_conversations.insert(spid.clone(), cid.clone());
+
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        session_prompt_id: spid,
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "bad-args".into(),
+            name: ToolName::new("strict_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(vec![
+                (
+                    CborValue::Text("allowed".to_owned()),
+                    CborValue::Text("ok".to_owned()),
+                ),
+                (
+                    CborValue::Text("extra".to_owned()),
+                    CborValue::Text("nope".to_owned()),
+                ),
+            ]),
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("provider response handled");
+
+    let mut provider_error = None;
+    let mut logical_events = Vec::new();
+    let mut seq = 0;
+    while let Some(entry) = h.event_log.get_next_from(seq) {
+        seq = entry.seq + 1;
+        match &entry.event {
+            Event::ProviderToolError(error) if error.call_id.as_str() == "bad-args" => {
+                provider_error = Some(error.message.clone());
+            }
+            Event::ToolRequest(request) if request.call_id.as_str() == "bad-args" => {
+                logical_events.push("tool.request");
+            }
+            Event::ToolInvoke(invoke) if invoke.call_id.as_str() == "bad-args" => {
+                logical_events.push("tool.invoke");
+            }
+            Event::ToolError(error) if error.call_id.as_str() == "bad-args" => {
+                logical_events.push("tool.error");
+            }
+            _ => {}
+        }
+    }
+
+    let provider_error = provider_error.expect("provider tool error");
+    assert!(provider_error.contains("invalid arguments for tool `strict_tool`"));
+    assert!(provider_error.contains("unexpected argument `extra`"));
+    assert!(
+        logical_events.is_empty(),
+        "unexpected events: {logical_events:?}"
+    );
+    assert!(tool_invoke_call_ids(&tool_events).is_empty());
+
+    h.shutdown().expect("shutdown");
+}
+
 #[test]
 fn disconnect_with_inflight_and_queued_tool_does_not_invoke_queued_on_dead_connection() {
     // Regression: disconnect cleanup must unregister the provider before a
@@ -6960,8 +7047,10 @@ fn instant_delegate_placeholder_is_committed_before_side_prompt() {
     .expect("main response");
 
     let mut placeholder_seq = None;
+    let mut placeholder_agent_id = None;
     let mut placeholder_count = 0;
     let mut side_prompt_seq = None;
+    let mut side_agent_id = None;
     let mut seq = 0;
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq + 1;
@@ -6972,6 +7061,14 @@ fn instant_delegate_placeholder_is_committed_before_side_prompt() {
             {
                 placeholder_count += 1;
                 placeholder_seq.get_or_insert(entry.seq);
+                if let CborValue::Text(text) = &result.result {
+                    placeholder_agent_id.get_or_insert_with(|| {
+                        text.lines()
+                            .find_map(|line| line.strip_prefix("agent_id: "))
+                            .expect("delegate placeholder agent id header")
+                            .to_owned()
+                    });
+                }
             }
             Event::ToolResult(result)
                 if result.call_id.as_str() == "delegate-call"
@@ -6985,6 +7082,16 @@ fn instant_delegate_placeholder_is_committed_before_side_prompt() {
                     .is_some_and(|prompt_cid| prompt_cid != &cid) =>
             {
                 side_prompt_seq.get_or_insert(entry.seq);
+                side_agent_id.get_or_insert_with(|| {
+                    let prompt_cid = h
+                        .prompt_conversations
+                        .get(&prompt.session_prompt_id)
+                        .expect("side prompt conversation");
+                    h.conversations
+                        .get(prompt_cid)
+                        .and_then(|conv| conv.agent_id.clone())
+                        .expect("side conversation agent id")
+                });
             }
             _ => {}
         }
@@ -6995,6 +7102,10 @@ fn instant_delegate_placeholder_is_committed_before_side_prompt() {
         placeholder_seq.expect("delegate placeholder") < side_prompt_seq.expect("side prompt"),
         "the parent transcript must contain the delegate placeholder before any side prompt is sent",
     );
+    let placeholder_agent_id = placeholder_agent_id.expect("placeholder agent id");
+    let side_agent_id = side_agent_id.expect("side agent id");
+    assert_eq!(placeholder_agent_id, side_agent_id);
+    assert!(placeholder_agent_id.starts_with("engineer_"));
 
     h.shutdown().expect("shutdown");
 }
@@ -7580,30 +7691,13 @@ fn wait_tool_reply_is_folded_into_followup_prompt() {
     h.shutdown().expect("shutdown");
 }
 
-/// Regression: older delegate callers may still send the legacy `read_only`
-/// flag. The harness keeps accepting it as a compatibility alias for shared
-/// execution while the agent-visible schema advertises only `execution_mode`.
+/// Regression: the delegate tool's advertised `execution_mode` argument
+/// controls sub-agent scheduling, not parent-conversation tool scheduling.
 #[test]
-fn legacy_read_only_delegate_argument_maps_to_shared_execution_mode() {
+fn delegate_parent_tool_scheduling_ignores_delegate_execution_mode_argument() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-
-    let legacy_call = AgentToolCall {
-        id: "legacy".to_owned().into(),
-        name: ToolName::new("delegate"),
-        tool_type: tau_proto::ToolType::Function,
-        arguments: CborValue::Map(vec![(
-            CborValue::Text("read_only".to_owned()),
-            CborValue::Bool(true),
-        )]),
-        display: None,
-    };
-    assert_eq!(
-        h.resolve_tool_execution_mode_for_call(&legacy_call),
-        ToolExecutionMode::Shared,
-        "legacy read_only=true remains a shared execution-mode alias"
-    );
 
     h.registry.register(
         "conn-delegate",
@@ -9638,20 +9732,9 @@ fn tool_events_carry_owning_conversation_originator() {
 
     h.selected_model = Some("test/model".into());
     let _ = connect_test_tool(&mut h, "conn-delegate");
-    h.registry.register(
-        "conn-delegate",
-        ToolSpec {
-            name: tau_proto::ToolName::new("delegate"),
-            model_visible_name: None,
-            description: None,
-            parameters: None,
-            tool_type: tau_proto::ToolType::Function,
-            format: None,
-            enabled_by_default: true,
-            execution_mode: ToolExecutionMode::Exclusive,
-            background_support: None,
-        },
-    );
+    let _ = connect_test_tool(&mut h, "conn-origin-tool");
+    h.registry
+        .register("conn-origin-tool", shared_test_tool_spec("origin_tool"));
 
     // Subscribe a sink to tool.request so we can inspect originator.
     let sink = connect_test_tool(&mut h, "test-tool-req-sink");
@@ -9684,7 +9767,7 @@ fn tool_events_carry_owning_conversation_originator() {
         session_prompt_id: main_spid,
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "main-call".into(),
-            name: ToolName::new("delegate"),
+            name: ToolName::new("origin_tool"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(Vec::new()),
         })],
@@ -9730,7 +9813,7 @@ fn tool_events_carry_owning_conversation_originator() {
         session_prompt_id: sub_spid,
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "sub-call".into(),
-            name: ToolName::new("delegate"),
+            name: ToolName::new("origin_tool"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(Vec::new()),
         })],
@@ -9805,6 +9888,7 @@ fn cancel_tool_cancels_delegate_side_conversation() {
             call_id: delegate_call_id.clone(),
             tool_name: ToolName::new("delegate"),
             started_at: std::time::Instant::now(),
+            agent_id: Some("worker_seeded123".to_owned()),
         },
     );
     h.tool_conversations
@@ -9848,6 +9932,7 @@ fn cancel_tool_cancels_delegate_side_conversation() {
             call_id: "nested-delegate-call".into(),
             tool_name: ToolName::new("delegate"),
             started_at: std::time::Instant::now(),
+            agent_id: Some("worker_nested123".to_owned()),
         },
     );
     h.tool_conversations
@@ -9876,6 +9961,8 @@ fn cancel_tool_cancels_delegate_side_conversation() {
             role: "worker".to_owned(),
             cid: ConversationId::new("start-agent-__harness__-delegate-nested"),
             parent_cid: side_cid.clone(),
+            agent_id: "worker_queued".to_owned(),
+            pending_agent_messages: std::collections::VecDeque::new(),
         });
 
     let cancel_call = AgentToolCall {
@@ -10112,8 +10199,9 @@ fn message_tool_unknown_recipient_errors_without_agent_message() {
     h.shutdown().expect("shutdown");
 }
 
-/// Agent-directed messages are hidden from the UI renderer, but the recipient
-/// agent must receive an internal queued prompt with stable markup.
+/// Agent-directed messages are displayed in the UI like every `AgentMessage`,
+/// and the recipient agent receives an internal queued prompt with stable
+/// markup.
 #[test]
 fn message_tool_to_agent_queues_internal_prompt_markup() {
     let td = TempDir::new().expect("tempdir");

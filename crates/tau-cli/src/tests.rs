@@ -5,14 +5,14 @@ use clap::Parser;
 use tau_cli_term::TermHandle;
 use tau_cli_term_raw::{Color, Term};
 use tau_proto::{
-    CborValue, ContentPart, ContextItem, ContextRole, Effort, Event, ExtAgentsMdAvailable,
-    ExtensionReady, HarnessContextUsageChanged, HarnessEffortChanged, HarnessRoleInfo,
-    HarnessRoleSelected, HarnessRolesAvailable, HarnessVerbosityChanged, MessageItem,
-    ProviderResponseFinished, ProviderResponseUpdated, ProviderStopReason, ServiceTier,
-    SessionPromptCreated, SessionPromptQueued, SessionPromptSteered, SessionPromptTerminated,
-    SessionPromptTerminationReason, SessionStartReason, SessionStarted, ThinkingSummary,
-    ToolBackgroundResult, ToolCallItem, ToolCancelled, ToolResult, UiPromptSubmitted,
-    UiRoleUpdateAction, Verbosity,
+    AgentMessage, CborValue, ContentPart, ContextItem, ContextRole, Effort, Event,
+    ExtAgentsMdAvailable, ExtensionReady, HarnessContextUsageChanged, HarnessEffortChanged,
+    HarnessRoleInfo, HarnessRoleSelected, HarnessRolesAvailable, HarnessVerbosityChanged,
+    MessageItem, ProviderResponseFinished, ProviderResponseUpdated, ProviderStopReason,
+    ServiceTier, SessionPromptCreated, SessionPromptQueued, SessionPromptSteered,
+    SessionPromptTerminated, SessionPromptTerminationReason, SessionStartReason, SessionStarted,
+    ThinkingSummary, ToolBackgroundResult, ToolCallItem, ToolCancelled, ToolError, ToolResult,
+    UiPromptSubmitted, UiRoleUpdateAction, Verbosity,
 };
 
 use super::chat::{DraftSlot, is_local_slash_command, should_send_draft_snapshot};
@@ -246,6 +246,41 @@ fn draft_snapshot_is_dropped_after_shutdown() {
     }
 
     assert!(!should_send_draft_snapshot(&handle, 0));
+}
+
+/// `AgentMessage` events are normal history entries, not active blocks. They
+/// must render for every sender/recipient pair and scroll away as history
+/// grows.
+#[test]
+fn agent_messages_render_all_recipients_as_history() {
+    let (_term, handle, vt) = setup(80, 8);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    renderer.handle(&Event::AgentMessage(AgentMessage {
+        session_id: "s1".into(),
+        sender_id: "manager_11111111".to_owned(),
+        recipient_id: "engineer_22222222".to_owned(),
+        message: "hello worker".to_owned(),
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "Messages from manager_11111111 to engineer_22222222:"));
+    assert!(vt.screen_contains(80, "hello worker"));
+
+    for idx in 0..20 {
+        renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: format!("scroll filler {idx}"),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        }));
+    }
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "Messages from manager_11111111 to engineer_22222222:"));
 }
 
 #[test]
@@ -1876,6 +1911,50 @@ fn failed_compaction_renders_error_status() {
     ));
     sync(&handle);
     assert!(vt.screen_contains(80, "compact #226.2k err: provider unavailable"));
+}
+
+/// Schema validation failures only emit `ProviderToolError`. The UI still has
+/// a live block from the preceding assistant tool call, so it must treat that
+/// provider-facing error as terminal and render the error in history.
+#[test]
+fn provider_tool_error_without_logical_tool_error_finishes_live_tool() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    renderer.handle_recorded_at(
+        &Event::ProviderResponseFinished(finished_response(
+            "sp-0",
+            vec![ContextItem::ToolCall(ToolCallItem {
+                call_id: "bad-args".into(),
+                name: tau_proto::ToolName::new("strict_tool"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+            })],
+        )),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    sync(&handle);
+    assert!(vt.screen_contains(80, "strict_tool 0s …"));
+
+    renderer.handle_recorded_at(
+        &Event::ProviderToolError(ToolError {
+            call_id: "bad-args".into(),
+            tool_name: tau_proto::ToolName::new("strict_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            message: "invalid arguments: unexpected argument `extra`".to_owned(),
+            details: None,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        }),
+        tau_proto::UnixMicros::new(2_000_000),
+    );
+    sync(&handle);
+    assert!(vt.screen_contains(80, "err: invalid"));
+    assert!(!vt.screen_contains(80, "strict_tool 0s …"));
 }
 
 #[test]

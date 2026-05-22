@@ -6,7 +6,8 @@ use std::error::Error;
 use std::fmt;
 
 use tau_proto::{
-    ConnectionId, Event, PromptFragment, ToolName, ToolRegister, ToolRequest, ToolSpec,
+    CborValue, ConnectionId, Event, PromptFragment, ToolName, ToolRegister, ToolRequest, ToolSpec,
+    ToolType,
 };
 
 use crate::bus::EventBus;
@@ -46,6 +47,34 @@ pub enum ToolRouteError {
     Route(RouteError),
 }
 
+/// Error returned when a tool call's arguments do not match its JSON schema.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolArgumentValidationError {
+    path: String,
+    message: String,
+}
+
+impl ToolArgumentValidationError {
+    fn new(path: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for ToolArgumentValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.path == "$" {
+            write!(f, "{}", self.message)
+        } else {
+            write!(f, "{}: {}", self.path, self.message)
+        }
+    }
+}
+
+impl Error for ToolArgumentValidationError {}
+
 impl fmt::Display for ToolRouteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -69,6 +98,300 @@ impl Error for ToolRouteError {
 pub struct ToolRouteReport {
     pub provider_connection_id: ConnectionId,
     pub route_report: RouteReport,
+}
+
+/// Validates a model-produced function-tool argument object against the tool's
+/// JSON Schema parameters.
+///
+/// Tau tool schemas intentionally use a small JSON Schema subset: object
+/// properties, required fields, closed objects via `additionalProperties:
+/// false`, primitive `type`, `enum`, array `items`, and numeric/string/array
+/// bounds. Unknown schema keywords are ignored so richer third-party schemas do
+/// not become harness errors.
+pub fn validate_tool_arguments(
+    tool: &ToolSpec,
+    arguments: &CborValue,
+) -> Result<(), ToolArgumentValidationError> {
+    if !matches!(tool.tool_type, ToolType::Function) {
+        return Ok(());
+    }
+    let Some(schema) = tool.parameters.as_ref() else {
+        return Ok(());
+    };
+    validate_json_schema(schema, arguments, "$")
+}
+
+fn validate_json_schema(
+    schema: &serde_json::Value,
+    value: &CborValue,
+    path: &str,
+) -> Result<(), ToolArgumentValidationError> {
+    match schema {
+        serde_json::Value::Bool(true) => return Ok(()),
+        serde_json::Value::Bool(false) => {
+            return Err(ToolArgumentValidationError::new(
+                path,
+                "value is rejected by schema",
+            ));
+        }
+        _ => {}
+    }
+
+    let Some(schema) = schema.as_object() else {
+        return Ok(());
+    };
+
+    if let Some(type_schema) = schema.get("type")
+        && !schema_type_matches(type_schema, value)
+    {
+        return Err(type_error(path, type_schema));
+    }
+
+    if let Some(enum_values) = schema.get("enum").and_then(serde_json::Value::as_array)
+        && !enum_values
+            .iter()
+            .any(|allowed| tau_proto::json_to_cbor(allowed) == *value)
+    {
+        return Err(ToolArgumentValidationError::new(
+            path,
+            "must be one of the schema enum values",
+        ));
+    }
+
+    match value {
+        CborValue::Map(entries) => validate_object_schema(schema, entries, path),
+        CborValue::Array(values) => validate_array_schema(schema, values, path),
+        CborValue::Text(text) => validate_string_schema(schema, text, path),
+        CborValue::Integer(_) | CborValue::Float(_) => validate_number_schema(schema, value, path),
+        _ => Ok(()),
+    }
+}
+
+fn schema_type_matches(type_schema: &serde_json::Value, value: &CborValue) -> bool {
+    match type_schema {
+        serde_json::Value::String(kind) => schema_type_name_matches(kind, value),
+        serde_json::Value::Array(kinds) => kinds.iter().any(|kind| {
+            kind.as_str()
+                .is_some_and(|kind| schema_type_name_matches(kind, value))
+        }),
+        _ => true,
+    }
+}
+
+fn schema_type_name_matches(kind: &str, value: &CborValue) -> bool {
+    match kind {
+        "object" => matches!(value, CborValue::Map(_)),
+        "array" => matches!(value, CborValue::Array(_)),
+        "string" => matches!(value, CborValue::Text(_)),
+        "boolean" => matches!(value, CborValue::Bool(_)),
+        "integer" => matches!(value, CborValue::Integer(_)),
+        "number" => matches!(value, CborValue::Integer(_) | CborValue::Float(_)),
+        "null" => matches!(value, CborValue::Null),
+        _ => true,
+    }
+}
+
+fn type_error(path: &str, type_schema: &serde_json::Value) -> ToolArgumentValidationError {
+    let expected = match type_schema {
+        serde_json::Value::String(kind) => kind.clone(),
+        serde_json::Value::Array(kinds) => kinds
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" or "),
+        _ => "expected schema type".to_owned(),
+    };
+    if path == "$" && expected == "object" {
+        ToolArgumentValidationError::new(path, "arguments must be an object")
+    } else {
+        ToolArgumentValidationError::new(path, format!("must be {expected}"))
+    }
+}
+
+fn validate_object_schema(
+    schema: &serde_json::Map<String, serde_json::Value>,
+    entries: &[(CborValue, CborValue)],
+    path: &str,
+) -> Result<(), ToolArgumentValidationError> {
+    let properties = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object);
+
+    if let Some(required) = schema.get("required").and_then(serde_json::Value::as_array) {
+        for required_name in required.iter().filter_map(serde_json::Value::as_str) {
+            if !entries
+                .iter()
+                .any(|(key, _)| cbor_key_matches(key, required_name))
+            {
+                return Err(missing_required_error(path, required_name));
+            }
+        }
+    }
+
+    for (key, field_value) in entries {
+        let CborValue::Text(field_name) = key else {
+            return Err(ToolArgumentValidationError::new(
+                path,
+                "object keys must be strings",
+            ));
+        };
+        if let Some(field_schema) = properties.and_then(|properties| properties.get(field_name)) {
+            validate_json_schema(field_schema, field_value, &child_path(path, field_name))?;
+            continue;
+        }
+        match schema.get("additionalProperties") {
+            Some(serde_json::Value::Bool(false)) => {
+                return Err(unexpected_property_error(path, field_name));
+            }
+            Some(additional_schema @ serde_json::Value::Object(_)) => {
+                validate_json_schema(
+                    additional_schema,
+                    field_value,
+                    &child_path(path, field_name),
+                )?;
+            }
+            Some(serde_json::Value::Bool(true)) | None => {}
+            Some(_) => {}
+        }
+    }
+
+    Ok(())
+}
+
+fn cbor_key_matches(key: &CborValue, expected: &str) -> bool {
+    matches!(key, CborValue::Text(text) if text == expected)
+}
+
+fn child_path(parent: &str, field: &str) -> String {
+    if parent == "$" {
+        format!("$.{field}")
+    } else {
+        format!("{parent}.{field}")
+    }
+}
+
+fn item_path(parent: &str, index: usize) -> String {
+    format!("{parent}[{index}]")
+}
+
+fn missing_required_error(path: &str, name: &str) -> ToolArgumentValidationError {
+    if path == "$" {
+        ToolArgumentValidationError::new(path, format!("missing required argument `{name}`"))
+    } else {
+        ToolArgumentValidationError::new(path, format!("missing required property `{name}`"))
+    }
+}
+
+fn unexpected_property_error(path: &str, name: &str) -> ToolArgumentValidationError {
+    if path == "$" {
+        ToolArgumentValidationError::new(path, format!("unexpected argument `{name}`"))
+    } else {
+        ToolArgumentValidationError::new(path, format!("unexpected property `{name}`"))
+    }
+}
+
+fn validate_array_schema(
+    schema: &serde_json::Map<String, serde_json::Value>,
+    values: &[CborValue],
+    path: &str,
+) -> Result<(), ToolArgumentValidationError> {
+    if let Some(min_items) = schema
+        .get("minItems")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        && values.len() < min_items
+    {
+        return Err(ToolArgumentValidationError::new(
+            path,
+            format!("must contain at least {min_items} item(s)"),
+        ));
+    }
+    if let Some(max_items) = schema
+        .get("maxItems")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        && max_items < values.len()
+    {
+        return Err(ToolArgumentValidationError::new(
+            path,
+            format!("must contain at most {max_items} item(s)"),
+        ));
+    }
+    if let Some(item_schema) = schema.get("items") {
+        for (idx, item) in values.iter().enumerate() {
+            validate_json_schema(item_schema, item, &item_path(path, idx))?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_string_schema(
+    schema: &serde_json::Map<String, serde_json::Value>,
+    text: &str,
+    path: &str,
+) -> Result<(), ToolArgumentValidationError> {
+    let len = text.chars().count();
+    if let Some(min_len) = schema
+        .get("minLength")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        && len < min_len
+    {
+        return Err(ToolArgumentValidationError::new(
+            path,
+            format!("must contain at least {min_len} character(s)"),
+        ));
+    }
+    if let Some(max_len) = schema
+        .get("maxLength")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        && max_len < len
+    {
+        return Err(ToolArgumentValidationError::new(
+            path,
+            format!("must contain at most {max_len} character(s)"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_number_schema(
+    schema: &serde_json::Map<String, serde_json::Value>,
+    value: &CborValue,
+    path: &str,
+) -> Result<(), ToolArgumentValidationError> {
+    let Some(number) = cbor_number_as_f64(value) else {
+        return Ok(());
+    };
+    if let Some(minimum) = schema.get("minimum").and_then(serde_json::Value::as_f64)
+        && number < minimum
+    {
+        return Err(ToolArgumentValidationError::new(
+            path,
+            format!("must be at least {minimum}"),
+        ));
+    }
+    if let Some(maximum) = schema.get("maximum").and_then(serde_json::Value::as_f64)
+        && maximum < number
+    {
+        return Err(ToolArgumentValidationError::new(
+            path,
+            format!("must be at most {maximum}"),
+        ));
+    }
+    Ok(())
+}
+
+fn cbor_number_as_f64(value: &CborValue) -> Option<f64> {
+    match value {
+        CborValue::Integer(value) => {
+            let value: i128 = (*value).into();
+            Some(value as f64)
+        }
+        CborValue::Float(value) => Some(*value),
+        _ => None,
+    }
 }
 
 /// Live tool registration state keyed by connection and tool name.

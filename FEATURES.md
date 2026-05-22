@@ -245,17 +245,21 @@ agent for a one-sentence idle summary before notifying.
 The harness exposes a `delegate` tool that spawns a side conversation and returns
 its result to the caller, plus a `wait` tool for collecting background tool
 results. Unless the `delegate` call supplies `role`, delegated sub-agents default
-to the `engineer` role. When `role` is supplied, or when the default `engineer`
-role is used, the sub-agent runs with that role's resolved model, model
-parameters, system prompt, and tool profile/filtering. The sub-agent starts with
-a *fresh* context — only the parent's `prompt`, the selected role's system
-prompt, and the selected role's tools — with no visibility into the parent
-conversation's prior turns, tool results, or in-flight state. The same isolation
-applies at every nesting depth, so sub-sub-agents don't see ancestor task framing
-and can't be tricked into re-delegating it. Parent agents are responsible for
-putting everything the sub-agent needs into the `prompt`. Live progress (turns,
-current tool) is shown in the parent UI alongside the delegate's task name and
-role.
+to the `engineer` role. The delegate placeholder and final result include the
+sub-agent `agent_id`, which can be passed to the `message` tool for live
+agent-to-agent notes. `message` can also target the special recipient `user`;
+all messages are rendered in the UI as `Messages from <sender> to <recipient>:`.
+When `role` is supplied, or when the default `engineer` role is used, the
+sub-agent runs with that role's resolved model, model parameters, system prompt,
+and tool profile/filtering. The sub-agent starts with a *fresh* context — only
+the parent's `prompt`, the selected role's system prompt, and the selected
+role's tools — with no visibility into the parent conversation's prior turns,
+tool results, or in-flight state. The same isolation applies at every nesting
+depth, so sub-sub-agents don't see ancestor task framing and can't be tricked
+into re-delegating it. Parent agents are responsible for putting everything the
+sub-agent needs into the `prompt`. Live progress (turns, current tool) is shown
+in the parent UI alongside the delegate's task name and role. See
+[`docs/agent-messaging.md`](docs/agent-messaging.md) for messaging examples.
 
 ### Web search extensions
 

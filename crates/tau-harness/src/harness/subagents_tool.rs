@@ -34,6 +34,8 @@ pub(crate) struct PendingHarnessDelegate {
     pub(crate) tool_name: ToolName,
     /// Wall-clock start time used for slow-call duration metadata.
     pub(crate) started_at: Instant,
+    /// Agent id allocated for the side conversation, when it started.
+    pub(crate) agent_id: Option<String>,
 }
 
 #[derive(Default)]
@@ -215,28 +217,47 @@ impl Harness {
             query_id.clone(),
             PendingHarnessDelegate {
                 call_id: call_id.clone(),
-                tool_name: visible_tool_name,
+                tool_name: visible_tool_name.clone(),
                 started_at: Instant::now(),
+                agent_id: None,
             },
         );
+        let start_request = tau_proto::StartAgentRequest {
+            query_id: query_id.clone(),
+            instruction: format!("{DELEGATE_PREFIX}{}", parsed.prompt),
+            role: parsed.role,
+            execution_mode: parsed.execution_mode,
+            input_stats: ToolDisplayStats::for_text(&parsed.prompt),
+            tool_call_id: Some(call_id.clone()),
+            task_name: Some(parsed.task_name),
+        };
+        let agent_id = match self
+            .enqueue_harness_delegate_start_agent_request_without_draining(start_request)
+        {
+            Ok(agent_id) => agent_id,
+            Err(message) => {
+                self.subagents.pending_delegates.remove(&query_id);
+                self.finish_harness_owned_tool_with_error(
+                    cid,
+                    call_id,
+                    visible_tool_name,
+                    call.tool_type,
+                    message,
+                    Some(call.arguments.clone()),
+                );
+                return Ok(());
+            }
+        };
+        if let Some(pending) = self.subagents.pending_delegates.get_mut(&query_id) {
+            pending.agent_id = Some(agent_id.clone());
+        }
         if self.tool_turn.mark_backgrounded(&call_id) {
-            self.publish_synthetic_background_result(&call_id);
+            self.publish_synthetic_background_result_with_agent_id(&call_id, &agent_id);
         }
         // `delegate` is harness-owned and already inside the main event loop, so
         // publishing a bus event would only echo an internal command. Use the
-        // same shared handler that external `agent.start_request` events reach.
-        self.handle_start_agent_request(
-            HARNESS_CONNECTION_ID,
-            tau_proto::StartAgentRequest {
-                query_id,
-                instruction: format!("{DELEGATE_PREFIX}{}", parsed.prompt),
-                role: parsed.role,
-                execution_mode: parsed.execution_mode,
-                input_stats: ToolDisplayStats::for_text(&parsed.prompt),
-                tool_call_id: Some(call_id),
-                task_name: Some(parsed.task_name),
-            },
-        )
+        // same shared scheduler that external `agent.start_request` events reach.
+        self.drain_pending_start_agent_requests()
     }
 
     /// Handle the harness-owned `message` tool call inline.
@@ -253,7 +274,7 @@ impl Harness {
                 .ensure_agent_id_for_conversation(cid)
                 .ok_or_else(|| "sender conversation no longer exists".to_owned())?;
             if parsed.recipient_id != "user"
-                && !self.agent_conversations.contains_key(&parsed.recipient_id)
+                && !self.agent_message_recipient_exists(&parsed.recipient_id)
             {
                 return Err(format!(
                     "unknown message recipient: `{}`",
@@ -375,6 +396,7 @@ impl Harness {
             return;
         };
         let duration_seconds = delegate_duration_seconds(pending.started_at.elapsed());
+        let agent_id = pending.agent_id.clone();
         let call_id = pending.call_id.clone();
         let owner_cid = self
             .tool_conversations
@@ -387,7 +409,7 @@ impl Harness {
                 tool_name: pending.tool_name,
                 tool_type: ToolType::Function,
                 message,
-                details: delegate_error_details(duration_seconds),
+                details: delegate_error_details(duration_seconds, agent_id.as_deref()),
                 display: None,
                 originator: tau_proto::PromptOriginator::User,
             };
@@ -410,7 +432,7 @@ impl Harness {
                 call_id: call_id.clone(),
                 tool_name: pending.tool_name,
                 tool_type: ToolType::Function,
-                result: delegate_result_value(text, duration_seconds),
+                result: delegate_result_value(text, duration_seconds, agent_id.as_deref()),
                 kind: ToolResultKind::Final,
                 display: None,
                 originator: tau_proto::PromptOriginator::User,
@@ -557,7 +579,7 @@ fn delegate_tool_spec() -> ToolSpec {
     ToolSpec {
         name: ToolName::new(DELEGATE_TOOL_NAME),
         model_visible_name: None,
-        description: Some("Delegate a self-contained sub-task to a fresh sub-agent that runs with its own context and tools, and returns only its final text answer. Use it for: open-ended exploration where step count is unpredictable; large search/read sweeps whose intermediate output would otherwise clutter this conversation; parallel work — multiple delegations with `execution_mode: \"shared\"` or compatible `execution_mode: \"update\"` can overlap globally. Use `execution_mode: \"update\"` when the sub-agent may update shared state and should not overlap with another update or exclusive sub-agent. Use `execution_mode: \"exclusive\"` when the sub-agent needs to run alone: it waits for all other sub-agent delegations and blocks later independent ones until it finishes. Skip it when the target is already known (use direct tools like `read`/`grep`/`shell` instead) or when the task requires synthesis you should do yourself — don't push 'based on findings, fix the bug' onto a sub-agent; investigate first, then delegate the concrete change. The sub-agent starts with a *clean* conversation: it sees ONLY your `prompt`, plus its tools and system prompt. It cannot see this conversation's prior turns, your reasoning, files you've read, or earlier tool results — and that isolation applies at every nesting depth, so a sub-agent's own delegations are equally fresh. You must therefore brief the sub-agent fully: state the goal, hand it every fact it needs (absolute file paths, exact symbols, code snippets, prior findings, constraints, format of the answer you want), and frame the sub-task as if writing to a teammate who just walked into the room. Terse command-style prompts produce shallow, generic work; missing context produces wrong answers.".to_owned()),
+        description: Some("Delegate a self-contained sub-task to a fresh sub-agent that runs with its own context and tools, and returns only its final text answer. The instant background placeholder and final result include an `agent_id` header/value you can pass to `message`. Use it for: open-ended exploration where step count is unpredictable; large search/read sweeps whose intermediate output would otherwise clutter this conversation; parallel work — multiple delegations with `execution_mode: \"shared\"` or compatible `execution_mode: \"update\"` can overlap globally. Use `execution_mode: \"update\"` when the sub-agent may update shared state and should not overlap with another update or exclusive sub-agent. Use `execution_mode: \"exclusive\"` when the sub-agent needs to run alone: it waits for all other sub-agent delegations and blocks later independent ones until it finishes. Skip it when the target is already known (use direct tools like `read`/`grep`/`shell` instead) or when the task requires synthesis you should do yourself — don't push 'based on findings, fix the bug' onto a sub-agent; investigate first, then delegate the concrete change. The sub-agent starts with a *clean* conversation: it sees ONLY your `prompt`, plus its tools and system prompt. It cannot see this conversation's prior turns, your reasoning, files you've read, or earlier tool results — and that isolation applies at every nesting depth, so a sub-agent's own delegations are equally fresh. You must therefore brief the sub-agent fully: state the goal, hand it every fact it needs (absolute file paths, exact symbols, code snippets, prior findings, constraints, format of the answer you want), and frame the sub-task as if writing to a teammate who just walked into the room. Terse command-style prompts produce shallow, generic work; missing context produces wrong answers.".to_owned()),
         tool_type: ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
@@ -567,7 +589,8 @@ fn delegate_tool_spec() -> ToolSpec {
                 "execution_mode": { "type": "string", "enum": ["shared", "update", "exclusive"], "description": "Use `shared` when the sub-task can safely overlap globally with other shared/update sub-agent delegations. Use `update` when it may change shared state: it can overlap with shared sub-agents, but not update or exclusive ones. Use `exclusive` when it must run alone: it waits for all other sub-agent delegations and blocks later independent ones. Default: `shared`." },
                 "role": { "type": "string", "description": "Optional sub-agent role to use. When omitted, Tau defaults delegate calls to `engineer` if that role is available and enabled." }
             },
-            "required": ["task_name", "prompt"]
+            "required": ["task_name", "prompt"],
+            "additionalProperties": false
         })),
         format: None,
         enabled_by_default: true,
@@ -580,7 +603,7 @@ fn message_tool_spec() -> ToolSpec {
     ToolSpec {
         name: ToolName::new(MESSAGE_TOOL_NAME),
         model_visible_name: None,
-        description: Some("Send a message to another live agent or to the user. Use recipient_id `user` to display to the user, or an agent_id for a live agent. Requires `recipient_id` and `message`.".to_owned()),
+        description: Some("Send a message to another live or pending agent, or to the user. Use recipient_id `user` to display to the user, or an `agent_id` returned by `delegate`; all messages are shown in the UI. A non-user recipient also receives a hidden prompt. Requires `recipient_id` and `message`.".to_owned()),
         tool_type: ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
@@ -588,7 +611,8 @@ fn message_tool_spec() -> ToolSpec {
                 "recipient_id": { "type": "string", "description": "Recipient agent_id, or the special value `user`." },
                 "message": { "type": "string", "description": "Message body." }
             },
-            "required": ["recipient_id", "message"]
+            "required": ["recipient_id", "message"],
+            "additionalProperties": false
         })),
         format: None,
         enabled_by_default: true,
@@ -606,7 +630,8 @@ fn cancel_tool_spec() -> ToolSpec {
         parameters: Some(serde_json::json!({
             "type": "object",
             "properties": { "tool_call_id": { "type": "string", "description": "Required id of the running supported tool call to cancel." } },
-            "required": ["tool_call_id"]
+            "required": ["tool_call_id"],
+            "additionalProperties": false
         })),
         format: None,
         enabled_by_default: true,
@@ -623,7 +648,8 @@ fn wait_tool_spec() -> ToolSpec {
         tool_type: ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
-            "properties": { "tool_call_id": { "type": "string", "description": "Optional. When set, wait for this specific background tool call. When omitted, wait for the first background tool call in this conversation to finish." } }
+            "properties": { "tool_call_id": { "type": "string", "description": "Optional. When set, wait for this specific background tool call. When omitted, wait for the first background tool call in this conversation to finish." } },
+            "additionalProperties": false
         })),
         format: None,
         enabled_by_default: true,
@@ -764,33 +790,59 @@ fn delegate_duration_seconds(elapsed: Duration) -> Option<u64> {
     }
 }
 
-fn delegate_result_value(text: String, duration_seconds: Option<u64>) -> CborValue {
-    let Some(duration_seconds) = duration_seconds else {
+fn delegate_result_value(
+    text: String,
+    duration_seconds: Option<u64>,
+    agent_id: Option<&str>,
+) -> CborValue {
+    if duration_seconds.is_none() && agent_id.is_none() {
         return CborValue::Text(text);
-    };
-    CborValue::Map(delegate_detail_entries(Some(text), duration_seconds))
+    }
+    CborValue::Map(delegate_detail_entries(
+        Some(text),
+        duration_seconds,
+        agent_id,
+    ))
 }
 
-fn delegate_error_details(duration_seconds: Option<u64>) -> Option<CborValue> {
-    duration_seconds
-        .map(|duration_seconds| CborValue::Map(delegate_detail_entries(None, duration_seconds)))
+fn delegate_error_details(
+    duration_seconds: Option<u64>,
+    agent_id: Option<&str>,
+) -> Option<CborValue> {
+    if duration_seconds.is_none() && agent_id.is_none() {
+        return None;
+    }
+    Some(CborValue::Map(delegate_detail_entries(
+        None,
+        duration_seconds,
+        agent_id,
+    )))
 }
 
 fn delegate_detail_entries(
     output: Option<String>,
-    duration_seconds: u64,
+    duration_seconds: Option<u64>,
+    agent_id: Option<&str>,
 ) -> Vec<(CborValue, CborValue)> {
     let mut entries = Vec::new();
+    if let Some(agent_id) = agent_id {
+        entries.push((
+            CborValue::Text("agent_id".to_owned()),
+            CborValue::Text(agent_id.to_owned()),
+        ));
+    }
+    if let Some(duration_seconds) = duration_seconds {
+        entries.push((
+            CborValue::Text("duration_seconds".to_owned()),
+            CborValue::Integer((duration_seconds as i64).into()),
+        ));
+    }
     if let Some(output) = output {
         entries.push((
             CborValue::Text("output".to_owned()),
             CborValue::Text(output),
         ));
     }
-    entries.push((
-        CborValue::Text("duration_seconds".to_owned()),
-        CborValue::Integer((duration_seconds as i64).into()),
-    ));
     entries
 }
 

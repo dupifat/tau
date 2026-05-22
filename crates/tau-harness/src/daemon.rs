@@ -50,6 +50,13 @@ impl From<SessionLaunchStatus> for tau_proto::SessionDirStatus {
     }
 }
 
+fn session_start_reason(status: SessionLaunchStatus) -> tau_proto::SessionStartReason {
+    match status {
+        SessionLaunchStatus::New => tau_proto::SessionStartReason::Initial,
+        SessionLaunchStatus::Resumed => tau_proto::SessionStartReason::Resume,
+    }
+}
+
 /// Serve-loop options for daemon mode.
 #[derive(Clone, Debug, Eq, PartialEq, bon::Builder)]
 pub struct ServeOptions {
@@ -147,7 +154,13 @@ pub fn run_embedded_message_with_options(
         });
     let config =
         resolve_config(None).map_err(|error| HarnessError::Participant(error.to_string()))?;
-    let mut harness = Harness::from_config(&config, &state_dir, dirs, session_id)?;
+    let mut harness = Harness::from_config(
+        &config,
+        &state_dir,
+        dirs,
+        session_id,
+        tau_proto::SessionStartReason::Initial,
+    )?;
     let mut outcome = match harness.send_user_message(session_id, message, None) {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -176,8 +189,14 @@ pub fn run_embedded_message_with_echo(
         config_dir: Some(state_dir.join("config")),
         state_dir: Some(state_dir.join("runtime")),
     };
-    let mut harness =
-        Harness::new_with_provider(state_dir, dirs, echo_runner, echo_tools(), session_id)?;
+    let mut harness = Harness::new_with_provider(
+        state_dir,
+        dirs,
+        echo_runner,
+        echo_tools(),
+        session_id,
+        tau_proto::SessionStartReason::Initial,
+    )?;
     let mut outcome = match harness.send_user_message(session_id, message, None) {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -227,7 +246,13 @@ pub fn run_daemon(
         });
     let config =
         resolve_config(None).map_err(|error| HarnessError::Participant(error.to_string()))?;
-    let mut harness = Harness::from_config(&config, state_dir, dirs, eager_session_id)?;
+    let mut harness = Harness::from_config(
+        &config,
+        state_dir,
+        dirs,
+        eager_session_id,
+        session_start_reason(options.session_status),
+    )?;
 
     let tx = harness.tx.clone();
     thread::spawn(move || {
@@ -267,8 +292,14 @@ pub fn run_daemon_with_echo(
             config_dir: Some(state_dir.join("config")),
             state_dir: Some(state_dir.join("runtime")),
         });
-    let mut harness =
-        Harness::new_with_provider(state_dir, dirs, echo_runner, echo_tools(), eager_session_id)?;
+    let mut harness = Harness::new_with_provider(
+        state_dir,
+        dirs,
+        echo_runner,
+        echo_tools(),
+        eager_session_id,
+        session_start_reason(options.session_status),
+    )?;
 
     let tx = harness.tx.clone();
     thread::spawn(move || {
@@ -297,7 +328,13 @@ pub fn run_daemon_with_config(
     let state_dir = state_dir.into();
     let listener = bind_listener(&socket_path)?;
     let dirs = options.dirs.clone().unwrap_or_default();
-    let mut harness = Harness::from_config(config, state_dir, dirs, eager_session_id)?;
+    let mut harness = Harness::from_config(
+        config,
+        state_dir,
+        dirs,
+        eager_session_id,
+        session_start_reason(options.session_status),
+    )?;
 
     let tx = harness.tx.clone();
     thread::spawn(move || {
@@ -536,7 +573,13 @@ pub fn run_harness_daemon(
     let sessions_dir = tau_config::settings::sessions_dir_of(&state_dir);
     let dirs = options.dirs.clone().unwrap_or_default();
     tracing::debug!(target: "tau_harness::startup", state_dir = %state_dir.display(), elapsed_ms = startup_started_at.elapsed().as_millis(), "constructing harness");
-    let mut harness = Harness::from_config(config, &state_dir, dirs, eager_session_id)?;
+    let mut harness = Harness::from_config(
+        config,
+        &state_dir,
+        dirs,
+        eager_session_id,
+        session_start_reason(options.session_status),
+    )?;
     tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "harness constructed");
     harness.publish_event(
         None,

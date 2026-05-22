@@ -974,6 +974,7 @@ impl Harness {
         provider_runner: ProviderRunner,
         tools: Vec<InProcessTool>,
         eager_session_id: &str,
+        eager_session_start_reason: tau_proto::SessionStartReason,
     ) -> Result<Self, HarnessError> {
         let state_dir = state_dir.into();
         let sessions_dir = tau_config::settings::sessions_dir_of(&state_dir);
@@ -1174,10 +1175,7 @@ impl Harness {
         // Every past agent that touched this code has "noticed" that
         // the CLI uses `chat-<ts>` session ids and concluded the eager
         // init is wasted work. It isn't. Please resist the urge.
-        harness.start_session_init(
-            eager_session_id.into(),
-            tau_proto::SessionStartReason::Initial,
-        );
+        harness.start_session_init(eager_session_id.into(), eager_session_start_reason);
         harness.wait_for_session_init()?;
         Ok(harness)
     }
@@ -1188,6 +1186,7 @@ impl Harness {
         state_dir: impl Into<PathBuf>,
         dirs: tau_config::settings::TauDirs,
         eager_session_id: &str,
+        eager_session_start_reason: tau_proto::SessionStartReason,
     ) -> Result<Self, HarnessError> {
         let startup_started_at = Instant::now();
         tracing::debug!(target: "tau_harness::startup", eager_session_id, "constructing harness from config");
@@ -1371,10 +1370,7 @@ impl Harness {
         harness.emit_startup_settings_errors(harness_settings_error);
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "config checks complete");
 
-        harness.start_session_init(
-            eager_session_id.into(),
-            tau_proto::SessionStartReason::Initial,
-        );
+        harness.start_session_init(eager_session_id.into(), eager_session_start_reason);
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "session init started");
         harness.wait_for_session_init()?;
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "session init complete");
@@ -6841,6 +6837,7 @@ impl Harness {
             &state_dir,
             tau_config::settings::TauDirs::default(),
             "s1",
+            tau_proto::SessionStartReason::Initial,
         )?;
         harness.selected_model = Some("test/model".parse().expect("model id"));
 

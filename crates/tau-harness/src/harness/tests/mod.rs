@@ -101,6 +101,33 @@ fn echo_harness_with_dirs(
     state_dir: impl Into<PathBuf>,
     dirs: tau_config::settings::TauDirs,
 ) -> Result<Harness, HarnessError> {
+    echo_harness_with_dirs_and_start_reason(
+        session_id,
+        state_dir,
+        dirs,
+        tau_proto::SessionStartReason::Initial,
+    )
+}
+
+fn echo_harness_with_start_reason(
+    session_id: &str,
+    state_dir: impl Into<PathBuf>,
+    start_reason: tau_proto::SessionStartReason,
+) -> Result<Harness, HarnessError> {
+    let state_dir = state_dir.into();
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(state_dir.join("config")),
+        state_dir: Some(state_dir.join("runtime")),
+    };
+    echo_harness_with_dirs_and_start_reason(session_id, state_dir, dirs, start_reason)
+}
+
+fn echo_harness_with_dirs_and_start_reason(
+    session_id: &str,
+    state_dir: impl Into<PathBuf>,
+    dirs: tau_config::settings::TauDirs,
+    start_reason: tau_proto::SessionStartReason,
+) -> Result<Harness, HarnessError> {
     fn shell_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
         tau_ext_shell::run(r, w).map_err(|e| e.to_string())
     }
@@ -113,6 +140,7 @@ fn echo_harness_with_dirs(
             runner: shell_runner,
         }],
         session_id,
+        start_reason,
     )
 }
 
@@ -163,7 +191,14 @@ fn quiet_provider_harness(state_dir: impl Into<PathBuf>) -> Result<Harness, Harn
         config_dir: Some(state_dir.join("config")),
         state_dir: Some(state_dir.join("runtime")),
     };
-    Harness::new_with_provider(state_dir, dirs, quiet_provider_runner, Vec::new(), "s1")
+    Harness::new_with_provider(
+        state_dir,
+        dirs,
+        quiet_provider_runner,
+        Vec::new(),
+        "s1",
+        tau_proto::SessionStartReason::Initial,
+    )
 }
 
 struct TestSink {

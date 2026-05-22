@@ -10006,7 +10006,7 @@ fn cancel_tool_cancels_delegate_side_conversation() {
         event,
         Event::ToolResult(result)
             if result.call_id.as_str() == "cancel-call"
-                && result.result == CborValue::Text("Tool cancelation sent".to_owned())
+                && result.result == CborValue::Text("Tool cancellation sent".to_owned())
     )));
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
@@ -10058,7 +10058,7 @@ fn cancel_tool_cancels_delegate_side_conversation() {
     )));
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
-        Event::HarnessInfo(info) if info.message.contains("tool call cancelation request")
+        Event::HarnessInfo(info) if info.message.contains("tool call cancellation request")
     )));
     assert!(!h.conversations.contains_key(&side_cid));
     assert!(!h.prompt_conversations.contains_key(&side_spid));

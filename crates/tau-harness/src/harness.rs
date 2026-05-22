@@ -3870,7 +3870,7 @@ impl Harness {
             !is_canceled
         });
         self.stopped_agent_ids.extend(stopped_pending_agent_ids);
-        self.emit_info("tool call cancelation request");
+        self.emit_info("tool call cancellation request");
         self.cancel_delegate_side_conversation(target_call_id);
         self.complete_harness_delegate_inner(
             &self.default_conversation_id.clone(),

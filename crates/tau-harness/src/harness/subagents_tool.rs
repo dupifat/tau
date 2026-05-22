@@ -370,7 +370,7 @@ impl Harness {
                 call_id,
                 visible_tool_name,
                 call.tool_type,
-                "Tool cancelation sent".to_owned(),
+                "Tool cancellation sent".to_owned(),
                 None,
             ),
             Err(message) => self.finish_harness_owned_tool_with_error(

@@ -40,8 +40,17 @@ pub(crate) fn prompt_input_placeholder(
 ) -> tau_cli_term::StyledText {
     let role = role.unwrap_or("agent");
     let mut text = ThemedText::new();
-    let style = text.add_style(tau_themes::names::STATUS_ROLE);
-    text.push(style, format!("Write message to the {role}..."));
+    let placeholder_style = text.add_style(tau_themes::names::PROMPT_PLACEHOLDER);
+    let role_style = text.add_style(tau_themes::names::STATUS_ROLE);
+
+    text.push_tree(SpanTree::span(
+        placeholder_style,
+        vec![
+            SpanTree::text("Write message to the "),
+            SpanTree::span(role_style, vec![SpanTree::text(role)]),
+            SpanTree::text("..."),
+        ],
+    ));
     tau_cli_term::resolve::themed_text(theme, &text)
 }
 
@@ -182,15 +191,32 @@ mod tests {
     }
 
     #[test]
-    fn prompt_input_placeholder_uses_status_role_style() {
-        let theme = tau_themes::Theme::builtin();
+    fn prompt_input_placeholder_keeps_placeholder_style_around_role_style() {
+        let theme = tau_themes::Theme::parse(
+            r##"
+            {
+                styles: {
+                    "prompt.placeholder": { fg: "dark_grey", italic: true },
+                    "status.role": { fg: "cyan", bold: true },
+                }
+            }
+            "##,
+        )
+        .expect("test theme parses");
         let prompt = prompt_input_placeholder(&theme, Some("engineer"));
+        let spans = prompt.spans();
 
-        assert_eq!(prompt.spans()[0].text, "Write message to the engineer...");
-        assert_eq!(
-            prompt.spans()[0].style,
-            tau_cli_term::resolve::resolve(&theme, tau_themes::names::STATUS_ROLE)
-        );
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].text, "Write message to the ");
+        assert_eq!(spans[0].style.fg, Some(tau_cli_term::Color::DarkGrey));
+        assert!(spans[0].style.italic);
+        assert_eq!(spans[1].text, "engineer");
+        assert_eq!(spans[1].style.fg, Some(tau_cli_term::Color::Cyan));
+        assert!(spans[1].style.bold);
+        assert!(spans[1].style.italic);
+        assert_eq!(spans[2].text, "...");
+        assert_eq!(spans[2].style.fg, Some(tau_cli_term::Color::DarkGrey));
+        assert!(spans[2].style.italic);
     }
 
     #[test]

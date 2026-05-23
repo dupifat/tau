@@ -1,6 +1,7 @@
 //! Interactive chat as a socket client of the harness daemon: input
 //! loop, draft debouncer, and the threading glue that joins them.
 
+use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
@@ -86,6 +87,7 @@ fn send_current_role_update(
 fn cycle_role_in_groups(
     writer: &WriterHandle,
     current_role_state: &Arc<Mutex<Option<String>>>,
+    role_group_memory: &Arc<Mutex<HashMap<String, String>>>,
     groups: &[tau_proto::HarnessRoleGroup],
     alternate: bool,
     print_local: &impl Fn(&str),
@@ -95,7 +97,48 @@ fn cycle_role_in_groups(
         return;
     }
     let current = current_role_state.lock().ok().and_then(|role| role.clone());
-    let current_pos = current.as_deref().and_then(|current| {
+    let mut memory = role_group_memory
+        .lock()
+        .map(|memory| memory.clone())
+        .unwrap_or_default();
+    remember_group_role(&mut memory, groups, current.as_deref());
+    let Some(next) = next_role_in_groups(current.as_deref(), groups, alternate, &memory) else {
+        print_local("role-cycle: no agent roles are available yet");
+        return;
+    };
+    remember_group_role(&mut memory, groups, Some(&next));
+    if let Ok(mut shared_memory) = role_group_memory.lock() {
+        *shared_memory = memory;
+    }
+    let _ = send_event(
+        writer,
+        &Event::UiRoleSelect(tau_proto::UiRoleSelect { role: next }),
+    );
+}
+
+fn remember_group_role(
+    memory: &mut HashMap<String, String>,
+    groups: &[tau_proto::HarnessRoleGroup],
+    role: Option<&str>,
+) {
+    let Some(role) = role else {
+        return;
+    };
+    if let Some(group) = groups
+        .iter()
+        .find(|group| group.roles.iter().any(|candidate| candidate == role))
+    {
+        memory.insert(group.name.clone(), role.to_owned());
+    }
+}
+
+fn next_role_in_groups(
+    current: Option<&str>,
+    groups: &[tau_proto::HarnessRoleGroup],
+    alternate: bool,
+    memory: &HashMap<String, String>,
+) -> Option<String> {
+    let current_pos = current.and_then(|current| {
         groups.iter().enumerate().find_map(|(group_index, group)| {
             group
                 .roles
@@ -104,18 +147,18 @@ fn cycle_role_in_groups(
                 .map(|role_index| (group_index, role_index))
         })
     });
-    let next = if alternate {
+    if alternate {
         let (group_index, role_index) = current_pos.unwrap_or((0, 0));
-        let roles = &groups[group_index].roles;
-        roles[(role_index + 1) % roles.len()].clone()
-    } else {
-        let next_group = current_pos.map_or(0, |(group_index, _)| (group_index + 1) % groups.len());
-        groups[next_group].roles[0].clone()
-    };
-    let _ = send_event(
-        writer,
-        &Event::UiRoleSelect(tau_proto::UiRoleSelect { role: next }),
-    );
+        let roles = groups.get(group_index)?.roles.as_slice();
+        return roles.get((role_index + 1) % roles.len()).cloned();
+    }
+    let next_group = current_pos.map_or(0, |(group_index, _)| (group_index + 1) % groups.len());
+    let group = groups.get(next_group)?;
+    memory
+        .get(&group.name)
+        .filter(|role| group.roles.iter().any(|candidate| candidate == *role))
+        .cloned()
+        .or_else(|| group.roles.first().cloned())
 }
 
 fn cycle_role(
@@ -557,6 +600,7 @@ pub(crate) fn run_chat(
     let current_role_state = renderer.current_role_state();
     let roles_available = renderer.roles_available();
     let role_groups_available = renderer.role_groups_available();
+    let role_group_memory = renderer.role_group_memory();
     let editor_context = renderer.editor_context();
     term.set_editor_context_handle(editor_context.clone());
     let _renderer = std::thread::spawn(move || {
@@ -600,6 +644,7 @@ pub(crate) fn run_chat(
             current_role_state,
             roles_available,
             role_groups_available,
+            role_group_memory,
             theme,
             agent_in_progress,
             renderer_tx: event_tx,
@@ -719,6 +764,7 @@ struct TerminalInputLoopCtx {
     current_role_state: Arc<Mutex<Option<String>>>,
     roles_available: Arc<Mutex<Vec<String>>>,
     role_groups_available: Arc<Mutex<Vec<tau_proto::HarnessRoleGroup>>>,
+    role_group_memory: Arc<Mutex<HashMap<String, String>>>,
     theme: tau_themes::Theme,
     agent_in_progress: Arc<std::sync::atomic::AtomicBool>,
     renderer_tx: mpsc::Sender<RendererCmd>,
@@ -1223,6 +1269,7 @@ impl<'a> TerminalInputSession<'a> {
             cycle_role_in_groups(
                 self.writer,
                 &self.ctx.current_role_state,
+                &self.ctx.role_group_memory,
                 &groups,
                 false,
                 &|message| output.system_info(message),
@@ -1244,6 +1291,7 @@ impl<'a> TerminalInputSession<'a> {
         cycle_role_in_groups(
             self.writer,
             &self.ctx.current_role_state,
+            &self.ctx.role_group_memory,
             &groups,
             true,
             &|message| output.system_info(message),
@@ -1488,4 +1536,58 @@ fn send_shell_command(
             include_in_context,
         }),
     )
+}
+
+#[cfg(test)]
+mod role_cycle_tests {
+    use super::*;
+
+    fn groups() -> Vec<tau_proto::HarnessRoleGroup> {
+        vec![
+            tau_proto::HarnessRoleGroup {
+                name: "engineer".to_owned(),
+                roles: vec![
+                    "junior-engineer".to_owned(),
+                    "senior-engineer".to_owned(),
+                    "staff-engineer".to_owned(),
+                ],
+            },
+            tau_proto::HarnessRoleGroup {
+                name: "assistant".to_owned(),
+                roles: vec!["assistant".to_owned()],
+            },
+            tau_proto::HarnessRoleGroup {
+                name: "manager".to_owned(),
+                roles: vec!["manager".to_owned()],
+            },
+        ]
+    }
+
+    #[test]
+    fn group_cycle_returns_to_last_runtime_role_for_group() {
+        // Tab moves between groups, but returning to a group should restore the
+        // role the user last used in that group during this process.
+        let groups = groups();
+        let mut memory = HashMap::new();
+        memory.insert("engineer".to_owned(), "staff-engineer".to_owned());
+
+        assert_eq!(
+            next_role_in_groups(Some("manager"), &groups, false, &memory).as_deref(),
+            Some("staff-engineer")
+        );
+    }
+
+    #[test]
+    fn group_cycle_ignores_stale_runtime_group_memory() {
+        // Role availability can change after startup, so stale remembered roles
+        // must not win over the currently configured group contents.
+        let groups = groups();
+        let mut memory = HashMap::new();
+        memory.insert("engineer".to_owned(), "missing-engineer".to_owned());
+
+        assert_eq!(
+            next_role_in_groups(Some("manager"), &groups, false, &memory).as_deref(),
+            Some("junior-engineer")
+        );
+    }
 }

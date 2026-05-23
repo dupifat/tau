@@ -182,6 +182,8 @@ pub(crate) struct EventRenderer {
     roles_available: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// Shared ordered role groups for input-thread role cycling.
     role_groups_available: std::sync::Arc<std::sync::Mutex<Vec<tau_proto::HarnessRoleGroup>>>,
+    /// Last selected role per role group for in-memory group cycling.
+    role_group_memory: std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>,
     /// Shared verbosity mirror kept symmetric with `effort_state`.
     verbosity_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
     /// Shared thinking-summary mirror. Kept symmetric with the
@@ -894,6 +896,7 @@ impl EventRenderer {
             current_role_state: std::sync::Arc::new(std::sync::Mutex::new(None)),
             roles_available: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             role_groups_available: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            role_group_memory: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             verbosity_state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
                 tau_proto::Verbosity::default().as_u8(),
             )),
@@ -974,6 +977,14 @@ impl EventRenderer {
         &self,
     ) -> std::sync::Arc<std::sync::Mutex<Vec<tau_proto::HarnessRoleGroup>>> {
         self.role_groups_available.clone()
+    }
+
+    /// Returns a clone of the per-group runtime role memory used by role
+    /// cycling.
+    pub(crate) fn role_group_memory(
+        &self,
+    ) -> std::sync::Arc<std::sync::Mutex<HashMap<String, String>>> {
+        self.role_group_memory.clone()
     }
 
     /// Apply a `/set <name> <value>` change. The caller (input loop)
@@ -3455,6 +3466,15 @@ impl EventRenderer {
         self.baseline_params = selected.baseline_params;
         if let Ok(mut role) = self.current_role_state.lock() {
             *role = Some(selected.role.clone());
+        }
+        if let (Ok(groups), Ok(mut memory)) = (
+            self.role_groups_available.lock(),
+            self.role_group_memory.lock(),
+        ) && let Some(group) = groups
+            .iter()
+            .find(|group| group.roles.iter().any(|role| role == &selected.role))
+        {
+            memory.insert(group.name.clone(), selected.role.clone());
         }
         let prompt = crate::theme::active_prompt_marker(
             &self.theme,

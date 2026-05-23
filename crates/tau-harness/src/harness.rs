@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use tau_core::{
     Connection, ConnectionMetadata, ConnectionOrigin, DefaultSubscriptionPolicy, EventBus,
     PolicyStore, RouteError, SessionStore, SessionStoreError, ToolRegistry, ToolRouteError,
-    validate_tool_arguments,
+    ToolRouteTarget, validate_tool_arguments,
 };
 use tau_proto::{
     BackgroundSupport, CborValue, ClientKind, ContentPart, ContextItem, ContextRole, Disconnect,
@@ -23,7 +23,7 @@ use tau_proto::{
     SessionPromptTerminated, SessionPromptTerminationReason, TokenUsageStats, ToolBackgroundError,
     ToolBackgroundResult, ToolCallId, ToolCallItem, ToolCancel, ToolCancelled, ToolChoice,
     ToolDefinition, ToolError, ToolName, ToolRegister, ToolRejected, ToolRequest, ToolResult,
-    ToolResultKind, ToolType, UiCancelPrompt,
+    ToolResultKind, ToolStarted, ToolType, UiCancelPrompt,
 };
 
 use crate::conversation::{
@@ -3140,6 +3140,19 @@ impl Harness {
                 // own tip, and the tool-request node would fold
                 // there instead.
                 let owning_cid = self.tool_conversations.get(&request.call_id).cloned();
+                if let Some(cid) = owning_cid.as_ref()
+                    && !self.pending_tools.contains_key(&request.call_id)
+                {
+                    self.pending_tools.insert(
+                        request.call_id.clone(),
+                        PendingTool {
+                            name: request.tool_name.clone(),
+                            internal_name: request.tool_name.clone(),
+                            tool_type: request.tool_type,
+                        },
+                    );
+                    self.bump_tools_started_for(cid);
+                }
                 let event = Event::ToolRequest(request.clone());
                 match owning_cid.as_ref() {
                     Some(cid) => self.publish_event_for_conversation(cid, Some(source_id), event),
@@ -3153,15 +3166,23 @@ impl Harness {
                 // `ToolError` for model-facing completion.
                 match self.registry.route_tool_request(request.clone()) {
                     Ok(route) => {
-                        self.ensure_tool_started_subscription(&route.provider_connection_id);
-                        self.pending_tool_providers
-                            .insert(request.call_id.clone(), route.provider_connection_id);
-                        let event = Event::ToolStarted(route.invoke);
+                        let started = route.invoke;
+                        let event = Event::ToolStarted(started.clone());
                         match owning_cid.as_ref() {
                             Some(cid) => {
                                 self.publish_for_conversation_from(cid, Some(source_id), event)
                             }
                             None => self.publish_event(Some(source_id), event),
+                        }
+                        match route.target {
+                            ToolRouteTarget::Internal => {
+                                self.handle_internal_tool_started(started)?
+                            }
+                            ToolRouteTarget::Extension(provider_connection_id) => {
+                                self.ensure_tool_started_subscription(&provider_connection_id);
+                                self.pending_tool_providers
+                                    .insert(request.call_id.clone(), provider_connection_id);
+                            }
                         }
                     }
                     Err(ToolRouteError::NoProvider { tool_name }) => {
@@ -8238,6 +8259,43 @@ impl Harness {
         self.clear_tool_call_tracking(call_id.as_str());
     }
 
+    fn handle_internal_tool_started(&mut self, started: ToolStarted) -> Result<(), HarnessError> {
+        let Some(cid) = self.tool_conversations.get(&started.call_id).cloned() else {
+            self.emit_info(&format!(
+                "discarding internal tool.started for unknown call_id={}",
+                started.call_id
+            ));
+            return Ok(());
+        };
+        let Some(pending) = self.pending_tools.get(&started.call_id).cloned() else {
+            self.emit_info(&format!(
+                "discarding internal tool.started without pending tool for call_id={}",
+                started.call_id
+            ));
+            return Ok(());
+        };
+        let call = AgentToolCall {
+            id: started.call_id,
+            name: pending.internal_name.clone(),
+            tool_type: pending.tool_type,
+            arguments: started.arguments,
+            display: None,
+        };
+        match pending.internal_name.as_str() {
+            "skill" => self.handle_skill_tool_call(&cid, &call),
+            DELEGATE_TOOL_NAME => self.handle_delegate_tool_call(&cid, &call, pending.name),
+            WAIT_TOOL_NAME => self.handle_wait_tool_call(&cid, &call, pending.name),
+            MESSAGE_TOOL_NAME => self.handle_message_tool_call(&cid, &call, pending.name),
+            CANCEL_TOOL_NAME => self.handle_cancel_tool_call(&cid, &call, pending.name),
+            other => {
+                self.emit_info(&format!(
+                    "discarding internal tool.started for non-internal tool `{other}`"
+                ));
+                Ok(())
+            }
+        }
+    }
+
     fn execute_agent_tool_call(
         &mut self,
         cid: &ConversationId,
@@ -8302,23 +8360,6 @@ impl Harness {
             return Ok(());
         }
 
-        // Handle harness-owned tools directly.
-        if internal_tool_name.as_str() == "skill" {
-            return self.handle_skill_tool_call(cid, call);
-        }
-        if internal_tool_name.as_str() == DELEGATE_TOOL_NAME {
-            return self.handle_delegate_tool_call(cid, call, visible_tool_name);
-        }
-        if internal_tool_name.as_str() == WAIT_TOOL_NAME {
-            return self.handle_wait_tool_call(cid, call, visible_tool_name);
-        }
-        if internal_tool_name.as_str() == MESSAGE_TOOL_NAME {
-            return self.handle_message_tool_call(cid, call, visible_tool_name);
-        }
-        if internal_tool_name.as_str() == CANCEL_TOOL_NAME {
-            return self.handle_cancel_tool_call(cid, call, visible_tool_name);
-        }
-
         let call_id: ToolCallId = call.id.clone();
 
         // Track conversation attribution before publishing — the
@@ -8334,7 +8375,12 @@ impl Harness {
             },
         );
         self.bump_tools_started_for(cid);
-        self.record_wait_tool_request(&call_id);
+        if !matches!(
+            internal_tool_name.as_str(),
+            WAIT_TOOL_NAME | CANCEL_TOOL_NAME | MESSAGE_TOOL_NAME
+        ) {
+            self.record_wait_tool_request(&call_id);
+        }
         let published_request = ToolRequest {
             call_id: call_id.clone(),
             tool_name: visible_tool_name.clone(),
@@ -8353,10 +8399,19 @@ impl Harness {
 
         match self.registry.route_tool_request(request) {
             Ok(route) => {
-                self.ensure_tool_started_subscription(&route.provider_connection_id);
-                self.pending_tool_providers
-                    .insert(call_id.clone(), route.provider_connection_id);
-                self.publish_for_conversation(cid, Event::ToolStarted(route.invoke));
+                let started = route.invoke;
+                match route.target {
+                    ToolRouteTarget::Internal => {
+                        self.publish_for_conversation(cid, Event::ToolStarted(started.clone()));
+                        self.handle_internal_tool_started(started)?;
+                    }
+                    ToolRouteTarget::Extension(provider_connection_id) => {
+                        self.ensure_tool_started_subscription(&provider_connection_id);
+                        self.pending_tool_providers
+                            .insert(call_id.clone(), provider_connection_id);
+                        self.publish_for_conversation(cid, Event::ToolStarted(started));
+                    }
+                }
             }
             Err(ToolRouteError::NoProvider { tool_name: _ }) => {
                 let message = unavailable_tool_error_message(&visible_tool_name);

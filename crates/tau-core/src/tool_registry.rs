@@ -12,11 +12,23 @@ use tau_proto::{
 
 use crate::connection::RouteError;
 
+/// Kind of provider registered for a tool name.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ToolProviderKind {
+    /// Tool is handled inside the harness after `tool.started` is published.
+    Internal,
+    /// Tool is handled by the extension connection that registered it.
+    Extension,
+}
+
 /// One live provider registered for a tool name.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolProvider {
-    /// Connection that registered this tool.
+    /// Connection that registered this tool, or a stable synthetic id for an
+    /// internal harness-owned provider.
     pub connection_id: ConnectionId,
+    /// Whether this provider is internal to the harness or extension-owned.
+    pub kind: ToolProviderKind,
     /// Tool metadata advertised to the model and used for routing.
     pub tool: ToolSpec,
     /// Optional prompt fragment template contributed while this tool is
@@ -92,10 +104,21 @@ impl Error for ToolRouteError {
     }
 }
 
+/// Destination selected for a routed tool request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ToolRouteTarget {
+    /// Harness-owned tool. No extension connection owns the call; the harness
+    /// handles the later `tool.started` event itself.
+    Internal,
+    /// Extension connection that registered the selected tool.
+    Extension(ConnectionId),
+}
+
 /// Summary of one `tool.request` routing decision.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolRouteReport {
-    pub provider_connection_id: ConnectionId,
+    /// Selected destination for the accepted request.
+    pub target: ToolRouteTarget,
     pub invoke: ToolStarted,
 }
 
@@ -410,12 +433,25 @@ impl ToolRegistry {
     /// Registers one tool for a live provider connection without a prompt
     /// fragment.
     pub fn register(&mut self, connection_id: &str, tool: ToolSpec) -> RegisterToolReport {
-        self.register_with_prompt_fragment(
+        self.register_provider(
             connection_id,
             ToolRegister {
                 tool,
                 prompt_fragment: None,
             },
+            ToolProviderKind::Extension,
+        )
+    }
+
+    /// Registers one harness-owned tool without a prompt fragment.
+    pub fn register_internal(&mut self, connection_id: &str, tool: ToolSpec) -> RegisterToolReport {
+        self.register_provider(
+            connection_id,
+            ToolRegister {
+                tool,
+                prompt_fragment: None,
+            },
+            ToolProviderKind::Internal,
         )
     }
 
@@ -425,6 +461,15 @@ impl ToolRegistry {
         &mut self,
         connection_id: &str,
         registration: ToolRegister,
+    ) -> RegisterToolReport {
+        self.register_provider(connection_id, registration, ToolProviderKind::Extension)
+    }
+
+    fn register_provider(
+        &mut self,
+        connection_id: &str,
+        registration: ToolRegister,
+        kind: ToolProviderKind,
     ) -> RegisterToolReport {
         let ToolRegister {
             tool,
@@ -452,10 +497,12 @@ impl ToolRegistry {
             .find(|provider| provider.connection_id == connection_id)
         {
             existing_provider.tool = tool;
+            existing_provider.kind = kind;
             existing_provider.prompt_fragment = prompt_fragment;
         } else {
             providers.push(ToolProvider {
                 connection_id: connection_id.into(),
+                kind,
                 tool,
                 prompt_fragment,
             });
@@ -566,15 +613,20 @@ impl ToolRegistry {
         request: ToolRequest,
     ) -> Result<ToolRouteReport, ToolRouteError> {
         let tool_name = request.tool_name.clone();
-        let provider_connection_id = self
-            .resolve_provider(tool_name.as_str())
-            .map(|provider| provider.connection_id.clone())
-            .ok_or_else(|| ToolRouteError::NoProvider {
+        let provider = self.resolve_provider(tool_name.as_str()).ok_or_else(|| {
+            ToolRouteError::NoProvider {
                 tool_name: tool_name.clone(),
-            })?;
+            }
+        })?;
+        let target = match provider.kind {
+            ToolProviderKind::Internal => ToolRouteTarget::Internal,
+            ToolProviderKind::Extension => {
+                ToolRouteTarget::Extension(provider.connection_id.clone())
+            }
+        };
 
         Ok(ToolRouteReport {
-            provider_connection_id,
+            target,
             invoke: ToolStarted {
                 call_id: request.call_id,
                 tool_name,

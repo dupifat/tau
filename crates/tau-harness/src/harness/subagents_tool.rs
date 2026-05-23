@@ -6,15 +6,12 @@ use std::time::{Duration, Instant};
 use tau_proto::{
     AgentMessage, BackgroundSupport, CborValue, Event, SessionContextKey, SessionContextValue,
     ToolBackgroundError, ToolBackgroundResult, ToolCallId, ToolDisplay, ToolDisplayStats,
-    ToolError, ToolExecutionMode, ToolName, ToolRequest, ToolResult, ToolResultKind, ToolSpec,
-    ToolType,
+    ToolError, ToolExecutionMode, ToolName, ToolResult, ToolResultKind, ToolSpec, ToolType,
 };
 
 use crate::conversation::ConversationId;
 use crate::error::HarnessError;
-use crate::harness::{
-    AgentMessageRecipientStatus, AgentToolCall, HARNESS_CONNECTION_ID, Harness, PendingTool,
-};
+use crate::harness::{AgentMessageRecipientStatus, AgentToolCall, HARNESS_CONNECTION_ID, Harness};
 
 /// Model-visible name of the harness-owned delegate tool.
 pub(crate) const DELEGATE_TOOL_NAME: &str = "delegate";
@@ -62,16 +59,16 @@ impl Harness {
         self.register_skill_tool();
         let _ = self
             .registry
-            .register(HARNESS_CONNECTION_ID, delegate_tool_spec());
+            .register_internal(HARNESS_CONNECTION_ID, delegate_tool_spec());
         let _ = self
             .registry
-            .register(HARNESS_CONNECTION_ID, wait_tool_spec());
+            .register_internal(HARNESS_CONNECTION_ID, wait_tool_spec());
         let _ = self
             .registry
-            .register(HARNESS_CONNECTION_ID, cancel_tool_spec());
+            .register_internal(HARNESS_CONNECTION_ID, cancel_tool_spec());
         let _ = self
             .registry
-            .register(HARNESS_CONNECTION_ID, message_tool_spec());
+            .register_internal(HARNESS_CONNECTION_ID, message_tool_spec());
     }
 
     pub(crate) fn publish_delegate_roles_context(&mut self) {
@@ -197,8 +194,7 @@ impl Harness {
         visible_tool_name: ToolName,
     ) -> Result<(), HarnessError> {
         let call_id: ToolCallId = call.id.clone();
-        self.track_harness_owned_tool_request(cid, call, &visible_tool_name);
-        self.record_wait_tool_request(&call_id);
+        self.ensure_harness_owned_tool_tracking(cid, call, &visible_tool_name);
 
         let parsed = match parse_delegate_args(&call.arguments) {
             Ok(parsed) => parsed,
@@ -292,7 +288,7 @@ impl Harness {
         visible_tool_name: ToolName,
     ) -> Result<(), HarnessError> {
         let call_id: ToolCallId = call.id.clone();
-        self.track_harness_owned_tool_request(cid, call, &visible_tool_name);
+        self.ensure_harness_owned_tool_tracking(cid, call, &visible_tool_name);
         let result = parse_message_args(&call.arguments).and_then(|parsed| {
             let sender_id = self
                 .ensure_agent_id_for_conversation(cid)
@@ -359,7 +355,7 @@ impl Harness {
         visible_tool_name: ToolName,
     ) -> Result<(), HarnessError> {
         let call_id: ToolCallId = call.id.clone();
-        self.track_harness_owned_tool_request(cid, call, &visible_tool_name);
+        self.ensure_harness_owned_tool_tracking(cid, call, &visible_tool_name);
         let result = match parse_cancel_args(&call.arguments) {
             Ok(target_call_id) => self.cancel_tool_call(&target_call_id),
             Err(message) => Err(message),
@@ -393,7 +389,7 @@ impl Harness {
         visible_tool_name: ToolName,
     ) -> Result<(), HarnessError> {
         let call_id: ToolCallId = call.id.clone();
-        self.track_harness_owned_tool_request(cid, call, &visible_tool_name);
+        self.ensure_harness_owned_tool_tracking(cid, call, &visible_tool_name);
         let start = self.subagents.wait_tracker.handle_wait_invoke(
             cid,
             call_id,
@@ -490,33 +486,25 @@ impl Harness {
         }
     }
 
-    fn track_harness_owned_tool_request(
+    fn ensure_harness_owned_tool_tracking(
         &mut self,
         cid: &ConversationId,
         call: &AgentToolCall,
         visible_tool_name: &ToolName,
     ) {
-        let call_id: ToolCallId = call.id.clone();
-        self.tool_conversations.insert(call_id.clone(), cid.clone());
+        if self.tool_conversations.contains_key(&call.id) {
+            return;
+        }
+        self.tool_conversations.insert(call.id.clone(), cid.clone());
         self.pending_tools.insert(
-            call_id.clone(),
-            PendingTool {
+            call.id.clone(),
+            crate::harness::PendingTool {
                 name: visible_tool_name.clone(),
-                internal_name: visible_tool_name.clone(),
+                internal_name: call.name.clone(),
                 tool_type: call.tool_type,
             },
         );
         self.bump_tools_started_for(cid);
-        self.publish_for_conversation(
-            cid,
-            Event::ToolRequest(ToolRequest {
-                call_id,
-                tool_name: visible_tool_name.clone(),
-                tool_type: call.tool_type,
-                arguments: call.arguments.clone(),
-                originator: tau_proto::PromptOriginator::User,
-            }),
-        );
     }
 
     fn finish_harness_owned_tool_with_result(

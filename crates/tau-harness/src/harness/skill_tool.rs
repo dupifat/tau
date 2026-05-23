@@ -1,8 +1,8 @@
 //! The harness-owned `skill` tool.
 //!
 //! The `skill` tool is registered against [`HARNESS_CONNECTION_ID`] in
-//! [`Harness::register_harness_tools`] and dispatched inline (bypassing the
-//! bus) by [`Harness::handle_skill_tool_call`]. It surfaces the skills the
+//! [`Harness::register_harness_tools`] and started from the same `ToolStarted`
+//! event path as extension tools. It surfaces the skills the
 //! harness already discovered at startup (`Harness::discovered_skills`),
 //! so search and load don't touch the filesystem walker again.
 
@@ -10,7 +10,7 @@ use std::io::Read;
 
 use tau_proto::{
     CborValue, Event, ToolCallId, ToolDisplay, ToolDisplayStats, ToolDisplayStatus, ToolName,
-    ToolRequest, ToolType,
+    ToolType,
 };
 
 const MAX_SKILL_CONTENT_BYTES: usize = 64 * 1024;
@@ -19,12 +19,12 @@ const MAX_SKILL_SEARCH_MATCHES: usize = 50;
 use crate::conversation::ConversationId;
 use crate::discovery::DiscoveredSkillSource;
 use crate::error::HarnessError;
-use crate::harness::{AgentToolCall, HARNESS_CONNECTION_ID, Harness, PendingTool};
+use crate::harness::{AgentToolCall, HARNESS_CONNECTION_ID, Harness};
 
 impl Harness {
     /// Register the harness-owned `skill` tool.
     pub(crate) fn register_skill_tool(&mut self) {
-        let _ = self.registry.register(
+        let _ = self.registry.register_internal(
             HARNESS_CONNECTION_ID,
             tau_proto::ToolSpec {
                 name: ToolName::new("skill"),
@@ -86,31 +86,18 @@ impl Harness {
     ) -> Result<(), HarnessError> {
         let call_id: ToolCallId = call.id.clone();
         let tool_name = ToolName::new("skill");
-
-        // Track the conversation mapping first so the published
-        // request + result both attribute to this conversation's
-        // session via `session_id_for_event`.
-        self.tool_conversations.insert(call_id.clone(), cid.clone());
-        self.pending_tools.insert(
-            call_id.clone(),
-            PendingTool {
-                name: tool_name.clone(),
-                internal_name: tool_name.clone(),
-                tool_type: call.tool_type,
-            },
-        );
-        self.bump_tools_started_for(cid);
-        self.record_wait_tool_request(&call_id);
-        self.publish_for_conversation(
-            cid,
-            Event::ToolRequest(ToolRequest {
-                call_id: call_id.clone(),
-                tool_name: tool_name.clone(),
-                tool_type: call.tool_type,
-                arguments: call.arguments.clone(),
-                originator: tau_proto::PromptOriginator::User,
-            }),
-        );
+        if !self.tool_conversations.contains_key(&call_id) {
+            self.tool_conversations.insert(call_id.clone(), cid.clone());
+            self.pending_tools.insert(
+                call_id.clone(),
+                crate::harness::PendingTool {
+                    name: tool_name.clone(),
+                    internal_name: tool_name.clone(),
+                    tool_type: call.tool_type,
+                },
+            );
+            self.bump_tools_started_for(cid);
+        }
 
         let result_event = self.handle_skill_query(&call_id, &tool_name, &call.arguments);
 

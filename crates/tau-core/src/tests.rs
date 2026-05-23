@@ -7,6 +7,7 @@ use tau_proto::{
 };
 use tempfile::TempDir;
 
+use crate::ToolRouteTarget;
 use crate::bus::EventBus;
 use crate::connection::{
     Connection, ConnectionMetadata, ConnectionOrigin, RouteError, RoutedFrame,
@@ -414,9 +415,12 @@ fn provider_can_register_tool_and_receive_invocations() {
             arguments: CborValue::Text("hello".to_owned()),
             originator: tau_proto::PromptOriginator::User,
         })
-        .expect("tool tool request should route");
+        .expect("tool request should route");
 
-    assert_eq!(route_report.provider_connection_id, tool_id.clone());
+    assert_eq!(
+        route_report.target,
+        ToolRouteTarget::Extension(tool_id.clone())
+    );
     assert!(provider_inbox.snapshot().is_empty());
     assert!(tool_inbox.snapshot().is_empty());
     assert_eq!(

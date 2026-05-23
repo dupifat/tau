@@ -547,9 +547,8 @@ struct PromptState {
 }
 
 /// Per-tool-call UI state held by [`EventRenderer`]. Created when the
-/// provider's `ProviderResponseFinished` enumerates the call (or when a
-/// sub-agent's finish marks the call as suppressed) and torn down on
-/// `ToolResult`/`ToolError`.
+/// harness publishes `ToolStarted` (or when a sub-agent's finish marks the call
+/// as suppressed) and torn down on `ToolResult`/`ToolError`.
 #[derive(Default)]
 struct ToolCallState {
     /// Live tool-call block in the active-tools area. `None` for sub-agent
@@ -1961,7 +1960,7 @@ impl EventRenderer {
 
         if self.handle_session_events(event)
             || self.handle_prompt_events(event)
-            || self.handle_provider_response_events(event, recorded_at)
+            || self.handle_provider_response_events(event)
             || self.handle_tool_events(event, recorded_at)
             || self.handle_shell_events(event)
             || self.handle_extension_events(event)
@@ -2248,7 +2247,7 @@ impl EventRenderer {
             .response_block_id = Some(id);
     }
 
-    fn handle_provider_response_events(&mut self, event: &Event, recorded_at: UnixMicros) -> bool {
+    fn handle_provider_response_events(&mut self, event: &Event) -> bool {
         match event {
             Event::ProviderPromptSubmitted(submitted) => {
                 self.handle_provider_prompt_submitted(submitted);
@@ -2259,7 +2258,7 @@ impl EventRenderer {
                 true
             }
             Event::ProviderResponseFinished(finished) => {
-                self.handle_provider_response_finished(finished, recorded_at);
+                self.handle_provider_response_finished(finished);
                 true
             }
             _ => false,
@@ -2355,7 +2354,6 @@ impl EventRenderer {
     fn handle_provider_response_finished(
         &mut self,
         finished: &tau_proto::ProviderResponseFinished,
-        recorded_at: UnixMicros,
     ) {
         let (prompt_state, turn_latency) = self.take_finished_prompt_state(finished);
         self.finalize_finished_thinking_block(
@@ -2367,7 +2365,7 @@ impl EventRenderer {
         let full_assistant_text = assistant_text_from_output_items(&finished.output_items);
         self.record_finished_assistant_context(finished, full_assistant_text.as_deref());
         self.record_finished_turn_stats(finished, turn_latency);
-        self.render_user_provider_response_items(finished, recorded_at);
+        self.render_user_provider_response_items(finished);
         self.render_model_status();
     }
 
@@ -2473,7 +2471,6 @@ impl EventRenderer {
     fn render_user_provider_response_items(
         &mut self,
         finished: &tau_proto::ProviderResponseFinished,
-        recorded_at: UnixMicros,
     ) {
         if !finished.originator.is_user() {
             return;
@@ -2488,7 +2485,7 @@ impl EventRenderer {
         self.set_main_tools_visible(!tool_calls.is_empty());
         let summary_block_id = self.prepare_tool_summary_for_finished_calls(&tool_calls);
         for item in &finished.output_items {
-            self.render_finished_context_item(item, summary_block_id, recorded_at);
+            self.render_finished_context_item(item, summary_block_id);
         }
         if !finished.output_items.is_empty() {
             self.handle.redraw();
@@ -2574,7 +2571,6 @@ impl EventRenderer {
         &mut self,
         item: &ContextItem,
         summary_block_id: Option<tau_cli_term::BlockId>,
-        recorded_at: UnixMicros,
     ) {
         use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
@@ -2589,27 +2585,20 @@ impl EventRenderer {
                 }
             }
             ContextItem::ToolCall(call) => {
-                self.render_finished_tool_call(call, summary_block_id, recorded_at);
+                self.render_tool_call_placeholder(call, summary_block_id);
             }
             _ => {}
         }
     }
 
-    fn render_finished_tool_call(
+    fn render_tool_call_placeholder(
         &mut self,
         call: &ToolCallItem,
         summary_block_id: Option<tau_cli_term::BlockId>,
-        recorded_at: UnixMicros,
     ) {
-        let display_payload = tool_display_from_call(call);
-        let mut display = format_tool_call(call.name.as_str(), Some(&display_payload));
-        Self::upsert_tool_duration_suffix(&mut display, Duration::ZERO);
-        let live_block = self.render_tool_history_block(&display);
-        let live_id = self.handle.new_block(
-            format!("tool-call-live:{}:{}", call.name, call.call_id),
-            live_block,
-        );
-        self.handle.push_above_active(live_id);
+        if self.tool_calls.contains_key(call.call_id.as_str()) {
+            return;
+        }
         let history_id = self.handle.new_block(
             format!("tool-call-history:{}:{}", call.name, call.call_id),
             Self::empty_block(),
@@ -2618,16 +2607,54 @@ impl EventRenderer {
         self.tool_calls.insert(
             call.call_id.to_string(),
             ToolCallState {
-                block_id: Some(live_id),
                 history_block_id: Some(history_id),
-                live_display: Some(display),
-                started_at: Some(Instant::now()),
-                recorded_started_at: Some(recorded_at),
                 summary_block_id,
                 is_main_delegate: call.name.as_str() == "delegate",
                 ..ToolCallState::default()
             },
         );
+    }
+
+    fn handle_tool_started(&mut self, started: &tau_proto::ToolStarted, recorded_at: UnixMicros) {
+        let call_id = started.call_id.to_string();
+        if self
+            .tool_calls
+            .get(call_id.as_str())
+            .is_some_and(|state| state.is_sub_agent || state.block_id.is_some())
+        {
+            return;
+        }
+        let call = ToolCallItem {
+            call_id: started.call_id.clone(),
+            name: started.tool_name.clone(),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: started.arguments.clone(),
+        };
+        let display_payload = tool_display_from_call(&call);
+        let mut display = format_tool_call(call.name.as_str(), Some(&display_payload));
+        Self::upsert_tool_duration_suffix(&mut display, Duration::ZERO);
+        let live_block = self.render_tool_history_block(&display);
+        let live_id = self.handle.new_block(
+            format!("tool-call-live:{}:{}", call.name, call.call_id),
+            live_block,
+        );
+        self.handle.push_above_active(live_id);
+        let state = self.tool_calls.entry(call_id).or_insert_with(|| {
+            let history_id = self.handle.new_block(
+                format!("tool-call-history:{}:{}", call.name, call.call_id),
+                Self::empty_block(),
+            );
+            self.handle.push_history(history_id);
+            ToolCallState {
+                history_block_id: Some(history_id),
+                is_main_delegate: call.name.as_str() == "delegate",
+                ..ToolCallState::default()
+            }
+        });
+        state.block_id = Some(live_id);
+        state.live_display = Some(display);
+        state.started_at = Some(Instant::now());
+        state.recorded_started_at = Some(recorded_at);
         if let Some(timer) = &self.tool_timer {
             timer.tool_started(call.call_id.as_str());
         }
@@ -2635,6 +2662,10 @@ impl EventRenderer {
 
     fn handle_tool_events(&mut self, event: &Event, recorded_at: UnixMicros) -> bool {
         match event {
+            Event::ToolStarted(started) => {
+                self.handle_tool_started(started, recorded_at);
+                true
+            }
             Event::ToolProgress(progress) => {
                 self.handle_tool_progress(progress);
                 true
@@ -2655,9 +2686,7 @@ impl EventRenderer {
                 self.handle_tool_result(result, recorded_at);
                 true
             }
-            Event::ProviderToolError(error)
-                if self.tool_calls.contains_key(error.call_id.as_str()) =>
-            {
+            Event::ProviderToolError(error) => {
                 self.handle_tool_error(error, recorded_at);
                 true
             }

@@ -156,6 +156,15 @@ fn session_prompt_created(session_prompt_id: &str, session_id: &str) -> SessionP
     }
 }
 
+fn tool_started(call_id: &str, tool_name: &str, arguments: CborValue) -> Event {
+    Event::ToolStarted(tau_proto::ToolStarted {
+        call_id: call_id.into(),
+        tool_name: tau_proto::ToolName::new(tool_name),
+        arguments,
+        originator: tau_proto::PromptOriginator::User,
+    })
+}
+
 fn finished_response(
     session_prompt_id: &str,
     output_items: Vec<ContextItem>,
@@ -870,6 +879,11 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
             arguments: CborValue::Map(Vec::new()),
         })],
     )));
+    renderer.handle(&tool_started(
+        "delegate-call",
+        "delegate",
+        CborValue::Map(Vec::new()),
+    ));
 
     // A running parent `delegate` call is the visible main-agent work while
     // the sub-agent side conversation is active. Regression coverage: the
@@ -1872,18 +1886,20 @@ fn delegate_progress_redraws_live_parent_block() {
         tau_themes::Theme::builtin(),
     );
 
+    let delegate_args = CborValue::Map(vec![(
+        CborValue::Text("task_name".into()),
+        CborValue::Text("[probe]".into()),
+    )]);
     renderer.handle(&Event::ProviderResponseFinished(finished_response(
         "sp-0",
         vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "call-delegate".into(),
             name: tau_proto::ToolName::new("delegate"),
             tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Map(vec![(
-                CborValue::Text("task_name".into()),
-                CborValue::Text("[probe]".into()),
-            )]),
+            arguments: delegate_args.clone(),
         })],
     )));
+    renderer.handle(&tool_started("call-delegate", "delegate", delegate_args));
     sync(&handle);
     assert!(vt.screen_contains(100, "[probe]"));
     assert!(!vt.screen_contains(100, "%3/3"));
@@ -2002,8 +2018,55 @@ fn failed_compaction_renders_error_status() {
     assert!(vt.screen_contains(80, "compact #226.2k err: provider unavailable"));
 }
 
+/// Regression: invalid provider tool calls can fail schema validation before
+/// the harness emits `ToolStarted`. The UI must reserve transcript order but
+/// must not show a fake live tool while waiting for the provider error.
+#[test]
+fn provider_tool_error_before_tool_started_does_not_show_live_tool() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    renderer.handle_recorded_at(
+        &Event::ProviderResponseFinished(finished_response(
+            "sp-0",
+            vec![ContextItem::ToolCall(ToolCallItem {
+                call_id: "bad-mode".into(),
+                name: tau_proto::ToolName::new("delegate"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(vec![(
+                    CborValue::Text("execution_mode".into()),
+                    CborValue::Text("invalid".into()),
+                )]),
+            })],
+        )),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "delegate 0s …"));
+
+    renderer.handle_recorded_at(
+        &Event::ProviderToolError(ToolError {
+            call_id: "bad-mode".into(),
+            tool_name: tau_proto::ToolName::new("delegate"),
+            tool_type: tau_proto::ToolType::Function,
+            message: "invalid arguments for tool `delegate`".to_owned(),
+            details: None,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        }),
+        tau_proto::UnixMicros::new(2_000_000),
+    );
+    sync(&handle);
+    assert!(vt.screen_contains(80, "delegate err: invalid"));
+    assert!(!vt.screen_contains(80, "delegate 0s …"));
+}
+
 /// Schema validation failures only emit `ProviderToolError`. The UI still has
-/// a live block from the preceding assistant tool call, so it must treat that
+/// a live block from the preceding `ToolStarted`, so it must treat that
 /// provider-facing error as terminal and render the error in history.
 #[test]
 fn provider_tool_error_without_logical_tool_error_finishes_live_tool() {
@@ -2025,6 +2088,10 @@ fn provider_tool_error_without_logical_tool_error_finishes_live_tool() {
             })],
         )),
         tau_proto::UnixMicros::new(1_000_000),
+    );
+    renderer.handle_recorded_at(
+        &tool_started("bad-args", "strict_tool", CborValue::Map(Vec::new())),
+        tau_proto::UnixMicros::new(1_500_000),
     );
     sync(&handle);
     assert!(vt.screen_contains(80, "strict_tool 0s …"));
@@ -2068,6 +2135,17 @@ fn running_tool_call_shows_ellipsis_until_result() {
                 )]),
             })],
         )),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    renderer.handle_recorded_at(
+        &tool_started(
+            "call-1",
+            "read",
+            CborValue::Map(vec![(
+                CborValue::Text("path".into()),
+                CborValue::Text("src/main.rs".into()),
+            )]),
+        ),
         tau_proto::UnixMicros::new(1_000_000),
     );
     sync(&handle);
@@ -2132,6 +2210,17 @@ fn backgrounded_tool_stays_visibly_running_until_background_result() {
                 )]),
             })],
         )),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    renderer.handle_recorded_at(
+        &tool_started(
+            "call-1",
+            "shell",
+            CborValue::Map(vec![(
+                CborValue::Text("command".into()),
+                CborValue::Text("sleep 10".into()),
+            )]),
+        ),
         tau_proto::UnixMicros::new(1_000_000),
     );
     renderer.handle_recorded_at(
@@ -2215,6 +2304,17 @@ fn running_shell_tool_shows_multiline_command_body_in_full_mode() {
                 )]),
             })],
         )),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    renderer.handle_recorded_at(
+        &tool_started(
+            "call-1",
+            "shell",
+            CborValue::Map(vec![(
+                CborValue::Text("command".into()),
+                CborValue::Text(command.into()),
+            )]),
+        ),
         tau_proto::UnixMicros::new(1_000_000),
     );
     sync(&handle);
@@ -2337,18 +2437,20 @@ fn live_tool_timer_updates_do_not_mutate_scrolled_history() {
             .map(|i| assistant_message_item(format!("history line {i}")))
             .collect(),
     )));
+    let read_args = CborValue::Map(vec![(
+        CborValue::Text("path".into()),
+        CborValue::Text("src/main.rs".into()),
+    )]);
     renderer.handle(&Event::ProviderResponseFinished(finished_response(
         "sp-tool",
         vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "call-1".into(),
             name: tau_proto::ToolName::new("read"),
             tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Map(vec![(
-                CborValue::Text("path".into()),
-                CborValue::Text("src/main.rs".into()),
-            )]),
+            arguments: read_args.clone(),
         })],
     )));
+    renderer.handle(&tool_started("call-1", "read", read_args));
     sync(&handle);
     assert!(vt.screen_contains(80, "read src/main.rs"));
 
@@ -2549,6 +2651,17 @@ fn show_tools_compact_hides_payload_body() {
                 )]),
             })],
         )),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    renderer.handle_recorded_at(
+        &tool_started(
+            "call-1",
+            "read",
+            CborValue::Map(vec![(
+                CborValue::Text("path".into()),
+                CborValue::Text("src/main.rs".into()),
+            )]),
+        ),
         tau_proto::UnixMicros::new(1_000_000),
     );
     renderer.handle_recorded_at(

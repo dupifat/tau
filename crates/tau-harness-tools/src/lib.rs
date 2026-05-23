@@ -326,6 +326,7 @@ fn handle_skill_tool_call(
     Ok(())
 }
 
+#[allow(clippy::result_large_err)]
 fn handle_skill_query(
     host: &mut InternalToolHost<'_>,
     arguments: &CborValue,
@@ -355,6 +356,7 @@ fn handle_skill_query(
     Ok(skill_search_result(&needles, search_content, outcome))
 }
 
+#[allow(clippy::result_large_err)]
 fn read_skill_by_name(
     host: &mut InternalToolHost<'_>,
     skills: &[InternalSkill],
@@ -801,7 +803,10 @@ impl BuiltinTools {
                 return Err("Tool call already canceled".to_owned());
             }
             if !host.is_running_cancellable_tool_call(&target) {
-                return Err("Tool call is not a running cancellable tool call".to_owned());
+                if host.is_completed_tool_call(&target) {
+                    return Err("Tool call is already done".to_owned());
+                }
+                return Err("Unknown tool call id".to_owned());
             }
             state.cancel_requested.insert(target.clone());
             drop(state);
@@ -814,7 +819,7 @@ impl BuiltinTools {
                 call_id,
                 visible_tool_name,
                 call.tool_type,
-                "Tool cancellation sent".to_owned(),
+                "Tool cancellation requested".to_owned(),
                 None,
             ),
             Err(message) => host.finish_tool_with_error(

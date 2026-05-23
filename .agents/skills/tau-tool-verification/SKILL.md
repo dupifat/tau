@@ -131,9 +131,9 @@ A completed background result is consumed by the first successful `wait`. Later 
 
 ### Background tool `cancel`
 
-`cancel` requires `tool_call_id` and never backgrounds. It supports running `delegate` calls and should support running `shell` calls. A successful cancel request returns `Tool cancellation sent`, emits a harness info event containing `tool call cancellation request`, and targets only the requested tool call. A canceled delegate should complete as a background error so `wait` can observe the cancellation instead of hanging. A canceled shell call should also complete through `wait`, include timing headers if it ran longer than about 5 seconds, and must not keep running to normal `status: 0` completion.
+`cancel` requires `tool_call_id` and never backgrounds. It supports running `delegate` calls and should support running `shell` calls. A successful cancel request returns `Tool cancellation requested`, emits a harness info event containing `tool call cancellation request`, and targets only the requested tool call. Cancellation is async and best effort: the success result only means Tau accepted the request, not that the child process or agent has already stopped. A canceled delegate should complete as a background error so `wait` can observe the cancellation instead of hanging. A canceled shell call should also complete through `wait`, include timing headers if it ran longer than about 5 seconds, and must not keep running to normal `status: 0` completion.
 
-Calling `cancel` for an unknown, completed, or unsupported tool call should return a tool error. Calling it twice for the same target should return a tool error like `Tool call already canceled`.
+Calling `cancel` for an unknown, completed, or unsupported tool call should return a tool error. Unknown ids should be distinguished from already-completed ids. Calling it twice for the same target should return a tool error like `Tool call already canceled`.
 
 When verifying this behavior, check that the synthetic foreground result is visible to the model, the completion notification is delivered to the model when no wait is active, and `wait` returns a completed result once and only once. Completion prompt suppression is only expected when a matching `wait` is already active before the background call finishes. If the tool finishes first and Tau shows `[tau-internal] Tool call ... is complete.`, a later `wait` can still consume the result and that earlier prompt is not a bug.
 
@@ -152,7 +152,7 @@ Record all of these observations:
 
 * The delegate placeholder includes `tau_internal: true`, `self_agent_id`, `sub_agent_id`, and the background delegate tool call ID.
 * `cancel` must be called with the delegate `tool_call_id`, not the `sub_agent_id`.
-* A successful cancel returns exactly `Tool cancellation sent` and does not background.
+* A successful cancel returns exactly `Tool cancellation requested` and does not background.
 * The harness emits a `HarnessInfo` event containing `tool call cancellation request` if event logs are available.
 * The canceled delegate produces a background error that `wait` can collect.
 * `wait({"tool_call_id": id})` returns the canceled result once and only once.
@@ -162,7 +162,7 @@ Record all of these observations:
 * Canceling an unknown id, completed delegate id, unsupported running tool id, empty id, or `sub_agent_id` returns a tool error.
 * Canceling one delegate does not cancel a sibling delegate.
 * Canceling a long-running shell call works and does not let the command complete normally.
-* Slow canceled delegates and shell calls include `duration_seconds` after about 5 seconds.
+* Slow canceled delegates and shell calls include `duration_seconds` after about 5 seconds. A few seconds of timing overhead is normal and not worth reporting by itself.
 * A canceled delegate does not leak completions from its own in-flight or backgrounded inner tool calls into the parent conversation.
 * The user-visible UI does not show hidden internal completion prompts unless the current UI settings intentionally expose them.
 
@@ -184,7 +184,7 @@ Do not do anything else.
 After the placeholder result returns, record `self_agent_id`, `sub_agent_id`, and the delegate tool call ID. Call `cancel` with that delegate tool call ID. Expect the foreground result to be exactly:
 
 ```text
-Tool cancellation sent
+Tool cancellation requested
 ```
 
 Then wait for the same tool call ID. Expect a background tool error like:
@@ -208,9 +208,9 @@ Start a third long-sleeping delegate. Call `cancel` and `wait({"tool_call_id": i
 Verify each error case independently:
 
 * `cancel({"tool_call_id": ""})` returns `` `tool_call_id` must not be empty ``.
-* A clearly unknown call ID returns `Tool call is not a running cancellable tool call` and echoes `tool_call_id`.
-* A completed delegate ID returns `Tool call is not a running cancellable tool call`.
-* A `sub_agent_id` returns `Tool call is not a running cancellable tool call`; this proves the tool wants the delegate call ID.
+* A clearly unknown call ID returns `Unknown tool call id` and echoes `tool_call_id`.
+* A completed delegate ID returns `Tool call is already done`.
+* A `sub_agent_id` returns `Unknown tool call id`; this proves the tool wants the delegate call ID.
 * Two parallel `cancel` calls for the same live delegate produce one success and one duplicate-cancel error.
 
 For the completed-delegate case, spawn a delegate that immediately returns:
@@ -223,7 +223,7 @@ Wait until the completion prompt arrives, then try to cancel it. After that, cal
 
 #### Phase 4: running shell cancellation
 
-Start a shell command long enough to background, such as `sleep 20`. When the shell placeholder gives a tool call ID, call `cancel` for that ID. Expect the foreground result to be exactly `Tool cancellation sent`.
+Start a shell command long enough to background, such as `sleep 20`. When the shell placeholder gives a tool call ID, call `cancel` for that ID. Expect the foreground result to be exactly `Tool cancellation requested`.
 
 Then call `wait` for the shell call. Expect a canceled or terminated result, not a normal `status: 0` completion. If the command ran longer than about 5 seconds, verify the result includes a `duration_seconds` header. If `cancel` rejects the shell call as not cancellable, or if `wait` later returns normal `status: 0`, record this as a discrepancy because shell cancellation is expected to work.
 
@@ -242,7 +242,7 @@ Any sibling cancellation, missing survivor result, or cross-talk between IDs is 
 
 Start a long-sleeping delegate. Let it run long enough to cross the delegate duration threshold, usually about 6 seconds. Cancel it and wait for the result. Expect the canceled delegate result to include `duration_seconds` with an approximate whole-second value.
 
-Do not require an exact duration. Internal overhead and scheduling can add jitter.
+Do not require an exact duration. Internal overhead and scheduling can add a few seconds of jitter; do not report small delays by themselves.
 
 #### Phase 7: nested and inner-tool leak check
 
@@ -282,8 +282,8 @@ Report concise but complete findings:
 * List each tested route and whether it passed: running delegate, no-arg wait, wait suppression, duplicate cancel, unknown id, empty id, completed delegate, shell cancellation, unsupported non-shell tool, `sub_agent_id`, sibling isolation, slow duration, and inner-tool leak.
 * Include exact unexpected errors or output.
 * Mention any timing surprises, missed completion prompts, duplicate prompts, leaked inner completions, or ordering uncertainty.
-* Confirm the `cancel` success output is only `Tool cancellation sent`; it is a request, not a delivery receipt for child cleanup.
-* Include whether errors distinguish completed delegates from unknown ids. Current behavior may use the same not-running-cancellable error for both.
+* Confirm the `cancel` success output is only `Tool cancellation requested`; it is an async, best-effort request, not a delivery receipt for child cleanup.
+* Include whether errors distinguish completed delegates from unknown ids.
 * Include whether the `delegate` placeholder made the target ID clear enough, and whether `self_agent_id` and `sub_agent_id` were present without redundant aliases.
 * Include whether slow canceled delegates reported `duration_seconds`.
 * Include whether the UI hid completion prompts that should be hidden, or whether that could not be directly verified.

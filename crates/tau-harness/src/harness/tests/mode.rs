@@ -341,11 +341,11 @@ fn resumed_startup_publishes_resume_session_started() {
     let mut session_started_reason = None;
     while let Some(entry) = h.event_log.get_next_from(next_seq) {
         next_seq = entry.seq + 1;
-        if let Event::SessionStarted(started) = entry.event {
-            if started.session_id.as_str() == "s1" {
-                session_started_reason = Some(started.reason);
-                break;
-            }
+        if let Event::SessionStarted(started) = entry.event
+            && started.session_id.as_str() == "s1"
+        {
+            session_started_reason = Some(started.reason);
+            break;
         }
     }
 

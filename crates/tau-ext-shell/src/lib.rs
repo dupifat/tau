@@ -593,18 +593,17 @@ fn dispatch_cancellable_shell_tool(
         &shell_config,
         Some(cancel_rx),
     ) {
-        Ok(crate::tools::shell::CommandOutcome::Finished(crate::display::ToolOutput {
-            result,
-            display,
-        })) => Event::ToolResult(ToolResult {
-            call_id: invoke.call_id.clone(),
-            tool_name: invoke.tool_name.clone(),
-            tool_type: tau_proto::ToolType::Function,
-            result,
-            kind: ToolResultKind::Final,
-            display: Some(display),
-            originator: tau_proto::PromptOriginator::User,
-        }),
+        Ok(crate::tools::shell::CommandOutcome::Finished(output)) => {
+            Event::ToolResult(ToolResult {
+                call_id: invoke.call_id.clone(),
+                tool_name: invoke.tool_name.clone(),
+                tool_type: tau_proto::ToolType::Function,
+                result: output.result,
+                kind: ToolResultKind::Final,
+                display: Some(output.display),
+                originator: tau_proto::PromptOriginator::User,
+            })
+        }
         Ok(crate::tools::shell::CommandOutcome::Cancelled) => Event::ToolCancelled(ToolCancelled {
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),
@@ -641,9 +640,10 @@ fn dispatch_session_started(started: SessionStarted, tx: &mpsc::Sender<Frame>) {
 fn ack_if_logged(
     id: Option<LogEventId>,
     tx: &mpsc::Sender<Frame>,
-) -> Result<(), mpsc::SendError<Frame>> {
+) -> Result<(), Box<mpsc::SendError<Frame>>> {
     if let Some(id) = id {
-        tx.send(Frame::Message(Message::Ack(Ack { up_to: id })))?;
+        tx.send(Frame::Message(Message::Ack(Ack { up_to: id })))
+            .map_err(Box::new)?;
     }
     Ok(())
 }

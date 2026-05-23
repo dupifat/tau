@@ -21,7 +21,7 @@ pub(crate) const SLOW_COMMAND_EXEC_TIME_THRESHOLD_SECS: u64 = 5;
 /// `termination_reason`; true invocation/config/start errors remain
 /// `ToolError`.
 pub(crate) enum CommandOutcome {
-    Finished(ToolOutput),
+    Finished(Box<ToolOutput>),
     Cancelled,
 }
 
@@ -30,7 +30,7 @@ pub(crate) fn run_command(
     shell_config: &ShellConfig,
 ) -> Result<ToolOutput, ToolFailure> {
     match run_command_cancellable(arguments, shell_config, None)? {
-        CommandOutcome::Finished(output) => Ok(output),
+        CommandOutcome::Finished(output) => Ok(*output),
         CommandOutcome::Cancelled => Err(ToolFailure::from("shell command cancelled".to_owned())),
     }
 }
@@ -131,7 +131,10 @@ pub(crate) fn run_command_cancellable(
     };
     display.payload = display_payload;
     display.stats = text_stats(&combined);
-    Ok(CommandOutcome::Finished(ToolOutput { result, display }))
+    Ok(CommandOutcome::Finished(Box::new(ToolOutput {
+        result,
+        display,
+    })))
 }
 
 fn parse_timeout_secs(arguments: &CborValue) -> Result<u64, String> {

@@ -326,6 +326,7 @@ impl Harness {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn finish_harness_owned_tool_with_display_error(
         &mut self,
         cid: &ConversationId,

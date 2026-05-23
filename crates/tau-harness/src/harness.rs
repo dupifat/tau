@@ -790,6 +790,10 @@ pub struct Harness {
     /// enrich terminal runtime events before they are folded into
     /// durable transcript facts.
     pub(crate) pending_tools: std::collections::HashMap<ToolCallId, PendingTool>,
+    /// Tool call ids that were known to this harness and reached a terminal
+    /// state. Used to distinguish completed calls from typos in user-facing
+    /// cancellation errors.
+    pub(crate) completed_tool_calls: std::collections::HashSet<ToolCallId>,
     /// `call_id` → connection id of the extension currently servicing
     /// the call. Needed to route cancellation requests back to the
     /// right provider.
@@ -1363,6 +1367,7 @@ impl Harness {
             current_session_id: eager_session_id.into(),
             tool_conversations: std::collections::HashMap::new(),
             pending_tools: std::collections::HashMap::new(),
+            completed_tool_calls: std::collections::HashSet::new(),
             pending_tool_providers: std::collections::HashMap::new(),
             event_log: EventLog::new(),
             client_writers: std::collections::HashMap::new(),
@@ -1583,6 +1588,7 @@ impl Harness {
             current_session_id: eager_session_id.into(),
             tool_conversations: std::collections::HashMap::new(),
             pending_tools: std::collections::HashMap::new(),
+            completed_tool_calls: std::collections::HashSet::new(),
             pending_tool_providers: std::collections::HashMap::new(),
             event_log: EventLog::new(),
             client_writers: std::collections::HashMap::new(),
@@ -3882,6 +3888,10 @@ impl Harness {
         self.pending_tools.contains_key(target_call_id)
     }
 
+    pub(crate) fn is_completed_tool_call(&self, target_call_id: &ToolCallId) -> bool {
+        self.completed_tool_calls.contains(target_call_id)
+    }
+
     pub(crate) fn publish_tool_cancel_request(&mut self, target_call_id: ToolCallId) {
         self.publish_event(
             Some(HARNESS_CONNECTION_ID),
@@ -4327,6 +4337,7 @@ impl Harness {
     /// has been published, otherwise `session_id_for_event` would no
     /// longer be able to attribute the durable record.
     pub(crate) fn clear_tool_call_tracking(&mut self, call_id: &str) {
+        self.completed_tool_calls.insert(call_id.into());
         self.tool_conversations.remove(call_id);
         self.pending_tools.remove(call_id);
         self.pending_tool_providers.remove(call_id);

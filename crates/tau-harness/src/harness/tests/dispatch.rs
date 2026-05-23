@@ -2215,8 +2215,22 @@ fn shared_exclusive_shared_serializes_through_dispatch_state_machine() {
     assert_eq!(h.tool_turn.in_flight_len(), 1);
     assert_eq!(h.tool_turn.in_flight_mode(&c1_id), Some(&Shared));
     assert_eq!(h.tool_turn.pending_len(), 2);
-    assert_eq!(h.tool_turn.pending(0).unwrap().invocation.id, "c2");
-    assert_eq!(h.tool_turn.pending(1).unwrap().invocation.id, "c3");
+    assert_eq!(
+        h.tool_turn
+            .pending(0)
+            .expect("c2 should be queued")
+            .invocation
+            .id,
+        "c2"
+    );
+    assert_eq!(
+        h.tool_turn
+            .pending(1)
+            .expect("c3 should be queued")
+            .invocation
+            .id,
+        "c3"
+    );
 
     drive_harness_until_call_completes(&mut h, "c1");
 
@@ -2225,7 +2239,14 @@ fn shared_exclusive_shared_serializes_through_dispatch_state_machine() {
     assert_eq!(h.tool_turn.in_flight_len(), 1);
     assert_eq!(h.tool_turn.in_flight_mode(&c2_id), Some(&Exclusive));
     assert_eq!(h.tool_turn.pending_len(), 1);
-    assert_eq!(h.tool_turn.pending(0).unwrap().invocation.id, "c3");
+    assert_eq!(
+        h.tool_turn
+            .pending(0)
+            .expect("c3 should stay queued")
+            .invocation
+            .id,
+        "c3"
+    );
 
     drive_harness_until_call_completes(&mut h, "c2");
 
@@ -7278,11 +7299,11 @@ fn wait_tool_reply_is_folded_into_followup_prompt() {
         .collect();
 
     assert!(
-        tool_uses.iter().any(|id| *id == "wait-call"),
+        tool_uses.contains(&"wait-call"),
         "follow-up prompt must include the wait ToolCall; got: {tool_uses:?}",
     );
     assert!(
-        tool_results.iter().any(|id| *id == "wait-call"),
+        tool_results.contains(&"wait-call"),
         "follow-up prompt must include the matching wait ToolResult; got: {tool_results:?}",
     );
 
@@ -9050,7 +9071,6 @@ fn stale_same_conversation_tool_call_response_is_ignored() {
 /// the resulting prompt would walk through unrelated history,
 /// producing orphan ToolUse blocks the provider rejects with
 /// `No tool output found for function call …`.
-
 fn message_tool_call(id: &str, recipient_id: &str, message: &str) -> AgentToolCall {
     AgentToolCall {
         id: id.into(),

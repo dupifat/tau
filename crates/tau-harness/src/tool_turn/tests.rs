@@ -57,11 +57,21 @@ fn update_runs_with_shared_but_not_another_update() {
     assert_eq!(pop_id(&mut machine), None);
     assert_eq!(machine.pending_len(), 2);
     assert_eq!(
-        machine.pending(0).unwrap().invocation.id.as_str(),
+        machine
+            .pending(0)
+            .expect("pending call at index 0")
+            .invocation
+            .id
+            .as_str(),
         "update-b"
     );
     assert_eq!(
-        machine.pending(1).unwrap().invocation.id.as_str(),
+        machine
+            .pending(1)
+            .expect("pending call at index 1")
+            .invocation
+            .id
+            .as_str(),
         "shared-behind"
     );
 }
@@ -99,7 +109,12 @@ fn exclusive_waits_while_same_conversation_shared_is_in_flight() {
     assert_eq!(pop_id(&mut machine).as_deref(), Some("shared"));
     assert_eq!(pop_id(&mut machine), None);
     assert_eq!(
-        machine.pending(0).unwrap().invocation.id.as_str(),
+        machine
+            .pending(0)
+            .expect("pending call at index 0")
+            .invocation
+            .id
+            .as_str(),
         "exclusive"
     );
 }
@@ -131,11 +146,21 @@ fn shared_behind_blocked_exclusive_is_not_skipped_for_same_conversation() {
     assert_eq!(pop_id(&mut machine), None);
     assert_eq!(machine.pending_len(), 2);
     assert_eq!(
-        machine.pending(0).unwrap().invocation.id.as_str(),
+        machine
+            .pending(0)
+            .expect("pending call at index 0")
+            .invocation
+            .id
+            .as_str(),
         "exclusive"
     );
     assert_eq!(
-        machine.pending(1).unwrap().invocation.id.as_str(),
+        machine
+            .pending(1)
+            .expect("pending call at index 1")
+            .invocation
+            .id
+            .as_str(),
         "shared-behind"
     );
 }
@@ -163,7 +188,12 @@ fn different_conversations_progress_independently() {
     assert_eq!(pop_id(&mut machine).as_deref(), Some("b-exclusive"));
     assert_eq!(machine.pending_len(), 1);
     assert_eq!(
-        machine.pending(0).unwrap().invocation.id.as_str(),
+        machine
+            .pending(0)
+            .expect("pending call at index 0")
+            .invocation
+            .id
+            .as_str(),
         "a-exclusive"
     );
 }

@@ -2502,12 +2502,11 @@ fn shell_tool_omits_truncation_marker_without_truncation() {
 
     let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
     assert_eq!(cbor_map_text(&output.result, "output"), Some("out ok"));
-    for field in ["truncated"] {
-        assert!(
-            cbor_map_field(&output.result, field).is_none(),
-            "{field} should be absent without truncation"
-        );
-    }
+    let field = "truncated";
+    assert!(
+        cbor_map_field(&output.result, field).is_none(),
+        "{field} should be absent without truncation"
+    );
 }
 
 #[test]

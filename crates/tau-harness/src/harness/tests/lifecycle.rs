@@ -1450,7 +1450,7 @@ fn extension_connect_command_installs_state_before_reader_ack() {
     .expect("queue connect command");
 
     assert!(h.bus.connection(&conn_id).is_none());
-    assert!(h.extensions.get(&conn_id).is_none());
+    assert!(!h.extensions.contains_key(&conn_id));
 
     let event =
         h.rx.recv_timeout(Duration::from_secs(1))
@@ -1463,7 +1463,7 @@ fn extension_connect_command_installs_state_before_reader_ack() {
     }
 
     assert!(h.bus.connection(&conn_id).is_some());
-    assert!(h.extensions.get(&conn_id).is_some());
+    assert!(h.extensions.contains_key(&conn_id));
     assert!(
         h.lifecycle_messages
             .iter()
@@ -2014,8 +2014,9 @@ fn cancel_during_tools_terminalizes_inflight_and_queued_calls() {
         h.tool_turn.in_flight_mode(&ToolCallId::from("c1")),
         Some(&Shared)
     );
-    assert_eq!(h.tool_turn.pending(0).unwrap().invocation.id, "c2");
-    assert_eq!(h.tool_turn.pending(0).unwrap().execution_mode, Exclusive);
+    let pending = h.tool_turn.pending(0).expect("c2 should be queued");
+    assert_eq!(pending.invocation.id, "c2");
+    assert_eq!(pending.execution_mode, Exclusive);
 
     h.handle_client_event(
         "ui",

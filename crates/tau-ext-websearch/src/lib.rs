@@ -204,9 +204,10 @@ where
 fn ack_if_logged(
     id: Option<LogEventId>,
     tx: &mpsc::Sender<Frame>,
-) -> Result<(), mpsc::SendError<Frame>> {
+) -> Result<(), Box<mpsc::SendError<Frame>>> {
     if let Some(id) = id {
-        tx.send(Frame::Message(Message::Ack(Ack { up_to: id })))?;
+        tx.send(Frame::Message(Message::Ack(Ack { up_to: id })))
+            .map_err(Box::new)?;
     }
     Ok(())
 }

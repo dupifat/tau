@@ -298,6 +298,7 @@ impl<'a> InternalToolHost<'a> {
     }
 
     /// Complete an internal tool call with a final displayed error.
+    #[allow(clippy::too_many_arguments)]
     pub fn finish_tool_with_display_error(
         &mut self,
         conversation_id: &ConversationId,
@@ -329,6 +330,11 @@ impl<'a> InternalToolHost<'a> {
     pub fn is_running_cancellable_tool_call(&self, target_call_id: &ToolCallId) -> bool {
         self.harness
             .is_running_cancellable_tool_call(target_call_id)
+    }
+
+    /// Return true when this harness saw the tool call reach a terminal state.
+    pub fn is_completed_tool_call(&self, target_call_id: &ToolCallId) -> bool {
+        self.harness.is_completed_tool_call(target_call_id)
     }
 
     /// Publish a durable broadcast tool cancellation request.

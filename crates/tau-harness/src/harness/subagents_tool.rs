@@ -963,8 +963,24 @@ impl WaitTracker {
         }
 
         for call_id in call_ids {
-            self.calls.insert(call_id.clone(), WaitCallState::Consumed);
-            self.remove_completed(call_id);
+            if self.is_backgrounded(call_id) {
+                self.calls.insert(
+                    call_id.clone(),
+                    WaitCallState::BackgroundError(ToolBackgroundError {
+                        call_id: call_id.clone(),
+                        tool_name: ToolName::new("cancelled"),
+                        tool_type: ToolType::Function,
+                        message: "Tool call canceled".to_owned(),
+                        details: None,
+                        display: None,
+                        originator: tau_proto::PromptOriginator::User,
+                    }),
+                );
+                self.push_completed(call_id.clone());
+            } else {
+                self.calls.insert(call_id.clone(), WaitCallState::Consumed);
+                self.remove_completed(call_id);
+            }
         }
 
         let any_waiters = std::mem::take(&mut self.any_waiters);

@@ -206,16 +206,14 @@ impl BuiltinTools {
             );
             return Ok(());
         }
-        if host.mark_tool_backgrounded(&call_id) {
-            host.publish_background_placeholder(
+        host.background_tool_call(
+            &call_id,
+            CborValue::Text(delegate_background_placeholder(
                 &call_id,
-                CborValue::Text(delegate_background_placeholder(
-                    &call_id,
-                    &self_agent_id,
-                    &agent_id,
-                )),
-            );
-        }
+                &self_agent_id,
+                &agent_id,
+            )),
+        );
         host.drain_start_agent_requests()
     }
 
@@ -798,13 +796,14 @@ impl BuiltinTools {
         let call_id = call.id.clone();
         host.ensure_internal_tool_tracking(conversation_id, call, &visible_tool_name);
         let result = parse_cancel_args(&call.arguments).and_then(|target| {
+            let mut state = self.state.lock().expect("builtin tool state poisoned");
+            if state.cancel_requested.contains(&target) {
+                return Err("Tool call already canceled".to_owned());
+            }
             if !host.is_running_cancellable_tool_call(&target) {
                 return Err("Tool call is not a running cancellable tool call".to_owned());
             }
-            let mut state = self.state.lock().expect("builtin tool state poisoned");
-            if !state.cancel_requested.insert(target.clone()) {
-                return Err("Tool call already canceled".to_owned());
-            }
+            state.cancel_requested.insert(target.clone());
             drop(state);
             host.publish_tool_cancel_request(target);
             Ok(())
@@ -1055,7 +1054,7 @@ fn skill_tool_spec() -> ToolSpec {
 }
 
 fn delegate_tool_spec() -> ToolSpec {
-    ToolSpec { name: ToolName::new(DELEGATE_TOOL_NAME), model_visible_name: None, description: Some("Delegate a self-contained sub-task to a fresh sub-agent that runs with its own context and tools, and returns only its final text answer. The instant background placeholder and final result include `self_agent_id` and `sub_agent_id` headers/values. Pass `sub_agent_id` to `message`.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"task_name":{"type":"string","description":"Short human-readable label for the sub-task (a few words, lowercase). Surfaced live to the user as `delegate [task_name]` while the sub-agent runs."},"prompt":{"type":"string","description":"Self-contained task for the sub-agent."},"execution_mode":{"type":"string","enum":["shared","update","exclusive"],"description":"Default: `shared`."},"role":{"type":"string","description":"Optional sub-agent role to use."}},"required":["task_name","prompt"],"additionalProperties":false})), format: None, enabled_by_default: true, execution_mode: ToolExecutionMode::Shared, background_support: Some(BackgroundSupport::Instant) }
+    ToolSpec { name: ToolName::new(DELEGATE_TOOL_NAME), model_visible_name: None, description: Some("Delegate a self-contained sub-task to a fresh sub-agent that runs with its own context and tools, and returns only its final text answer. The instant background placeholder and final result include `self_agent_id` and `sub_agent_id` headers/values. Pass `sub_agent_id` to `message`.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"task_name":{"type":"string","description":"Short human-readable label for the sub-task (a few words, lowercase). Surfaced live to the user as `delegate [task_name]` while the sub-agent runs."},"prompt":{"type":"string","description":"Self-contained task for the sub-agent."},"execution_mode":{"type":"string","enum":["shared","update","exclusive"],"description":"Default: `shared`."},"role":{"type":"string","description":"Optional sub-agent role to use."}},"required":["task_name","prompt"],"additionalProperties":false})), format: None, enabled_by_default: true, execution_mode: ToolExecutionMode::Shared, background_support: Some(BackgroundSupport::Never) }
 }
 
 fn message_tool_spec() -> ToolSpec {

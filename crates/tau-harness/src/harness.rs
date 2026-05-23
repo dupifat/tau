@@ -7722,7 +7722,7 @@ impl Harness {
         }
     }
 
-    fn on_tool_call_foreground_complete(&mut self, call_id: &str) {
+    pub(crate) fn on_tool_call_foreground_complete(&mut self, call_id: &str) {
         let owner = self.tool_conversations.get(call_id).cloned();
         if let Some(cid) = owner {
             self.emit_delegate_progress(&cid);

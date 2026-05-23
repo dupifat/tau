@@ -467,3 +467,40 @@ fn transferred_background_owner_can_be_consumed_by_parent_no_arg_wait() {
     );
     assert_eq!(cbor_map_text(&result, "output"), Some("done"));
 }
+
+/// A canceled background call remains waitable once. It should not be marked
+/// consumed before the caller has a chance to retrieve the cancellation result.
+#[test]
+fn exact_wait_after_background_cancel_returns_cancel_error_once() {
+    let owner = conv("main");
+    let mut tracker = WaitTracker::default();
+    tracker.record_tool_invoke("bg-cancel".into(), slow_tool_name(), owner.clone());
+    assert!(
+        tracker
+            .record_tool_result(background_placeholder("bg-cancel"), owner.clone())
+            .is_empty()
+    );
+
+    let cancelled = HashSet::from([ToolCallId::from("bg-cancel")]);
+    let wait_cancel = tracker.record_tool_cancelled(&cancelled);
+    assert!(wait_cancel.replies.is_empty());
+
+    let reply = start_reply(start_wait_exact(
+        &mut tracker,
+        &owner,
+        "wait-cancel",
+        "bg-cancel",
+    ));
+    let (message, details) = reply_error(reply);
+    assert_eq!(message, "Tool call canceled");
+    assert!(details.is_none());
+
+    let reply = start_reply(start_wait_exact(
+        &mut tracker,
+        &owner,
+        "wait-cancel-again",
+        "bg-cancel",
+    ));
+    let (message, _) = reply_error(reply);
+    assert_eq!(message, "result for tool call `bg-cancel` already consumed");
+}

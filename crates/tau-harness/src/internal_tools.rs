@@ -161,6 +161,18 @@ impl<'a> InternalToolHost<'a> {
             .publish_internal_background_placeholder(call_id, result);
     }
 
+    /// Background an internal tool call with a custom placeholder and release
+    /// the foreground turn so the caller can continue while the tool remains
+    /// waitable.
+    pub fn background_tool_call(&mut self, call_id: &ToolCallId, result: CborValue) {
+        if self.harness.tool_turn.mark_backgrounded(call_id) {
+            self.harness
+                .publish_internal_background_placeholder(call_id, result);
+        }
+        self.harness
+            .on_tool_call_foreground_complete(call_id.as_str());
+    }
+
     /// Complete a prebuilt internal tool result, routing foreground/background.
     pub fn finish_prebuilt_tool_result(&mut self, result: ToolResult) {
         self.harness.finish_prebuilt_internal_tool_result(result);

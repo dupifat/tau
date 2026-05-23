@@ -383,7 +383,7 @@ pub struct HarnessSettings {
     /// Set to `0` to disable session cleanup.
     pub session_retention_days: u64,
 
-    /// Extension table, keyed by name. Built-in entries (`provider-openai`,
+    /// Extension table, keyed by name. Built-in entries (`provider-builtin`,
     /// `core-shell`) come pre-baked at the harness level; anything the
     /// user writes here overrides those per-field, or adds a new
     /// extension.
@@ -393,7 +393,7 @@ pub struct HarnessSettings {
     /// extensions:
     ///   core-shell:
     ///     enable: false
-    ///   provider-openai:
+    ///   provider-builtin:
     ///     prefix: ["ssh", "user@host"]
     ///   mything:
     ///     command: ["/usr/local/bin/my-tau-ext"]
@@ -595,7 +595,7 @@ pub struct ExtensionEntry {
 
     /// argv suffix appended after `command`. Symmetric to `prefix`.
     /// Built-in extensions use this to spell their subcommand (e.g.
-    /// `["ext", "ext-provider-openai"]`) so the `command` slot stays
+    /// `["ext", "ext-provider-builtin"]`) so the `command` slot stays
     /// as the tau binary path.
     pub suffix: Option<Vec<String>>,
 

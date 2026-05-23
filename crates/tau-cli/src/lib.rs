@@ -368,9 +368,8 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
 
             cli::Command::Init { force } => run_init(force),
 
-            cli::Command::Provider { args } => {
-                tau_provider_cli::run(&args).map_err(|e| CliError::Participant(e.to_string()))
-            }
+            cli::Command::Provider { args } => tau_ext_provider_builtin::run_provider_cli(&args)
+                .map_err(|e| CliError::Participant(e.to_string())),
 
             cli::Command::Dev { command } => match command {
                 cli::DevCommand::Send { session_id, line } => {
@@ -407,7 +406,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     })?;
                 match component.logging {
                     ComponentLogging::CliStderr => ui_logging::init_stderr_from_env(
-                        "tau_harness=info,tau_cli=info,provider-openai=info",
+                        "tau_harness=info,tau_cli=info,provider-builtin=info",
                     ),
                     ComponentLogging::RunnerManaged => {}
                 }

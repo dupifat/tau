@@ -1,5 +1,5 @@
 [package]
-name = "tau-ext-provider-openai"
+name = "tau-ext-provider-builtin"
 version.workspace = true
 edition.workspace = true
 description.workspace = true
@@ -16,20 +16,12 @@ workspace = true
 
 [dependencies]
 backon.workspace = true
-base64.workspace = true
-blake3.workspace = true
 dialoguer.workspace = true
-futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tau-config.workspace = true
 tau-extension.workspace = true
 tau-proto.workspace = true
 tau-provider.workspace = true
-tokio.workspace = true
-tokio-tungstenite.workspace = true
+tau-provider-chat-completions.workspace = true
+tau-provider-chatgpt.workspace = true
 tracing.workspace = true
-ureq.workspace = true
-
-[dev-dependencies]
-tungstenite.workspace = true

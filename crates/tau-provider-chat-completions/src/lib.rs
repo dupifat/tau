@@ -1,38 +1,18 @@
-//! OpenAI-compatible Chat Completions provider extension.
+//! OpenAI-compatible Chat Completions backend helpers.
 
 use std::collections::{BTreeMap, HashMap};
-use std::error::Error;
-use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 
-use dialoguer::Input;
 use serde::{Deserialize, Serialize};
 use tau_proto::{
-    Ack, ClientKind, ConfigError, ContentPart, ContextItem, ContextRole, Event, EventName, Frame,
-    FrameReader, FrameWriter, Message, ModelId, ModelName, ProviderBackend, ProviderBackendKind,
-    ProviderBackendTransport, ProviderModelInfo, ProviderModelsUpdated, ProviderName,
-    ProviderPromptSubmitted, ProviderResponseFinished, ProviderResponseUpdated, ProviderStopReason,
+    ContentPart, ContextItem, ContextRole, Event, Frame, FrameWriter, ModelId, ModelName,
+    ProviderBackend, ProviderBackendKind, ProviderBackendTransport, ProviderModelInfo,
+    ProviderName, ProviderResponseFinished, ProviderResponseUpdated, ProviderStopReason,
     ProviderTokenUsage, SessionPromptId, ThinkingSummary, ToolCallItem, ToolChoice, ToolDefinition,
     ToolResponseHeader, ToolResultStatus, ToolType,
 };
-use tau_provider::storage::AuthFile;
 
-/// `tracing` target for events emitted from this extension.
-pub const LOG_TARGET: &str = "provider-chat-completions";
-
-const EXTENSION_NAME: &str = "tau-ext-provider-chat-completions";
-/// Auth file name for OpenAI-compatible Chat Completions providers.
-pub const AUTH_FILE_NAME: &str = "provider-chat-completions";
 const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
-
-/// Authentication and provider configuration for the Chat Completions
-/// extension.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct ChatCompletionsAuth {
-    /// Named Chat Completions-compatible providers. Each key becomes the Tau
-    /// provider namespace for its configured models.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub providers: BTreeMap<ProviderName, ChatCompletionsProvider>,
-}
 
 /// One Chat Completions-compatible provider entry.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -115,333 +95,6 @@ impl ChatCompletionsCompat {
     }
 }
 
-/// Runs provider-specific setup commands for Chat Completions-compatible APIs.
-pub fn run_provider_cli(args: &[String]) -> Result<(), Box<dyn Error>> {
-    match args.first().map(String::as_str).unwrap_or("help") {
-        "add" => cmd_add()?,
-        "remove" | "delete" => cmd_remove(args.get(1).map(String::as_str))?,
-        "list" | "status" => cmd_list()?,
-        "help" | "--help" | "-h" => println!("{PROVIDER_CLI_HELP}"),
-        other => {
-            return Err(format!("unknown chat-completions provider subcommand: {other}").into());
-        }
-    }
-    Ok(())
-}
-
-const PROVIDER_CLI_HELP: &str = "\
-Usage: tau provider chat-completions <subcommand>
-
-Subcommands:
-  add             Add or replace a provider entry
-  remove <name>   Remove a provider entry
-  list            List provider entries";
-
-fn cmd_add() -> Result<(), Box<dyn Error>> {
-    let name_input: String = Input::new()
-        .with_prompt("Provider namespace")
-        .default("openai".to_owned())
-        .interact_text()?;
-    let name = parse_provider_name(&name_input)?;
-    let base_url: String = Input::new()
-        .with_prompt("Base URL")
-        .default("https://api.openai.com/v1".to_owned())
-        .interact_text()?;
-    let api_key: String = Input::new()
-        .with_prompt("API key (empty for keyless/local providers)")
-        .allow_empty(true)
-        .interact_text()?;
-    let models_input: String = Input::new()
-        .with_prompt("Models (comma-separated)")
-        .default("gpt-4o,gpt-4o-mini".to_owned())
-        .interact_text()?;
-    let models = parse_model_list(&models_input)?;
-    let compat = prompt_chat_completions_compat()?;
-
-    let file = AuthFile::<ChatCompletionsAuth>::open_default(AUTH_FILE_NAME)?;
-    file.with_lock(|locked| {
-        let mut auth = locked.load()?.unwrap_or_default();
-        auth.providers.insert(
-            name,
-            ChatCompletionsProvider {
-                base_url,
-                api_key,
-                models,
-                extra_body: BTreeMap::new(),
-                compat,
-            },
-        );
-        locked.save(&auth)
-    })?;
-    eprintln!("Provider saved to: {}", file.path().display());
-    Ok(())
-}
-
-fn cmd_remove(name_arg: Option<&str>) -> Result<(), Box<dyn Error>> {
-    let name_input = match name_arg {
-        Some(name) => name.to_owned(),
-        None => Input::new()
-            .with_prompt("Provider namespace")
-            .interact_text()?,
-    };
-    let name = parse_provider_name(&name_input)?;
-    let file = AuthFile::<ChatCompletionsAuth>::open_default(AUTH_FILE_NAME)?;
-    let removed = file.with_lock(|locked| {
-        let mut auth = locked.load()?.unwrap_or_default();
-        let removed = auth.providers.remove(&name).is_some();
-        locked.save(&auth)?;
-        Ok(removed)
-    })?;
-    if removed {
-        eprintln!("Removed provider '{name_input}'.");
-    } else {
-        eprintln!("Provider '{name_input}' was not configured.");
-    }
-    Ok(())
-}
-
-fn cmd_list() -> Result<(), Box<dyn Error>> {
-    let auth = AuthFile::<ChatCompletionsAuth>::open_default(AUTH_FILE_NAME)?
-        .load()?
-        .unwrap_or_default();
-    if auth.providers.is_empty() {
-        println!("No chat-completions providers configured.");
-        return Ok(());
-    }
-    for (name, provider) in auth.providers {
-        let auth_status = if provider.api_key.trim().is_empty() {
-            "no-api-key"
-        } else {
-            "api-key"
-        };
-        let models = provider
-            .models
-            .iter()
-            .map(|model| model.id.as_str())
-            .collect::<Vec<_>>()
-            .join(",");
-        println!("{name}\t{}\t{models}\t{auth_status}", provider.base_url);
-    }
-    Ok(())
-}
-
-fn parse_provider_name(name: &str) -> Result<ProviderName, Box<dyn Error>> {
-    ProviderName::try_new(name.trim().to_owned())
-        .map_err(|error| format!("invalid provider namespace '{name}': {error}").into())
-}
-
-fn parse_model_list(input: &str) -> Result<Vec<ChatCompletionsModel>, Box<dyn Error>> {
-    let mut models = Vec::new();
-    for raw in input.split(',') {
-        let model = raw.trim();
-        if model.is_empty() {
-            continue;
-        }
-        models.push(ChatCompletionsModel {
-            id: ModelName::try_new(model.to_owned())?,
-            display_name: None,
-            context_window: DEFAULT_CONTEXT_WINDOW,
-        });
-    }
-    if models.is_empty() {
-        return Err("at least one model is required".into());
-    }
-    Ok(models)
-}
-
-fn prompt_chat_completions_compat() -> Result<ChatCompletionsCompat, Box<dyn Error>> {
-    let defaults = ChatCompletionsCompat::openai_defaults();
-    Ok(ChatCompletionsCompat {
-        stream_options: prompt_bool("Send stream_options.include_usage", defaults.stream_options)?,
-        parallel_tool_calls: prompt_bool("Send parallel_tool_calls", defaults.parallel_tool_calls)?,
-        prompt_cache_key: prompt_bool("Send prompt_cache_key", defaults.prompt_cache_key)?,
-        reasoning_effort: prompt_bool("Send reasoning_effort", defaults.reasoning_effort)?,
-        max_completion_tokens: prompt_bool(
-            "Use max_completion_tokens when supported",
-            defaults.max_completion_tokens,
-        )?,
-    })
-}
-
-fn prompt_bool(prompt: &str, default: bool) -> Result<bool, Box<dyn Error>> {
-    let default_text = if default { "yes" } else { "no" };
-    let answer: String = Input::new()
-        .with_prompt(prompt)
-        .default(default_text.to_owned())
-        .interact_text()?;
-    match answer.trim().to_ascii_lowercase().as_str() {
-        "y" | "yes" | "true" | "1" => Ok(true),
-        "n" | "no" | "false" | "0" => Ok(false),
-        other => Err(format!("expected yes/no, got '{other}'").into()),
-    }
-}
-
-/// Runs the extension on stdin/stdout.
-pub fn run_stdio() -> Result<(), Box<dyn Error>> {
-    tau_extension::init_logging_for(LOG_TARGET);
-    run(std::io::stdin(), std::io::stdout())
-}
-
-/// Runs the extension over arbitrary reader/writer streams.
-pub fn run<R, W>(reader: R, writer: W) -> Result<(), Box<dyn Error>>
-where
-    R: Read,
-    W: Write,
-{
-    let auth = load_auth();
-    run_with_auth(reader, writer, auth)
-}
-
-fn load_auth() -> ChatCompletionsAuth {
-    match AuthFile::<ChatCompletionsAuth>::open_default(AUTH_FILE_NAME).and_then(|file| file.load())
-    {
-        Ok(Some(auth)) => auth,
-        Ok(None) => ChatCompletionsAuth::default(),
-        Err(error) => {
-            tracing::warn!(
-                target: LOG_TARGET,
-                error = %error,
-                "failed to load provider auth; publishing no models"
-            );
-            ChatCompletionsAuth::default()
-        }
-    }
-}
-
-#[cfg(test)]
-fn run_with_auth<R, W>(
-    reader: R,
-    writer: W,
-    auth: ChatCompletionsAuth,
-) -> Result<(), Box<dyn Error>>
-where
-    R: Read,
-    W: Write,
-{
-    run_inner(reader, writer, auth)
-}
-
-#[cfg(not(test))]
-fn run_with_auth<R, W>(
-    reader: R,
-    writer: W,
-    auth: ChatCompletionsAuth,
-) -> Result<(), Box<dyn Error>>
-where
-    R: Read,
-    W: Write,
-{
-    run_inner(reader, writer, auth)
-}
-
-fn run_inner<R, W>(
-    reader: R,
-    writer: W,
-    auth_file_auth: ChatCompletionsAuth,
-) -> Result<(), Box<dyn Error>>
-where
-    R: Read,
-    W: Write,
-{
-    let mut reader = FrameReader::new(BufReader::new(reader));
-    let mut writer = FrameWriter::new(BufWriter::new(writer));
-    let mut auth = auth_file_auth.clone();
-
-    // No past events requested: SessionPromptCreated is a work request.
-    // Replaying old prompts would rerun completed turns; models are
-    // announced from current auth below.
-    tau_extension::Handshake::with_kind(EXTENSION_NAME, ClientKind::Provider)
-        .subscribe([EventName::SESSION_PROMPT_CREATED])
-        .announce_event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
-            models: models_for_auth(&auth),
-        }))
-        .ready_message("chat-completions provider ready")
-        .run(&mut writer)?;
-
-    while let Some(frame) = reader.read_frame()? {
-        if handle_frame(frame, &mut writer, &mut auth, &auth_file_auth)? {
-            return Ok(());
-        }
-    }
-    Ok(())
-}
-
-fn handle_frame<W: Write>(
-    frame: Frame,
-    writer: &mut FrameWriter<W>,
-    auth: &mut ChatCompletionsAuth,
-    auth_file_auth: &ChatCompletionsAuth,
-) -> Result<bool, Box<dyn Error>> {
-    let (log_id, inner) = frame.peel_log();
-    match inner {
-        Frame::Message(Message::Configure(msg)) => {
-            handle_configure(msg, writer, auth, auth_file_auth)?;
-        }
-        Frame::Event(Event::SessionPromptCreated(prompt)) => {
-            handle_prompt(prompt, writer, auth)?;
-        }
-        Frame::Message(Message::Disconnect(_)) => return Ok(true),
-        _ => {}
-    }
-    if let Some(id) = log_id {
-        writer.write_frame(&Frame::Message(Message::Ack(Ack { up_to: id })))?;
-        writer.flush()?;
-    }
-    Ok(false)
-}
-
-fn handle_configure<W: Write>(
-    msg: tau_proto::Configure,
-    writer: &mut FrameWriter<W>,
-    auth: &mut ChatCompletionsAuth,
-    auth_file_auth: &ChatCompletionsAuth,
-) -> Result<(), Box<dyn Error>> {
-    match tau_extension::parse_config::<ChatCompletionsAuth>(&msg.config) {
-        Ok(config_auth) => {
-            *auth = merge_config_and_auth(config_auth, auth_file_auth.clone());
-            writer.write_frame(&Frame::Event(Event::ProviderModelsUpdated(
-                ProviderModelsUpdated {
-                    models: models_for_auth(auth),
-                },
-            )))?;
-        }
-        Err(message) => {
-            tracing::warn!(target: LOG_TARGET, error = %message, "rejecting config");
-            writer.write_frame(&Frame::Message(Message::ConfigError(ConfigError {
-                message,
-            })))?;
-        }
-    }
-    writer.flush()?;
-    Ok(())
-}
-
-fn handle_prompt<W: Write>(
-    prompt: tau_proto::SessionPromptCreated,
-    writer: &mut FrameWriter<W>,
-    auth: &ChatCompletionsAuth,
-) -> Result<(), Box<dyn Error>> {
-    let session_prompt_id = prompt.session_prompt_id.clone();
-    writer.write_frame(&Frame::Event(Event::ProviderPromptSubmitted(
-        ProviderPromptSubmitted {
-            session_prompt_id: session_prompt_id.clone(),
-            originator: prompt.originator.clone(),
-        },
-    )))?;
-    writer.flush()?;
-    let finished = match prompt
-        .model
-        .as_ref()
-        .and_then(|model| resolve_backend(auth, model))
-    {
-        Some((provider, model)) => run_prompt(&session_prompt_id, &prompt, provider, model, writer),
-        None => missing_backend_finished(session_prompt_id, prompt),
-    };
-    writer.write_frame(&Frame::Event(Event::ProviderResponseFinished(finished)))?;
-    writer.flush()?;
-    Ok(())
-}
-
 fn run_prompt<W: Write>(
     session_prompt_id: &SessionPromptId,
     prompt: &tau_proto::SessionPromptCreated,
@@ -466,22 +119,27 @@ fn run_prompt<W: Write>(
     }
 }
 
-fn missing_backend_finished(
-    session_prompt_id: SessionPromptId,
-    prompt: tau_proto::SessionPromptCreated,
+/// Runs one prompt against a registered Chat Completions-compatible provider
+/// profile.
+pub fn run_prompt_for_provider<W: Write>(
+    session_prompt_id: &SessionPromptId,
+    prompt: &tau_proto::SessionPromptCreated,
+    provider: &ChatCompletionsProvider,
+    model: &ChatCompletionsModel,
+    writer: &mut FrameWriter<W>,
 ) -> ProviderResponseFinished {
-    ProviderResponseFinished {
+    run_prompt(
         session_prompt_id,
-        output_items: vec![assistant_text_item(
-            "No Chat Completions backend is configured for the selected model.",
-        )],
-        stop_reason: ProviderStopReason::Error,
-        originator: prompt.originator,
-        usage: None,
-        backend: None,
-        provider_response_id: None,
-        ws_pool_delta: None,
-    }
+        prompt,
+        ResolvedProvider {
+            base_url: provider.base_url.clone(),
+            api_key: provider.api_key.clone(),
+            extra_body: provider.extra_body.clone(),
+            compat: provider.compat,
+        },
+        model.clone(),
+        writer,
+    )
 }
 
 #[derive(Clone)]
@@ -492,54 +150,26 @@ struct ResolvedProvider {
     compat: ChatCompletionsCompat,
 }
 
-fn resolve_backend(
-    auth: &ChatCompletionsAuth,
-    model: &ModelId,
-) -> Option<(ResolvedProvider, ChatCompletionsModel)> {
-    let provider = auth.providers.get(&model.provider)?;
-    let configured_model = provider
+/// Returns model publication records for one Chat Completions-compatible
+/// provider profile.
+pub fn models_for_provider(
+    provider_name: &ProviderName,
+    provider: &ChatCompletionsProvider,
+) -> Vec<ProviderModelInfo> {
+    provider
         .models
         .iter()
-        .find(|configured| configured.id == model.model)
-        .cloned()?;
-    Some((
-        ResolvedProvider {
-            base_url: provider.base_url.clone(),
-            api_key: provider.api_key.clone(),
-            extra_body: provider.extra_body.clone(),
-            compat: provider.compat,
-        },
-        configured_model,
-    ))
-}
-
-fn merge_config_and_auth(
-    mut config_auth: ChatCompletionsAuth,
-    auth_file_auth: ChatCompletionsAuth,
-) -> ChatCompletionsAuth {
-    for (name, provider) in auth_file_auth.providers {
-        config_auth.providers.insert(name, provider);
-    }
-    config_auth
-}
-
-fn models_for_auth(auth: &ChatCompletionsAuth) -> Vec<ProviderModelInfo> {
-    let mut models = Vec::new();
-    for (provider_name, provider) in &auth.providers {
-        for model in &provider.models {
-            models.push(ProviderModelInfo {
-                id: ModelId::new(provider_name.clone(), model.id.clone()),
-                display_name: model.display_name.clone(),
-                default_affinity: 0,
-                context_window: model.context_window,
-                efforts: model_efforts(provider.compat),
-                verbosities: vec![tau_proto::Verbosity::Medium],
-                thinking_summaries: vec![ThinkingSummary::Off],
-                supports_compaction: false,
-            });
-        }
-    }
-    models
+        .map(|model| ProviderModelInfo {
+            id: ModelId::new(provider_name.clone(), model.id.clone()),
+            display_name: model.display_name.clone(),
+            default_affinity: 0,
+            context_window: model.context_window,
+            efforts: model_efforts(provider.compat),
+            verbosities: vec![tau_proto::Verbosity::Medium],
+            thinking_summaries: vec![ThinkingSummary::Off],
+            supports_compaction: false,
+        })
+        .collect()
 }
 
 fn model_efforts(compat: ChatCompletionsCompat) -> Vec<tau_proto::Effort> {

@@ -86,10 +86,9 @@ pub enum Command {
         force: bool,
     },
 
-    /// Manage LLM providers (add, login, list-models)
+    /// Manage LLM provider profiles (add, remove, list)
     Provider {
-        /// Subcommand and arguments (e.g. `add`, `login [name]`,
-        /// `list-models [name]`)
+        /// Subcommand and arguments (e.g. `add`, `remove <name>`, `list`)
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
     },
@@ -105,7 +104,7 @@ pub enum Command {
     /// harness to spawn extensions from the unified binary).
     #[command(hide = true, alias = "component")]
     Ext {
-        /// Extension name (harness, ext-provider-openai, ext-shell,
+        /// Extension name (harness, ext-provider-builtin, ext-shell,
         /// ext-test-dummy, ext-std-notifications)
         name: String,
     },

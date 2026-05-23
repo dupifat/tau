@@ -2,6 +2,8 @@ use std::io::{BufReader, Cursor};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use tau_proto::{Effort, Verbosity};
+
 use super::*;
 
 fn chatgpt_auth() -> OpenAiAuth {
@@ -67,12 +69,12 @@ fn prompt() -> tau_proto::SessionPromptCreated {
 }
 
 #[test]
-fn no_auth_publishes_no_models() {
-    // Auth presence is the first-cut enable switch: no API key or OAuth state
-    // means the provider extension should still start, but advertise nothing.
+fn chatgpt_profile_publishes_models_even_without_auth_tokens() {
+    // Profile existence is the registration signal. Auth validity affects
+    // prompt execution, not whether the registered account's models are visible.
     let models = models_for_auth(&OpenAiAuth::default());
 
-    assert!(models.is_empty());
+    assert!(model_ids(&models).starts_with(&["chatgpt/gpt-5.5".to_owned()]));
 }
 
 #[test]
@@ -97,13 +99,14 @@ fn chatgpt_oauth_publishes_chatgpt_models() {
 fn resolves_chatgpt_to_codex_responses_backend() {
     // ChatGPT is OAuth-backed and enables Codex-specific transport and replay
     // features owned by this provider slice.
-    let mut auth = chatgpt_auth();
+    let mut profiles = profiles_with_chatgpt_auth(chatgpt_auth());
 
-    let config = resolve_responses_backend(&model_id(CHATGPT_PROVIDER_NAME, "gpt-5.4"), &mut auth)
-        .expect("chatgpt backend");
+    let config =
+        resolve_responses_backend(&model_id(CHATGPT_PROVIDER_NAME, "gpt-5.4"), &mut profiles)
+            .expect("chatgpt backend");
 
     assert_eq!(config.surface, responses::ResponsesSurface::ChatGpt);
-    assert_eq!(config.base_url, CHATGPT_BASE_URL);
+    assert_eq!(config.base_url, tau_provider_chatgpt::DEFAULT_BASE_URL);
     assert_eq!(config.api_key, "access");
     assert_eq!(config.account_id.as_deref(), Some("account"));
     assert!(config.supports_websocket);
@@ -116,14 +119,18 @@ fn resolves_chatgpt_to_codex_responses_backend() {
 fn chatgpt_phase_metadata_is_model_specific() {
     // The assistant `phase` field is only accepted by newer Codex model
     // families, so the hardcoded resolver must preserve the old whitelist.
-    let mut auth = chatgpt_auth();
+    let mut profiles = profiles_with_chatgpt_auth(chatgpt_auth());
 
-    let old =
-        resolve_responses_backend(&model_id(CHATGPT_PROVIDER_NAME, "gpt-5.2-codex"), &mut auth)
-            .expect("old codex backend");
-    let new =
-        resolve_responses_backend(&model_id(CHATGPT_PROVIDER_NAME, "gpt-5.3-codex"), &mut auth)
-            .expect("new codex backend");
+    let old = resolve_responses_backend(
+        &model_id(CHATGPT_PROVIDER_NAME, "gpt-5.2-codex"),
+        &mut profiles,
+    )
+    .expect("old codex backend");
+    let new = resolve_responses_backend(
+        &model_id(CHATGPT_PROVIDER_NAME, "gpt-5.3-codex"),
+        &mut profiles,
+    )
+    .expect("new codex backend");
 
     assert!(!old.supports_phase);
     assert!(new.supports_phase);
@@ -243,14 +250,14 @@ fn prompt_workers_start_concurrently() {
         cv.notify_all();
     });
 
-    let auth = chatgpt_auth();
-    let prompt_auth = auth.clone();
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
     let mut output = Vec::new();
     run_inner_with_prompt_executor(
         Cursor::new(input),
         &mut output,
-        auth,
-        move || prompt_auth.clone(),
+        profiles,
+        move || prompt_profiles.clone(),
         2,
         executor,
     )

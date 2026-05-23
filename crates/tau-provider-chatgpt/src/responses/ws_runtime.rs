@@ -1,4 +1,4 @@
-//! Shared Tokio runtime for provider-openai network IO.
+//! Shared Tokio runtime for provider-builtin network IO.
 //!
 //! One process-wide multi-thread runtime, lazily started on first
 //! use. The runtime is intentionally narrow in scope today (WS pool
@@ -32,16 +32,16 @@ const WORKER_THREADS: usize = 2;
 /// through every call site: the provider process is useless without
 /// its network runtime, and the panic message is more actionable
 /// than a `Result` that callers would `.expect()` anyway.
-pub(crate) fn handle() -> Handle {
+pub fn handle() -> Handle {
     static RUNTIME: OnceLock<Runtime> = OnceLock::new();
     RUNTIME
         .get_or_init(|| {
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(WORKER_THREADS)
                 .enable_all()
-                .thread_name("tau-provider-openai-net")
+                .thread_name("tau-provider-builtin-net")
                 .build()
-                .expect("build tokio runtime for provider-openai network IO")
+                .expect("build tokio runtime for provider-builtin network IO")
         })
         .handle()
         .clone()

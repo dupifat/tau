@@ -1,14 +1,10 @@
-//! OpenAI provider extension.
+//! Built-in provider registry extension.
 //!
-//! The extension owns model publication and Responses execution for the
-//! hardcoded `chatgpt/*` provider namespace. The harness routes prompts for
-//! those models directly here; this crate emits the provider execution events
-//! and uses provider-named protocol payload types throughout Rust.
+//! This crate owns Tau's built-in provider process, profile CLI, auth/profile
+//! storage scan, model publication, and dispatch across built-in provider
+//! backends. Individual backend crates own provider-specific wire formats.
 
-mod common;
-mod responses;
-
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::error::Error;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -20,25 +16,46 @@ use backon::BackoffBuilder;
 use dialoguer::Input;
 use serde::{Deserialize, Serialize};
 use tau_proto::{
-    Ack, ClientKind, ContextItem, Effort, Event, EventName, Frame, FrameReader, FrameWriter,
-    Message, ModelId, ModelName, ProviderBackend, ProviderBackendKind, ProviderBackendTransport,
+    Ack, ClientKind, ContextItem, Event, EventName, Frame, FrameReader, FrameWriter, Message,
+    ModelId, ModelName, ProviderBackend, ProviderBackendKind, ProviderBackendTransport,
     ProviderModelInfo, ProviderModelsUpdated, ProviderName, ProviderPromptSubmitted,
-    ProviderResponseFinished, ProviderResponseUpdated, ProviderStopReason, ThinkingSummary,
-    Verbosity,
+    ProviderResponseFinished, ProviderResponseUpdated, ProviderStopReason,
 };
-use tau_provider::storage::AuthFile;
+use tau_provider::storage::{AuthFile, ProviderStore};
+use tau_provider_chat_completions::{
+    ChatCompletionsModel, ChatCompletionsProvider, models_for_provider as chat_models_for_provider,
+    run_prompt_for_provider as run_chat_completions_prompt,
+};
+use tau_provider_chatgpt::{ChatGptRuntime, ChatGptTurnState, common, responses};
 
 /// `tracing` target for events emitted from this extension.
-pub const LOG_TARGET: &str = "provider-openai";
+pub const LOG_TARGET: &str = "provider-builtin";
 
-const EXTENSION_NAME: &str = "tau-ext-provider-openai";
-/// Auth file name for the ChatGPT/Codex provider extension.
-pub const AUTH_FILE_NAME: &str = "provider-openai";
+const EXTENSION_NAME: &str = "tau-ext-provider-builtin";
 const CHATGPT_PROVIDER_NAME: &str = "chatgpt";
-const CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api";
-const CONTEXT_WINDOW: u64 = 258400;
+/// One built-in provider profile loaded from `auth.d/<provider>.json`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BuiltinProviderProfile {
+    /// ChatGPT/Codex OAuth provider using the Responses backend.
+    Chatgpt(ChatGptProfile),
+    /// OpenAI-compatible Chat Completions provider.
+    ChatCompletions(ChatCompletionsProvider),
+}
 
-const CHATGPT_MODELS: &[&str] = &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"];
+/// ChatGPT/Codex provider profile.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ChatGptProfile {
+    /// OAuth credentials used for ChatGPT/Codex Responses calls.
+    #[serde(default)]
+    pub auth: OpenAiAuth,
+}
+
+/// Registered built-in provider profiles keyed by filename-derived namespace.
+#[derive(Clone, Debug, Default)]
+pub struct BuiltinProviderProfiles {
+    providers: BTreeMap<ProviderName, BuiltinProviderProfile>,
+}
 
 /// OAuth credentials for the ChatGPT/Codex Responses provider.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -71,67 +88,181 @@ const LLM_MAX_RETRIES: usize = 8;
 /// should not block the provider extension's single prompt slot for minutes.
 const LLM_MAX_RETRIES_EXTENSION: usize = 2;
 
-/// WebSocket attempts that can fail before a ChatGPT session falls back to
-/// HTTP+SSE for the process lifetime.
-const WS_RETRY_BUDGET_BEFORE_HTTP_FALLBACK: usize = 2;
-
 /// Default number of provider prompts allowed to execute concurrently.
 const DEFAULT_PROMPT_CONCURRENCY: usize = 4;
 
 /// Environment override for prompt execution concurrency.
-const PROMPT_CONCURRENCY_ENV: &str = "TAU_OPENAI_PROVIDER_PROMPT_CONCURRENCY";
+const PROMPT_CONCURRENCY_ENV: &str = "TAU_BUILTIN_PROVIDER_PROMPT_CONCURRENCY";
 const CANCELED_BY_HARNESS_STATUS: u16 = 499;
 const CANCELED_BY_HARNESS_BODY: &str = "cancelled by harness";
 
-/// Runs provider-specific setup commands for ChatGPT/Codex.
+/// Runs setup commands for registered built-in provider profiles.
 pub fn run_provider_cli(args: &[String]) -> Result<(), Box<dyn Error>> {
     match args.first().map(String::as_str).unwrap_or("help") {
-        "login" => cmd_login()?,
-        "logout" | "remove" => cmd_logout()?,
-        "status" | "list" => cmd_status()?,
+        "add" => cmd_add(&args[1..])?,
+        "remove" | "delete" => cmd_remove(args.get(1).map(String::as_str))?,
+        "list" | "status" => cmd_list()?,
         "help" | "--help" | "-h" => println!("{PROVIDER_CLI_HELP}"),
-        other => return Err(format!("unknown chatgpt provider subcommand: {other}").into()),
+        other => return Err(format!("unknown provider subcommand: {other}").into()),
     }
     Ok(())
 }
 
 const PROVIDER_CLI_HELP: &str = "\
-Usage: tau provider chatgpt <subcommand>
+Usage: tau provider <subcommand>
 
 Subcommands:
-  login        Log in / refresh ChatGPT OAuth credentials
-  logout       Remove ChatGPT OAuth credentials
-  status       Show ChatGPT auth status";
+  add                            Add or replace a provider profile interactively
+  remove <name>                  Remove a provider profile
+  list                           List provider profiles";
 
-fn cmd_login() -> Result<(), Box<dyn Error>> {
+fn cmd_add(args: &[String]) -> Result<(), Box<dyn Error>> {
+    if !args.is_empty() {
+        return Err(
+            "tau provider add does not accept arguments; it prompts for all provider details"
+                .into(),
+        );
+    }
+    let kind: String = Input::new()
+        .with_prompt("Provider kind (chatgpt or chat-completions)")
+        .default("chatgpt".to_owned())
+        .interact_text()?;
+    match kind.trim() {
+        "chatgpt" => cmd_add_chatgpt()?,
+        "chat-completions" => cmd_add_chat_completions()?,
+        other => return Err(format!("unknown provider kind: {other}").into()),
+    }
+    Ok(())
+}
+
+fn cmd_add_chatgpt() -> Result<(), Box<dyn Error>> {
+    let name = prompt_provider_name("chatgpt")?;
     let auth = run_openai_codex_login()?;
-    let file = AuthFile::<OpenAiAuth>::open_default(AUTH_FILE_NAME)?;
-    file.save(&auth)?;
-    eprintln!("\nCredentials saved to: {}", file.path().display());
+    save_profile(
+        &name,
+        &BuiltinProviderProfile::Chatgpt(ChatGptProfile { auth }),
+    )?;
     Ok(())
 }
 
-fn cmd_logout() -> Result<(), Box<dyn Error>> {
-    let file = AuthFile::<OpenAiAuth>::open_default(AUTH_FILE_NAME)?;
+fn cmd_add_chat_completions() -> Result<(), Box<dyn Error>> {
+    let name = prompt_provider_name("local")?;
+    let base_url: String = Input::new()
+        .with_prompt("Base URL")
+        .default("https://api.openai.com/v1".to_owned())
+        .interact_text()?;
+    let api_key: String = Input::new()
+        .with_prompt("API key (empty for keyless/local providers)")
+        .allow_empty(true)
+        .interact_text()?;
+    let models_input: String = Input::new()
+        .with_prompt("Models (comma-separated)")
+        .default("gpt-4o,gpt-4o-mini".to_owned())
+        .interact_text()?;
+    let models = parse_chat_model_list(&models_input)?;
+    let profile = ChatCompletionsProvider {
+        base_url,
+        api_key,
+        models,
+        extra_body: BTreeMap::new(),
+        compat: tau_provider_chat_completions::ChatCompletionsCompat::openai_defaults(),
+    };
+    save_profile(&name, &BuiltinProviderProfile::ChatCompletions(profile))?;
+    Ok(())
+}
+
+fn cmd_remove(name_arg: Option<&str>) -> Result<(), Box<dyn Error>> {
+    let name = match name_arg {
+        Some(name) => ProviderName::try_new(name.trim().to_owned())
+            .map_err(|error| format!("invalid provider namespace '{name}': {error}"))?,
+        None => prompt_provider_name(CHATGPT_PROVIDER_NAME)?,
+    };
+    let file = AuthFile::<BuiltinProviderProfile>::open_default(name.as_str())?;
     if file.delete()? {
-        eprintln!("Removed ChatGPT credentials.");
+        eprintln!("Removed provider profile '{name}'.");
     } else {
-        eprintln!("ChatGPT credentials were not configured.");
+        eprintln!("Provider profile '{name}' was not configured.");
     }
     Ok(())
 }
 
-fn cmd_status() -> Result<(), Box<dyn Error>> {
-    let auth = AuthFile::<OpenAiAuth>::open_default(AUTH_FILE_NAME)?
-        .load()?
-        .unwrap_or_default();
-    if auth.access_token.trim().is_empty() && auth.refresh_token.trim().is_empty() {
-        println!("chatgpt: not configured");
-    } else if now_ms() < auth.expires_at_ms {
-        println!("chatgpt: logged in");
-    } else {
-        println!("chatgpt: expired");
+fn cmd_list() -> Result<(), Box<dyn Error>> {
+    let profiles = load_profiles();
+    if profiles.providers.is_empty() {
+        println!("No provider profiles configured.");
+        return Ok(());
     }
+    for (name, profile) in profiles.providers {
+        match profile {
+            BuiltinProviderProfile::Chatgpt(profile) => {
+                let status = if profile.auth.access_token.trim().is_empty()
+                    && profile.auth.refresh_token.trim().is_empty()
+                {
+                    "not-configured"
+                } else if now_ms() < profile.auth.expires_at_ms {
+                    "logged-in"
+                } else {
+                    "expired"
+                };
+                println!("{name}\tchatgpt\t{status}");
+            }
+            BuiltinProviderProfile::ChatCompletions(provider) => {
+                let auth_status = if provider.api_key.trim().is_empty() {
+                    "no-api-key"
+                } else {
+                    "api-key"
+                };
+                let models = provider
+                    .models
+                    .iter()
+                    .map(|model| model.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                println!(
+                    "{name}\tchat_completions\t{}\t{models}\t{auth_status}",
+                    provider.base_url
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn prompt_provider_name(default: &str) -> Result<ProviderName, Box<dyn Error>> {
+    let name: String = Input::new()
+        .with_prompt("Provider namespace")
+        .default(default.to_owned())
+        .interact_text()?;
+    ProviderName::try_new(name.trim().to_owned())
+        .map_err(|error| format!("invalid provider namespace '{name}': {error}").into())
+}
+
+fn parse_chat_model_list(input: &str) -> Result<Vec<ChatCompletionsModel>, Box<dyn Error>> {
+    let mut models = Vec::new();
+    for raw in input.split(',') {
+        let model = raw.trim();
+        if model.is_empty() {
+            continue;
+        }
+        models.push(ChatCompletionsModel {
+            id: ModelName::try_new(model.to_owned())?,
+            display_name: None,
+            context_window: 128_000,
+        });
+    }
+    if models.is_empty() {
+        return Err("at least one model is required".into());
+    }
+    Ok(models)
+}
+
+fn save_profile(
+    name: &ProviderName,
+    profile: &BuiltinProviderProfile,
+) -> Result<(), Box<dyn Error>> {
+    let file = AuthFile::<BuiltinProviderProfile>::open_default(name.as_str())?;
+    file.save(profile)?;
+    eprintln!("Provider profile saved to: {}", file.path().display());
     Ok(())
 }
 
@@ -182,23 +313,64 @@ where
     R: Read + Send + 'static,
     W: Write,
 {
-    let startup_auth = load_auth();
-    run_inner(reader, writer, startup_auth, load_auth)
+    let startup_profiles = load_profiles();
+    run_inner(reader, writer, startup_profiles, load_profiles)
 }
 
-fn load_auth() -> OpenAiAuth {
-    match AuthFile::<OpenAiAuth>::open_default(AUTH_FILE_NAME).and_then(|file| file.load()) {
-        Ok(Some(auth)) => auth,
-        Ok(None) => OpenAiAuth::default(),
+fn load_profiles() -> BuiltinProviderProfiles {
+    match load_profiles_result() {
+        Ok(profiles) => profiles,
         Err(error) => {
             tracing::warn!(
                 target: LOG_TARGET,
                 error = %error,
-                "failed to load provider auth; publishing no models"
+                "failed to load provider profiles; publishing no models"
             );
-            OpenAiAuth::default()
+            BuiltinProviderProfiles::default()
         }
     }
+}
+
+fn load_profiles_result() -> std::io::Result<BuiltinProviderProfiles> {
+    let store = ProviderStore::open_default()?;
+    let mut profiles = BuiltinProviderProfiles::default();
+    let auth_dir = store.auth_dir();
+    let entries = match std::fs::read_dir(&auth_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(profiles),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let Ok(name) = ProviderName::try_new(stem.to_owned()) else {
+            tracing::warn!(target: LOG_TARGET, path = %path.display(), "skipping provider profile with invalid filename");
+            continue;
+        };
+        let file = match store.auth_file::<BuiltinProviderProfile>(stem.to_owned()) {
+            Ok(file) => file,
+            Err(error) => {
+                tracing::warn!(target: LOG_TARGET, path = %path.display(), error = %error, "skipping provider profile with invalid auth file name");
+                continue;
+            }
+        };
+        match file.load() {
+            Ok(Some(profile)) => {
+                profiles.providers.insert(name, profile);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(target: LOG_TARGET, path = %path.display(), error = %error, "skipping invalid provider profile");
+            }
+        }
+    }
+    Ok(profiles)
 }
 
 #[cfg(test)]
@@ -207,26 +379,37 @@ where
     R: Read + Send + 'static,
     W: Write,
 {
-    let prompt_auth = auth.clone();
-    run_inner(reader, writer, auth, move || prompt_auth.clone())
+    let profiles = profiles_with_chatgpt_auth(auth);
+    let prompt_profiles = profiles.clone();
+    run_inner(reader, writer, profiles, move || prompt_profiles.clone())
+}
+
+#[cfg(test)]
+fn profiles_with_chatgpt_auth(auth: OpenAiAuth) -> BuiltinProviderProfiles {
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        ProviderName::new(CHATGPT_PROVIDER_NAME),
+        BuiltinProviderProfile::Chatgpt(ChatGptProfile { auth }),
+    );
+    BuiltinProviderProfiles { providers }
 }
 
 fn run_inner<R, W, F>(
     reader: R,
     writer: W,
-    startup_auth: OpenAiAuth,
-    load_prompt_auth: F,
+    startup_profiles: BuiltinProviderProfiles,
+    load_prompt_profiles: F,
 ) -> Result<(), Box<dyn Error>>
 where
     R: Read + Send + 'static,
     W: Write,
-    F: FnMut() -> OpenAiAuth,
+    F: FnMut() -> BuiltinProviderProfiles,
 {
     run_inner_with_prompt_executor(
         reader,
         writer,
-        startup_auth,
-        load_prompt_auth,
+        startup_profiles,
+        load_prompt_profiles,
         prompt_concurrency_limit(),
         production_prompt_executor(),
     )
@@ -235,15 +418,15 @@ where
 fn run_inner_with_prompt_executor<R, W, F>(
     reader: R,
     writer: W,
-    startup_auth: OpenAiAuth,
-    mut load_prompt_auth: F,
+    startup_profiles: BuiltinProviderProfiles,
+    mut load_prompt_profiles: F,
     prompt_concurrency_limit: usize,
     prompt_executor: PromptExecutor,
 ) -> Result<(), Box<dyn Error>>
 where
     R: Read + Send + 'static,
     W: Write,
-    F: FnMut() -> OpenAiAuth,
+    F: FnMut() -> BuiltinProviderProfiles,
 {
     let mut handshake_writer = FrameWriter::new(BufWriter::new(writer));
 
@@ -256,9 +439,9 @@ where
             EventName::UI_CANCEL_PROMPT,
         ])
         .announce_event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
-            models: models_for_auth(&startup_auth),
+            models: models_for_profiles(&startup_profiles),
         }))
-        .ready_message("openai provider ready")
+        .ready_message("builtin provider ready")
         .run(&mut handshake_writer)?;
     let mut writer = handshake_writer.into_inner();
 
@@ -283,16 +466,14 @@ where
 
     let (worker_tx, worker_rx) = mpsc::channel::<WorkerMessage>();
     let mut deferred: VecDeque<Frame> = VecDeque::new();
-    let ws_pool = Arc::new(responses::pool::SharedWsPool::new());
-    let ws_disabled = Arc::new(Mutex::new(HashSet::new()));
+    let chatgpt_runtime = Arc::new(ChatGptRuntime::new());
     let cancellation = Arc::new(CancellationState::default());
     let mut prompt_queue: VecDeque<PromptJob> = VecDeque::new();
     let prompt_worker_context = PromptWorkerContext {
         worker_tx: &worker_tx,
         prompt_executor: &prompt_executor,
         cancellation: &cancellation,
-        ws_pool: &ws_pool,
-        ws_disabled: &ws_disabled,
+        chatgpt_runtime: &chatgpt_runtime,
     };
     let mut active_prompts = 0_usize;
     let mut ack_tracker = AckTracker::default();
@@ -349,8 +530,8 @@ where
         let mut complete_log_now = true;
         match inner {
             Frame::Event(Event::SessionPromptPrewarmRequested(prewarm)) => {
-                let mut auth_store = load_prompt_auth();
-                handle_prewarm(&prewarm, &mut auth_store, &ws_pool, &ws_disabled);
+                let mut profiles = load_prompt_profiles();
+                handle_prewarm(&prewarm, &mut profiles, &chatgpt_runtime);
             }
             Frame::Event(Event::SessionCompactionRequested(request)) => {
                 let session_prompt_id = request.prompt.session_prompt_id.clone();
@@ -381,12 +562,12 @@ where
                     deferred: &mut deferred,
                     cancellation: cancellation.clone(),
                 };
-                let mut auth_store = load_prompt_auth();
+                let mut profiles = load_prompt_profiles();
                 let mut frame_writer = FrameWriter::new(&mut writer);
                 match prompt
                     .model
                     .as_ref()
-                    .and_then(|model| resolve_responses_backend(model, &mut auth_store))
+                    .and_then(|model| resolve_responses_backend(model, &mut profiles))
                 {
                     Some(backend) => handle_compaction_request(
                         &session_prompt_id,
@@ -414,11 +595,11 @@ where
 
                 trace_prompt_like("provider prompt", &prompt, &session_prompt_id);
 
-                let mut auth_store = load_prompt_auth();
+                let mut profiles = load_prompt_profiles();
                 match prompt
                     .model
                     .as_ref()
-                    .and_then(|model| resolve_responses_backend(model, &mut auth_store))
+                    .and_then(|model| resolve_prompt_backend(model, &mut profiles))
                 {
                     Some(backend) => {
                         let job = PromptJob {
@@ -478,23 +659,30 @@ struct PromptJob {
     log_id: Option<tau_proto::LogEventId>,
     session_prompt_id: tau_proto::SessionPromptId,
     prompt: tau_proto::SessionPromptCreated,
-    backend: responses::ResponsesConfig,
+    backend: PromptBackend,
+}
+
+#[derive(Clone)]
+enum PromptBackend {
+    Responses(responses::ResponsesConfig),
+    ChatCompletions {
+        provider: ChatCompletionsProvider,
+        model: ChatCompletionsModel,
+    },
 }
 
 struct PromptExecution {
     job: PromptJob,
     output_tx: Sender<WorkerMessage>,
     cancellation: Arc<CancellationState>,
-    ws_pool: Arc<responses::pool::SharedWsPool>,
-    ws_disabled: Arc<Mutex<HashSet<String>>>,
+    chatgpt_runtime: Arc<ChatGptRuntime>,
 }
 
 struct PromptWorkerContext<'a> {
     worker_tx: &'a Sender<WorkerMessage>,
     prompt_executor: &'a PromptExecutor,
     cancellation: &'a Arc<CancellationState>,
-    ws_pool: &'a Arc<responses::pool::SharedWsPool>,
-    ws_disabled: &'a Arc<Mutex<HashSet<String>>>,
+    chatgpt_runtime: &'a Arc<ChatGptRuntime>,
 }
 
 impl PromptExecution {
@@ -667,14 +855,13 @@ fn production_prompt_executor() -> PromptExecutor {
         let mut retry_ctx = SharedRetryContext {
             cancellation: execution.cancellation.clone(),
         };
-        let result = handle_prompt(
+        let result = handle_prompt_backend(
             &session_prompt_id,
             &execution.job.backend,
             &execution.job.prompt,
             &mut writer,
             &mut retry_ctx,
-            &execution.ws_pool,
-            &execution.ws_disabled,
+            &execution.chatgpt_runtime,
         );
         if let Err(error) = result {
             tracing::warn!(
@@ -693,8 +880,7 @@ fn start_prompt_job(job: PromptJob, active_prompts: &mut usize, context: &Prompt
         job,
         output_tx: context.worker_tx.clone(),
         cancellation: context.cancellation.clone(),
-        ws_pool: context.ws_pool.clone(),
-        ws_disabled: context.ws_disabled.clone(),
+        chatgpt_runtime: context.chatgpt_runtime.clone(),
     };
     let executor = context.prompt_executor.clone();
     let done_tx = context.worker_tx.clone();
@@ -996,24 +1182,50 @@ impl RetrySleeper for SharedRetryContext {
     }
 }
 
+fn resolve_prompt_backend(
+    model: &ModelId,
+    profiles: &mut BuiltinProviderProfiles,
+) -> Option<PromptBackend> {
+    match profiles.providers.get_mut(&model.provider)? {
+        BuiltinProviderProfile::Chatgpt(profile) => {
+            resolve_chatgpt_backend(model, &model.provider, &mut profile.auth)
+                .map(PromptBackend::Responses)
+        }
+        BuiltinProviderProfile::ChatCompletions(provider) => {
+            let configured_model = provider
+                .models
+                .iter()
+                .find(|configured| configured.id == model.model)?
+                .clone();
+            Some(PromptBackend::ChatCompletions {
+                provider: provider.clone(),
+                model: configured_model,
+            })
+        }
+    }
+}
+
 fn resolve_responses_backend(
     model: &ModelId,
-    auth_store: &mut OpenAiAuth,
+    profiles: &mut BuiltinProviderProfiles,
 ) -> Option<responses::ResponsesConfig> {
-    if model.provider.as_str() != CHATGPT_PROVIDER_NAME {
-        return None;
+    match profiles.providers.get_mut(&model.provider)? {
+        BuiltinProviderProfile::Chatgpt(profile) => {
+            resolve_chatgpt_backend(model, &model.provider, &mut profile.auth)
+        }
+        BuiltinProviderProfile::ChatCompletions(_) => None,
     }
-    resolve_chatgpt_backend(model, auth_store)
 }
 
 fn resolve_chatgpt_backend(
     model: &ModelId,
+    provider_name: &ProviderName,
     auth_store: &mut OpenAiAuth,
 ) -> Option<responses::ResponsesConfig> {
     if oauth_token_should_refresh(&auth_store.access_token, auth_store.expires_at_ms)
         && !auth_store.refresh_token.trim().is_empty()
     {
-        match refresh_chatgpt_credentials_locked() {
+        match refresh_chatgpt_credentials_locked(provider_name) {
             Ok(refreshed) => {
                 *auth_store = refreshed;
             }
@@ -1027,28 +1239,26 @@ fn resolve_chatgpt_backend(
         return None;
     }
 
-    let model_id = model.model.as_str();
-    Some(responses::ResponsesConfig {
-        surface: responses::ResponsesSurface::ChatGpt,
-        base_url: CHATGPT_BASE_URL.to_owned(),
-        api_key: auth_store.access_token.clone(),
-        model_id: model_id.to_owned(),
-        account_id: auth_store.account_id.clone(),
-        supports_reasoning_effort: true,
-        supports_reasoning_summary: true,
-        supports_verbosity: model_id.starts_with("gpt-5"),
-        supports_phase: is_known_chatgpt_phase_capable_model_id(model_id),
-        supports_encrypted_reasoning: true,
-        supports_websocket: true,
-        supports_compaction: true,
-        supports_prompt_cache_key: true,
-    })
+    Some(tau_provider_chatgpt::config_for_model(
+        &model.model,
+        auth_store.access_token.clone(),
+        auth_store.account_id.clone(),
+    ))
 }
 
-fn refresh_chatgpt_credentials_locked() -> std::io::Result<OpenAiAuth> {
-    let auth_file = AuthFile::<OpenAiAuth>::open_default(AUTH_FILE_NAME)?;
+fn refresh_chatgpt_credentials_locked(provider_name: &ProviderName) -> std::io::Result<OpenAiAuth> {
+    let auth_file = AuthFile::<BuiltinProviderProfile>::open_default(provider_name.as_str())?;
     auth_file.with_lock(|locked| {
-        let current = locked.load()?.unwrap_or_default();
+        let BuiltinProviderProfile::Chatgpt(mut profile) = locked.load()?.ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "provider profile not found")
+        })?
+        else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "provider profile is not a ChatGPT profile",
+            ));
+        };
+        let current = profile.auth.clone();
         if !oauth_token_should_refresh(&current.access_token, current.expires_at_ms)
             || current.refresh_token.trim().is_empty()
         {
@@ -1062,7 +1272,8 @@ fn refresh_chatgpt_credentials_locked() -> std::io::Result<OpenAiAuth> {
             expires_at_ms: tokens.expires_at_ms,
             account_id: tokens.account_id,
         };
-        locked.save(&refreshed)?;
+        profile.auth = refreshed.clone();
+        locked.save(&BuiltinProviderProfile::Chatgpt(profile))?;
         Ok(refreshed)
     })
 }
@@ -1099,19 +1310,6 @@ fn jwt_issued_at_ms(jwt: &str) -> Option<u64> {
     claims.get("iat")?.as_u64().map(|secs| secs * 1000)
 }
 
-fn is_known_chatgpt_phase_capable_model_id(model_id: &str) -> bool {
-    let trimmed = model_id.trim();
-    let Some(rest) = trimmed.strip_prefix("gpt-5.") else {
-        return false;
-    };
-    let (minor, suffix) = rest.split_once('-').unwrap_or((rest, ""));
-    let Ok(n) = minor.parse::<u32>() else {
-        return false;
-    };
-
-    n >= 4 || (n == 3 && suffix.starts_with("codex"))
-}
-
 fn max_retries_for(originator: &tau_proto::PromptOriginator) -> usize {
     match originator {
         tau_proto::PromptOriginator::User => LLM_MAX_RETRIES,
@@ -1127,15 +1325,15 @@ fn llm_retry_schedule(max_attempts: usize) -> backon::FibonacciBackoff {
         .build()
 }
 
-fn with_llm_retry<F, R, W: Write>(
+fn with_llm_retry<F, R, W: Write, T>(
     session_prompt_id: &str,
     originator: &tau_proto::PromptOriginator,
     writer: &mut FrameWriter<W>,
     retry_ctx: &mut R,
     mut call: F,
-) -> Result<common::StreamState, common::LlmError>
+) -> Result<T, common::LlmError>
 where
-    F: FnMut(&mut FrameWriter<W>, &mut R) -> Result<common::StreamState, common::LlmError>,
+    F: FnMut(&mut FrameWriter<W>, &mut R) -> Result<T, common::LlmError>,
     R: RetrySleeper,
 {
     let max_attempts = max_retries_for(originator);
@@ -1209,141 +1407,6 @@ fn emit_retry_banner<W: Write>(
     let _ = writer.flush();
 }
 
-struct WsRetryState {
-    failures: usize,
-    budget: usize,
-}
-
-struct SharedStreamDispatchState<'a> {
-    ws_pool: &'a responses::pool::SharedWsPool,
-    ws_disabled: &'a Mutex<HashSet<String>>,
-    ws_retry: &'a mut WsRetryState,
-    transport_taken: &'a mut ProviderBackendTransport,
-}
-
-fn stream_with_shared_dispatch(
-    session_prompt_id: &str,
-    config: &responses::ResponsesConfig,
-    request: &common::PromptPayload<'_>,
-    dispatch: SharedStreamDispatchState<'_>,
-    should_abort: &mut impl FnMut() -> bool,
-    on_update: &mut impl FnMut(&str, Option<&str>),
-) -> Result<common::StreamState, common::LlmError> {
-    let SharedStreamDispatchState {
-        ws_pool,
-        ws_disabled,
-        ws_retry,
-        transport_taken,
-    } = dispatch;
-    let session_id = request.session_id.as_str();
-    let try_ws = config.supports_websocket
-        && ws_disabled
-            .lock()
-            .map(|disabled| !disabled.contains(session_id))
-            .unwrap_or(false);
-    if try_ws {
-        let ws_request = request_for_transport(request, ProviderBackendTransport::Websocket);
-        match responses::pool::run_turn_through_shared_pool(
-            ws_pool,
-            config,
-            session_prompt_id,
-            &ws_request,
-            should_abort,
-            on_update,
-        ) {
-            Ok(state) => {
-                ws_retry.failures = 0;
-                *transport_taken = ProviderBackendTransport::Websocket;
-                return Ok(state);
-            }
-            Err(error) if should_disable_ws_error(&error) => {
-                let error = error.into_llm_error();
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    session_id,
-                    "WS path failed ({error}); falling back to HTTP for this session",
-                );
-                if let Ok(mut disabled) = ws_disabled.lock() {
-                    disabled.insert(session_id.to_owned());
-                }
-            }
-            Err(other) => {
-                let error = other.into_llm_error();
-                *transport_taken = ProviderBackendTransport::Websocket;
-                if error.retry_after().is_some() {
-                    ws_retry.failures += 1;
-                    if ws_retry.failures <= ws_retry.budget {
-                        tracing::warn!(
-                            target: LOG_TARGET,
-                            session_id,
-                            ws_retry_failures = ws_retry.failures,
-                            ws_retry_budget = ws_retry.budget,
-                            "WS path failed with retryable error ({error}); retrying WS before HTTP fallback",
-                        );
-                        return Err(error);
-                    }
-                    tracing::warn!(
-                        target: LOG_TARGET,
-                        session_id,
-                        ws_retry_failures = ws_retry.failures,
-                        ws_retry_budget = ws_retry.budget,
-                        "WS retry budget exhausted ({error}); falling back to HTTP for this session",
-                    );
-                    if let Ok(mut disabled) = ws_disabled.lock() {
-                        disabled.insert(session_id.to_owned());
-                    }
-                } else {
-                    return Err(error);
-                }
-            }
-        }
-    }
-
-    *transport_taken = ProviderBackendTransport::HttpSse;
-    let http_request = request_for_transport(request, ProviderBackendTransport::HttpSse);
-    responses::responses_stream(session_prompt_id, config, &http_request, on_update)
-}
-
-fn request_for_transport<'a>(
-    request: &common::PromptPayload<'a>,
-    transport: ProviderBackendTransport,
-) -> common::PromptPayload<'a> {
-    let previous_response =
-        request
-            .previous_response
-            .and_then(|previous_response| match previous_response.transport {
-                Some(previous_transport) if previous_transport != transport => {
-                    tracing::info!(
-                        target: LOG_TARGET,
-                        session_id = %request.session_id,
-                        previous_transport = ?previous_transport,
-                        current_transport = ?transport,
-                        "stripping transport-incompatible previous_response_id",
-                    );
-                    None
-                }
-                _ => Some(previous_response),
-            });
-    common::PromptPayload {
-        previous_response,
-        system_prompt: request.system_prompt,
-        context_items: request.context_items,
-        tools: request.tools,
-        params: request.params,
-        tool_choice: request.tool_choice,
-        originator: request.originator,
-        session_id: request.session_id,
-        share_user_cache_key: request.share_user_cache_key,
-    }
-}
-
-fn should_disable_ws_error(error: &responses::pool::WsTurnError) -> bool {
-    match error {
-        responses::pool::WsTurnError::Canceled => false,
-        responses::pool::WsTurnError::Other(error) => should_disable_ws(error),
-    }
-}
-
 fn is_canceled_by_harness(error: &common::LlmError) -> bool {
     matches!(
         error,
@@ -1352,21 +1415,10 @@ fn is_canceled_by_harness(error: &common::LlmError) -> bool {
     )
 }
 
-fn should_disable_ws(error: &common::LlmError) -> bool {
-    match error {
-        common::LlmError::HttpStatus(426, _) => true,
-        common::LlmError::HttpStatus(_, body) => {
-            body.contains("websocket_connection_limit_reached")
-        }
-        _ => false,
-    }
-}
-
 fn handle_prewarm(
     prewarm: &tau_proto::SessionPromptPrewarmRequested,
-    auth_store: &mut OpenAiAuth,
-    ws_pool: &responses::pool::SharedWsPool,
-    ws_disabled: &Mutex<HashSet<String>>,
+    profiles: &mut BuiltinProviderProfiles,
+    chatgpt_runtime: &ChatGptRuntime,
 ) {
     let Some(model) = prewarm.model.as_ref() else {
         tracing::debug!(
@@ -1376,7 +1428,7 @@ fn handle_prewarm(
         );
         return;
     };
-    let Some(config) = resolve_responses_backend(model, auth_store) else {
+    let Some(config) = resolve_responses_backend(model, profiles) else {
         tracing::debug!(
             target: LOG_TARGET,
             session_id = %prewarm.session_id,
@@ -1386,19 +1438,6 @@ fn handle_prewarm(
         return;
     };
     let session_id = prewarm.session_id.as_str();
-    let ws_disabled_for_session = ws_disabled
-        .lock()
-        .map(|disabled| disabled.contains(session_id))
-        .unwrap_or(true);
-    if !config.supports_websocket || ws_disabled_for_session {
-        tracing::debug!(
-            target: LOG_TARGET,
-            session_id,
-            "skipping prompt prewarm: websocket prewarm unsupported",
-        );
-        return;
-    }
-
     let request = common::PromptPayload {
         system_prompt: &prewarm.system_prompt,
         context_items: &prewarm.context_items,
@@ -1411,23 +1450,44 @@ fn handle_prewarm(
         session_id: &prewarm.session_id,
     };
     tracing::debug!(target: LOG_TARGET, session_id, "starting prompt prewarm");
-    match responses::pool::run_prewarm_through_shared_pool(ws_pool, &config, session_id, &request) {
-        Ok(_) => tracing::debug!(target: LOG_TARGET, session_id, "completed prompt prewarm"),
-        Err(error) if should_disable_ws(&error) => {
-            tracing::debug!(
-                target: LOG_TARGET,
-                session_id,
-                "prompt prewarm disabled WS path: {error}",
-            );
-            if let Ok(mut disabled) = ws_disabled.lock() {
-                disabled.insert(session_id.to_owned());
-            }
-        }
+    match chatgpt_runtime.prewarm(&config, session_id, &request) {
+        Ok(()) => tracing::debug!(target: LOG_TARGET, session_id, "completed prompt prewarm"),
         Err(error) => tracing::debug!(
             target: LOG_TARGET,
             session_id,
             "prompt prewarm failed: {error}",
         ),
+    }
+}
+
+fn handle_prompt_backend<R, W: Write>(
+    session_prompt_id: &tau_proto::SessionPromptId,
+    backend: &PromptBackend,
+    prompt: &tau_proto::SessionPromptCreated,
+    writer: &mut FrameWriter<W>,
+    retry_ctx: &mut R,
+    chatgpt_runtime: &ChatGptRuntime,
+) -> Result<(), Box<dyn Error>>
+where
+    R: RetrySleeper,
+{
+    match backend {
+        PromptBackend::Responses(config) => handle_prompt(
+            session_prompt_id.as_str(),
+            config,
+            prompt,
+            writer,
+            retry_ctx,
+            chatgpt_runtime,
+        ),
+        PromptBackend::ChatCompletions { provider, model } => {
+            write_prompt_submitted(session_prompt_id, &prompt.originator, writer)?;
+            let finished =
+                run_chat_completions_prompt(session_prompt_id, prompt, provider, model, writer);
+            writer.write_frame(&Frame::Event(Event::ProviderResponseFinished(finished)))?;
+            writer.flush()?;
+            Ok(())
+        }
     }
 }
 
@@ -1437,8 +1497,7 @@ fn handle_prompt<R, W: Write>(
     prompt: &tau_proto::SessionPromptCreated,
     writer: &mut FrameWriter<W>,
     retry_ctx: &mut R,
-    ws_pool: &responses::pool::SharedWsPool,
-    ws_disabled: &Mutex<HashSet<String>>,
+    chatgpt_runtime: &ChatGptRuntime,
 ) -> Result<(), Box<dyn Error>>
 where
     R: RetrySleeper,
@@ -1463,12 +1522,9 @@ where
     };
 
     let originator = prompt.originator.clone();
-    let mut ws_retry = WsRetryState {
-        failures: 0,
-        budget: max_retries_for(&originator).min(WS_RETRY_BUDGET_BEFORE_HTTP_FALLBACK),
-    };
+    let mut chatgpt_turn_state = ChatGptTurnState::new(max_retries_for(&originator));
     let mut transport_taken = ProviderBackendTransport::HttpSse;
-    let ws_pool_before = ws_pool.stats();
+    let mut ws_pool_delta = None;
     let result = with_llm_retry(
         session_prompt_id,
         &originator,
@@ -1486,35 +1542,28 @@ where
                 )));
                 let _ = writer.flush();
             };
-            stream_with_shared_dispatch(
+            chatgpt_runtime.stream(
                 session_prompt_id,
                 config,
                 &request,
-                SharedStreamDispatchState {
-                    ws_pool,
-                    ws_disabled,
-                    ws_retry: &mut ws_retry,
-                    transport_taken: &mut transport_taken,
-                },
+                &mut chatgpt_turn_state,
                 &mut || retry_ctx.is_aborted(session_prompt_id),
                 &mut on_update,
             )
         },
     );
-    let ws_pool_delta = ws_pool_before.and_then(|before| {
-        ws_pool
-            .stats()
-            .map(|after| compute_ws_pool_delta(before, after))
-    });
     match result {
-        Ok(state) => {
-            let backend = backend_descriptor(config, transport_taken, state.stale_chain_fallback);
+        Ok(dispatch) => {
+            transport_taken = dispatch.transport;
+            ws_pool_delta = dispatch.ws_pool_delta;
+            let backend =
+                backend_descriptor(config, transport_taken, dispatch.state.stale_chain_fallback);
             finish_stream(
                 &prompt.session_id,
                 session_prompt_id,
                 &prompt.originator,
                 &backend,
-                state,
+                dispatch.state,
                 ws_pool_delta,
                 writer,
             )?
@@ -1614,18 +1663,6 @@ fn backend_descriptor(
         base_url: config.base_url.clone(),
         transport,
         stale_chain_fallback,
-    }
-}
-
-fn compute_ws_pool_delta(
-    before: responses::pool::WsPoolStats,
-    after: responses::pool::WsPoolStats,
-) -> tau_proto::WsPoolDelta {
-    let sub = |a: u64, b: u64| u32::try_from(a.saturating_sub(b)).unwrap_or(u32::MAX);
-    tau_proto::WsPoolDelta {
-        upgrades: sub(after.upgrades, before.upgrades),
-        silent_reconnects: sub(after.silent_reconnects, before.silent_reconnects),
-        chain_strips_on_fresh: sub(after.chain_strips_on_fresh, before.chain_strips_on_fresh),
     }
 }
 
@@ -1757,89 +1794,27 @@ fn finish_error<W: Write>(
     Ok(())
 }
 
+#[cfg(test)]
 fn models_for_auth(auth: &OpenAiAuth) -> Vec<ProviderModelInfo> {
-    if has_chatgpt_auth(auth) {
-        models_for_provider(CHATGPT_PROVIDER_NAME, CHATGPT_MODELS)
-    } else {
-        Vec::new()
+    models_for_profiles(&profiles_with_chatgpt_auth(auth.clone()))
+}
+
+fn models_for_profiles(profiles: &BuiltinProviderProfiles) -> Vec<ProviderModelInfo> {
+    let mut models = Vec::new();
+    for (provider_name, profile) in &profiles.providers {
+        match profile {
+            BuiltinProviderProfile::Chatgpt(_) => {
+                models.extend(tau_provider_chatgpt::models_for_provider(provider_name));
+            }
+            BuiltinProviderProfile::ChatCompletions(provider) => {
+                models.extend(chat_models_for_provider(provider_name, provider));
+            }
+        }
     }
-}
-
-fn has_chatgpt_auth(auth: &OpenAiAuth) -> bool {
-    !auth.access_token.trim().is_empty() || !auth.refresh_token.trim().is_empty()
-}
-
-fn models_for_provider(provider: &str, models: &[&str]) -> Vec<ProviderModelInfo> {
     models
-        .iter()
-        .map(|model| model_info(provider, model))
-        .collect()
 }
 
-fn model_info(provider: &str, model: &str) -> ProviderModelInfo {
-    ProviderModelInfo {
-        id: ModelId::new(ProviderName::new(provider), ModelName::new(model)),
-        display_name: None,
-        default_affinity: default_affinity_for_model(model),
-        context_window: CONTEXT_WINDOW,
-        efforts: efforts_for_model(model),
-        verbosities: verbosities_for_model(model),
-        thinking_summaries: vec![
-            ThinkingSummary::Off,
-            ThinkingSummary::Auto,
-            ThinkingSummary::Concise,
-            ThinkingSummary::Detailed,
-        ],
-        supports_compaction: true,
-    }
-}
-
-fn default_affinity_for_model(model: &str) -> i32 {
-    match model {
-        "gpt-5.5" => 400,
-        "gpt-5.4" => 300,
-        "gpt-5.3-codex" => 200,
-        "gpt-5.4-mini" => 100,
-        _ => 0,
-    }
-}
-
-fn efforts_for_model(model: &str) -> Vec<Effort> {
-    let mut efforts = vec![
-        Effort::Off,
-        Effort::Minimal,
-        Effort::Low,
-        Effort::Medium,
-        Effort::High,
-    ];
-    if supports_xhigh(model) {
-        efforts.push(Effort::XHigh);
-    }
-    efforts
-}
-
-fn supports_xhigh(model: &str) -> bool {
-    if model.contains("mini") || model.contains("nano") {
-        return false;
-    }
-    [
-        "gpt-5.5",
-        "gpt-5.4",
-        "gpt-5.3-codex",
-        "gpt-5.2",
-        "gpt-5.1-codex-max",
-    ]
-    .iter()
-    .any(|prefix| model.starts_with(prefix))
-}
-
-fn verbosities_for_model(model: &str) -> Vec<Verbosity> {
-    if model.starts_with("gpt-5") {
-        vec![Verbosity::Low, Verbosity::Medium, Verbosity::High]
-    } else {
-        vec![Verbosity::Medium]
-    }
-}
-
+#[cfg(test)]
+mod openai_tests;
 #[cfg(test)]
 mod tests;

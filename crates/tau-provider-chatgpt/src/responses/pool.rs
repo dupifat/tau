@@ -38,11 +38,11 @@ use crate::common::LlmError;
 /// sub-agent delegation). The cap exists to bound pathological growth (a
 /// long-lived agent process where the user reopens many old
 /// sessions), not because the normal path needs many slots.
-pub(crate) const DEFAULT_POOL_MAX: usize = 10;
+pub const DEFAULT_POOL_MAX: usize = 10;
 
 /// Environment variable that overrides [`DEFAULT_POOL_MAX`] at
 /// `WsPool::new()` time.
-pub(crate) const POOL_MAX_ENV: &str = "TAU_WS_POOL_MAX";
+pub const POOL_MAX_ENV: &str = "TAU_WS_POOL_MAX";
 
 /// Margin under the server's 60-minute hard cap before we
 /// pre-emptively reopen a connection on checkout. Five minutes is
@@ -50,7 +50,7 @@ pub(crate) const POOL_MAX_ENV: &str = "TAU_WS_POOL_MAX";
 /// dies *after* we send `response.create` surfaces as a mid-stream
 /// `stream error` to the user, which a `<55min ? reuse : reopen`
 /// check avoids entirely.
-pub(crate) const MAX_CONNECTION_AGE: Duration = Duration::from_secs(55 * 60);
+pub const MAX_CONNECTION_AGE: Duration = Duration::from_secs(55 * 60);
 
 /// Pool key. A connection caches the previous_response of one
 /// conversation chain; different chains get different sockets so
@@ -62,7 +62,7 @@ pub(crate) const MAX_CONNECTION_AGE: Duration = Duration::from_secs(55 * 60);
 ///   session id with their parent, so `conversation_id` further separates the
 ///   user turn from extension-originated query chains.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct PoolKey {
+pub struct PoolKey {
     pub base_url: String,
     pub account_id: Option<String>,
     pub session_id: String,
@@ -101,7 +101,7 @@ fn conversation_id(originator: &tau_proto::PromptOriginator) -> String {
 /// head of the LRU queue. On error (mid-stream close, IO break),
 /// the caller drops the connection — the entry is already removed
 /// from the map and the LRU list resyncs lazily.
-pub(crate) struct WsPool {
+pub struct WsPool {
     conns: HashMap<PoolKey, WsConn>,
     /// Front = most recent. Pruned of stale keys on `release` /
     /// `checkout` rather than eagerly — a key in the queue without
@@ -118,7 +118,7 @@ pub(crate) struct WsPool {
 /// importantly, *kept* kicking in for a session — a runaway count
 /// is the signature of an upstream regression).
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct WsPoolStats {
+pub struct WsPoolStats {
     /// Fresh sockets opened (pool miss, age-out, bearer-rotate, or
     /// the silent-reconnect path below).
     pub upgrades: u64,
@@ -234,7 +234,7 @@ impl Default for WsPool {
 /// same-key callers wait for that turn to release/drop the socket instead of
 /// opening a second socket for the same chain. Different keys can still run
 /// their network turns concurrently.
-pub(crate) struct SharedWsPool {
+pub struct SharedWsPool {
     inner: Mutex<SharedWsPoolInner>,
     changed: Condvar,
 }
@@ -245,7 +245,7 @@ struct SharedWsPoolInner {
 }
 
 impl SharedWsPool {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             inner: Mutex::new(SharedWsPoolInner {
                 pool: WsPool::new(),
@@ -255,7 +255,7 @@ impl SharedWsPool {
         }
     }
 
-    pub(crate) fn stats(&self) -> Option<WsPoolStats> {
+    pub fn stats(&self) -> Option<WsPoolStats> {
         self.inner.lock().ok().map(|inner| inner.pool.stats())
     }
 
@@ -362,13 +362,13 @@ enum TryCheckout {
 
 /// WS dispatch failed in a way the caller can classify.
 #[derive(Debug)]
-pub(crate) enum WsTurnError {
+pub enum WsTurnError {
     Canceled,
     Other(LlmError),
 }
 
 impl WsTurnError {
-    pub(crate) fn into_llm_error(self) -> LlmError {
+    pub fn into_llm_error(self) -> LlmError {
         match self {
             Self::Canceled => LlmError::HttpStatus(499, "cancelled by harness".to_owned()),
             Self::Other(error) => error,
@@ -388,7 +388,7 @@ impl WsTurnError {
 /// chain id, replays the full prompt once over the new WS, and releases that
 /// socket back into the pool so the following turn is warm again.
 #[cfg(test)]
-pub(crate) fn run_turn_through_pool(
+pub fn run_turn_through_pool(
     pool: &mut WsPool,
     config: &ResponsesConfig,
     session_id: &str,
@@ -461,7 +461,7 @@ pub(crate) fn run_turn_through_pool(
 /// successful connection. The network turn runs without the lock, so unrelated
 /// prompt workers can use their own pooled sockets concurrently; same-key
 /// callers wait on the reservation to preserve one chain per socket.
-pub(crate) fn run_turn_through_shared_pool(
+pub fn run_turn_through_shared_pool(
     pool: &SharedWsPool,
     config: &ResponsesConfig,
     session_prompt_id: &str,
@@ -546,7 +546,7 @@ pub(crate) fn run_turn_through_shared_pool(
 /// real turns, a failed cached socket is simply dropped and retried
 /// once on a fresh socket; no stateful chain id exists on prewarm.
 #[cfg(test)]
-pub(crate) fn run_prewarm_through_pool(
+pub fn run_prewarm_through_pool(
     pool: &mut WsPool,
     config: &ResponsesConfig,
     session_id: &str,
@@ -595,7 +595,7 @@ pub(crate) fn run_prewarm_through_pool(
 /// network prewarm is in flight, so prompt workers on other keys can continue
 /// to check out/release pooled sockets concurrently. If that key is already
 /// reserved, prewarm is skipped because it is best-effort main-loop work.
-pub(crate) fn run_prewarm_through_shared_pool(
+pub fn run_prewarm_through_shared_pool(
     pool: &SharedWsPool,
     config: &ResponsesConfig,
     session_id: &str,

@@ -122,7 +122,7 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
         let provider_reader = provider_runtime_stream
             .try_clone()
             .expect("provider reader clone should succeed");
-        tau_ext_provider_openai::run(provider_reader, provider_runtime_stream)
+        tau_ext_provider_builtin::run(provider_reader, provider_runtime_stream)
             .expect("provider should run successfully");
     });
     let tool_thread = thread::spawn(move || {
@@ -134,7 +134,7 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
     });
 
     let (provider_connection, mut provider_reader) = stream_connection(
-        "provider-openai",
+        "provider-builtin",
         ClientKind::Provider,
         provider_harness_stream,
     );

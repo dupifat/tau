@@ -22,9 +22,9 @@ use crate::common::{
     prompt_cache_key_for,
 };
 
-pub(crate) mod pool;
-pub(crate) mod ws;
-pub(crate) mod ws_runtime;
+pub mod pool;
+pub mod ws;
+pub mod ws_runtime;
 
 /// Which ChatGPT/Codex Responses surface a model is served through.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -120,7 +120,7 @@ pub struct ResponsesConfig {
 /// debug directory:
 ///
 /// `~/.local/state/tau/sessions/<session_id>/debug/provider-requests/`.
-pub(crate) fn maybe_debug_write_provider_request(
+pub fn maybe_debug_write_provider_request(
     session_prompt_id: &str,
     config: &ResponsesConfig,
     request: &PromptPayload<'_>,
@@ -137,7 +137,7 @@ pub(crate) fn maybe_debug_write_provider_request(
     }
 }
 
-pub(crate) fn debug_provider_request_dir(session_id: &str) -> Option<PathBuf> {
+pub fn debug_provider_request_dir(session_id: &str) -> Option<PathBuf> {
     let state = tau_config::settings::state_dir()?;
     Some(
         tau_config::settings::sessions_dir_of(&state)
@@ -369,7 +369,7 @@ fn responses_stream_once(
 /// decode a single JSON event and hand it here. The WS docs state
 /// "server events and ordering match the existing Responses
 /// streaming event model", so the parse rules are identical.
-pub(crate) fn apply_event(
+pub fn apply_event(
     state: &mut StreamState,
     event: &serde_json::Value,
     on_update: &mut impl FnMut(&str, Option<&str>),
@@ -811,14 +811,14 @@ fn build_input_items(
     input
 }
 
-/// WebSocket-side wrapper around a [`ResponsesRequest`]. The OpenAI
+/// WebSocket-side wrapper around a Responses request. The OpenAI
 /// WS guide requires every client message to carry `type:
 /// "response.create"` at the top level, while HTTP+SSE has no
 /// envelope. `#[serde(flatten)]` keeps the body shape identical
 /// across the two transports so request-build tests don't need a
 /// separate fixture for each.
 #[derive(Serialize)]
-pub(crate) struct WsResponseCreate {
+pub struct WsResponseCreate {
     #[serde(rename = "type")]
     ty: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -828,10 +828,10 @@ pub(crate) struct WsResponseCreate {
 }
 
 /// Build the JSON envelope to send over a WebSocket text frame for
-/// one turn. Reuses [`build_request`] for the body — the only deltas
-/// vs. the HTTP body are (a) the top-level `type` tag and (b)
+/// one turn. Reuses the regular Responses request builder for the body — the
+/// only deltas vs. the HTTP body are (a) the top-level `type` tag and (b)
 /// dropping `stream` (transport-implicit on WS, per the WS guide).
-pub(crate) fn build_ws_envelope(
+pub fn build_ws_envelope(
     config: &ResponsesConfig,
     request: &PromptPayload<'_>,
 ) -> WsResponseCreate {
@@ -850,7 +850,7 @@ pub(crate) fn build_ws_envelope(
 /// intentionally blanked: the next real turn is allowed to extend the
 /// prewarmed input prefix, and the prewarm itself never has a prior
 /// chain id.
-pub(crate) fn ws_chain_fingerprint(
+pub fn ws_chain_fingerprint(
     config: &ResponsesConfig,
     request: &PromptPayload<'_>,
 ) -> Result<String, LlmError> {
@@ -863,7 +863,7 @@ pub(crate) fn ws_chain_fingerprint(
 /// Build a non-generating WebSocket envelope for provider-side
 /// prompt-cache prewarm. Normal turns must keep `generate` omitted;
 /// only this path serializes `generate: false`.
-pub(crate) fn build_ws_prewarm_envelope(
+pub fn build_ws_prewarm_envelope(
     config: &ResponsesConfig,
     request: &PromptPayload<'_>,
 ) -> WsResponseCreate {

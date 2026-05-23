@@ -53,7 +53,7 @@ use crate::responses::ws_runtime;
 /// Dated by the server; will need a bump when OpenAI rolls a new
 /// release. Pinned here as a single `const` so that bump is a
 /// one-line change.
-pub(crate) const OPENAI_BETA_WS: &str = "responses_websockets=2026-02-06";
+pub const OPENAI_BETA_WS: &str = "responses_websockets=2026-02-06";
 
 /// How often the writer task sends an unsolicited client `Ping`.
 ///
@@ -109,7 +109,7 @@ enum InboundEvent {
 /// This struct just holds the channel ends and the abort handles —
 /// `run_turn` is a thin sync wrapper that pushes the envelope onto
 /// the outbound channel and pulls events off the inbound one.
-pub(crate) struct WsConn {
+pub struct WsConn {
     outbound_tx: UnboundedSender<WsCommand>,
     inbound_rx: UnboundedReceiver<InboundEvent>,
     /// Aborted on [`Drop`] so a `WsConn` falling out of scope cleanly

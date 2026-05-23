@@ -172,7 +172,7 @@ harness-owned instead of extension processes.
 ```json5
 extensions: {
   "core-shell":         { enable: false },                       // disable
-  "provider-openai":    { prefix: ["ssh", "user@host"] },        // run remotely
+  "provider-builtin":    { prefix: ["ssh", "user@host"] },        // run remotely
   "std-notifications": { config: { idle_seconds: 30 } },         // reconfigure
 },
 ```
@@ -220,7 +220,7 @@ apply only to that role. Fragments are ordered by priority with extension- and
 tool-provided fragments, so global style instructions, role guidance, and
 tool-specific instructions share one prompt assembly path.
 
-### `provider-openai` — OpenAI Responses backend
+### `provider-builtin` — Built-in provider backend
 
 Publishes hardcoded `chatgpt/*` model metadata from provider-owned ChatGPT OAuth
 state and owns model execution for that namespace. The harness assembles prompts,
@@ -238,7 +238,7 @@ a full-replay retry once before surfacing the error.
 
 The ChatGPT/Codex surface additionally routes turns over a persistent
 **WebSocket** connection. One connection per `(account, session)` lives in a
-small LRU pool inside `provider-openai`, so the server-side connection-local
+small LRU pool inside `provider-builtin`, so the server-side connection-local
 response cache stays warm across turns of the same conversation — including
 when Tau context-switches between sessions (sub-agent delegations interleaved
 with the parent). Connections age out before the upstream's 60-minute hard cap,

@@ -154,7 +154,7 @@ pub fn resolve_extensions(
                     // Setting `command` replaces the built-in's full argv tail.
                     // `suffix` is cleared so users overriding only `command`
                     // don't accidentally inherit the built-in's subcommand
-                    // tokens (e.g. `["ext", "ext-provider-openai"]`). Users
+                    // tokens (e.g. `["ext", "ext-provider-builtin"]`). Users
                     // who want to keep them must set `suffix` explicitly below.
                     existing.suffix = Vec::new();
                 }

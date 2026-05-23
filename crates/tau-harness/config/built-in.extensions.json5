@@ -4,15 +4,8 @@
 // extension subcommand in `suffix`.
 [
     {
-        name: "provider-openai",
-        suffix: ["ext", "ext-provider-openai"],
-        role: "provider",
-        enable: true,
-        config: {},
-    },
-    {
-        name: "provider-chat-completions",
-        suffix: ["ext", "ext-provider-chat-completions"],
+        name: "provider-builtin",
+        suffix: ["ext", "ext-provider-builtin"],
         role: "provider",
         enable: true,
         config: {},

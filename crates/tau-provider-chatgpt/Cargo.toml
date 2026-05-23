@@ -1,5 +1,5 @@
 [package]
-name = "tau-ext-provider-chat-completions"
+name = "tau-provider-chatgpt"
 version.workspace = true
 edition.workspace = true
 description.workspace = true
@@ -15,11 +15,19 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-dialoguer.workspace = true
+backon.workspace = true
+base64.workspace = true
+blake3.workspace = true
+futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tau-extension.workspace = true
+tau-config.workspace = true
 tau-proto.workspace = true
 tau-provider.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
 tracing.workspace = true
 ureq.workspace = true
+
+[dev-dependencies]
+tungstenite.workspace = true

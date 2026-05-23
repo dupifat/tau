@@ -42,11 +42,11 @@ __TAU_SELF_KNOWLEDGE_UI_CONFIG__
 
 ## Providers
 
-Use `tau provider add` for the interactive provider setup wizard. It configures API-key providers, local providers such as Ollama, and OAuth-backed providers.
+Use `tau provider add` for the interactive provider setup wizard. It prompts for provider kind, provider namespace, auth, and model details as needed.
 
 Other provider commands:
 
-- `tau provider list` — show configured provider credentials.
-- `tau provider login [name]` — log in or refresh OAuth credentials; `tau provider login chatgpt` enables the built-in ChatGPT/Codex provider.
-- `tau provider remove [name]` — remove credentials.
-- `tau provider list-models [name]` — explain that models are published by provider extensions at runtime; start Tau and use `/model` to inspect the current model list.
+- `tau provider list` — show configured provider profiles.
+- `tau provider remove <name>` — remove a provider profile.
+
+Models are published by provider extensions at runtime; start Tau and use `/model` to inspect the current model list.

@@ -14,8 +14,10 @@
 - `crates/tau-ext-websearch` — built-in generic web search extension (Exa default plus opt-in Parallel.ai tools)
 - `crates/tau-extension` — extension-side protocol/runtime helpers
 - `crates/tau-harness` — harness daemon: extensions, bus, sessions, socket server, harness-owned delegate/wait tools
-- `crates/tau-provider` — provider credential/config library (storage, OAuth helpers, resolver)
-- `crates/tau-provider-cli` — interactive `tau provider {add,remove,list,login,list-models}` subcommands
+- `crates/tau-provider` — provider credential/config library (storage and OAuth helpers)
+- `crates/tau-provider-chat-completions` — OpenAI-compatible Chat Completions backend helpers
+- `crates/tau-provider-chatgpt` — ChatGPT/Codex Responses backend helpers, including HTTP/SSE, WebSocket, and pool logic
+- `crates/tau-ext-provider-builtin` — built-in provider extension plus `tau provider {add,remove,list}` profile CLI
 - `crates/tau-proto` — shared protocol types and CBOR codec helpers
 - `crates/tau-skills` — skill discovery/loading support
 - `crates/tau-socket` — Unix socket transport glue

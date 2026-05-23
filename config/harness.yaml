@@ -45,7 +45,7 @@
 # extensions:
 #   core-shell:
 #     enable: false
-#   provider-openai:
+#   provider-builtin:
 #     enable: false
 #   test-dummy:
 #     enable: true

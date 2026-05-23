@@ -55,8 +55,8 @@ impl ProviderStore {
 
     /// Returns a typed handle for one auth JSON file under `auth.d/`.
     ///
-    /// `name` is the file stem, without `.json`; built-in providers use stable
-    /// names such as `provider-openai` and `provider-chat-completions`.
+    /// `name` is the file stem, without `.json`; built-in provider profiles
+    /// use their provider namespace as this stable file stem.
     pub fn auth_file<T>(&self, name: impl Into<String>) -> io::Result<AuthFile<T>> {
         AuthFile::new(self.clone(), name)
     }

@@ -1720,8 +1720,7 @@ name = "tau"
 version = "0.1.0"
 dependencies = [
  "tau-cli",
- "tau-ext-provider-chat-completions",
- "tau-ext-provider-openai",
+ "tau-ext-provider-builtin",
  "tau-ext-shell",
  "tau-ext-std-notifications",
  "tau-ext-test-dummy",
@@ -1749,10 +1748,10 @@ dependencies = [
  "tau-cli-term",
  "tau-cli-term-raw",
  "tau-config",
+ "tau-ext-provider-builtin",
  "tau-harness",
  "tau-harness-tools",
  "tau-proto",
- "tau-provider-cli",
  "tau-session-inspect",
  "tau-themes",
  "tempfile",
@@ -1824,39 +1823,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "tau-ext-provider-chat-completions"
-version = "0.1.0"
-dependencies = [
- "dialoguer",
- "serde",
- "serde_json",
- "tau-extension",
- "tau-proto",
- "tau-provider",
- "tracing",
- "ureq",
-]
-
-[[package]]
-name = "tau-ext-provider-openai"
+name = "tau-ext-provider-builtin"
 version = "0.1.0"
 dependencies = [
  "backon",
- "base64",
- "blake3",
  "dialoguer",
- "futures-util",
  "serde",
  "serde_json",
- "tau-config",
  "tau-extension",
  "tau-proto",
  "tau-provider",
- "tokio",
- "tokio-tungstenite",
+ "tau-provider-chat-completions",
+ "tau-provider-chatgpt",
  "tracing",
- "tungstenite",
- "ureq",
 ]
 
 [[package]]
@@ -1995,11 +1974,34 @@ dependencies = [
 ]
 
 [[package]]
-name = "tau-provider-cli"
+name = "tau-provider-chat-completions"
 version = "0.1.0"
 dependencies = [
- "tau-ext-provider-chat-completions",
- "tau-ext-provider-openai",
+ "serde",
+ "serde_json",
+ "tau-proto",
+ "tau-provider",
+ "ureq",
+]
+
+[[package]]
+name = "tau-provider-chatgpt"
+version = "0.1.0"
+dependencies = [
+ "backon",
+ "base64",
+ "blake3",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tau-config",
+ "tau-proto",
+ "tau-provider",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "tungstenite",
+ "ureq",
 ]
 
 [[package]]
@@ -2052,7 +2054,7 @@ version = "0.1.0"
 dependencies = [
  "tau-config",
  "tau-core",
- "tau-ext-provider-openai",
+ "tau-ext-provider-builtin",
  "tau-ext-shell",
  "tau-harness",
  "tau-proto",

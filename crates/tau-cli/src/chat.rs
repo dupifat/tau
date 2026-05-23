@@ -509,7 +509,7 @@ pub(crate) fn run_chat(
         ),
         SlashCommand::new(
             "/provider-auth",
-            "Refresh OAuth for a provider (runs `tau provider login [name]`)",
+            "Add or replace a provider profile (runs `tau provider add [kind]`)",
         ),
     ];
     // Fail fast on a malformed `cli.yaml`. The fields here drive
@@ -1502,14 +1502,16 @@ fn handle_role_command(text: &str, writer: &WriterHandle, print_local: &impl Fn(
 }
 
 fn run_provider_auth(provider: &str, print_local: &impl Fn(&str)) {
-    print_local("starting provider auth; follow prompts in the terminal");
-    let mut args = vec!["provider".to_owned(), "login".to_owned()];
+    print_local("starting provider registration; follow prompts in the terminal");
     if !provider.is_empty() {
-        args.push(provider.to_owned());
+        print_local(
+            "provider arguments are no longer accepted; the add flow will prompt for provider kind and name",
+        );
     }
-    match tau_provider_cli::run(&args) {
-        Ok(()) => print_local("provider auth refreshed; new prompts will use updated credentials"),
-        Err(error) => print_local(&format!("provider auth failed: {error}")),
+    let args = vec!["add".to_owned()];
+    match tau_ext_provider_builtin::run_provider_cli(&args) {
+        Ok(()) => print_local("provider profile saved; new prompts will use updated credentials"),
+        Err(error) => print_local(&format!("provider registration failed: {error}")),
     }
 }
 

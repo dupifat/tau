@@ -126,7 +126,7 @@ The first provider extension covers only the ChatGPT/Codex Responses backend:
 
 - `chatgpt/*` for the ChatGPT / Codex Responses backend
 
-It lives in `crates/tau-ext-provider-openai` and is spawned as the built-in `provider-openai` extension.
+It lives in `crates/tau-ext-provider-builtin` and is spawned as the built-in `provider-builtin` extension.
 It publishes hardcoded model metadata, including required context windows, before `Ready` during extension startup.
 It owns Responses execution for that namespace and preserves the existing provider execution event semantics for streaming, tool calls, usage, and retries.
 It publishes `chatgpt/*` only from auth named `chatgpt`; there is no `openai-codex` compatibility alias.

@@ -1,4 +1,4 @@
-//! Types shared by provider-openai's Responses transports.
+//! Types shared by the ChatGPT/Codex Responses transports.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

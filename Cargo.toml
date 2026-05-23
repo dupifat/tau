@@ -8,8 +8,7 @@ members = [
   "crates/tau-cli-term-raw",
   "crates/tau-config",
   "crates/tau-core",
-  "crates/tau-ext-provider-chat-completions",
-  "crates/tau-ext-provider-openai",
+  "crates/tau-ext-provider-builtin",
   "crates/tau-ext-shell",
   "crates/tau-ext-std-notifications",
   "crates/tau-ext-test-dummy",
@@ -19,7 +18,8 @@ members = [
   "crates/tau-harness-tools",
   "crates/tau-proto",
   "crates/tau-provider",
-  "crates/tau-provider-cli",
+  "crates/tau-provider-chat-completions",
+  "crates/tau-provider-chatgpt",
   "crates/tau-session-inspect",
   "crates/tau-skills",
   "crates/tau-socket",
@@ -60,8 +60,7 @@ tau-cli-term = { path = "crates/tau-cli-term" }
 tau-cli-term-raw = { path = "crates/tau-cli-term-raw" }
 tau-config = { path = "crates/tau-config" }
 tau-core = { path = "crates/tau-core" }
-tau-ext-provider-chat-completions = { path = "crates/tau-ext-provider-chat-completions" }
-tau-ext-provider-openai = { path = "crates/tau-ext-provider-openai" }
+tau-ext-provider-builtin = { path = "crates/tau-ext-provider-builtin" }
 tau-ext-shell = { path = "crates/tau-ext-shell" }
 tau-ext-std-notifications = { path = "crates/tau-ext-std-notifications" }
 tau-ext-test-dummy = { path = "crates/tau-ext-test-dummy" }
@@ -71,7 +70,8 @@ tau-harness = { path = "crates/tau-harness" }
 tau-harness-tools = { path = "crates/tau-harness-tools" }
 tau-proto = { path = "crates/tau-proto" }
 tau-provider = { path = "crates/tau-provider" }
-tau-provider-cli = { path = "crates/tau-provider-cli" }
+tau-provider-chat-completions = { path = "crates/tau-provider-chat-completions" }
+tau-provider-chatgpt = { path = "crates/tau-provider-chatgpt" }
 tau-session-inspect = { path = "crates/tau-session-inspect" }
 tau-skills = { path = "crates/tau-skills" }
 tau-socket = { path = "crates/tau-socket" }

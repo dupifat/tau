@@ -358,7 +358,7 @@ fn build_daemon_command(
         .env(
             "TAU_LOG",
             std::env::var("TAU_LOG").unwrap_or_else(|_| {
-                "tau_harness=info,tau_cli=info,provider-openai=info".to_owned()
+                "tau_harness=info,tau_cli=info,provider-builtin=info".to_owned()
             }),
         )
         .stdin(Stdio::null())

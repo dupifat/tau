@@ -226,7 +226,9 @@ fn harness_settings_load_role_tool_lists() {
         r#"{
             roleGroups: {
                 engineer: {
-                    engineer: { tools: ["read", "grep"], disableTools: ["grep"] },
+                    roles: {
+                        engineer: { tools: ["read", "grep"], disableTools: ["grep"] },
+                    },
                 },
             },
         }"#,
@@ -274,7 +276,9 @@ fn harness_settings_rejects_unknown_role_fields() {
         r#"{
             roleGroups: {
                 engineer: {
-                    senior-engineer: { staleRoleField: true },
+                    roles: {
+                        senior-engineer: { staleRoleField: true },
+                    },
                 },
             },
         }"#,
@@ -322,7 +326,9 @@ fn harness_settings_role_cli_overrides_apply_in_order_after_config() {
         r#"{
             roleGroups: {
                 manager: {
-                    manager: { enabled: false },
+                    roles: {
+                        manager: { enabled: false },
+                    },
                 },
             },
         }"#,
@@ -415,7 +421,9 @@ fn harness_drop_in_layers_merge_through_domain_overrides() {
             ],
             roleGroups: {
                 manager: {
-                    manager: { promptFragments: [{ name: "manager.local", priority: 170, text: "Local manager instruction." }] },
+                    roles: {
+                        manager: { promptFragments: [{ name: "manager.local", priority: 170, text: "Local manager instruction." }] },
+                    },
                 },
             },
         }"#,
@@ -434,7 +442,9 @@ fn harness_drop_in_layers_merge_through_domain_overrides() {
             ],
             roleGroups: {
                 manager: {
-                    manager: { promptFragments: [{ name: "manager.drop-in", priority: 180, text: "Drop-in manager instruction." }] },
+                    roles: {
+                        manager: { promptFragments: [{ name: "manager.drop-in", priority: 180, text: "Drop-in manager instruction." }] },
+                    },
                 },
             },
         }"#,
@@ -509,7 +519,9 @@ fn harness_global_prompt_fragments_apply_to_all_roles() {
             ],
             roleGroups: {
                 custom: {
-                    custom: { model: "openai/custom" },
+                    roles: {
+                        custom: { model: "openai/custom" },
+                    },
                 },
             },
         }"#,
@@ -558,11 +570,15 @@ fn harness_roles_merge_with_built_ins() {
         r#"{
             roleGroups: {
                 engineer: {
-                    engineer: { model: "openai/gpt-5.5", tools: ["read"] },
-                    custom: { description: "Custom local role", effort: "medium", disableTools: ["shell"] },
+                    roles: {
+                        engineer: { model: "openai/gpt-5.5", tools: ["read"] },
+                        custom: { description: "Custom local role", effort: "medium", disableTools: ["shell"] },
+                    },
                 },
                 manager: {
-                    manager: { model: "openai/gpt-5.5" },
+                    roles: {
+                        manager: { model: "openai/gpt-5.5" },
+                    },
                 },
             },
         }"#,
@@ -625,7 +641,9 @@ fn harness_manager_partial_override_keeps_built_in_prompt_fragments() {
         r#"{
             roleGroups: {
                 manager: {
-                    manager: { model: "openai/gpt-5.5" },
+                    roles: {
+                        manager: { model: "openai/gpt-5.5" },
+                    },
                 },
             },
         }"#,
@@ -658,7 +676,9 @@ fn harness_manager_prompt_fragments_extend_built_in_prompt_fragments() {
         r#"{
             roleGroups: {
                 manager: {
-                    manager: { promptFragments: [{ name: "manager.custom", priority: 100, text: "Custom manager prompt." }] },
+                    roles: {
+                        manager: { promptFragments: [{ name: "manager.custom", priority: 100, text: "Custom manager prompt." }] },
+                    },
                 },
             },
         }"#,
@@ -682,6 +702,62 @@ fn harness_manager_prompt_fragments_extend_built_in_prompt_fragments() {
 }
 
 #[test]
+fn harness_role_group_fields_apply_as_role_defaults() {
+    // Group-level role fields keep shared role policy in one place. Individual
+    // roles can still override scalar defaults or add their own fragments.
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"{
+            roleGroups: {
+                review: {
+                    effort: "low",
+                    tools: ["read"],
+                    promptFragments: [
+                        { name: "review.shared", priority: 80, text: "Review carefully." },
+                    ],
+                    roles: {
+                        quick: {},
+                        deep: {
+                            effort: "xhigh",
+                            promptFragments: [
+                                { name: "review.deep", priority: 90, text: "Look for subtle issues." },
+                            ],
+                        },
+                    },
+                },
+            },
+        }"#,
+    )
+    .expect("write");
+
+    let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+    let quick = &s.roles["quick"];
+    assert_eq!(quick.effort, Some(tau_proto::Effort::Low));
+    assert_eq!(quick.tools, Some(vec![tau_proto::ToolName::new("read")]));
+    assert!(
+        quick
+            .prompt_fragments
+            .iter()
+            .any(|fragment| fragment.name == "review.shared")
+    );
+
+    let deep = &s.roles["deep"];
+    assert_eq!(deep.effort, Some(tau_proto::Effort::XHigh));
+    assert!(
+        deep.prompt_fragments
+            .iter()
+            .any(|fragment| fragment.name == "review.shared")
+    );
+    assert!(
+        deep.prompt_fragments
+            .iter()
+            .any(|fragment| fragment.name == "review.deep")
+    );
+}
+
+#[test]
 fn harness_role_prompt_fragments_parse_as_plain_strings() {
     // Role prompt customization must keep harness.yaml ergonomic: users write
     // prompt text directly instead of nested newtype objects.
@@ -692,11 +768,13 @@ fn harness_role_prompt_fragments_parse_as_plain_strings() {
         r#"{
             roleGroups: {
                 review: {
-                    custom: {
-                        promptFragments: [
-                            { name: "custom.reviewer", priority: 100, text: "You are a focused reviewer." },
-                            { name: "custom.patch-style", priority: 200, text: "Prefer small patches." },
-                        ],
+                    roles: {
+                        custom: {
+                            promptFragments: [
+                                { name: "custom.reviewer", priority: 100, text: "You are a focused reviewer." },
+                                { name: "custom.patch-style", priority: 200, text: "Prefer small patches." },
+                            ],
+                        },
                     },
                 },
             },
@@ -789,10 +867,14 @@ fn harness_role_groups_load_custom_roles() {
         r#"{
             roleGroups: {
                 coding: {
-                    custom: { effort: "medium", tools: ["read"] },
+                    roles: {
+                        custom: { effort: "medium", tools: ["read"] },
+                    },
                 },
                 manager: {
-                    manager: { model: "openai/gpt-5.5" },
+                    roles: {
+                        manager: { model: "openai/gpt-5.5" },
+                    },
                 },
             },
         }"#,
@@ -828,8 +910,8 @@ fn harness_role_groups_reject_duplicate_role_names() {
         dir.join("harness.yaml"),
         r#"{
             roleGroups: {
-                coding: { engineer: {} },
-                review: { engineer: {} },
+                coding: { roles: { engineer: {} } },
+                review: { roles: { engineer: {} } },
             },
         }"#,
     )
@@ -876,9 +958,11 @@ fn harness_role_enabled_false_filters_built_in_roles_after_merging() {
             defaultRole: "senior-engineer",
             roleGroups: {
                 engineer: {
-                    "junior-engineer": { enabled: false },
-                    "senior-engineer": { enabled: false },
-                    "staff-engineer": { enabled: false },
+                    roles: {
+                        "junior-engineer": { enabled: false },
+                        "senior-engineer": { enabled: false },
+                        "staff-engineer": { enabled: false },
+                    },
                 },
             },
         }"#,
@@ -909,12 +993,12 @@ fn harness_role_enabled_can_be_reenabled_by_later_layers() {
     std::fs::create_dir_all(dir.join("harness.d")).expect("mkdir drop-ins");
     std::fs::write(
         dir.join("harness.yaml"),
-        r#"{ roleGroups: { engineer: { "staff-engineer": { enabled: false } } } }"#,
+        r#"{ roleGroups: { engineer: { roles: { "staff-engineer": { enabled: false } } } } }"#,
     )
     .expect("write base");
     std::fs::write(
         dir.join("harness.d/10-enable.yaml"),
-        r#"{ roleGroups: { engineer: { "staff-engineer": { enabled: true, effort: "xhigh" } } } }"#,
+        r#"{ roleGroups: { engineer: { roles: { "staff-engineer": { enabled: true, effort: "xhigh" } } } } }"#,
     )
     .expect("write drop-in");
 

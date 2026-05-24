@@ -1501,7 +1501,9 @@ fn role_disabled_tool_is_reported_without_dispatch() {
         r#"{
             roleGroups: {
                 engineer: {
-                    engineer: { disableTools: ["shell"] },
+                    roles: {
+                        engineer: { disableTools: ["shell"] },
+                    },
                 },
             },
         }"#,

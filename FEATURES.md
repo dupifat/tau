@@ -97,31 +97,38 @@ promptFragments:
 defaultRole: senior-engineer
 roleGroups:
   engineer:
-    junior-engineer:
-      description: Lower-reasoning engineer
-      effort: low
-    senior-engineer:
-      description: Balanced coding engineer
-      model: chatgpt/gpt-5.5
-      effort: medium
-      tools: [read, grep]
-    staff-engineer:
-      description: Maximum-reasoning engineer
-      effort: xhigh
-    legacy-role:
-      enabled: false  # hide a lower-layer or built-in role without deleting it
+    promptFragments:
+      - name: engineer.workflow
+        priority: 66
+        text: Focus on implementation details.
+    roles:
+      junior-engineer:
+        description: Lower-reasoning engineer
+        effort: low
+      senior-engineer:
+        description: Balanced coding engineer
+        model: chatgpt/gpt-5.5
+        effort: medium
+        tools: [read, grep]
+      staff-engineer:
+        description: Maximum-reasoning engineer
+        effort: xhigh
+      legacy-role:
+        enabled: false  # hide a lower-layer or built-in role without deleting it
   manager:
-    manager:
-      promptFragments:
-        - name: manager.workflow
-          priority: 66
-          text: Delegate non-trivial work.
+    roles:
+      manager:
+        promptFragments:
+          - name: manager.workflow
+            priority: 66
+            text: Delegate non-trivial work.
 ```
 
 Roles can include a `description` shown after the model/knob summary in
 `/role ...` completions. Top-level `promptFragments` apply to every role;
-per-role `promptFragments` apply only to that role. Roles can also use `tools`
-and `disableTools` to customize internal tool availability.
+group-level fields apply as defaults to that group's roles; per-role
+`promptFragments` apply only to that role. Roles can also use `tools` and
+`disableTools` to customize internal tool availability.
 
 `defaultRole` selects the startup role; if it is omitted Tau starts on the
 first role in `roleGroups` order. `/model <role>` switches roles for the current

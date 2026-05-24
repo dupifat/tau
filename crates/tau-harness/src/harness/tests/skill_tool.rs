@@ -1155,7 +1155,9 @@ fn gather_tool_definitions_respects_role_tool_lists() {
         r#"{
             roleGroups: {
                 engineer: {
-                    engineer: { disableTools: ["shell", "skill"] },
+                    roles: {
+                        engineer: { disableTools: ["shell", "skill"] },
+                    },
                 },
             },
         }"#,
@@ -1324,7 +1326,9 @@ fn aliased_tool_name_is_advertised_and_routed_via_internal_tool() {
         r#"{
             roleGroups: {
                 engineer: {
-                    engineer: { tools: ["test_gpt_shell"], disableTools: ["shell"] },
+                    roles: {
+                        engineer: { tools: ["test_gpt_shell"], disableTools: ["shell"] },
+                    },
                 },
             },
         }"#,

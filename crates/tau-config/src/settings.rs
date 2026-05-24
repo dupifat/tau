@@ -411,8 +411,8 @@ pub struct HarnessSettings {
     pub roles: HashMap<String, AgentRole>,
 
     /// Ordered role groups used by the CLI for structured role navigation.
-    /// Role names remain globally unique; groups only affect presentation and
-    /// keyboard cycling.
+    /// Role names remain globally unique; groups provide shared defaults for
+    /// their `roles` entries and affect presentation and keyboard cycling.
     pub role_groups: Vec<RoleGroup>,
 
     /// Top-level prompt fragments from harness config. Loaded settings also
@@ -480,7 +480,46 @@ pub struct RoleGroup {
     pub roles: Vec<String>,
 }
 
-type RawRoleGroups = IndexMap<String, IndexMap<String, AgentRole>>;
+type RawRoleGroups = IndexMap<String, RawRoleGroup>;
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+struct RawRoleGroup {
+    enabled: Option<bool>,
+    description: Option<String>,
+    model: Option<ModelId>,
+    effort: Option<tau_proto::Effort>,
+    verbosity: Option<tau_proto::Verbosity>,
+    #[serde(rename = "thinkingSummary")]
+    thinking_summary: Option<tau_proto::ThinkingSummary>,
+    #[serde(rename = "serviceTier")]
+    service_tier: Option<tau_proto::ServiceTier>,
+    prompt_fragments: Vec<RolePromptFragment>,
+    #[serde(rename = "promptOverride")]
+    prompt_override: Option<String>,
+    tools: Option<Vec<ToolName>>,
+    #[serde(rename = "disableTools")]
+    disable_tools: Vec<ToolName>,
+    roles: IndexMap<String, AgentRole>,
+}
+
+impl RawRoleGroup {
+    fn defaults(&self) -> AgentRole {
+        AgentRole {
+            enabled: self.enabled,
+            description: self.description.clone(),
+            model: self.model.clone(),
+            effort: self.effort,
+            verbosity: self.verbosity,
+            thinking_summary: self.thinking_summary,
+            service_tier: self.service_tier,
+            prompt_fragments: self.prompt_fragments.clone(),
+            prompt_override: self.prompt_override.clone(),
+            tools: self.tools.clone(),
+            disable_tools: self.disable_tools.clone(),
+        }
+    }
+}
 
 /// One command-line role availability override, applied after all config files.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -504,8 +543,11 @@ impl HarnessSettings {
     }
 
     fn apply_role_group_overrides(&mut self, groups: RawRoleGroups) -> Result<(), SettingsError> {
-        for (group_name, roles) in groups {
-            for (role_name, override_role) in roles {
+        for (group_name, group) in groups {
+            let group_defaults = group.defaults();
+            for (role_name, role_overrides) in group.roles {
+                let mut override_role = group_defaults.clone();
+                override_role.apply_overrides_from(&role_overrides);
                 self.ensure_role_group_member(&group_name, &role_name)?;
                 self.roles
                     .entry(role_name)

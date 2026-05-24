@@ -19,27 +19,29 @@
 
 # Optional grouped role defaults. Role names are globally unique across all
 # groups. Tab cycles between groups; Shift-Tab cycles within the selected
-# role's group. `description` is shown in `/role ...` completions. Per-role
+# role's group. Group-level fields are defaults for every role in `roles`.
+# `description` is shown in `/role ...` completions. Per-role
 # `promptFragments` add instructions only for that role. `promptOverride`
 # selects a system prompt template. `tools` and `disableTools` customize
 # internal tool availability for the role.
 # roleGroups:
 #   engineer:
-#     junior-engineer:
-#       effort: low
-#     senior-engineer:
-#       description: Balanced coding engineer.
-#       model: chatgpt/gpt-5.5
-#       promptFragments:
-#         - name: engineer.careful
-#           priority: 80
-#           text: You are a careful coding agent.
-#       tools: [read, grep]
-#       disableTools: [shell]
-#     staff-engineer:
-#       effort: xhigh
-#     old-role:
-#       enabled: false  # hide a lower-layer or built-in role
+#     promptFragments:
+#       - name: engineer.careful
+#         priority: 80
+#         text: You are a careful coding agent.
+#     roles:
+#       junior-engineer:
+#         effort: low
+#       senior-engineer:
+#         description: Balanced coding engineer.
+#         model: chatgpt/gpt-5.5
+#         tools: [read, grep]
+#         disableTools: [shell]
+#       staff-engineer:
+#         effort: xhigh
+#       old-role:
+#         enabled: false  # hide a lower-layer or built-in role
 
 # Optional built-in extension overrides.
 # extensions:

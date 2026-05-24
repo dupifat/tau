@@ -424,7 +424,9 @@ fn load_roles_ignores_stale_harness_state() {
             defaultRole: "engineer",
             roleGroups: {
                 engineer: {
-                    engineer: { model: "openai/gpt-4.1", effort: "high", verbosity: "medium" },
+                    roles: {
+                        engineer: { model: "openai/gpt-4.1", effort: "high", verbosity: "medium" },
+                    },
                 },
             },
         }"#,
@@ -530,10 +532,14 @@ fn load_roles_falls_back_to_engineer_role_while_models_are_provider_owned() {
             defaultRole: "engineer",
             roleGroups: {
                 engineer: {
-                    engineer: { model: "local/engineer" },
+                    roles: {
+                        engineer: { model: "local/engineer" },
+                    },
                 },
                 manager: {
-                    manager: { model: "local/deep" },
+                    roles: {
+                        manager: { model: "local/deep" },
+                    },
                 },
             },
         }"#,
@@ -599,8 +605,10 @@ fn role_missing_fields_use_model_defaults() {
             defaultRole: "plain",
             roleGroups: {
                 engineer: {
-                    engineer: { model: "local/engineer", effort: "high" },
-                    plain: {},
+                    roles: {
+                        engineer: { model: "local/engineer", effort: "high" },
+                        plain: {},
+                    },
                 },
             },
         }"#,
@@ -735,12 +743,16 @@ fn harness_startup_errors_when_no_roles_are_enabled() {
         r#"{
             roleGroups: {
                 engineer: {
-                    "senior-engineer": { enabled: false },
-                    "junior-engineer": { enabled: false },
-                    "staff-engineer": { enabled: false },
+                    roles: {
+                        "senior-engineer": { enabled: false },
+                        "junior-engineer": { enabled: false },
+                        "staff-engineer": { enabled: false },
+                    },
                 },
                 manager: {
-                    manager: { enabled: false },
+                    roles: {
+                        manager: { enabled: false },
+                    },
                 },
             },
         }"#,

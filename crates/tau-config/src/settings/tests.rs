@@ -250,6 +250,84 @@ fn harness_settings_load_role_tool_lists() {
 }
 
 #[test]
+fn harness_settings_load_role_group_default_tool_overrides_without_relisting_roles() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"{
+            roleGroups: {
+                engineer: { disableTools: ["email"] },
+            },
+        }"#,
+    )
+    .expect("write");
+
+    let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+    for role_name in ["senior-engineer", "junior-engineer", "staff-engineer"] {
+        assert_eq!(
+            s.roles[role_name].disable_tools,
+            vec![tau_proto::ToolName::new("email")]
+        );
+    }
+}
+
+#[test]
+fn harness_settings_allow_new_role_group() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"{
+            roleGroups: {
+                reviewers: {
+                    disableTools: ["email"],
+                    roles: {
+                        reviewer: { effort: "high" },
+                    },
+                },
+            },
+        }"#,
+    )
+    .expect("write");
+
+    let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+    assert_eq!(s.role_groups.last().expect("new group").name, "reviewers");
+    assert_eq!(
+        s.roles["reviewer"].disable_tools,
+        vec![tau_proto::ToolName::new("email")]
+    );
+}
+
+#[test]
+fn harness_settings_rejects_role_in_multiple_groups() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"{
+            roleGroups: {
+                reviewers: {
+                    roles: {
+                        senior-engineer: { effort: "high" },
+                    },
+                },
+            },
+        }"#,
+    )
+    .expect("write");
+
+    let error =
+        load_harness_settings_in(&dirs_with_config(dir)).expect_err("reject duplicate role");
+    assert!(
+        error
+            .to_string()
+            .contains("role `senior-engineer` appears in multiple roleGroups"),
+        "error should mention duplicate role: {error}"
+    );
+}
+
+#[test]
 fn harness_settings_rejects_unknown_top_level_fields() {
     // Unknown harness.yaml keys used to be silently ignored. That hides stale
     // configs after refactors, so loading must fail and let the harness print a

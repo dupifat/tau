@@ -287,6 +287,7 @@ fn prompt_fragments_order_by_priority_name_and_expose_priority() {
         },
         &std::collections::HashMap::new(),
         &fragments,
+        &[],
         serde_json::json!({}),
     );
     let rendered = data["prompt_fragments"].as_array().expect("fragments");
@@ -332,6 +333,42 @@ fn big_system_prompt_template_is_builtin_and_renders_context() {
     assert!(prompt.contains("You are Tau, an autonomous coding agent."));
     assert!(prompt.contains("- test-skill: test skill description (file: <builtin>/SKILL.md)"));
     assert!(prompt.contains("FRAGMENT /tmp/work"));
+}
+
+/// Tool-scoped fragments render in a dedicated section near tool-use
+/// instructions, separate from ordinary role/extension prompt fragments.
+#[test]
+fn tool_prompt_fragments_render_in_dedicated_section() {
+    let prompt = build_system_prompt_with_tool_template_context(
+        BUILT_IN_SYSTEM_PROMPT_TEMPLATE,
+        &std::collections::HashMap::new(),
+        &[tau_proto::PromptFragment::new(
+            "role.instructions",
+            tau_proto::PromptPriority::new(10),
+            "ROLE FRAGMENT",
+        )],
+        &[tau_proto::PromptFragment::new(
+            "tool.instructions",
+            tau_proto::PromptPriority::new(10),
+            "TOOL FRAGMENT",
+        )],
+        serde_json::json!({}),
+        RolePromptTemplateContext {
+            role_name: "engineer",
+        },
+    );
+
+    let tool_heading = prompt
+        .find("# Tool-provided instructions")
+        .expect("tool section should render");
+    let tool_fragment = prompt
+        .find("TOOL FRAGMENT")
+        .expect("tool fragment should render");
+    let role_fragment = prompt
+        .find("ROLE FRAGMENT")
+        .expect("ordinary fragment should render");
+    assert!(tool_heading < tool_fragment);
+    assert!(tool_fragment < role_fragment);
 }
 
 /// Bad fragment templates are skipped rather than leaking raw unrendered

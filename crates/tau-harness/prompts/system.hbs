@@ -4,6 +4,18 @@ You can call multiple tools in a single response. If you intend to call multiple
 
 Tau may send internal behavior information to you prefixed with `[tau-internal]`, including background tool notifications and deduplicated tool result pointers. These internal messages are not errors.
 
+{{#if tool_prompt_fragments}}
+# Tool-provided instructions
+
+These instructions apply only because the corresponding tools are available to your current role.
+
+{{#each tool_prompt_fragments}}
+{{trim content}}{{#unless @last}}
+
+{{/unless}}
+{{/each}}
+
+{{/if}}
 {{#each prompt_fragments}}
 {{#if early}}
 {{trim content}}

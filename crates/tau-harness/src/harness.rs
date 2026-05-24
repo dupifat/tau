@@ -65,7 +65,7 @@ use crate::model::{
 };
 use crate::prompt::{
     BUILT_IN_SYSTEM_TEMPLATE_NAME, RolePromptTemplateContext, assemble_conversation_from,
-    assemble_prompt_context_from, build_system_prompt_with_template_context,
+    assemble_prompt_context_from, build_system_prompt_with_tool_template_context,
     built_in_system_prompt_templates, render_agents_context_message,
 };
 use crate::secrets::{load_secret_sources, resolve_extension_secrets};
@@ -335,6 +335,27 @@ impl PromptFragmentSource {
 struct SourcedPromptFragment {
     source: PromptFragmentSource,
     fragment: PromptFragment,
+}
+
+fn sort_sourced_prompt_fragments(fragments: &mut [SourcedPromptFragment]) {
+    fragments.sort_by(|a, b| {
+        a.fragment
+            .priority
+            .cmp(&b.fragment.priority)
+            .then_with(|| a.source.sort_key().cmp(&b.source.sort_key()))
+            .then_with(|| a.fragment.name.cmp(&b.fragment.name))
+    });
+}
+
+fn sorted_prompt_fragments(
+    fragments: impl IntoIterator<Item = SourcedPromptFragment>,
+) -> Vec<PromptFragment> {
+    let mut fragments = fragments.into_iter().collect::<Vec<_>>();
+    sort_sourced_prompt_fragments(&mut fragments);
+    fragments
+        .into_iter()
+        .map(|sourced| sourced.fragment)
+        .collect()
 }
 
 impl SessionContextStore {
@@ -7146,12 +7167,14 @@ impl Harness {
     }
 
     fn build_system_prompt_for_role(&self, role_name: &str) -> String {
-        let prompt_fragments = self.gather_prompt_fragments_for_role(role_name);
+        let (prompt_fragments, tool_prompt_fragments) =
+            self.gather_prompt_fragment_groups_for_role(role_name);
         let system_template = self.system_template_for_role(role_name);
-        build_system_prompt_with_template_context(
+        build_system_prompt_with_tool_template_context(
             system_template,
             &self.discovered_skills,
             &prompt_fragments,
+            &tool_prompt_fragments,
             self.session_context
                 .template_value(&self.current_session_id),
             RolePromptTemplateContext { role_name },
@@ -7180,7 +7203,27 @@ impl Harness {
         self.gather_prompt_fragments_for_role(&self.selected_role)
     }
 
+    #[cfg(test)]
     fn gather_prompt_fragments_for_role(&self, role_name: &str) -> Vec<PromptFragment> {
+        let (fragments, tool_fragments) = self.gather_sourced_prompt_fragment_groups(role_name);
+        sorted_prompt_fragments(fragments.into_iter().chain(tool_fragments))
+    }
+
+    fn gather_prompt_fragment_groups_for_role(
+        &self,
+        role_name: &str,
+    ) -> (Vec<PromptFragment>, Vec<PromptFragment>) {
+        let (fragments, tool_fragments) = self.gather_sourced_prompt_fragment_groups(role_name);
+        (
+            sorted_prompt_fragments(fragments),
+            sorted_prompt_fragments(tool_fragments),
+        )
+    }
+
+    fn gather_sourced_prompt_fragment_groups(
+        &self,
+        role_name: &str,
+    ) -> (Vec<SourcedPromptFragment>, Vec<SourcedPromptFragment>) {
         let mut fragments: Vec<_> = self
             .extension_prompt_fragments
             .iter()
@@ -7211,34 +7254,24 @@ impl Harness {
                     }),
             );
         }
-        fragments.extend(
-            self.registry
-                .all_tool_providers()
-                .into_iter()
-                .filter(|provider| self.is_tool_enabled_for_role(&provider.tool, role_name))
-                .filter_map(|provider| {
-                    provider
-                        .prompt_fragment
-                        .as_ref()
-                        .map(|fragment| SourcedPromptFragment {
-                            source: PromptFragmentSource::Tool {
-                                connection_id: provider.connection_id.clone(),
-                            },
-                            fragment: fragment.clone(),
-                        })
-                }),
-        );
-        fragments.sort_by(|a, b| {
-            a.fragment
-                .priority
-                .cmp(&b.fragment.priority)
-                .then_with(|| a.source.sort_key().cmp(&b.source.sort_key()))
-                .then_with(|| a.fragment.name.cmp(&b.fragment.name))
-        });
-        fragments
+        let tool_fragments = self
+            .registry
+            .all_tool_providers()
             .into_iter()
-            .map(|sourced| sourced.fragment)
-            .collect()
+            .filter(|provider| self.is_tool_enabled_for_role(&provider.tool, role_name))
+            .filter_map(|provider| {
+                provider
+                    .prompt_fragment
+                    .as_ref()
+                    .map(|fragment| SourcedPromptFragment {
+                        source: PromptFragmentSource::Tool {
+                            connection_id: provider.connection_id.clone(),
+                        },
+                        fragment: fragment.clone(),
+                    })
+            })
+            .collect::<Vec<_>>();
+        (fragments, tool_fragments)
     }
 
     fn gather_tool_definitions(&self) -> Vec<ToolDefinition> {

@@ -26,8 +26,9 @@ const DEFAULT_FOLDER: &str = "INBOX";
 use tau_proto::{
     ACTION_SCHEMA_VERSION, Ack, ActionArg, ActionArgKind, ActionCommand, ActionError, ActionInvoke,
     ActionOutput, ActionResult, ActionSchema, CborValue, ConfigError, Event, Frame, FrameReader,
-    FrameWriter, LogEventId, Message, ToolDisplay, ToolDisplayStats, ToolDisplayStatus, ToolError,
-    ToolExecutionMode, ToolResult, ToolSpec, ToolStarted,
+    FrameWriter, LogEventId, Message, PromptFragment, PromptPriority, ToolDisplay,
+    ToolDisplayStats, ToolDisplayStatus, ToolError, ToolExecutionMode, ToolResult, ToolSpec,
+    ToolStarted,
 };
 
 /// `tracing` target for events emitted from this extension.
@@ -57,7 +58,7 @@ where
             tau_proto::EventName::TOOL_STARTED,
             tau_proto::EventName::ACTION_INVOKE,
         ])
-        .register_tool(email_tool_spec())
+        .register_tool_with_prompt_fragment(email_tool_spec(), Some(email_prompt_fragment()))
         .publish_actions(email_action_schema())
         .ready_message("email extension ready")
         .run(&mut writer)?;
@@ -2423,6 +2424,14 @@ fn email_tool_spec() -> ToolSpec {
         execution_mode: ToolExecutionMode::Exclusive,
         background_support: None,
     }
+}
+
+fn email_prompt_fragment() -> PromptFragment {
+    PromptFragment::new(
+        "email.instructions",
+        PromptPriority::new(120),
+        "Use the `email` tool for controlled access to configured mail accounts. If `send` returns `approval_required`, treat it as a successful queued send: tell the user the email will be delivered after their approval and do not call `send` again for that message. Use `/email out approve <id>` only when acting as the user reviewing pending outgoing approvals.",
+    )
 }
 
 fn email_action_schema() -> ActionSchema {

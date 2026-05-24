@@ -166,14 +166,20 @@ fn spawn_extension() -> FramePair {
     }
 }
 
-fn drain_startup(reader: &mut FrameReader<BufReader<UnixStream>>) -> ToolSpec {
+fn drain_startup_register(
+    reader: &mut FrameReader<BufReader<UnixStream>>,
+) -> tau_proto::ToolRegister {
     loop {
         match reader.read_frame().expect("read").expect("frame") {
-            Frame::Event(Event::ToolRegister(register)) => return register.tool,
+            Frame::Event(Event::ToolRegister(register)) => return register,
             Frame::Message(Message::Ready(_)) => panic!("tool should be registered before ready"),
             _ => {}
         }
     }
+}
+
+fn drain_startup(reader: &mut FrameReader<BufReader<UnixStream>>) -> ToolSpec {
+    drain_startup_register(reader).tool
 }
 
 fn drain_action_schema(reader: &mut FrameReader<BufReader<UnixStream>>) -> ActionSchema {
@@ -307,6 +313,20 @@ fn registers_single_email_tool() {
     assert_eq!(tool.name.as_str(), TOOL_NAME);
     assert_eq!(tool.execution_mode, ToolExecutionMode::Exclusive);
     assert!(tool.parameters.is_some());
+}
+
+#[test]
+fn registers_email_tool_prompt_fragment() {
+    // Email has approval semantics that the JSON schema alone cannot explain
+    // well. Keep that guidance attached to the tool registration so it appears
+    // only for roles that can use the email tool.
+    let mut pair = spawn_extension();
+    let register = drain_startup_register(&mut pair.reader);
+    let fragment = register.prompt_fragment.expect("prompt fragment");
+
+    assert_eq!(fragment.name, "email.instructions");
+    assert!(fragment.template.contains("approval_required"));
+    assert!(fragment.template.contains("do not call `send` again"));
 }
 
 #[test]

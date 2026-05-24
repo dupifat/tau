@@ -56,6 +56,7 @@ pub(crate) fn build_system_prompt(
 }
 
 /// Builds the system prompt with role prompt sections rendered as Handlebars.
+#[cfg(test)]
 pub(crate) fn build_system_prompt_with_template_context(
     system_template: &str,
     skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
@@ -63,14 +64,36 @@ pub(crate) fn build_system_prompt_with_template_context(
     session_context: serde_json::Value,
     template_context: RolePromptTemplateContext<'_>,
 ) -> String {
+    build_system_prompt_with_tool_template_context(
+        system_template,
+        skills,
+        prompt_fragments,
+        &[],
+        session_context,
+        template_context,
+    )
+}
+
+/// Builds the system prompt with ordinary prompt fragments and tool-scoped
+/// prompt fragments rendered into separate template sections.
+pub(crate) fn build_system_prompt_with_tool_template_context(
+    system_template: &str,
+    skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
+    prompt_fragments: &[PromptFragment],
+    tool_prompt_fragments: &[PromptFragment],
+    session_context: serde_json::Value,
+    template_context: RolePromptTemplateContext<'_>,
+) -> String {
     // Tool definitions are delivered out-of-band via the provider's
     // tool-use channel, so the built-in system template doesn't restate them.
     let fragments: Vec<_> = prompt_fragments.to_vec();
+    let tool_fragments: Vec<_> = tool_prompt_fragments.to_vec();
     render_system_prompt_template(
         system_template,
         template_context,
         skills,
         &fragments,
+        &tool_fragments,
         session_context,
     )
 }
@@ -80,9 +103,16 @@ fn render_system_prompt_template(
     context: RolePromptTemplateContext<'_>,
     skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
     prompt_fragments: &[PromptFragment],
+    tool_prompt_fragments: &[PromptFragment],
     session_context: serde_json::Value,
 ) -> String {
-    let data = system_prompt_template_data(context, skills, prompt_fragments, session_context);
+    let data = system_prompt_template_data(
+        context,
+        skills,
+        prompt_fragments,
+        tool_prompt_fragments,
+        session_context,
+    );
     let handlebars = prompt_template_renderer();
     match handlebars.render_template(system_template, &data) {
         Ok(rendered) => rendered,
@@ -125,13 +155,18 @@ fn system_prompt_template_data(
     context: RolePromptTemplateContext<'_>,
     skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
     prompt_fragments: &[PromptFragment],
+    tool_prompt_fragments: &[PromptFragment],
     session_context: serde_json::Value,
 ) -> serde_json::Value {
     let mut data = prompt_template_data(context, skills, session_context);
     let rendered_fragments = rendered_prompt_fragment_template_parts(prompt_fragments, &data);
-    data.as_object_mut()
-        .expect("system prompt template data is an object")
-        .insert("prompt_fragments".to_owned(), rendered_fragments);
+    let rendered_tool_fragments =
+        rendered_prompt_fragment_template_parts(tool_prompt_fragments, &data);
+    let object = data
+        .as_object_mut()
+        .expect("system prompt template data is an object");
+    object.insert("prompt_fragments".to_owned(), rendered_fragments);
+    object.insert("tool_prompt_fragments".to_owned(), rendered_tool_fragments);
     data
 }
 

@@ -48,6 +48,9 @@ impl FakeBackend {
                     subject: "secret subject".to_owned(),
                     body_text: "secret body".to_owned(),
                     flags: vec!["seen".to_owned()],
+                    has_attachments: false,
+                    attachments: Vec::new(),
+                    message_id: None,
                 },
                 BackendMessage {
                     uid: "2".to_owned(),
@@ -59,10 +62,52 @@ impl FakeBackend {
                     subject: "deploy notes".to_owned(),
                     body_text: "safe body".to_owned(),
                     flags: Vec::new(),
+                    has_attachments: false,
+                    attachments: Vec::new(),
+                    message_id: None,
                 },
             ],
         );
         fake
+    }
+}
+
+struct SpyBackend {
+    metadata: BackendMessage,
+    body: BackendMessage,
+    body_reads: RefCell<usize>,
+}
+
+impl EmailBackend for SpyBackend {
+    fn list_folders(&self, _account: &str) -> Result<Vec<BackendFolder>, String> {
+        Ok(Vec::new())
+    }
+
+    fn list_messages(&self, _account: &str, _folder: &str) -> Result<Vec<BackendMessage>, String> {
+        Ok(vec![self.metadata.clone()])
+    }
+
+    fn message_metadata(
+        &self,
+        _account: &str,
+        _folder: &str,
+        _uid: &str,
+    ) -> Result<BackendMessage, String> {
+        Ok(self.metadata.clone())
+    }
+
+    fn read_message(
+        &self,
+        _account: &str,
+        _folder: &str,
+        _uid: &str,
+    ) -> Result<BackendMessage, String> {
+        *self.body_reads.borrow_mut() += 1;
+        Ok(self.body.clone())
+    }
+
+    fn send_message(&mut self, _message: &OutgoingMessage) -> Result<String, String> {
+        Ok("spy-message-id".to_owned())
     }
 }
 
@@ -151,10 +196,18 @@ fn cfg() -> EmailExtensionConfig {
             enable: true,
             display_name: Some("Work".to_owned()),
             from: "Alice <alice@company.com>".to_owned(),
-            imap: Some(ImapConfig::default()),
-            smtp: Some(SmtpConfig::default()),
+            imap: Some(ImapConfig {
+                host: Some("imap.company.com".to_owned()),
+                login: Some("alice@company.com".to_owned()),
+                ..Default::default()
+            }),
+            smtp: Some(SmtpConfig {
+                host: Some("smtp.company.com".to_owned()),
+                login: Some("alice@company.com".to_owned()),
+                ..Default::default()
+            }),
             auth: Some(AuthConfig {
-                method: Some("password".to_owned()),
+                method: AuthMethod::Password,
                 password_env: Some("EMAIL_PASSWORD".to_owned()),
                 ..Default::default()
             }),
@@ -285,6 +338,65 @@ fn disabled_defaults_and_config_validation() {
 }
 
 #[test]
+fn real_backend_config_requires_connection_identity_and_accepts_command_auth() {
+    let mut missing_host = cfg();
+    missing_host.accounts[0].imap.as_mut().expect("imap").host = None;
+    let missing_host_error = missing_host
+        .validate()
+        .err()
+        .expect("missing host rejected");
+    assert!(missing_host_error.contains("imap.host"));
+
+    let mut command_auth = cfg();
+    command_auth.accounts[0].auth = Some(AuthConfig {
+        method: AuthMethod::Command,
+        command: Some(vec![
+            "secret-tool".to_owned(),
+            "lookup".to_owned(),
+            "mail".to_owned(),
+            "work".to_owned(),
+        ]),
+        ..Default::default()
+    });
+    let valid = command_auth.validate().expect("command auth is valid");
+    assert!(valid.accounts["work"].auth.is_some());
+
+    let mut password_without_source = cfg();
+    password_without_source.accounts[0].auth = Some(AuthConfig {
+        method: AuthMethod::Password,
+        ..Default::default()
+    });
+    let missing_password_source_error = password_without_source
+        .validate()
+        .err()
+        .expect("password auth without a source is rejected");
+    assert!(missing_password_source_error.contains("auth.password_env or auth.command"));
+
+    let mut empty_command = cfg();
+    empty_command.accounts[0].auth = Some(AuthConfig {
+        method: AuthMethod::Command,
+        command: Some(Vec::new()),
+        ..Default::default()
+    });
+    let empty_command_error = empty_command
+        .validate()
+        .err()
+        .expect("empty command rejected");
+    assert!(empty_command_error.contains("auth.command"));
+
+    let mut imap_without_auth = cfg();
+    imap_without_auth.accounts[0].auth = Some(AuthConfig {
+        method: AuthMethod::None,
+        ..Default::default()
+    });
+    let none_auth_error = imap_without_auth
+        .validate()
+        .err()
+        .expect("IMAP with auth none is rejected");
+    assert!(none_auth_error.contains("auth.method none"));
+}
+
+#[test]
 fn duplicate_account_ids_and_invalid_regex_are_rejected() {
     let mut dup = cfg();
     dup.accounts.push(dup.accounts[0].clone());
@@ -394,6 +506,91 @@ fn incoming_list_redacts_untrusted_and_shows_whitelisted_subject() {
 }
 
 #[test]
+fn password_command_times_out_instead_of_hanging() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let result = runtime.block_on(super::real_backend::run_password_command(
+        &[
+            "sh".to_owned(),
+            "-c".to_owned(),
+            "sleep 10; printf secret".to_owned(),
+        ],
+        std::time::Duration::from_millis(20),
+    ));
+    assert_eq!(
+        result.err().as_deref(),
+        Some("auth_error: password command timed out")
+    );
+}
+
+#[test]
+fn rfc822_parser_extracts_text_and_attachment_metadata_without_network() {
+    let fallback = BackendMessage {
+        uid: "42".to_owned(),
+        uidvalidity: "uv".to_owned(),
+        date: "fallback-date".to_owned(),
+        from: "fallback@example.com".to_owned(),
+        to: Vec::new(),
+        cc: Vec::new(),
+        subject: "fallback".to_owned(),
+        body_text: String::new(),
+        flags: Vec::new(),
+        has_attachments: false,
+        attachments: Vec::new(),
+        message_id: None,
+    };
+    let raw = b"From: Team <team@company.com>\r\nTo: Alice <alice@company.com>\r\nCc: Ops <ops@company.com>\r\nSubject: Parsed subject\r\nMessage-ID: <m1@example.com>\r\nDate: Mon, 25 May 2026 12:00:00 +0000\r\nContent-Type: multipart/mixed; boundary=\"b\"\r\n\r\n--b\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nHello text\r\n--b\r\nContent-Type: application/pdf; name=\"notes.pdf\"\r\nContent-Disposition: attachment; filename=\"notes.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\nSGVsbG8=\r\n--b--\r\n";
+
+    let parsed = super::real_backend::parse_backend_message_from_rfc822(&fallback, raw);
+
+    assert_eq!(parsed.from, "team@company.com");
+    assert_eq!(parsed.to, vec!["alice@company.com".to_owned()]);
+    assert_eq!(parsed.cc, vec!["ops@company.com".to_owned()]);
+    assert_eq!(parsed.subject, "Parsed subject");
+    assert_eq!(parsed.message_id, Some("m1@example.com".to_owned()));
+    assert!(parsed.body_text.contains("Hello text"));
+    assert!(parsed.has_attachments);
+    assert_eq!(parsed.attachments.len(), 1);
+    assert_eq!(parsed.attachments[0].filename.as_deref(), Some("notes.pdf"));
+    assert_eq!(
+        parsed.attachments[0].content_type.as_deref(),
+        Some("application/pdf")
+    );
+    assert_eq!(parsed.attachments[0].size_bytes, Some(5));
+}
+
+#[test]
+fn rfc822_parser_failure_omits_raw_message_body() {
+    let fallback = BackendMessage {
+        uid: "42".to_owned(),
+        uidvalidity: "uv".to_owned(),
+        date: "fallback-date".to_owned(),
+        from: "fallback@example.com".to_owned(),
+        to: Vec::new(),
+        cc: Vec::new(),
+        subject: "fallback".to_owned(),
+        body_text: String::new(),
+        flags: Vec::new(),
+        has_attachments: true,
+        attachments: vec![BackendAttachment {
+            filename: Some("secret.bin".to_owned()),
+            content_type: Some("application/octet-stream".to_owned()),
+            size_bytes: Some(12),
+        }],
+        message_id: None,
+    };
+    let raw = b":";
+
+    let parsed = super::real_backend::parse_backend_message_from_rfc822(&fallback, raw);
+
+    assert_eq!(
+        parsed.body_text,
+        "[message body omitted: RFC822 parse failed]"
+    );
+    assert!(!parsed.body_text.contains("U0VDUkVU"));
+    assert!(parsed.attachments.is_empty());
+}
+
+#[test]
 fn read_approval_creation_repeat_stability_and_exact_approval() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut engine = engine(&temp);
@@ -449,6 +646,97 @@ fn read_approval_creation_repeat_stability_and_exact_approval() {
         cbor_text_field(&changed, "status"),
         Some("approval_required")
     );
+}
+
+#[test]
+fn unapproved_read_uses_metadata_without_fetching_full_body() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let metadata = BackendMessage {
+        uid: "77".to_owned(),
+        uidvalidity: "uv".to_owned(),
+        date: "d".to_owned(),
+        from: "mallory@evil.test".to_owned(),
+        to: Vec::new(),
+        cc: Vec::new(),
+        subject: "redacted".to_owned(),
+        body_text: String::new(),
+        flags: Vec::new(),
+        has_attachments: false,
+        attachments: Vec::new(),
+        message_id: None,
+    };
+    let body = BackendMessage {
+        body_text: "must not be fetched".to_owned(),
+        ..metadata.clone()
+    };
+    let mut engine = Engine {
+        config: cfg().validate().expect("valid"),
+        state: StateStore::open(temp.path().join("email-state")).expect("state"),
+        backend: SpyBackend {
+            metadata,
+            body,
+            body_reads: RefCell::new(0),
+        },
+    };
+
+    let result = engine.dispatch(EmailCommand::Read {
+        account: "work".to_owned(),
+        folder: "INBOX".to_owned(),
+        uid: "77".to_owned(),
+    });
+
+    assert_eq!(
+        cbor_text_field(&result, "status"),
+        Some("approval_required")
+    );
+    assert_eq!(*engine.backend.body_reads.borrow(), 0);
+    assert!(!format!("{result:?}").contains("must not be fetched"));
+}
+
+#[test]
+fn allowed_read_rejects_body_fetch_uidvalidity_mismatch() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let metadata = BackendMessage {
+        uid: "77".to_owned(),
+        uidvalidity: "uv1".to_owned(),
+        date: "d".to_owned(),
+        from: "team@company.com".to_owned(),
+        to: Vec::new(),
+        cc: Vec::new(),
+        subject: "allowed".to_owned(),
+        body_text: String::new(),
+        flags: Vec::new(),
+        has_attachments: false,
+        attachments: Vec::new(),
+        message_id: None,
+    };
+    let body = BackendMessage {
+        uidvalidity: "uv2".to_owned(),
+        body_text: "stale body must not be returned".to_owned(),
+        ..metadata.clone()
+    };
+    let mut engine = Engine {
+        config: cfg().validate().expect("valid"),
+        state: StateStore::open(temp.path().join("email-state")).expect("state"),
+        backend: SpyBackend {
+            metadata,
+            body,
+            body_reads: RefCell::new(0),
+        },
+    };
+
+    let result = engine.dispatch(EmailCommand::Read {
+        account: "work".to_owned(),
+        folder: "INBOX".to_owned(),
+        uid: "77".to_owned(),
+    });
+
+    assert_eq!(
+        cbor_nested_text_field(&result, "error", "code"),
+        Some("message_not_found")
+    );
+    assert_eq!(*engine.backend.body_reads.borrow(), 1);
+    assert!(!format!("{result:?}").contains("stale body"));
 }
 
 #[test]
@@ -634,6 +922,9 @@ fn incoming_actions_list_open_approve_and_whitelist_drive_policy_without_leaks()
             subject: "visible after whitelist".to_owned(),
             body_text: "friend body".to_owned(),
             flags: Vec::new(),
+            has_attachments: false,
+            attachments: Vec::new(),
+            message_id: None,
         }],
     );
     engine
@@ -902,6 +1193,9 @@ fn read_body_and_list_results_report_truncation_metadata() {
                 subject: "long".to_owned(),
                 body_text: long_body,
                 flags: Vec::new(),
+                has_attachments: false,
+                attachments: Vec::new(),
+                message_id: None,
             },
             BackendMessage {
                 uid: "11".to_owned(),
@@ -913,6 +1207,9 @@ fn read_body_and_list_results_report_truncation_metadata() {
                 subject: "next".to_owned(),
                 body_text: "body".to_owned(),
                 flags: Vec::new(),
+                has_attachments: false,
+                attachments: Vec::new(),
+                message_id: None,
             },
         ],
     );
@@ -992,6 +1289,9 @@ fn state_allowlist_load_save_and_policy_extension_disable() {
             subject: "state subject".to_owned(),
             body_text: "state body".to_owned(),
             flags: Vec::new(),
+            has_attachments: false,
+            attachments: Vec::new(),
+            message_id: None,
         }],
     );
     let read = engine.dispatch(EmailCommand::Read {

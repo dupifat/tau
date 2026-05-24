@@ -1,9 +1,8 @@
-//! Standard email extension policy, state, and fake-backend core.
+//! Standard email extension policy, state, and IMAP/SMTP backend core.
 //!
-//! This crate intentionally keeps Phase B email behavior pure and testable: no
-//! IMAP/SMTP network dependencies are used. Tool commands and `/email ...` UI
-//! actions are routed through the same policy/state core that tests exercise
-//! with an in-memory backend.
+//! Policy and approval checks stay in the synchronous command engine so fake
+//! tests and the real network backend exercise the same redaction and
+//! no-partial-send behavior.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -14,6 +13,10 @@ use std::path::{Path, PathBuf};
 use globset::{Glob, GlobMatcher};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+
+mod real_backend;
+use real_backend::RealEmailBackend;
+
 const READ_BODY_MAX_BYTES: usize = 64 * 1024;
 const READ_BODY_MAX_LINES: usize = 1000;
 const LIST_MAX_LIMIT: usize = 100;
@@ -115,61 +118,122 @@ pub struct AccountConfig {
     pub display_name: Option<String>,
     /// Configured From identity for outgoing sends.
     pub from: String,
-    /// Placeholder IMAP settings; Phase B never opens a network connection.
+    /// Optional IMAP settings used by list and read commands.
     pub imap: Option<ImapConfig>,
-    /// Placeholder SMTP settings; Phase B never opens a network connection.
+    /// Optional SMTP settings used by send commands.
     pub smtp: Option<SmtpConfig>,
-    /// Placeholder authentication settings; secrets are never returned by
-    /// tools.
+    /// Optional authentication settings. Secrets are loaded at use time and are
+    /// never returned by tools.
     pub auth: Option<AuthConfig>,
     /// Per-account folder visibility policy.
     pub folders: FolderPolicy,
 }
 
-/// IMAP connection placeholder configuration.
-#[derive(Clone, Debug, Default, Deserialize)]
+/// TLS mode used by IMAP and SMTP connections.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum TlsMode {
+    /// Connect with TLS immediately.
+    #[default]
+    #[serde(alias = "implicit")]
+    Required,
+    /// Connect in plaintext and require a successful STARTTLS upgrade before
+    /// credentials or message content are sent.
+    #[serde(alias = "start_tls")]
+    StartTls,
+    /// Use plaintext only. This is intended for trusted local relays or test
+    /// servers.
+    None,
+}
+
+/// IMAP connection configuration.
+#[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ImapConfig {
     /// Server host name.
     pub host: Option<String>,
     /// Server port.
-    pub port: Option<u16>,
-    /// TLS policy placeholder.
-    pub tls: Option<String>,
-    /// Login user name placeholder.
+    pub port: u16,
+    /// TLS policy.
+    pub tls: TlsMode,
+    /// Login user name.
     pub login: Option<String>,
-    /// Timeout placeholder in seconds.
-    pub timeout_seconds: Option<u64>,
+    /// Whole-operation timeout in seconds.
+    pub timeout_seconds: u64,
 }
 
-/// SMTP connection placeholder configuration.
-#[derive(Clone, Debug, Default, Deserialize)]
+impl Default for ImapConfig {
+    fn default() -> Self {
+        Self {
+            host: None,
+            port: 993,
+            tls: TlsMode::Required,
+            login: None,
+            timeout_seconds: 30,
+        }
+    }
+}
+
+/// SMTP connection configuration.
+#[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SmtpConfig {
     /// Server host name.
     pub host: Option<String>,
     /// Server port.
-    pub port: Option<u16>,
-    /// TLS policy placeholder.
-    pub tls: Option<String>,
-    /// Login user name placeholder.
+    pub port: u16,
+    /// TLS policy.
+    pub tls: TlsMode,
+    /// Login user name.
     pub login: Option<String>,
-    /// Timeout placeholder in seconds.
-    pub timeout_seconds: Option<u64>,
+    /// Whole-operation timeout in seconds.
+    pub timeout_seconds: u64,
 }
 
-/// Authentication placeholder configuration.
+impl Default for SmtpConfig {
+    fn default() -> Self {
+        Self {
+            host: None,
+            port: 587,
+            tls: TlsMode::StartTls,
+            login: None,
+            timeout_seconds: 30,
+        }
+    }
+}
+
+/// Authentication method for password-style account credentials.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMethod {
+    /// Read a password from `password_env` or `command`.
+    #[default]
+    Password,
+    /// Read a password from `command`.
+    Command,
+    /// Do not configure SMTP authentication. IMAP still requires a password.
+    None,
+    /// OAuth is parsed for forward compatibility but not implemented yet.
+    #[serde(alias = "oauth2_token")]
+    Oauth2,
+}
+
+/// Authentication configuration. Secrets are loaded at use time and are never
+/// returned in tool output.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AuthConfig {
-    /// Authentication method placeholder, such as password, oauth2, or command.
-    pub method: Option<String>,
-    /// Password environment variable name placeholder.
+    /// Authentication method.
+    pub method: AuthMethod,
+    /// Environment variable containing a password.
     pub password_env: Option<String>,
-    /// OAuth token command placeholder.
-    pub oauth2_token_command: Option<Vec<String>>,
-    /// Secret command placeholder.
+    /// Password command. The first element is the program and the rest are
+    /// arguments.
     pub command: Option<Vec<String>>,
+    /// Alias for `command` accepted by config files that want to be explicit.
+    pub password_command: Option<Vec<String>>,
+    /// OAuth token command placeholder; OAuth is out of scope for Phase E.
+    pub oauth2_token_command: Option<Vec<String>>,
 }
 
 /// Folder visibility policy for an account.
@@ -265,12 +329,67 @@ pub struct ValidatedAccount {
     pub from_normalized: String,
     /// Original From identity for display.
     pub from_identity: String,
-    /// Whether IMAP placeholder config was provided.
-    pub imap_configured: bool,
-    /// Whether SMTP placeholder config was provided.
-    pub smtp_configured: bool,
+    /// Validated IMAP settings when configured.
+    pub imap: Option<ValidatedImapConfig>,
+    /// Validated SMTP settings when configured.
+    pub smtp: Option<ValidatedSmtpConfig>,
+    /// Validated account authentication settings.
+    pub auth: Option<ValidatedAuthConfig>,
     /// Compiled folder allowlist.
     pub folders: ValidatedFolderPolicy,
+}
+
+impl ValidatedAccount {
+    /// Return true when this account has IMAP settings.
+    pub fn imap_configured(&self) -> bool {
+        self.imap.is_some()
+    }
+
+    /// Return true when this account has SMTP settings.
+    pub fn smtp_configured(&self) -> bool {
+        self.smtp.is_some()
+    }
+}
+
+/// Validated IMAP connection settings.
+#[derive(Clone)]
+pub struct ValidatedImapConfig {
+    /// Server host name.
+    pub host: String,
+    /// Server port.
+    pub port: u16,
+    /// TLS policy.
+    pub tls: TlsMode,
+    /// Login user name.
+    pub login: String,
+    /// Whole-operation timeout in seconds.
+    pub timeout_seconds: u64,
+}
+
+/// Validated SMTP connection settings.
+#[derive(Clone)]
+pub struct ValidatedSmtpConfig {
+    /// Server host name.
+    pub host: String,
+    /// Server port.
+    pub port: u16,
+    /// TLS policy.
+    pub tls: TlsMode,
+    /// Login user name.
+    pub login: String,
+    /// Whole-operation timeout in seconds.
+    pub timeout_seconds: u64,
+}
+
+/// Validated authentication settings.
+#[derive(Clone)]
+pub struct ValidatedAuthConfig {
+    /// Authentication method.
+    pub method: AuthMethod,
+    /// Environment variable that contains the password.
+    pub password_env: Option<String>,
+    /// Password command to execute when needed.
+    pub command: Option<Vec<String>>,
 }
 
 impl TryFrom<AccountConfig> for ValidatedAccount {
@@ -287,6 +406,10 @@ impl TryFrom<AccountConfig> for ValidatedAccount {
                     .map_err(|e| e.to_string())
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let imap = validate_imap_config(&value.id, value.imap)?;
+        let smtp = validate_smtp_config(&value.id, value.smtp)?;
+        let auth = validate_auth_config(&value.id, value.auth)?;
+        validate_account_auth_support(&value.id, imap.is_some(), auth.as_ref())?;
         Ok(Self {
             id: value.id,
             enable: value.enable,
@@ -294,10 +417,141 @@ impl TryFrom<AccountConfig> for ValidatedAccount {
             from_normalized: normalize_address(&value.from)
                 .ok_or_else(|| "from identity must contain an email address".to_owned())?,
             from_identity: value.from,
-            imap_configured: value.imap.is_some(),
-            smtp_configured: value.smtp.is_some(),
+            imap,
+            smtp,
+            auth,
             folders: ValidatedFolderPolicy { matchers },
         })
+    }
+}
+
+fn validate_imap_config(
+    account_id: &str,
+    config: Option<ImapConfig>,
+) -> Result<Option<ValidatedImapConfig>, String> {
+    let Some(config) = config else {
+        return Ok(None);
+    };
+    let host = required_config_string(config.host, account_id, "imap.host")?;
+    let login = required_config_string(config.login, account_id, "imap.login")?;
+    validate_timeout(account_id, "imap.timeout_seconds", config.timeout_seconds)?;
+    Ok(Some(ValidatedImapConfig {
+        host,
+        port: config.port,
+        tls: config.tls,
+        login,
+        timeout_seconds: config.timeout_seconds,
+    }))
+}
+
+fn validate_smtp_config(
+    account_id: &str,
+    config: Option<SmtpConfig>,
+) -> Result<Option<ValidatedSmtpConfig>, String> {
+    let Some(config) = config else {
+        return Ok(None);
+    };
+    let host = required_config_string(config.host, account_id, "smtp.host")?;
+    let login = required_config_string(config.login, account_id, "smtp.login")?;
+    validate_timeout(account_id, "smtp.timeout_seconds", config.timeout_seconds)?;
+    Ok(Some(ValidatedSmtpConfig {
+        host,
+        port: config.port,
+        tls: config.tls,
+        login,
+        timeout_seconds: config.timeout_seconds,
+    }))
+}
+
+fn validate_auth_config(
+    account_id: &str,
+    config: Option<AuthConfig>,
+) -> Result<Option<ValidatedAuthConfig>, String> {
+    let Some(config) = config else {
+        return Ok(None);
+    };
+    let command = config.command.or(config.password_command);
+    if let Some(command) = &command {
+        validate_auth_command(account_id, command)?;
+    }
+    if let Some(env) = &config.password_env
+        && env.trim().is_empty()
+    {
+        return Err(format!(
+            "account `{account_id}` auth.password_env must not be empty"
+        ));
+    }
+    if matches!(config.method, AuthMethod::Command) && command.is_none() {
+        return Err(format!(
+            "account `{account_id}` auth.command is required for command auth"
+        ));
+    }
+    if matches!(config.method, AuthMethod::Password)
+        && config.password_env.is_none()
+        && command.is_none()
+    {
+        return Err(format!(
+            "account `{account_id}` auth.password_env or auth.command is required for password auth"
+        ));
+    }
+    if matches!(config.method, AuthMethod::Oauth2) {
+        return Err(format!(
+            "account `{account_id}` oauth2 authentication is not implemented"
+        ));
+    }
+    Ok(Some(ValidatedAuthConfig {
+        method: config.method,
+        password_env: config.password_env,
+        command,
+    }))
+}
+
+fn validate_account_auth_support(
+    account_id: &str,
+    imap_configured: bool,
+    auth: Option<&ValidatedAuthConfig>,
+) -> Result<(), String> {
+    if !imap_configured {
+        return Ok(());
+    }
+    match auth.map(|auth| auth.method) {
+        Some(AuthMethod::Password | AuthMethod::Command) => Ok(()),
+        Some(AuthMethod::None) => Err(format!(
+            "account `{account_id}` auth.method none is not supported for IMAP accounts"
+        )),
+        None => Err(format!(
+            "account `{account_id}` IMAP configuration requires password or command auth"
+        )),
+        Some(AuthMethod::Oauth2) => Err(format!(
+            "account `{account_id}` oauth2 authentication is not implemented"
+        )),
+    }
+}
+
+fn validate_auth_command(account_id: &str, command: &[String]) -> Result<(), String> {
+    if command.is_empty() || command.iter().any(|part| part.trim().is_empty()) {
+        return Err(format!(
+            "account `{account_id}` auth.command must contain non-empty strings"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_timeout(account_id: &str, field: &str, seconds: u64) -> Result<(), String> {
+    if seconds == 0 {
+        return Err(format!("account `{account_id}` {field} must be positive"));
+    }
+    Ok(())
+}
+
+fn required_config_string(
+    value: Option<String>,
+    account_id: &str,
+    field: &str,
+) -> Result<String, String> {
+    match value {
+        Some(value) if !value.trim().is_empty() => Ok(value),
+        _ => Err(format!("account `{account_id}` {field} must not be empty")),
     }
 }
 
@@ -794,7 +1048,34 @@ pub trait EmailBackend {
     fn list_folders(&self, account: &str) -> Result<Vec<BackendFolder>, String>;
     /// List messages known to the backend for an account/folder.
     fn list_messages(&self, account: &str, folder: &str) -> Result<Vec<BackendMessage>, String>;
-    /// Read one message by UID.
+    /// List one redaction-safe metadata page.
+    fn list_messages_page(
+        &self,
+        account: &str,
+        folder: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<BackendMessagePage, String> {
+        let messages = self.list_messages(account, folder)?;
+        let truncated = messages.len() > offset.saturating_add(limit);
+        let next_cursor = truncated.then(|| offset.saturating_add(limit).to_string());
+        Ok(BackendMessagePage {
+            messages: messages.into_iter().skip(offset).take(limit).collect(),
+            next_cursor,
+            truncated,
+        })
+    }
+    /// Fetch metadata needed for incoming policy checks without fetching the
+    /// full body when the backend can support that.
+    fn message_metadata(
+        &self,
+        account: &str,
+        folder: &str,
+        uid: &str,
+    ) -> Result<BackendMessage, String> {
+        self.read_message(account, folder, uid)
+    }
+    /// Read one message by UID after policy has allowed the content fetch.
     fn read_message(
         &self,
         account: &str,
@@ -805,27 +1086,14 @@ pub trait EmailBackend {
     fn send_message(&mut self, message: &OutgoingMessage) -> Result<String, String>;
 }
 
-#[derive(Default)]
-struct EmptyBackend;
-
-impl EmailBackend for EmptyBackend {
-    fn list_folders(&self, _account: &str) -> Result<Vec<BackendFolder>, String> {
-        Ok(Vec::new())
-    }
-    fn list_messages(&self, _account: &str, _folder: &str) -> Result<Vec<BackendMessage>, String> {
-        Ok(Vec::new())
-    }
-    fn read_message(
-        &self,
-        _account: &str,
-        _folder: &str,
-        _uid: &str,
-    ) -> Result<BackendMessage, String> {
-        Err("message backend is not implemented".to_owned())
-    }
-    fn send_message(&mut self, _message: &OutgoingMessage) -> Result<String, String> {
-        Err("smtp backend is not implemented".to_owned())
-    }
+/// One page of backend message metadata.
+pub struct BackendMessagePage {
+    /// Messages in display order.
+    pub messages: Vec<BackendMessage>,
+    /// Opaque next cursor when more data is available.
+    pub next_cursor: Option<String>,
+    /// Whether additional messages are available after this page.
+    pub truncated: bool,
 }
 
 /// Backend folder metadata.
@@ -837,6 +1105,18 @@ pub struct BackendFolder {
     pub delimiter: String,
     /// Whether the folder is selectable.
     pub selectable: bool,
+}
+
+/// Backend attachment metadata. Attachment content is intentionally not exposed
+/// by the Phase E backend.
+#[derive(Clone, Default)]
+pub struct BackendAttachment {
+    /// Optional attachment file name.
+    pub filename: Option<String>,
+    /// Optional MIME content type, such as `application/pdf`.
+    pub content_type: Option<String>,
+    /// Decoded attachment size when known.
+    pub size_bytes: Option<u64>,
 }
 
 /// Backend message fixture/metadata.
@@ -856,10 +1136,16 @@ pub struct BackendMessage {
     pub cc: Vec<String>,
     /// Message subject.
     pub subject: String,
-    /// Message body text.
+    /// Message body text. Metadata-only fetches leave this empty.
     pub body_text: String,
     /// Minimal flags.
     pub flags: Vec<String>,
+    /// Whether the message appears to have attachments.
+    pub has_attachments: bool,
+    /// Attachment metadata, populated only after an allowed full read.
+    pub attachments: Vec<BackendAttachment>,
+    /// Optional Message-ID header.
+    pub message_id: Option<String>,
 }
 
 /// Exact incoming read approval target.
@@ -1037,6 +1323,10 @@ fn parse_cursor(cursor: Option<&str>) -> Result<usize, String> {
     }
 }
 
+fn is_single_uid(uid: &str) -> bool {
+    !uid.is_empty() && uid.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 struct Engine<B> {
     config: ValidatedConfig,
     state: StateStore,
@@ -1121,8 +1411,8 @@ impl<B: EmailBackend> Engine<B> {
                     ),
                     ("from", CborValue::Text(a.from_normalized.clone())),
                     ("enabled", CborValue::Bool(self.config.enable && a.enable)),
-                    ("imap_configured", CborValue::Bool(a.imap_configured)),
-                    ("smtp_configured", CborValue::Bool(a.smtp_configured)),
+                    ("imap_configured", CborValue::Bool(a.imap_configured())),
+                    ("smtp_configured", CborValue::Bool(a.smtp_configured())),
                 ])
             })
             .collect();
@@ -1160,7 +1450,7 @@ impl<B: EmailBackend> Engine<B> {
                     ]),
                 )
             }
-            Err(message) => error_envelope(Some("list_folders"), "internal_error", &message),
+            Err(message) => backend_error_envelope(Some("list_folders"), "network_error", &message),
         }
     }
 
@@ -1176,28 +1466,29 @@ impl<B: EmailBackend> Engine<B> {
                 "folder is not whitelisted for this account",
             );
         }
-        let messages = match self.backend.list_messages(account_id, folder) {
-            Ok(m) => m,
-            Err(message) => return error_envelope(Some("list"), "internal_error", &message),
-        };
         let offset = match parse_cursor(cursor) {
             Ok(offset) => offset,
             Err(message) => return error_envelope(Some("list"), "invalid_input", &message),
         };
-        let total_available = messages.len();
         let limit = (limit as usize).min(LIST_MAX_LIMIT);
-        let truncated = total_available > offset.saturating_add(limit);
-        let next_cursor = if truncated {
-            CborValue::Text(offset.saturating_add(limit).to_string())
-        } else {
-            CborValue::Null
+        let page = match self
+            .backend
+            .list_messages_page(account_id, folder, limit, offset)
+        {
+            Ok(page) => page,
+            Err(message) => return backend_error_envelope(Some("list"), "network_error", &message),
         };
-        let data = messages
+        let next_cursor = page
+            .next_cursor
+            .map(CborValue::Text)
+            .unwrap_or(CborValue::Null);
+        let truncated = page.truncated;
+        let data = page
+            .messages
             .into_iter()
-            .skip(offset)
-            .take(limit)
             .map(|m| {
                 let decision = self.incoming_decision(&m);
+                let has_attachments = m.has_attachments || !m.attachments.is_empty();
                 let mut entries = vec![
                     ("uid", CborValue::Text(m.uid)),
                     ("date", CborValue::Text(m.date)),
@@ -1216,6 +1507,14 @@ impl<B: EmailBackend> Engine<B> {
                     "subject",
                     if decision.allowed {
                         CborValue::Text(m.subject)
+                    } else {
+                        CborValue::Null
+                    },
+                ));
+                entries.push((
+                    "has_attachments",
+                    if decision.allowed {
+                        CborValue::Bool(has_attachments)
                     } else {
                         CborValue::Null
                     },
@@ -1248,27 +1547,59 @@ impl<B: EmailBackend> Engine<B> {
                 "folder is not whitelisted for this account",
             );
         }
-        let msg = match self.backend.read_message(account_id, folder, uid) {
-            Ok(m) => m,
+        if !is_single_uid(uid) {
+            return error_envelope(
+                Some("read"),
+                "invalid_input",
+                "uid must be a positive integer",
+            );
+        }
+        let metadata = match self.backend.message_metadata(account_id, folder, uid) {
+            Ok(message) => message,
             Err(message) if message.contains("not implemented") => {
                 return error_envelope(Some("read"), "internal_error", &message);
             }
-            Err(_) => {
+            Err(message)
+                if backend_error_code(&message, "network_error") == "message_not_found" =>
+            {
                 return error_envelope(Some("read"), "message_not_found", "message not found");
+            }
+            Err(message) => {
+                return backend_error_envelope(Some("read"), "network_error", &message);
             }
         };
         let target = IncomingTarget {
             account: account_id.to_owned(),
             folder: folder.to_owned(),
             uid: uid.to_owned(),
-            uidvalidity: msg.uidvalidity.clone(),
+            uidvalidity: metadata.uidvalidity.clone(),
         };
-        let mut decision = self.incoming_decision(&msg);
+        let mut decision = self.incoming_decision(&metadata);
         if !decision.allowed && self.state.incoming_approved_exact(&target) {
             decision = PolicyDecision::allowed(Some("approval".to_owned()));
         }
         if decision.allowed {
+            let msg = match self.backend.read_message(account_id, folder, uid) {
+                Ok(message) => message,
+                Err(message)
+                    if backend_error_code(&message, "network_error") == "message_not_found" =>
+                {
+                    return error_envelope(Some("read"), "message_not_found", "message not found");
+                }
+                Err(message) => {
+                    return backend_error_envelope(Some("read"), "network_error", &message);
+                }
+            };
+            if msg.uid != metadata.uid || msg.uidvalidity != metadata.uidvalidity {
+                return error_envelope(Some("read"), "message_not_found", "message not found");
+            }
             let truncate = truncate_body(&msg.body_text);
+            let attachments = msg
+                .attachments
+                .into_iter()
+                .enumerate()
+                .map(|(index, attachment)| attachment_cbor(index, attachment))
+                .collect();
             return ok_envelope(
                 "read",
                 "ok",
@@ -1290,6 +1621,12 @@ impl<B: EmailBackend> Engine<B> {
                             ),
                             ("date", CborValue::Text(msg.date)),
                             ("subject", CborValue::Text(msg.subject)),
+                            (
+                                "message_id",
+                                msg.message_id
+                                    .map(CborValue::Text)
+                                    .unwrap_or(CborValue::Null),
+                            ),
                         ]),
                     ),
                     ("body_text", CborValue::Text(truncate.body_text)),
@@ -1310,7 +1647,7 @@ impl<B: EmailBackend> Engine<B> {
                         "body_shown_bytes",
                         CborValue::Integer(truncate.shown_bytes.into()),
                     ),
-                    ("attachments", CborValue::Array(Vec::new())),
+                    ("attachments", CborValue::Array(attachments)),
                     ("policy", policy_cbor(&decision)),
                 ]),
             );
@@ -1324,8 +1661,8 @@ impl<B: EmailBackend> Engine<B> {
             folder: folder.to_owned(),
             uid: uid.to_owned(),
             uidvalidity: target.uidvalidity,
-            from: normalize_address(&msg.from).unwrap_or(msg.from),
-            date: msg.date,
+            from: normalize_address(&metadata.from).unwrap_or(metadata.from),
+            date: metadata.date,
             subject_redacted: true,
             reason: decision.reason,
         };
@@ -1371,7 +1708,7 @@ impl<B: EmailBackend> Engine<B> {
             Ok(a) => a,
             Err(e) => return e,
         };
-        if !account_cfg.smtp_configured {
+        if !account_cfg.smtp_configured() {
             return error_envelope(
                 Some("send"),
                 "smtp_error",
@@ -1437,7 +1774,7 @@ impl<B: EmailBackend> Engine<B> {
                         ("rejected_recipients", CborValue::Array(Vec::new())),
                     ]),
                 ),
-                Err(message) => error_envelope(Some("send"), "internal_error", &message),
+                Err(message) => backend_error_envelope(Some("send"), "smtp_error", &message),
             };
         }
         let approval = OutgoingApproval {
@@ -1800,7 +2137,7 @@ struct RuntimeState {
 enum ConfigState {
     #[default]
     Unconfigured,
-    Configured(Engine<EmptyBackend>),
+    Configured(Engine<RealEmailBackend>),
     Rejected {
         reason: String,
     },
@@ -1825,15 +2162,17 @@ impl RuntimeState {
     fn try_configure(
         &self,
         configure: tau_proto::Configure,
-    ) -> Result<Engine<EmptyBackend>, String> {
+    ) -> Result<Engine<RealEmailBackend>, String> {
         let cfg: EmailExtensionConfig = tau_extension::parse_config(&configure.config)?;
         let state_dir = configure
             .state_dir
             .ok_or_else(|| "email extension requires Configure.state_dir".to_owned())?;
+        let config = cfg.validate()?;
+        let backend = RealEmailBackend::new(&config)?;
         Ok(Engine {
-            config: cfg.validate()?,
+            config,
             state: StateStore::open(state_dir)?,
-            backend: EmptyBackend,
+            backend,
         })
     }
 
@@ -2487,11 +2826,71 @@ fn error_envelope(command: Option<&str>, code: &str, message: &str) -> CborValue
         ("error", structured_error(code, message)),
     ])
 }
+fn backend_error_envelope(command: Option<&str>, default_code: &str, message: &str) -> CborValue {
+    let code = backend_error_code(message, default_code);
+    let message = backend_error_text(message);
+    error_envelope(command, code, &message)
+}
+fn backend_error_code<'a>(message: &'a str, default_code: &'a str) -> &'a str {
+    for code in [
+        "auth_error",
+        "network_error",
+        "tls_error",
+        "imap_error",
+        "smtp_error",
+        "message_not_found",
+        "invalid_input",
+        "internal_error",
+    ] {
+        if message
+            .strip_prefix(code)
+            .is_some_and(|rest| rest.starts_with(':'))
+        {
+            return code;
+        }
+    }
+    default_code
+}
+fn backend_error_text(message: &str) -> String {
+    let stripped = message
+        .split_once(':')
+        .filter(|(prefix, _)| backend_error_code(message, "") == *prefix)
+        .map(|(_, rest)| rest.trim())
+        .unwrap_or(message);
+    let line = stripped.lines().next().unwrap_or("email backend error");
+    line.chars().take(200).collect()
+}
 fn structured_error(code: &str, message: &str) -> CborValue {
     cbor_map(vec![
         ("code", CborValue::Text(code.to_owned())),
         ("message", CborValue::Text(message.to_owned())),
         ("details", CborValue::Map(Vec::new())),
+    ])
+}
+fn attachment_cbor(index: usize, attachment: BackendAttachment) -> CborValue {
+    cbor_map(vec![
+        ("index", CborValue::Integer((index as u64).into())),
+        (
+            "filename",
+            attachment
+                .filename
+                .map(CborValue::Text)
+                .unwrap_or(CborValue::Null),
+        ),
+        (
+            "content_type",
+            attachment
+                .content_type
+                .map(CborValue::Text)
+                .unwrap_or(CborValue::Null),
+        ),
+        (
+            "size_bytes",
+            attachment
+                .size_bytes
+                .map(|size| CborValue::Integer(size.into()))
+                .unwrap_or(CborValue::Null),
+        ),
     ])
 }
 fn policy_cbor(decision: &PolicyDecision) -> CborValue {

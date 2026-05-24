@@ -502,6 +502,7 @@ pub(crate) fn run_chat(
                 EventSelector::Prefix("ui.".to_owned()),
                 EventSelector::Prefix("action.".to_owned()),
                 EventSelector::Exact(EventName::AGENT_MESSAGE),
+                EventSelector::Prefix("agent.".to_owned()),
                 EventSelector::Prefix("session.".to_owned()),
                 EventSelector::Prefix("provider.".to_owned()),
                 EventSelector::Prefix("tool.".to_owned()),

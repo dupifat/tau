@@ -28,36 +28,60 @@ use super::tool_render::{
 };
 
 #[test]
-fn dev_print_prompt_parses_role_flag() {
-    // `tau dev print-prompt -r <role>` is a diagnostic command, so keep
-    // the clap shape pinned even though it is hidden from normal help.
-    let cli = super::cli::Cli::parse_from(["tau", "dev", "print-prompt", "-r", "engineer"]);
-    match cli.command {
+fn dev_print_prompt_uses_shared_role_flag() {
+    // Diagnostics share the same harness-selection args as normal `tau`, so a
+    // role can be supplied before or after the hidden dev subcommand.
+    let cli = super::cli::Cli::parse_from(["tau", "dev", "print-prompt", "--role", "engineer"]);
+    assert_eq!(cli.harness.role.as_deref(), Some("engineer"));
+    assert!(matches!(
+        cli.command,
         Some(super::cli::Command::Dev {
-            command: super::cli::DevCommand::PrintPrompt { role },
-        }) => assert_eq!(role, "engineer"),
-        _ => panic!("unexpected command"),
-    }
+            command: super::cli::DevCommand::PrintPrompt,
+        })
+    ));
 }
 
 #[test]
-fn dev_print_tools_parses_role_flag() {
-    // `tau dev print-tools -r <role>` mirrors print-prompt, but prints the
-    // role-filtered tool definitions advertised to the provider.
-    let cli = super::cli::Cli::parse_from(["tau", "dev", "print-tools", "-r", "engineer"]);
-    match cli.command {
+fn dev_print_tools_uses_shared_role_flag() {
+    // `print-tools` mirrors print-prompt and uses the same global role flag.
+    let cli = super::cli::Cli::parse_from(["tau", "--role", "engineer", "dev", "print-tools"]);
+    assert_eq!(cli.harness.role.as_deref(), Some("engineer"));
+    assert!(matches!(
+        cli.command,
         Some(super::cli::Command::Dev {
-            command: super::cli::DevCommand::PrintTools { role },
-        }) => assert_eq!(role, "engineer"),
-        _ => panic!("unexpected command"),
-    }
+            command: super::cli::DevCommand::PrintTools,
+        })
+    ));
 }
 
 #[test]
 fn startup_role_flag_is_parsed_for_default_run() {
     let cli = super::cli::Cli::parse_from(["tau", "--role", "manager"]);
 
-    assert_eq!(cli.run.role.as_deref(), Some("manager"));
+    assert_eq!(cli.harness.role.as_deref(), Some("manager"));
+}
+
+#[test]
+fn global_harness_flags_parse_before_dev_print_prompt() {
+    // Hidden diagnostic commands use the same global harness args as normal
+    // startup, including flags placed before the `dev` subcommand.
+    let cli = super::cli::Cli::parse_from([
+        "tau",
+        "--disable-roles-all",
+        "--role",
+        "manager",
+        "dev",
+        "print-prompt",
+    ]);
+
+    assert_eq!(cli.harness.role_overrides.disable_roles_all, 1);
+    assert_eq!(cli.harness.role.as_deref(), Some("manager"));
+    assert!(matches!(
+        cli.command,
+        Some(super::cli::Command::Dev {
+            command: super::cli::DevCommand::PrintPrompt,
+        })
+    ));
 }
 
 #[test]
@@ -72,9 +96,12 @@ fn role_cli_flags_accept_repeated_and_mixed_options() {
         "--disable-roles-all",
     ]);
 
-    assert_eq!(cli.role_overrides.disable_roles_all, 2);
-    assert_eq!(cli.role_overrides.enable_role, vec!["manager"]);
-    assert_eq!(cli.role_overrides.disable_role, vec!["senior-engineer"]);
+    assert_eq!(cli.harness.role_overrides.disable_roles_all, 2);
+    assert_eq!(cli.harness.role_overrides.enable_role, vec!["manager"]);
+    assert_eq!(
+        cli.harness.role_overrides.disable_role,
+        vec!["senior-engineer"]
+    );
 }
 
 #[test]
@@ -89,14 +116,14 @@ fn extension_cli_flags_accept_repeated_and_mixed_options() {
         "--disable-extensions-all",
     ]);
 
-    assert_eq!(cli.extension_overrides.enable_extensions_all, 1);
-    assert_eq!(cli.extension_overrides.disable_extensions_all, 1);
+    assert_eq!(cli.harness.extension_overrides.enable_extensions_all, 1);
+    assert_eq!(cli.harness.extension_overrides.disable_extensions_all, 1);
     assert_eq!(
-        cli.extension_overrides.enable_extension,
+        cli.harness.extension_overrides.enable_extension,
         vec!["std-websearch"]
     );
     assert_eq!(
-        cli.extension_overrides.disable_extension,
+        cli.harness.extension_overrides.disable_extension,
         vec!["core-shell"]
     );
 }

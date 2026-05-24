@@ -306,6 +306,10 @@ where
     overrides
 }
 
+fn required_harness_role<'a>(role: Option<&'a str>, command: &str) -> Result<&'a str, CliError> {
+    role.ok_or_else(|| CliError::Participant(format!("tau dev {command} requires --role <role>")))
+}
+
 fn parse_extension_cli_overrides<I, S>(args: I) -> Vec<tau_config::settings::ExtensionCliOverride>
 where
     I: IntoIterator<Item = S>,
@@ -386,8 +390,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
         let extension_cli_overrides = parse_extension_cli_overrides(std::env::args_os());
         let cli::Cli {
             version,
-            role_overrides: _,
-            extension_overrides: _,
+            harness,
             run,
             command,
         } = cli::Cli::parse();
@@ -401,7 +404,6 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
         match command {
             cli::Command::Run(cli::RunArgs {
                 resume,
-                role,
                 config: _config,
                 attach,
             }) => {
@@ -431,7 +433,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     &session_id,
                     attach,
                     session_status,
-                    role.as_deref(),
+                    harness.role.as_deref(),
                     &role_cli_overrides,
                     &extension_cli_overrides,
                 )
@@ -475,16 +477,22 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     println!("wrote {}", out.display());
                     Ok(())
                 }
-                cli::DevCommand::PrintPrompt { role } => print_prompt::run_print_prompt(
-                    &role,
-                    &role_cli_overrides,
-                    &extension_cli_overrides,
-                ),
-                cli::DevCommand::PrintTools { role } => print_tools::run_print_tools(
-                    &role,
-                    &role_cli_overrides,
-                    &extension_cli_overrides,
-                ),
+                cli::DevCommand::PrintPrompt => {
+                    let role = required_harness_role(harness.role.as_deref(), "print-prompt")?;
+                    print_prompt::run_print_prompt(
+                        role,
+                        &role_cli_overrides,
+                        &extension_cli_overrides,
+                    )
+                }
+                cli::DevCommand::PrintTools => {
+                    let role = required_harness_role(harness.role.as_deref(), "print-tools")?;
+                    print_tools::run_print_tools(
+                        role,
+                        &role_cli_overrides,
+                        &extension_cli_overrides,
+                    )
+                }
             },
 
             cli::Command::Ext { name } => {

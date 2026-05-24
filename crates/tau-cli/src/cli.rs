@@ -15,16 +15,26 @@ pub struct Cli {
     pub version: bool,
 
     #[command(flatten)]
-    pub role_overrides: RoleOverrideArgs,
-
-    #[command(flatten)]
-    pub extension_overrides: ExtensionOverrideArgs,
+    pub harness: HarnessArgs,
 
     #[command(flatten)]
     pub run: RunArgs,
 
     #[command(subcommand)]
     pub command: Option<Command>,
+}
+
+#[derive(Args)]
+pub struct HarnessArgs {
+    #[command(flatten)]
+    pub role_overrides: RoleOverrideArgs,
+
+    #[command(flatten)]
+    pub extension_overrides: ExtensionOverrideArgs,
+
+    /// Select the startup/rendered role.
+    #[arg(long = "role", global = true)]
+    pub role: Option<String>,
 }
 
 #[derive(Args)]
@@ -71,10 +81,6 @@ pub struct RunArgs {
     /// (`<basename(cwd)>-<rand6>`).
     #[arg(short = 'r', long = "resume", num_args = 0..=1, default_missing_value = "")]
     pub resume: Option<String>,
-
-    /// Select the startup role for a newly spawned session.
-    #[arg(long = "role")]
-    pub role: Option<String>,
 
     /// Path to extension configuration file
     #[arg(long)]
@@ -178,16 +184,8 @@ pub enum DevCommand {
     },
 
     /// Print the rendered system prompt for a role.
-    PrintPrompt {
-        /// Role name to render.
-        #[arg(short = 'r', long = "role")]
-        role: String,
-    },
+    PrintPrompt,
 
     /// Print the effective tool definitions for a role.
-    PrintTools {
-        /// Role name whose tools should be printed.
-        #[arg(short = 'r', long = "role")]
-        role: String,
-    },
+    PrintTools,
 }

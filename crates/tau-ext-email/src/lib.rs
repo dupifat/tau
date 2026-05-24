@@ -1,13 +1,22 @@
-//! Standard email extension foundation.
+//! Standard email extension policy, state, and fake-backend core.
 //!
-//! Phase A intentionally provides only the harness integration surface: strict
-//! config parsing, extension state-dir setup, a single `email` tool, and
-//! deterministic structured not-implemented responses for the planned commands.
+//! This crate intentionally keeps Phase B email behavior pure and testable: no
+//! IMAP/SMTP network dependencies are used, and no CLI action injection is
+//! implemented yet. Tool commands are routed through the same policy/state core
+//! that tests exercise with an in-memory backend.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
+use std::fs;
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use globset::{Glob, GlobMatcher};
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+const READ_BODY_MAX_BYTES: usize = 64 * 1024;
+const READ_BODY_MAX_LINES: usize = 1000;
+const LIST_MAX_LIMIT: usize = 100;
 
 use tau_proto::{
     Ack, CborValue, ConfigError, Event, Frame, FrameReader, FrameWriter, LogEventId, Message,
@@ -70,22 +79,1384 @@ where
     Ok(())
 }
 
-#[derive(Debug, Default, serde::Deserialize)]
+/// Top-level email extension configuration.
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct ExtConfig {}
+pub struct EmailExtensionConfig {
+    /// Harness-level enable flag. Disabled by default for safe configuration.
+    pub enable: bool,
+    /// Configured email accounts. Account IDs must be unique.
+    pub accounts: Vec<AccountConfig>,
+    /// Global incoming/outgoing allow policy.
+    pub policy: PolicyConfig,
+}
 
-#[derive(Debug, Default)]
+/// One configured email account.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AccountConfig {
+    /// Stable account identifier used by tool commands.
+    pub id: String,
+    /// Per-account enable flag. Accounts are disabled unless explicitly
+    /// enabled.
+    #[serde(alias = "enabled")]
+    pub enable: bool,
+    /// Optional display name for user-facing account lists.
+    pub display_name: Option<String>,
+    /// Configured From identity for outgoing sends.
+    pub from: String,
+    /// Placeholder IMAP settings; Phase B never opens a network connection.
+    pub imap: Option<ImapConfig>,
+    /// Placeholder SMTP settings; Phase B never opens a network connection.
+    pub smtp: Option<SmtpConfig>,
+    /// Placeholder authentication settings; secrets are never returned by
+    /// tools.
+    pub auth: Option<AuthConfig>,
+    /// Per-account folder visibility policy.
+    pub folders: FolderPolicy,
+}
+
+/// IMAP connection placeholder configuration.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ImapConfig {
+    /// Server host name.
+    pub host: Option<String>,
+    /// Server port.
+    pub port: Option<u16>,
+    /// TLS policy placeholder.
+    pub tls: Option<String>,
+    /// Login user name placeholder.
+    pub login: Option<String>,
+    /// Timeout placeholder in seconds.
+    pub timeout_seconds: Option<u64>,
+}
+
+/// SMTP connection placeholder configuration.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SmtpConfig {
+    /// Server host name.
+    pub host: Option<String>,
+    /// Server port.
+    pub port: Option<u16>,
+    /// TLS policy placeholder.
+    pub tls: Option<String>,
+    /// Login user name placeholder.
+    pub login: Option<String>,
+    /// Timeout placeholder in seconds.
+    pub timeout_seconds: Option<u64>,
+}
+
+/// Authentication placeholder configuration.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuthConfig {
+    /// Authentication method placeholder, such as password, oauth2, or command.
+    pub method: Option<String>,
+    /// Password environment variable name placeholder.
+    pub password_env: Option<String>,
+    /// OAuth token command placeholder.
+    pub oauth2_token_command: Option<Vec<String>>,
+    /// Secret command placeholder.
+    pub command: Option<Vec<String>>,
+}
+
+/// Folder visibility policy for an account.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FolderPolicy {
+    /// Glob patterns for visible/selectable folders. Empty means no folders
+    /// visible.
+    pub allow: Vec<String>,
+    /// Optional special Sent folder placeholder.
+    pub special_sent: Option<String>,
+}
+
+/// Global email policy.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PolicyConfig {
+    /// Config-defined incoming sender allow patterns.
+    pub incoming_allow: Vec<String>,
+    /// Config-defined outgoing recipient allow patterns.
+    pub outgoing_allow: Vec<String>,
+    /// Whether persisted state allowlists may extend config policy.
+    pub allow_state_policy_extensions: bool,
+}
+
+impl Default for PolicyConfig {
+    fn default() -> Self {
+        Self {
+            incoming_allow: Vec::new(),
+            outgoing_allow: Vec::new(),
+            allow_state_policy_extensions: true,
+        }
+    }
+}
+
+impl EmailExtensionConfig {
+    /// Validate and compile this configuration into a policy runtime.
+    pub fn validate(self) -> Result<ValidatedConfig, String> {
+        let mut ids = BTreeSet::new();
+        let mut accounts = BTreeMap::new();
+        for account in self.accounts {
+            if account.id.trim().is_empty() {
+                return Err("account id must not be empty".to_owned());
+            }
+            if !ids.insert(account.id.clone()) {
+                return Err(format!("duplicate account id `{}`", account.id));
+            }
+            if account.from.trim().is_empty() {
+                return Err(format!(
+                    "account `{}` from identity must not be empty",
+                    account.id
+                ));
+            }
+            for pat in &account.folders.allow {
+                validate_folder_pattern(pat)?;
+            }
+            if let Some(folder) = &account.folders.special_sent {
+                validate_folder_pattern(folder)?;
+            }
+            accounts.insert(account.id.clone(), ValidatedAccount::try_from(account)?);
+        }
+        Ok(ValidatedConfig {
+            enable: self.enable,
+            accounts,
+            policy: ValidatedPolicy {
+                incoming_allow: compile_address_patterns(&self.policy.incoming_allow)?,
+                outgoing_allow: compile_address_patterns(&self.policy.outgoing_allow)?,
+                allow_state_policy_extensions: self.policy.allow_state_policy_extensions,
+            },
+        })
+    }
+}
+
+/// Validated extension configuration with compiled policy matchers.
+pub struct ValidatedConfig {
+    /// Harness-level enable flag.
+    pub enable: bool,
+    /// Accounts keyed by configured account ID.
+    pub accounts: BTreeMap<String, ValidatedAccount>,
+    /// Compiled global policy.
+    pub policy: ValidatedPolicy,
+}
+
+/// Validated account configuration.
+pub struct ValidatedAccount {
+    /// Stable account identifier used by commands.
+    pub id: String,
+    /// Whether this account is enabled.
+    pub enable: bool,
+    /// Optional display name.
+    pub display_name: Option<String>,
+    /// Normalized From address for spoof checks.
+    pub from_normalized: String,
+    /// Original From identity for display.
+    pub from_identity: String,
+    /// Whether IMAP placeholder config was provided.
+    pub imap_configured: bool,
+    /// Whether SMTP placeholder config was provided.
+    pub smtp_configured: bool,
+    /// Compiled folder allowlist.
+    pub folders: ValidatedFolderPolicy,
+}
+
+impl TryFrom<AccountConfig> for ValidatedAccount {
+    type Error = String;
+
+    fn try_from(value: AccountConfig) -> Result<Self, Self::Error> {
+        let matchers = value
+            .folders
+            .allow
+            .iter()
+            .map(|pat| {
+                Glob::new(pat)
+                    .map(|glob| glob.compile_matcher())
+                    .map_err(|e| e.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            id: value.id,
+            enable: value.enable,
+            display_name: value.display_name,
+            from_normalized: normalize_address(&value.from)
+                .ok_or_else(|| "from identity must contain an email address".to_owned())?,
+            from_identity: value.from,
+            imap_configured: value.imap.is_some(),
+            smtp_configured: value.smtp.is_some(),
+            folders: ValidatedFolderPolicy { matchers },
+        })
+    }
+}
+
+/// Compiled folder allowlist.
+pub struct ValidatedFolderPolicy {
+    /// Glob matchers that decide folder visibility.
+    pub matchers: Vec<GlobMatcher>,
+}
+
+impl ValidatedFolderPolicy {
+    /// Return true if the folder is visible for this account.
+    pub fn allows(&self, folder: &str) -> bool {
+        !self.matchers.is_empty() && self.matchers.iter().any(|matcher| matcher.is_match(folder))
+    }
+}
+
+/// Compiled global policy.
+pub struct ValidatedPolicy {
+    /// Compiled config incoming allow patterns.
+    pub incoming_allow: Vec<AddressPattern>,
+    /// Compiled config outgoing allow patterns.
+    pub outgoing_allow: Vec<AddressPattern>,
+    /// Whether persisted state policy extensions are enabled.
+    pub allow_state_policy_extensions: bool,
+}
+
+/// A normalized address pattern.
+pub enum AddressPattern {
+    /// Exact normalized `local@domain` match.
+    Exact { pattern: String },
+    /// Whole-address glob match.
+    Glob {
+        pattern: String,
+        matcher: GlobMatcher,
+    },
+    /// Whole-address regex match, compiled as `^(?:pattern)$`.
+    Regex { pattern: String, regex: Regex },
+}
+
+impl AddressPattern {
+    /// Compile a user/config pattern string.
+    pub fn compile(input: &str) -> Result<Self, String> {
+        if input.trim().is_empty() {
+            return Err("allow pattern must not be empty".to_owned());
+        }
+        if let Some(regex) = input.strip_prefix("re:") {
+            let compiled = Regex::new(&format!("^(?:{regex})$"))
+                .map_err(|error| format!("invalid regex pattern `{input}`: {error}"))?;
+            return Ok(Self::Regex {
+                pattern: input.to_owned(),
+                regex: compiled,
+            });
+        }
+        if input.contains('*') || input.contains('?') {
+            let pattern = input.to_ascii_lowercase();
+            let matcher = Glob::new(&pattern)
+                .map_err(|error| format!("invalid glob pattern `{input}`: {error}"))?
+                .compile_matcher();
+            return Ok(Self::Glob { pattern, matcher });
+        }
+        let normalized = normalize_address(input)
+            .ok_or_else(|| format!("invalid exact address pattern `{input}`"))?;
+        Ok(Self::Exact {
+            pattern: normalized,
+        })
+    }
+
+    /// Return true when this pattern matches the normalized address/header.
+    pub fn matches(&self, address: &str) -> bool {
+        let Some(normalized) = normalize_address(address) else {
+            return false;
+        };
+        match self {
+            Self::Exact { pattern } => pattern == &normalized,
+            Self::Glob { matcher, .. } => matcher.is_match(&normalized),
+            Self::Regex { regex, .. } => regex.is_match(&normalized),
+        }
+    }
+
+    fn pattern_text(&self) -> &str {
+        match self {
+            Self::Exact { pattern } | Self::Glob { pattern, .. } | Self::Regex { pattern, .. } => {
+                pattern
+            }
+        }
+    }
+}
+
+/// Match result for policy decisions.
+pub struct PolicyDecision {
+    /// Whether the operation is allowed without a new approval.
+    pub allowed: bool,
+    /// Machine-readable reason.
+    pub reason: String,
+    /// Matching pattern text when allowed by policy.
+    pub matched_pattern: Option<String>,
+}
+
+impl PolicyDecision {
+    fn allowed(pattern: Option<String>) -> Self {
+        Self {
+            allowed: true,
+            reason: "allowed".to_owned(),
+            matched_pattern: pattern,
+        }
+    }
+
+    fn denied(reason: &str) -> Self {
+        Self {
+            allowed: false,
+            reason: reason.to_owned(),
+            matched_pattern: None,
+        }
+    }
+}
+
+fn compile_address_patterns(patterns: &[String]) -> Result<Vec<AddressPattern>, String> {
+    patterns
+        .iter()
+        .map(|pattern| AddressPattern::compile(pattern))
+        .collect()
+}
+
+/// Normalize an email address/header to lowercase `local@domain` for policy
+/// matching.
+pub fn normalize_address(input: &str) -> Option<String> {
+    let raw = input.trim();
+    let candidate = if let (Some(start), Some(end)) = (raw.rfind('<'), raw.rfind('>')) {
+        if start < end {
+            &raw[start + 1..end]
+        } else {
+            raw
+        }
+    } else {
+        raw
+    };
+    let candidate = candidate.trim().trim_matches('"');
+    let (local, domain) = candidate.split_once('@')?;
+    if local.is_empty()
+        || domain.is_empty()
+        || candidate.contains(char::is_whitespace)
+        || candidate.matches('@').count() != 1
+    {
+        return None;
+    }
+    Some(format!(
+        "{}@{}",
+        local.to_ascii_lowercase(),
+        domain.to_ascii_lowercase()
+    ))
+}
+
+fn validate_folder_pattern(pattern: &str) -> Result<(), String> {
+    if pattern.trim().is_empty() {
+        return Err("folder allow pattern must not be empty".to_owned());
+    }
+    if pattern.contains('\0') || pattern.split('/').any(|part| part == "..") {
+        return Err(format!("invalid folder allow pattern `{pattern}`"));
+    }
+    Glob::new(pattern).map_err(|error| format!("invalid folder glob `{pattern}`: {error}"))?;
+    Ok(())
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct PolicyFile {
+    schema: u32,
+    patterns: Vec<StatePattern>,
+}
+
+/// One persisted allowlist pattern.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct StatePattern {
+    /// Pattern kind: exact, glob, or regex.
+    pub kind: String,
+    /// User-added pattern text.
+    pub pattern: String,
+    /// Creation timestamp placeholder.
+    pub created_at: String,
+    /// Creator marker such as cli or test.
+    pub created_by: String,
+    /// Optional human note.
+    pub note: Option<String>,
+}
+
+/// Persistent policy/approval state under the injected extension state
+/// directory.
+pub struct StateStore {
+    /// Root state directory provided by the harness.
+    pub state_dir: PathBuf,
+}
+
+impl StateStore {
+    /// Create the state directory and marker file if needed.
+    pub fn open(state_dir: PathBuf) -> Result<Self, String> {
+        fs::create_dir_all(&state_dir).map_err(|error| error.to_string())?;
+        for dir in [
+            "policy",
+            "approvals/incoming/pending",
+            "approvals/incoming/approved",
+            "approvals/incoming/denied",
+            "approvals/outgoing/pending",
+            "approvals/outgoing/approved",
+            "approvals/outgoing/denied",
+        ] {
+            fs::create_dir_all(state_dir.join(dir)).map_err(|error| error.to_string())?;
+        }
+        atomic_json_write(
+            &state_dir.join("state-v1.json"),
+            &serde_json::json!({"schema":1}),
+        )?;
+        Ok(Self { state_dir })
+    }
+
+    /// Load persisted incoming allow patterns.
+    pub fn load_incoming_allow(&self) -> Result<Vec<AddressPattern>, String> {
+        self.load_allow_file("incoming-allow.json")
+    }
+
+    /// Load persisted outgoing allow patterns.
+    pub fn load_outgoing_allow(&self) -> Result<Vec<AddressPattern>, String> {
+        self.load_allow_file("outgoing-allow.json")
+    }
+
+    /// Save persisted incoming allow pattern records.
+    pub fn save_incoming_allow_records(&self, records: &[StatePattern]) -> Result<(), String> {
+        self.save_allow_file("incoming-allow.json", records)
+    }
+
+    /// Save persisted outgoing allow pattern records.
+    pub fn save_outgoing_allow_records(&self, records: &[StatePattern]) -> Result<(), String> {
+        self.save_allow_file("outgoing-allow.json", records)
+    }
+
+    fn load_allow_file(&self, name: &str) -> Result<Vec<AddressPattern>, String> {
+        let path = self.state_dir.join("policy").join(name);
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let file: PolicyFile = serde_json::from_slice(&fs::read(&path).map_err(|e| e.to_string())?)
+            .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
+        if file.schema != 1 {
+            return Err(format!(
+                "unsupported policy schema {} in {}",
+                file.schema,
+                path.display()
+            ));
+        }
+        file.patterns
+            .iter()
+            .map(|record| match record.kind.as_str() {
+                "exact" | "glob" => AddressPattern::compile(&record.pattern),
+                "regex" => AddressPattern::compile(&format!("re:{}", record.pattern)),
+                other => Err(format!("unsupported policy pattern kind `{other}`")),
+            })
+            .collect()
+    }
+
+    fn save_allow_file(&self, name: &str, records: &[StatePattern]) -> Result<(), String> {
+        let file = PolicyFile {
+            schema: 1,
+            patterns: records.to_vec(),
+        };
+        atomic_json_write(&self.state_dir.join("policy").join(name), &file)
+    }
+
+    /// Return an existing pending incoming approval or create it atomically.
+    pub fn pending_incoming(&self, request: &IncomingApproval) -> Result<String, String> {
+        let path = self.approval_path("incoming", "pending", &request.id)?;
+        if !path.exists() {
+            atomic_json_write(&path, request)?;
+        }
+        Ok(request.id.clone())
+    }
+
+    /// Return an existing pending outgoing approval or create it atomically.
+    pub fn pending_outgoing(&self, request: &OutgoingApproval) -> Result<String, String> {
+        let path = self.approval_path("outgoing", "pending", &request.id)?;
+        if !path.exists() {
+            atomic_json_write(&path, request)?;
+        }
+        Ok(request.id.clone())
+    }
+
+    /// Mark an incoming approval ID as approved by moving/writing it to
+    /// approved.
+    pub fn approve_incoming(&self, id: &str) -> Result<(), String> {
+        self.approve("incoming", "in", id)
+    }
+
+    /// Mark an outgoing approval ID as approved by moving/writing it to
+    /// approved.
+    pub fn approve_outgoing(&self, id: &str) -> Result<(), String> {
+        self.approve("outgoing", "out", id)
+    }
+
+    fn approve(&self, kind: &str, prefix: &str, id: &str) -> Result<(), String> {
+        validate_approval_id(id, prefix)?;
+        let from = self.approval_path(kind, "pending", id)?;
+        let to = self.approval_path(kind, "approved", id)?;
+        if from.exists() {
+            fs::rename(&from, &to).map_err(|error| error.to_string())
+        } else if to.exists() {
+            Ok(())
+        } else {
+            Err(format!("approval `{id}` not found"))
+        }
+    }
+
+    fn incoming_approved_exact(&self, target: &IncomingTarget) -> bool {
+        let id = incoming_id(target);
+        self.approval_path("incoming", "approved", &id)
+            .is_ok_and(|path| path.exists())
+    }
+
+    fn outgoing_approved_exact(&self, message: &OutgoingMessage) -> bool {
+        let id = outgoing_id(message);
+        self.approval_path("outgoing", "approved", &id)
+            .is_ok_and(|path| path.exists())
+    }
+
+    fn approval_path(&self, kind: &str, status: &str, id: &str) -> Result<PathBuf, String> {
+        let prefix = match kind {
+            "incoming" => "in",
+            "outgoing" => "out",
+            _ => return Err(format!("invalid approval kind `{kind}`")),
+        };
+        validate_approval_id(id, prefix)?;
+        Ok(self
+            .state_dir
+            .join("approvals")
+            .join(kind)
+            .join(status)
+            .join(format!("{id}.json")))
+    }
+}
+
+fn validate_approval_id(id: &str, prefix: &str) -> Result<(), String> {
+    if id.is_empty() || id.contains(['/', '\\', '\0']) {
+        return Err(format!("invalid approval id `{id}`"));
+    }
+    let Some(suffix) = id.strip_prefix(&format!("{prefix}_")) else {
+        return Err(format!("invalid approval id `{id}`"));
+    };
+    if suffix.len() != 24
+        || !suffix
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err(format!("invalid approval id `{id}`"));
+    }
+    Ok(())
+}
+
+fn atomic_json_write<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "state path has no parent".to_owned())?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let tmp = parent.join(format!(
+        ".{}.tmp-{}",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("state"),
+        std::process::id()
+    ));
+    let bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
+    {
+        let mut file = fs::File::create(&tmp).map_err(|error| error.to_string())?;
+        file.write_all(&bytes).map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+    }
+    fs::rename(&tmp, path).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Minimal backend abstraction used by command handlers.
+pub trait EmailBackend {
+    /// List folders known to the backend for an account.
+    fn list_folders(&self, account: &str) -> Result<Vec<BackendFolder>, String>;
+    /// List messages known to the backend for an account/folder.
+    fn list_messages(&self, account: &str, folder: &str) -> Result<Vec<BackendMessage>, String>;
+    /// Read one message by UID.
+    fn read_message(
+        &self,
+        account: &str,
+        folder: &str,
+        uid: &str,
+    ) -> Result<BackendMessage, String>;
+    /// Send one already-approved outgoing message.
+    fn send_message(&mut self, message: &OutgoingMessage) -> Result<String, String>;
+}
+
+#[derive(Default)]
+struct EmptyBackend;
+
+impl EmailBackend for EmptyBackend {
+    fn list_folders(&self, _account: &str) -> Result<Vec<BackendFolder>, String> {
+        Ok(Vec::new())
+    }
+    fn list_messages(&self, _account: &str, _folder: &str) -> Result<Vec<BackendMessage>, String> {
+        Ok(Vec::new())
+    }
+    fn read_message(
+        &self,
+        _account: &str,
+        _folder: &str,
+        _uid: &str,
+    ) -> Result<BackendMessage, String> {
+        Err("message backend is not implemented".to_owned())
+    }
+    fn send_message(&mut self, _message: &OutgoingMessage) -> Result<String, String> {
+        Err("smtp backend is not implemented".to_owned())
+    }
+}
+
+/// Backend folder metadata.
+#[derive(Clone)]
+pub struct BackendFolder {
+    /// Folder name.
+    pub name: String,
+    /// Hierarchy delimiter.
+    pub delimiter: String,
+    /// Whether the folder is selectable.
+    pub selectable: bool,
+}
+
+/// Backend message fixture/metadata.
+#[derive(Clone)]
+pub struct BackendMessage {
+    /// IMAP UID or fixture UID.
+    pub uid: String,
+    /// UIDVALIDITY used to bind approvals exactly.
+    pub uidvalidity: String,
+    /// Message date string.
+    pub date: String,
+    /// Sender header/address.
+    pub from: String,
+    /// Recipient addresses.
+    pub to: Vec<String>,
+    /// CC recipient addresses.
+    pub cc: Vec<String>,
+    /// Message subject.
+    pub subject: String,
+    /// Message body text.
+    pub body_text: String,
+    /// Minimal flags.
+    pub flags: Vec<String>,
+}
+
+/// Exact incoming read approval target.
+#[derive(Serialize, Deserialize)]
+pub struct IncomingTarget {
+    /// Account ID.
+    pub account: String,
+    /// Folder name.
+    pub folder: String,
+    /// Message UID.
+    pub uid: String,
+    /// Mailbox UIDVALIDITY.
+    pub uidvalidity: String,
+}
+
+/// Persisted incoming approval record.
+#[derive(Serialize, Deserialize)]
+pub struct IncomingApproval {
+    /// Schema version.
+    pub schema: u32,
+    /// Opaque stable approval ID.
+    pub id: String,
+    /// Approval kind.
+    pub kind: String,
+    /// Approval status.
+    pub status: String,
+    /// Account ID.
+    pub account: String,
+    /// Folder name.
+    pub folder: String,
+    /// Message UID.
+    pub uid: String,
+    /// Mailbox UIDVALIDITY.
+    pub uidvalidity: String,
+    /// Sender address/header.
+    pub from: String,
+    /// Message date.
+    pub date: String,
+    /// Whether subject is redacted in the approval-required tool output.
+    pub subject_redacted: bool,
+    /// Denial/approval reason.
+    pub reason: String,
+}
+
+/// Outgoing message submitted by the tool.
+#[derive(Serialize, Deserialize)]
+pub struct OutgoingMessage {
+    /// Account ID.
+    pub account: String,
+    /// From identity.
+    pub from: String,
+    /// To recipients.
+    pub to: Vec<String>,
+    /// CC recipients.
+    pub cc: Vec<String>,
+    /// BCC recipients; stored for approval but never leaked in unrelated
+    /// outputs.
+    pub bcc: Vec<String>,
+    /// Subject.
+    pub subject: String,
+    /// Body text.
+    pub body_text: String,
+    /// Optional Reply-To header.
+    pub reply_to: Option<String>,
+    /// Optional In-Reply-To message identifier.
+    pub in_reply_to: Option<String>,
+}
+
+/// Persisted outgoing approval record.
+#[derive(Serialize, Deserialize)]
+pub struct OutgoingApproval {
+    /// Schema version.
+    pub schema: u32,
+    /// Opaque stable approval ID.
+    pub id: String,
+    /// Approval kind.
+    pub kind: String,
+    /// Approval status.
+    pub status: String,
+    /// Account ID.
+    pub account: String,
+    /// From identity.
+    pub from: String,
+    /// To recipients.
+    pub to: Vec<String>,
+    /// CC recipients.
+    pub cc: Vec<String>,
+    /// BCC recipients.
+    pub bcc: Vec<String>,
+    /// Subject.
+    pub subject: String,
+    /// Body text.
+    pub body_text: String,
+    /// Optional Reply-To header.
+    pub reply_to: Option<String>,
+    /// Optional In-Reply-To message identifier.
+    pub in_reply_to: Option<String>,
+    /// Recipients blocked by current policy.
+    pub blocked_recipients: Vec<String>,
+    /// Denial/approval reason.
+    pub reason: String,
+}
+
+fn incoming_id(target: &IncomingTarget) -> String {
+    stable_id("in", target)
+}
+
+fn outgoing_id(message: &OutgoingMessage) -> String {
+    stable_id("out", message)
+}
+
+fn stable_id<T: Serialize>(prefix: &str, value: &T) -> String {
+    let bytes = serde_json::to_vec(value).unwrap_or_default();
+    let hash = blake3::hash(&bytes);
+    format!("{prefix}_{}", &hash.to_hex()[..24])
+}
+
+struct BodyTruncation {
+    body_text: String,
+    truncated: bool,
+    total_lines: u64,
+    total_bytes: u64,
+    shown_lines: u64,
+    shown_bytes: u64,
+}
+
+fn truncate_body(body: &str) -> BodyTruncation {
+    let total_bytes = body.len();
+    let total_lines = body.lines().count();
+    let mut shown = String::new();
+    let mut truncated = false;
+
+    for (line_index, line) in body.split_inclusive('\n').enumerate() {
+        if line_index == READ_BODY_MAX_LINES {
+            truncated = true;
+            break;
+        }
+        if shown.len().saturating_add(line.len()) > READ_BODY_MAX_BYTES {
+            let remaining = READ_BODY_MAX_BYTES.saturating_sub(shown.len());
+            let mut boundary = 0usize;
+            for (idx, ch) in line.char_indices() {
+                let next = idx + ch.len_utf8();
+                if next > remaining {
+                    break;
+                }
+                boundary = next;
+            }
+            shown.push_str(&line[..boundary]);
+            truncated = true;
+            break;
+        }
+        shown.push_str(line);
+    }
+
+    if shown.len() < total_bytes {
+        truncated = true;
+    }
+
+    BodyTruncation {
+        shown_lines: shown.lines().count() as u64,
+        shown_bytes: shown.len() as u64,
+        body_text: shown,
+        truncated,
+        total_lines: total_lines as u64,
+        total_bytes: total_bytes as u64,
+    }
+}
+
+fn parse_cursor(cursor: Option<&str>) -> Result<usize, String> {
+    match cursor {
+        Some(cursor) => cursor
+            .parse::<usize>()
+            .map_err(|_| "cursor must be a non-negative integer offset".to_owned()),
+        None => Ok(0),
+    }
+}
+
+struct Engine<B> {
+    config: ValidatedConfig,
+    state: StateStore,
+    backend: B,
+}
+
+impl<B: EmailBackend> Engine<B> {
+    fn dispatch(&mut self, command: EmailCommand) -> CborValue {
+        match command {
+            EmailCommand::ListAccounts => self.list_accounts(),
+            EmailCommand::ListFolders { account } => self.list_folders(&account),
+            EmailCommand::List {
+                account,
+                folder,
+                limit,
+                cursor,
+            } => self.list(&account, &folder, limit, cursor.as_deref()),
+            EmailCommand::Read {
+                account,
+                folder,
+                uid,
+            } => self.read(&account, &folder, &uid),
+            EmailCommand::Send {
+                account,
+                from,
+                to,
+                cc,
+                bcc,
+                subject,
+                body_text,
+                reply_to,
+                in_reply_to,
+            } => self.send(
+                account,
+                from,
+                to,
+                cc,
+                bcc,
+                subject,
+                body_text,
+                reply_to,
+                in_reply_to,
+            ),
+        }
+    }
+
+    fn account(&self, command: &str, id: &str) -> Result<&ValidatedAccount, CborValue> {
+        if !self.config.enable {
+            return Err(error_envelope(
+                Some(command),
+                "account_disabled",
+                "email extension is disabled",
+            ));
+        }
+        let account = self.config.accounts.get(id).ok_or_else(|| {
+            error_envelope(Some(command), "account_not_found", "account not found")
+        })?;
+        if !account.enable {
+            return Err(error_envelope(
+                Some(command),
+                "account_disabled",
+                "account is disabled",
+            ));
+        }
+        Ok(account)
+    }
+
+    fn list_accounts(&self) -> CborValue {
+        let accounts = self
+            .config
+            .accounts
+            .values()
+            .map(|a| {
+                cbor_map(vec![
+                    ("id", CborValue::Text(a.id.clone())),
+                    (
+                        "display_name",
+                        a.display_name
+                            .clone()
+                            .map(CborValue::Text)
+                            .unwrap_or(CborValue::Null),
+                    ),
+                    ("from", CborValue::Text(a.from_normalized.clone())),
+                    ("enabled", CborValue::Bool(self.config.enable && a.enable)),
+                    ("imap_configured", CborValue::Bool(a.imap_configured)),
+                    ("smtp_configured", CborValue::Bool(a.smtp_configured)),
+                ])
+            })
+            .collect();
+        ok_envelope(
+            "list_accounts",
+            "ok",
+            cbor_map(vec![("accounts", CborValue::Array(accounts))]),
+        )
+    }
+
+    fn list_folders(&self, account_id: &str) -> CborValue {
+        let account = match self.account("list_folders", account_id) {
+            Ok(a) => a,
+            Err(e) => return e,
+        };
+        match self.backend.list_folders(account_id) {
+            Ok(folders) => {
+                let visible = folders
+                    .into_iter()
+                    .filter(|f| account.folders.allows(&f.name))
+                    .map(|f| {
+                        cbor_map(vec![
+                            ("name", CborValue::Text(f.name)),
+                            ("delimiter", CborValue::Text(f.delimiter)),
+                            ("selectable", CborValue::Bool(f.selectable)),
+                        ])
+                    })
+                    .collect();
+                ok_envelope(
+                    "list_folders",
+                    "ok",
+                    cbor_map(vec![
+                        ("account", CborValue::Text(account_id.to_owned())),
+                        ("folders", CborValue::Array(visible)),
+                    ]),
+                )
+            }
+            Err(message) => error_envelope(Some("list_folders"), "internal_error", &message),
+        }
+    }
+
+    fn list(&self, account_id: &str, folder: &str, limit: u32, cursor: Option<&str>) -> CborValue {
+        let account = match self.account("list", account_id) {
+            Ok(a) => a,
+            Err(e) => return e,
+        };
+        if !account.folders.allows(folder) {
+            return error_envelope(
+                Some("list"),
+                "folder_not_allowed",
+                "folder is not whitelisted for this account",
+            );
+        }
+        let messages = match self.backend.list_messages(account_id, folder) {
+            Ok(m) => m,
+            Err(message) => return error_envelope(Some("list"), "internal_error", &message),
+        };
+        let offset = match parse_cursor(cursor) {
+            Ok(offset) => offset,
+            Err(message) => return error_envelope(Some("list"), "invalid_input", &message),
+        };
+        let total_available = messages.len();
+        let limit = (limit as usize).min(LIST_MAX_LIMIT);
+        let truncated = total_available > offset.saturating_add(limit);
+        let next_cursor = if truncated {
+            CborValue::Text(offset.saturating_add(limit).to_string())
+        } else {
+            CborValue::Null
+        };
+        let data = messages
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|m| {
+                let decision = self.incoming_decision(&m);
+                let mut entries = vec![
+                    ("uid", CborValue::Text(m.uid)),
+                    ("date", CborValue::Text(m.date)),
+                    (
+                        "from",
+                        CborValue::Text(normalize_address(&m.from).unwrap_or(m.from)),
+                    ),
+                    (
+                        "flags",
+                        CborValue::Array(m.flags.into_iter().map(CborValue::Text).collect()),
+                    ),
+                    ("subject_redacted", CborValue::Bool(!decision.allowed)),
+                    ("policy", policy_cbor(&decision)),
+                ];
+                entries.push((
+                    "subject",
+                    if decision.allowed {
+                        CborValue::Text(m.subject)
+                    } else {
+                        CborValue::Null
+                    },
+                ));
+                cbor_map(entries)
+            })
+            .collect();
+        ok_envelope(
+            "list",
+            "ok",
+            cbor_map(vec![
+                ("account", CborValue::Text(account_id.to_owned())),
+                ("folder", CborValue::Text(folder.to_owned())),
+                ("messages", CborValue::Array(data)),
+                ("next_cursor", next_cursor),
+                ("truncated", CborValue::Bool(truncated)),
+            ]),
+        )
+    }
+
+    fn read(&self, account_id: &str, folder: &str, uid: &str) -> CborValue {
+        let account = match self.account("read", account_id) {
+            Ok(a) => a,
+            Err(e) => return e,
+        };
+        if !account.folders.allows(folder) {
+            return error_envelope(
+                Some("read"),
+                "folder_not_allowed",
+                "folder is not whitelisted for this account",
+            );
+        }
+        let msg = match self.backend.read_message(account_id, folder, uid) {
+            Ok(m) => m,
+            Err(message) if message.contains("not implemented") => {
+                return error_envelope(Some("read"), "internal_error", &message);
+            }
+            Err(_) => {
+                return error_envelope(Some("read"), "message_not_found", "message not found");
+            }
+        };
+        let target = IncomingTarget {
+            account: account_id.to_owned(),
+            folder: folder.to_owned(),
+            uid: uid.to_owned(),
+            uidvalidity: msg.uidvalidity.clone(),
+        };
+        let mut decision = self.incoming_decision(&msg);
+        if !decision.allowed && self.state.incoming_approved_exact(&target) {
+            decision = PolicyDecision::allowed(Some("approval".to_owned()));
+        }
+        if decision.allowed {
+            let truncate = truncate_body(&msg.body_text);
+            return ok_envelope(
+                "read",
+                "ok",
+                cbor_map(vec![
+                    ("account", CborValue::Text(account_id.to_owned())),
+                    ("folder", CborValue::Text(folder.to_owned())),
+                    ("uid", CborValue::Text(uid.to_owned())),
+                    (
+                        "headers",
+                        cbor_map(vec![
+                            ("from", CborValue::Text(msg.from)),
+                            (
+                                "to",
+                                CborValue::Array(msg.to.into_iter().map(CborValue::Text).collect()),
+                            ),
+                            (
+                                "cc",
+                                CborValue::Array(msg.cc.into_iter().map(CborValue::Text).collect()),
+                            ),
+                            ("date", CborValue::Text(msg.date)),
+                            ("subject", CborValue::Text(msg.subject)),
+                        ]),
+                    ),
+                    ("body_text", CborValue::Text(truncate.body_text)),
+                    ("body_truncated", CborValue::Bool(truncate.truncated)),
+                    (
+                        "body_total_lines",
+                        CborValue::Integer(truncate.total_lines.into()),
+                    ),
+                    (
+                        "body_total_bytes",
+                        CborValue::Integer(truncate.total_bytes.into()),
+                    ),
+                    (
+                        "body_shown_lines",
+                        CborValue::Integer(truncate.shown_lines.into()),
+                    ),
+                    (
+                        "body_shown_bytes",
+                        CborValue::Integer(truncate.shown_bytes.into()),
+                    ),
+                    ("attachments", CborValue::Array(Vec::new())),
+                    ("policy", policy_cbor(&decision)),
+                ]),
+            );
+        }
+        let approval = IncomingApproval {
+            schema: 1,
+            id: incoming_id(&target),
+            kind: "incoming_read".to_owned(),
+            status: "pending".to_owned(),
+            account: account_id.to_owned(),
+            folder: folder.to_owned(),
+            uid: uid.to_owned(),
+            uidvalidity: target.uidvalidity,
+            from: normalize_address(&msg.from).unwrap_or(msg.from),
+            date: msg.date,
+            subject_redacted: true,
+            reason: decision.reason,
+        };
+        match self.state.pending_incoming(&approval) {
+            Ok(id) => ok_envelope(
+                "read",
+                "approval_required",
+                cbor_map(vec![
+                    ("approval_id", CborValue::Text(id)),
+                    ("kind", CborValue::Text("incoming_read".to_owned())),
+                    ("account", CborValue::Text(account_id.to_owned())),
+                    ("folder", CborValue::Text(folder.to_owned())),
+                    ("uid", CborValue::Text(uid.to_owned())),
+                    ("from", CborValue::Text(approval.from)),
+                    ("date", CborValue::Text(approval.date)),
+                    ("subject", CborValue::Null),
+                    ("subject_redacted", CborValue::Bool(true)),
+                    ("reason", CborValue::Text(approval.reason)),
+                ]),
+            ),
+            Err(message) => error_envelope(Some("read"), "internal_error", &message),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send(
+        &mut self,
+        account: Option<String>,
+        from: Option<String>,
+        to: Vec<String>,
+        cc: Vec<String>,
+        bcc: Vec<String>,
+        subject: String,
+        body_text: String,
+        reply_to: Option<String>,
+        in_reply_to: Option<String>,
+    ) -> CborValue {
+        let account_id = match account.or_else(|| self.config.accounts.keys().next().cloned()) {
+            Some(id) => id,
+            None => return error_envelope(Some("send"), "account_not_found", "account not found"),
+        };
+        let account_cfg = match self.account("send", &account_id) {
+            Ok(a) => a,
+            Err(e) => return e,
+        };
+        if !account_cfg.smtp_configured {
+            return error_envelope(
+                Some("send"),
+                "smtp_error",
+                "account has no SMTP configuration",
+            );
+        }
+        let from_identity = from.unwrap_or_else(|| account_cfg.from_identity.clone());
+        if normalize_address(&from_identity).as_deref()
+            != Some(account_cfg.from_normalized.as_str())
+        {
+            return error_envelope(
+                Some("send"),
+                "policy_denied",
+                "from identity does not match configured account",
+            );
+        }
+        let mut invalid = Vec::new();
+        for r in to.iter().chain(cc.iter()).chain(bcc.iter()) {
+            if normalize_address(r).is_none() {
+                invalid.push(r.clone());
+            }
+        }
+        if !invalid.is_empty() {
+            return error_envelope(
+                Some("send"),
+                "invalid_input",
+                "recipient address is invalid",
+            );
+        }
+        let message = OutgoingMessage {
+            account: account_id.clone(),
+            from: from_identity,
+            to,
+            cc,
+            bcc,
+            subject,
+            body_text,
+            reply_to,
+            in_reply_to,
+        };
+        let blocked = self.blocked_recipients(&message);
+        if blocked.is_empty() || self.state.outgoing_approved_exact(&message) {
+            return match self.backend.send_message(&message) {
+                Ok(id) => ok_envelope(
+                    "send",
+                    "sent",
+                    cbor_map(vec![
+                        ("account", CborValue::Text(account_id)),
+                        ("message_id", CborValue::Text(id)),
+                        (
+                            "accepted_recipients",
+                            CborValue::Array(
+                                message
+                                    .to
+                                    .iter()
+                                    .chain(message.cc.iter())
+                                    .chain(message.bcc.iter())
+                                    .cloned()
+                                    .map(CborValue::Text)
+                                    .collect(),
+                            ),
+                        ),
+                        ("rejected_recipients", CborValue::Array(Vec::new())),
+                    ]),
+                ),
+                Err(message) => error_envelope(Some("send"), "internal_error", &message),
+            };
+        }
+        let approval = OutgoingApproval {
+            schema: 1,
+            id: outgoing_id(&message),
+            kind: "outgoing_send".to_owned(),
+            status: "pending".to_owned(),
+            account: message.account.clone(),
+            from: message.from.clone(),
+            to: message.to.clone(),
+            cc: message.cc.clone(),
+            bcc: message.bcc.clone(),
+            subject: message.subject.clone(),
+            body_text: message.body_text.clone(),
+            reply_to: message.reply_to.clone(),
+            in_reply_to: message.in_reply_to.clone(),
+            blocked_recipients: blocked.clone(),
+            reason: "recipient_not_whitelisted".to_owned(),
+        };
+        match self.state.pending_outgoing(&approval) {
+            Ok(id) => {
+                let bcc = message.bcc.clone();
+                let allowed_recipients = self
+                    .allowed_recipients(&message)
+                    .into_iter()
+                    .filter(|recipient| !bcc.contains(recipient))
+                    .collect::<Vec<_>>();
+                let blocked_recipients = blocked
+                    .into_iter()
+                    .filter(|recipient| !bcc.contains(recipient))
+                    .collect::<Vec<_>>();
+                ok_envelope(
+                    "send",
+                    "approval_required",
+                    cbor_map(vec![
+                        ("approval_id", CborValue::Text(id)),
+                        ("kind", CborValue::Text("outgoing_send".to_owned())),
+                        ("account", CborValue::Text(message.account)),
+                        (
+                            "blocked_recipients",
+                            CborValue::Array(
+                                blocked_recipients
+                                    .into_iter()
+                                    .map(CborValue::Text)
+                                    .collect(),
+                            ),
+                        ),
+                        (
+                            "allowed_recipients",
+                            CborValue::Array(
+                                allowed_recipients
+                                    .into_iter()
+                                    .map(CborValue::Text)
+                                    .collect(),
+                            ),
+                        ),
+                        (
+                            "reason",
+                            CborValue::Text("recipient_not_whitelisted".to_owned()),
+                        ),
+                    ]),
+                )
+            }
+            Err(message) => error_envelope(Some("send"), "internal_error", &message),
+        }
+    }
+
+    fn incoming_decision(&self, message: &BackendMessage) -> PolicyDecision {
+        self.address_decision(
+            &message.from,
+            &self.config.policy.incoming_allow,
+            |s| s.load_incoming_allow(),
+            "sender_not_whitelisted",
+        )
+    }
+
+    fn recipient_allowed(&self, recipient: &str) -> bool {
+        self.address_decision(
+            recipient,
+            &self.config.policy.outgoing_allow,
+            |s| s.load_outgoing_allow(),
+            "recipient_not_whitelisted",
+        )
+        .allowed
+    }
+
+    fn address_decision<F>(
+        &self,
+        address: &str,
+        config_patterns: &[AddressPattern],
+        load_state: F,
+        denied: &str,
+    ) -> PolicyDecision
+    where
+        F: Fn(&StateStore) -> Result<Vec<AddressPattern>, String>,
+    {
+        for pattern in config_patterns {
+            if pattern.matches(address) {
+                return PolicyDecision::allowed(Some(pattern.pattern_text().to_owned()));
+            }
+        }
+        if self.config.policy.allow_state_policy_extensions
+            && let Ok(patterns) = load_state(&self.state)
+        {
+            for pattern in patterns {
+                if pattern.matches(address) {
+                    return PolicyDecision::allowed(Some(pattern.pattern_text().to_owned()));
+                }
+            }
+        }
+        PolicyDecision::denied(denied)
+    }
+
+    fn blocked_recipients(&self, message: &OutgoingMessage) -> Vec<String> {
+        message
+            .to
+            .iter()
+            .chain(message.cc.iter())
+            .chain(message.bcc.iter())
+            .filter(|r| !self.recipient_allowed(r))
+            .cloned()
+            .collect()
+    }
+
+    fn allowed_recipients(&self, message: &OutgoingMessage) -> Vec<String> {
+        message
+            .to
+            .iter()
+            .chain(message.cc.iter())
+            .chain(message.bcc.iter())
+            .filter(|r| self.recipient_allowed(r))
+            .cloned()
+            .collect()
+    }
+}
+
+#[derive(Default)]
 struct RuntimeState {
     config_state: ConfigState,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 enum ConfigState {
     #[default]
     Unconfigured,
-    Configured {
-        state_dir: PathBuf,
-    },
+    Configured(Engine<EmptyBackend>),
     Rejected {
         reason: String,
     },
@@ -94,8 +1465,8 @@ enum ConfigState {
 impl RuntimeState {
     fn configure(&mut self, configure: tau_proto::Configure) -> Result<(), String> {
         match self.try_configure(configure) {
-            Ok(state_dir) => {
-                self.config_state = ConfigState::Configured { state_dir };
+            Ok(engine) => {
+                self.config_state = ConfigState::Configured(engine);
                 Ok(())
             }
             Err(message) => {
@@ -107,59 +1478,57 @@ impl RuntimeState {
         }
     }
 
-    fn try_configure(&self, configure: tau_proto::Configure) -> Result<PathBuf, String> {
-        let _cfg: ExtConfig = tau_extension::parse_config(&configure.config)?;
+    fn try_configure(
+        &self,
+        configure: tau_proto::Configure,
+    ) -> Result<Engine<EmptyBackend>, String> {
+        let cfg: EmailExtensionConfig = tau_extension::parse_config(&configure.config)?;
         let state_dir = configure
             .state_dir
             .ok_or_else(|| "email extension requires Configure.state_dir".to_owned())?;
-        std::fs::create_dir_all(&state_dir).map_err(|error| {
-            format!(
-                "failed to create email extension state directory {}: {error}",
-                state_dir.display()
-            )
-        })?;
-        Ok(state_dir)
+        Ok(Engine {
+            config: cfg.validate()?,
+            state: StateStore::open(state_dir)?,
+            backend: EmptyBackend,
+        })
     }
 
-    fn dispatch(&self, invoke: ToolStarted) -> Event {
-        match &self.config_state {
-            ConfigState::Configured { state_dir } => {
-                let _ = state_dir;
-            }
+    fn dispatch(&mut self, invoke: ToolStarted) -> Event {
+        match &mut self.config_state {
+            ConfigState::Configured(engine) => match parse_command(&invoke.arguments) {
+                Ok(command) => Event::ToolResult(ToolResult {
+                    call_id: invoke.call_id,
+                    tool_name: invoke.tool_name,
+                    tool_type: tau_proto::ToolType::Function,
+                    result: engine.dispatch(command),
+                    kind: tau_proto::ToolResultKind::Final,
+                    display: Some(display(ToolDisplayStatus::Success, "email")),
+                    originator: tau_proto::PromptOriginator::User,
+                }),
+                Err(error) => tool_error(invoke, error),
+            },
             ConfigState::Unconfigured => {
                 let command = command_from_arguments(&invoke.arguments).map(str::to_owned);
-                return tool_error(
+                tool_error(
                     invoke,
                     error_envelope(
                         command.as_deref(),
-                        "not_configured",
+                        "invalid_input",
                         "Configure.state_dir has not been received",
                     ),
-                );
+                )
             }
             ConfigState::Rejected { reason } => {
                 let command = command_from_arguments(&invoke.arguments).map(str::to_owned);
-                return tool_error(
+                tool_error(
                     invoke,
                     error_envelope(
                         command.as_deref(),
-                        "not_configured",
+                        "invalid_input",
                         &format!("email extension configuration was rejected: {reason}"),
                     ),
-                );
+                )
             }
-        }
-        match parse_command(&invoke.arguments) {
-            Ok(command) => Event::ToolResult(ToolResult {
-                call_id: invoke.call_id,
-                tool_name: invoke.tool_name,
-                tool_type: tau_proto::ToolType::Function,
-                result: command.not_implemented_result(),
-                kind: tau_proto::ToolResultKind::Final,
-                display: Some(display(ToolDisplayStatus::Error, "not implemented")),
-                originator: tau_proto::PromptOriginator::User,
-            }),
-            Err(error) => tool_error(invoke, error),
         }
     }
 }
@@ -176,25 +1545,11 @@ fn email_tool_spec() -> ToolSpec {
     ToolSpec {
         name: tau_proto::ToolName::new(TOOL_NAME),
         model_visible_name: None,
-        description: Some(
-            "Interact with configured email accounts. Phase A exposes the stable command envelope only; account, folder, list, read, and send operations currently return structured not_implemented results."
-                .to_owned(),
-        ),
+        description: Some("Controlled email access through configured accounts. Commands: list_accounts, list_folders, list, read, send. Reads and sends can require approval.".to_owned()),
         tool_type: tau_proto::ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "enum": ["list_accounts", "list_folders", "list", "read", "send"],
-                    "description": "Email subcommand to execute."
-                },
-                "args": {
-                    "type": "object",
-                    "description": "Command-specific arguments.",
-                    "additionalProperties": true
-                }
-            },
+            "properties": {"command": {"type": "string", "enum": ["list_accounts", "list_folders", "list", "read", "send"]}, "args": {"type": "object", "additionalProperties": true}},
             "required": ["command", "args"],
             "additionalProperties": false
         })),
@@ -230,27 +1585,9 @@ enum EmailCommand {
         bcc: Vec<String>,
         subject: String,
         body_text: String,
+        reply_to: Option<String>,
+        in_reply_to: Option<String>,
     },
-}
-
-impl EmailCommand {
-    fn name(&self) -> &'static str {
-        match self {
-            Self::ListAccounts => "list_accounts",
-            Self::ListFolders { .. } => "list_folders",
-            Self::List { .. } => "list",
-            Self::Read { .. } => "read",
-            Self::Send { .. } => "send",
-        }
-    }
-
-    fn not_implemented_result(&self) -> CborValue {
-        error_envelope(
-            Some(self.name()),
-            "not_implemented",
-            &format!("email.{} is not implemented yet", self.name()),
-        )
-    }
 }
 
 fn command_from_arguments(arguments: &CborValue) -> Option<&str> {
@@ -264,7 +1601,6 @@ fn command_from_arguments(arguments: &CborValue) -> Option<&str> {
 }
 
 type CborMapEntries<'a> = &'a [(CborValue, CborValue)];
-
 type CommandEnvelope<'a> = (String, CborMapEntries<'a>);
 
 fn parse_command(arguments: &CborValue) -> Result<EmailCommand, CborValue> {
@@ -277,7 +1613,7 @@ fn parse_command(arguments: &CborValue) -> Result<EmailCommand, CborValue> {
         "send" => parse_send(&command, args),
         _ => Err(error_envelope(
             Some(&command),
-            "unknown_command",
+            "invalid_input",
             "unsupported email command",
         )),
     }
@@ -287,7 +1623,7 @@ fn parse_command_envelope(arguments: &CborValue) -> Result<CommandEnvelope<'_>, 
     let CborValue::Map(entries) = arguments else {
         return Err(error_envelope(
             None,
-            "invalid_arguments",
+            "invalid_input",
             "arguments must be an object",
         ));
     };
@@ -305,7 +1641,6 @@ fn parse_list_accounts(
     reject_extra(args, &BTreeSet::new(), Some(command))?;
     Ok(EmailCommand::ListAccounts)
 }
-
 fn parse_list_folders(
     command: &str,
     args: &[(CborValue, CborValue)],
@@ -315,7 +1650,6 @@ fn parse_list_folders(
     reject_extra(args, &seen, Some(command))?;
     Ok(EmailCommand::ListFolders { account })
 }
-
 fn parse_list(command: &str, args: &[(CborValue, CborValue)]) -> Result<EmailCommand, CborValue> {
     let mut seen = BTreeSet::new();
     let account = required_string(args, &mut seen, "account", Some(command))?;
@@ -330,7 +1664,6 @@ fn parse_list(command: &str, args: &[(CborValue, CborValue)]) -> Result<EmailCom
         cursor,
     })
 }
-
 fn parse_read(command: &str, args: &[(CborValue, CborValue)]) -> Result<EmailCommand, CborValue> {
     let mut seen = BTreeSet::new();
     let account = required_string(args, &mut seen, "account", Some(command))?;
@@ -343,7 +1676,6 @@ fn parse_read(command: &str, args: &[(CborValue, CborValue)]) -> Result<EmailCom
         uid,
     })
 }
-
 fn parse_send(command: &str, args: &[(CborValue, CborValue)]) -> Result<EmailCommand, CborValue> {
     let mut seen = BTreeSet::new();
     let account = optional_string(args, &mut seen, "account", Some(command))?;
@@ -353,9 +1685,9 @@ fn parse_send(command: &str, args: &[(CborValue, CborValue)]) -> Result<EmailCom
     let bcc = optional_string_array(args, &mut seen, "bcc", Some(command))?;
     let subject = required_string_allow_empty(args, &mut seen, "subject", Some(command))?;
     let body_text = required_string_allow_empty(args, &mut seen, "body_text", Some(command))?;
-    let _reply_to = optional_nullable_string(args, &mut seen, "reply_to", Some(command))?;
-    let _in_reply_to = optional_nullable_string(args, &mut seen, "in_reply_to", Some(command))?;
-    optional_array(args, &mut seen, "attachments", Some(command))?;
+    let reply_to = optional_nullable_string(args, &mut seen, "reply_to", Some(command))?;
+    let in_reply_to = optional_nullable_string(args, &mut seen, "in_reply_to", Some(command))?;
+    reject_non_empty_array(args, &mut seen, "attachments", Some(command))?;
     reject_extra(args, &seen, Some(command))?;
     Ok(EmailCommand::Send {
         account,
@@ -365,6 +1697,8 @@ fn parse_send(command: &str, args: &[(CborValue, CborValue)]) -> Result<EmailCom
         bcc,
         subject,
         body_text,
+        reply_to,
+        in_reply_to,
     })
 }
 
@@ -378,22 +1712,21 @@ fn required_string(
         Some(CborValue::Text(value)) if !value.trim().is_empty() => Ok(value.clone()),
         Some(CborValue::Text(_)) => Err(error_envelope(
             command,
-            "invalid_arguments",
+            "invalid_input",
             &format!("`{name}` must not be empty"),
         )),
         Some(_) => Err(error_envelope(
             command,
-            "invalid_arguments",
+            "invalid_input",
             &format!("`{name}` must be a string"),
         )),
         None => Err(error_envelope(
             command,
-            "invalid_arguments",
+            "invalid_input",
             &format!("missing `{name}`"),
         )),
     }
 }
-
 fn required_string_allow_empty(
     entries: &[(CborValue, CborValue)],
     seen: &mut BTreeSet<String>,
@@ -404,17 +1737,16 @@ fn required_string_allow_empty(
         Some(CborValue::Text(value)) => Ok(value.clone()),
         Some(_) => Err(error_envelope(
             command,
-            "invalid_arguments",
+            "invalid_input",
             &format!("`{name}` must be a string"),
         )),
         None => Err(error_envelope(
             command,
-            "invalid_arguments",
+            "invalid_input",
             &format!("missing `{name}`"),
         )),
     }
 }
-
 fn optional_string(
     entries: &[(CborValue, CborValue)],
     seen: &mut BTreeSet<String>,
@@ -425,18 +1757,17 @@ fn optional_string(
         Some(CborValue::Text(value)) if !value.trim().is_empty() => Ok(Some(value.clone())),
         Some(CborValue::Text(_)) => Err(error_envelope(
             command,
-            "invalid_arguments",
+            "invalid_input",
             &format!("`{name}` must not be empty"),
         )),
+        Some(CborValue::Null) | None => Ok(None),
         Some(_) => Err(error_envelope(
             command,
-            "invalid_arguments",
+            "invalid_input",
             &format!("`{name}` must be a string"),
         )),
-        None => Ok(None),
     }
 }
-
 fn optional_nullable_string(
     entries: &[(CborValue, CborValue)],
     seen: &mut BTreeSet<String>,
@@ -448,17 +1779,16 @@ fn optional_nullable_string(
         Some(CborValue::Text(value)) if !value.trim().is_empty() => Ok(Some(value.clone())),
         Some(CborValue::Text(_)) => Err(error_envelope(
             command,
-            "invalid_arguments",
+            "invalid_input",
             &format!("`{name}` must not be empty"),
         )),
         Some(_) => Err(error_envelope(
             command,
-            "invalid_arguments",
+            "invalid_input",
             &format!("`{name}` must be a string or null"),
         )),
     }
 }
-
 fn required_positive_u32(
     entries: &[(CborValue, CborValue)],
     seen: &mut BTreeSet<String>,
@@ -471,7 +1801,7 @@ fn required_positive_u32(
             if raw < 1 || i128::from(u32::MAX) < raw {
                 return Err(error_envelope(
                     command,
-                    "invalid_arguments",
+                    "invalid_input",
                     &format!("`{name}` must be a positive integer"),
                 ));
             }
@@ -479,17 +1809,16 @@ fn required_positive_u32(
         }
         Some(_) => Err(error_envelope(
             command,
-            "invalid_arguments",
+            "invalid_input",
             &format!("`{name}` must be an integer"),
         )),
         None => Err(error_envelope(
             command,
-            "invalid_arguments",
+            "invalid_input",
             &format!("missing `{name}`"),
         )),
     }
 }
-
 fn required_string_array(
     entries: &[(CborValue, CborValue)],
     seen: &mut BTreeSet<String>,
@@ -499,13 +1828,12 @@ fn required_string_array(
     let Some(value) = field(entries, seen, name, command)? else {
         return Err(error_envelope(
             command,
-            "invalid_arguments",
+            "invalid_input",
             &format!("missing `{name}`"),
         ));
     };
     string_array_value(value, name, command, false)
 }
-
 fn optional_string_array(
     entries: &[(CborValue, CborValue)],
     seen: &mut BTreeSet<String>,
@@ -517,7 +1845,6 @@ fn optional_string_array(
         None => Ok(Vec::new()),
     }
 }
-
 fn string_array_value(
     value: &CborValue,
     name: &str,
@@ -527,7 +1854,7 @@ fn string_array_value(
     let CborValue::Array(values) = value else {
         return Err(error_envelope(
             command,
-            "invalid_arguments",
+            "invalid_input",
             &format!("`{name}` must be an array"),
         ));
     };
@@ -536,14 +1863,14 @@ fn string_array_value(
         let CborValue::Text(text) = value else {
             return Err(error_envelope(
                 command,
-                "invalid_arguments",
+                "invalid_input",
                 &format!("`{name}` entries must be strings"),
             ));
         };
         if text.trim().is_empty() {
             return Err(error_envelope(
                 command,
-                "invalid_arguments",
+                "invalid_input",
                 &format!("`{name}` entries must not be empty"),
             ));
         }
@@ -552,29 +1879,33 @@ fn string_array_value(
     if out.is_empty() && !allow_empty {
         return Err(error_envelope(
             command,
-            "invalid_arguments",
+            "invalid_input",
             &format!("`{name}` must not be empty"),
         ));
     }
     Ok(out)
 }
-
-fn optional_array(
+fn reject_non_empty_array(
     entries: &[(CborValue, CborValue)],
     seen: &mut BTreeSet<String>,
     name: &str,
     command: Option<&str>,
 ) -> Result<(), CborValue> {
     match field(entries, seen, name, command)? {
-        Some(CborValue::Array(_)) | None => Ok(()),
+        Some(CborValue::Array(values)) if values.is_empty() => Ok(()),
+        Some(CborValue::Array(_)) => Err(error_envelope(
+            command,
+            "invalid_input",
+            &format!("`{name}` are not supported yet"),
+        )),
         Some(_) => Err(error_envelope(
             command,
-            "invalid_arguments",
+            "invalid_input",
             &format!("`{name}` must be an array"),
         )),
+        None => Ok(()),
     }
 }
-
 fn required_object<'a>(
     entries: &'a [(CborValue, CborValue)],
     seen: &mut BTreeSet<String>,
@@ -585,17 +1916,16 @@ fn required_object<'a>(
         Some(CborValue::Map(values)) => Ok(values),
         Some(_) => Err(error_envelope(
             command,
-            "invalid_arguments",
+            "invalid_input",
             &format!("`{name}` must be an object"),
         )),
         None => Err(error_envelope(
             command,
-            "invalid_arguments",
+            "invalid_input",
             &format!("missing `{name}`"),
         )),
     }
 }
-
 fn field<'a>(
     entries: &'a [(CborValue, CborValue)],
     seen: &mut BTreeSet<String>,
@@ -607,7 +1937,7 @@ fn field<'a>(
         let CborValue::Text(key) = key else {
             return Err(error_envelope(
                 command,
-                "invalid_arguments",
+                "invalid_input",
                 "argument object keys must be strings",
             ));
         };
@@ -615,7 +1945,7 @@ fn field<'a>(
             if found.is_some() {
                 return Err(error_envelope(
                     command,
-                    "invalid_arguments",
+                    "invalid_input",
                     &format!("duplicate `{name}`"),
                 ));
             }
@@ -625,7 +1955,6 @@ fn field<'a>(
     }
     Ok(found)
 }
-
 fn reject_extra(
     entries: &[(CborValue, CborValue)],
     seen: &BTreeSet<String>,
@@ -635,14 +1964,14 @@ fn reject_extra(
         let CborValue::Text(key) = key else {
             return Err(error_envelope(
                 command,
-                "invalid_arguments",
+                "invalid_input",
                 "argument object keys must be strings",
             ));
         };
         if !seen.contains(key) {
             return Err(error_envelope(
                 command,
-                "invalid_arguments",
+                "invalid_input",
                 &format!("unexpected argument `{key}`"),
             ));
         }
@@ -664,20 +1993,26 @@ fn tool_error(invoke: ToolStarted, details: CborValue) -> Event {
         originator: tau_proto::PromptOriginator::User,
     })
 }
-
+fn ok_envelope(command: &str, status: &str, data: CborValue) -> CborValue {
+    cbor_map(vec![
+        ("ok", CborValue::Bool(true)),
+        ("command", CborValue::Text(command.to_owned())),
+        ("status", CborValue::Text(status.to_owned())),
+        ("data", data),
+    ])
+}
 fn error_envelope(command: Option<&str>, code: &str, message: &str) -> CborValue {
     cbor_map(vec![
         ("ok", CborValue::Bool(false)),
         (
             "command",
             command
-                .map(|command| CborValue::Text(command.to_owned()))
+                .map(|c| CborValue::Text(c.to_owned()))
                 .unwrap_or(CborValue::Null),
         ),
         ("error", structured_error(code, message)),
     ])
 }
-
 fn structured_error(code: &str, message: &str) -> CborValue {
     cbor_map(vec![
         ("code", CborValue::Text(code.to_owned())),
@@ -685,7 +2020,21 @@ fn structured_error(code: &str, message: &str) -> CborValue {
         ("details", CborValue::Map(Vec::new())),
     ])
 }
-
+fn policy_cbor(decision: &PolicyDecision) -> CborValue {
+    cbor_map(vec![
+        ("incoming_allowed", CborValue::Bool(decision.allowed)),
+        ("allowed", CborValue::Bool(decision.allowed)),
+        ("reason", CborValue::Text(decision.reason.clone())),
+        (
+            "matched_pattern",
+            decision
+                .matched_pattern
+                .clone()
+                .map(CborValue::Text)
+                .unwrap_or(CborValue::Null),
+        ),
+    ])
+}
 fn cbor_map(entries: Vec<(&str, CborValue)>) -> CborValue {
     CborValue::Map(
         entries
@@ -694,7 +2043,6 @@ fn cbor_map(entries: Vec<(&str, CborValue)>) -> CborValue {
             .collect(),
     )
 }
-
 fn cbor_text_field<'a>(value: &'a CborValue, field: &str) -> Option<&'a str> {
     let CborValue::Map(entries) = value else {
         return None;
@@ -704,7 +2052,6 @@ fn cbor_text_field<'a>(value: &'a CborValue, field: &str) -> Option<&'a str> {
         _ => None,
     })
 }
-
 fn cbor_nested_text_field<'a>(value: &'a CborValue, outer: &str, inner: &str) -> Option<&'a str> {
     let CborValue::Map(entries) = value else {
         return None;
@@ -715,7 +2062,6 @@ fn cbor_nested_text_field<'a>(value: &'a CborValue, outer: &str, inner: &str) ->
     })?;
     cbor_text_field(nested, inner)
 }
-
 fn display(status: ToolDisplayStatus, status_text: &str) -> ToolDisplay {
     ToolDisplay {
         status,

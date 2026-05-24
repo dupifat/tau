@@ -1044,6 +1044,173 @@ pub(crate) fn render_shell_block(
     StyledBlock::new(StyledText::from(spans))
 }
 
+pub(crate) fn render_action_output_block(
+    theme: &tau_themes::Theme,
+    text: &str,
+) -> tau_cli_term::StyledBlock {
+    use tau_cli_term::resolve::resolve;
+    use tau_cli_term::{Span, StyledBlock, StyledText};
+    use tau_themes::names;
+
+    let styles = ActionStyles {
+        output: resolve(theme, names::ACTION_OUTPUT),
+        label: resolve(theme, names::ACTION_LABEL),
+        value: resolve(theme, names::ACTION_VALUE),
+        id: resolve(theme, names::ACTION_ID),
+    };
+    let mut spans = Vec::new();
+    for line in text.split_inclusive('\n') {
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        push_action_line(&mut spans, body, styles);
+        if line.ends_with('\n') {
+            spans.push(Span::new("\n", styles.output));
+        }
+    }
+    StyledBlock::new(StyledText::from(spans))
+}
+
+pub(crate) fn render_action_error_block(
+    theme: &tau_themes::Theme,
+    action_id: &str,
+    message: &str,
+) -> tau_cli_term::StyledBlock {
+    use tau_cli_term::resolve::resolve;
+    use tau_cli_term::{Span, StyledBlock, StyledText};
+    use tau_themes::names;
+
+    StyledBlock::new(StyledText::from(vec![
+        Span::new(action_id.to_owned(), resolve(theme, names::ACTION_ID)),
+        Span::new(": ", resolve(theme, names::ACTION_OUTPUT)),
+        Span::new(message.to_owned(), resolve(theme, names::ACTION_ERROR)),
+    ]))
+}
+
+#[derive(Clone, Copy)]
+struct ActionStyles {
+    output: tau_cli_term::Style,
+    label: tau_cli_term::Style,
+    value: tau_cli_term::Style,
+    id: tau_cli_term::Style,
+}
+
+fn push_action_line(spans: &mut Vec<tau_cli_term::Span>, line: &str, styles: ActionStyles) {
+    if push_action_approval_heading(spans, line, styles) {
+        return;
+    }
+    if push_action_label_line(spans, line, styles) {
+        return;
+    }
+
+    let mut index = 0;
+    if let Some(end) = leading_action_id_end(line) {
+        spans.push(tau_cli_term::Span::new(line[..end].to_owned(), styles.id));
+        index = end;
+    }
+    push_action_tokens(spans, &line[index..], styles);
+}
+
+fn push_action_approval_heading(
+    spans: &mut Vec<tau_cli_term::Span>,
+    line: &str,
+    styles: ActionStyles,
+) -> bool {
+    let Some((prefix, id)) = line.rsplit_once(' ') else {
+        return false;
+    };
+    if !prefix.to_ascii_lowercase().contains("approval") || !is_action_id_token(id) {
+        return false;
+    }
+    spans.push(tau_cli_term::Span::new(format!("{prefix} "), styles.output));
+    spans.push(tau_cli_term::Span::new(id.to_owned(), styles.id));
+    true
+}
+
+fn push_action_label_line(
+    spans: &mut Vec<tau_cli_term::Span>,
+    line: &str,
+    styles: ActionStyles,
+) -> bool {
+    let Some(colon) = line.find(':') else {
+        return false;
+    };
+    if line[..colon].contains(char::is_whitespace) {
+        return false;
+    }
+    let label = &line[..=colon];
+    let mut value = &line[colon + 1..];
+    spans.push(tau_cli_term::Span::new(label.to_owned(), styles.label));
+    if let Some(stripped) = value.strip_prefix(' ') {
+        spans.push(tau_cli_term::Span::new(" ", styles.output));
+        value = stripped;
+    }
+    let value_style = if is_action_id_label(&line[..colon]) && is_action_id_token(value) {
+        styles.id
+    } else {
+        styles.value
+    };
+    spans.push(tau_cli_term::Span::new(value.to_owned(), value_style));
+    true
+}
+
+fn push_action_tokens(spans: &mut Vec<tau_cli_term::Span>, text: &str, styles: ActionStyles) {
+    let mut rest = text;
+    while !rest.is_empty() {
+        let split_at = rest
+            .find(|c: char| !c.is_whitespace())
+            .unwrap_or(rest.len());
+        if 0 < split_at {
+            spans.push(tau_cli_term::Span::new(
+                rest[..split_at].to_owned(),
+                styles.output,
+            ));
+            rest = &rest[split_at..];
+            continue;
+        }
+        let token_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let token = &rest[..token_end];
+        push_action_token(spans, token, styles);
+        rest = &rest[token_end..];
+    }
+}
+
+fn push_action_token(spans: &mut Vec<tau_cli_term::Span>, token: &str, styles: ActionStyles) {
+    let Some(eq) = token.find('=') else {
+        spans.push(tau_cli_term::Span::new(token.to_owned(), styles.output));
+        return;
+    };
+    if eq == 0 {
+        spans.push(tau_cli_term::Span::new(token.to_owned(), styles.output));
+        return;
+    }
+    spans.push(tau_cli_term::Span::new(
+        token[..=eq].to_owned(),
+        styles.label,
+    ));
+    spans.push(tau_cli_term::Span::new(
+        token[eq + 1..].to_owned(),
+        styles.value,
+    ));
+}
+
+fn leading_action_id_end(line: &str) -> Option<usize> {
+    let end = line.find(char::is_whitespace)?;
+    let token = &line[..end];
+    let rest = &line[end..];
+    (is_action_id_token(token) && rest.contains('=')).then_some(end)
+}
+
+fn is_action_id_label(label: &str) -> bool {
+    label == "id" || label.ends_with("_id") || label.ends_with("-id")
+}
+
+fn is_action_id_token(token: &str) -> bool {
+    !token.is_empty()
+        && token.len() <= 16
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 pub(crate) fn render_harness_info(
     theme: &tau_themes::Theme,
     info: &tau_proto::HarnessInfo,

@@ -27,6 +27,13 @@ pub const TOOL_STATUS_INFO: &str = "tool.status.info";
 pub const TOOL_STATUS_TIME: &str = "tool.status.time";
 pub const SHELL_OUTPUT: &str = "shell.output";
 
+// -- Action output --
+pub const ACTION_OUTPUT: &str = "action.output";
+pub const ACTION_LABEL: &str = "action.label";
+pub const ACTION_VALUE: &str = "action.value";
+pub const ACTION_ID: &str = "action.id";
+pub const ACTION_ERROR: &str = "action.error";
+
 /// Streaming-`…` indicator appended to in-progress agent responses,
 /// thinking blocks, and running tool-call lines. Painted independently
 /// from the surrounding body so themes can make it stand out.

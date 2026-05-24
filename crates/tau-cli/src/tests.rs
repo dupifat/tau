@@ -21,7 +21,8 @@ use super::chat::{
 use super::event_renderer::EventRenderer;
 use super::tool_render::{
     CompactionStatus, ToolStatus, build_delegate_completion_display, build_osc1337_set_user_var,
-    cache_hit_percent, format_turn_stats_line, render_compaction_block, render_delegate_display,
+    cache_hit_percent, format_turn_stats_line, render_action_error_block,
+    render_action_output_block, render_compaction_block, render_delegate_display,
     render_shell_block, render_tool_block, render_tool_display, render_turn_stats_block,
     streaming_block, synthesize_fallback_display,
 };
@@ -3465,6 +3466,54 @@ fn format_turn_stats_line_shows_zero_hit_when_no_prompt_sent() {
     let line = format_turn_stats_line(&usage, None, None, None);
 
     assert_eq!(line, "Δ0% 0/0 ↑0 ↓0 Σ ↑0/0 ↓0");
+}
+
+#[test]
+fn render_action_output_block_highlights_approval_ids_and_labels() {
+    let theme = tau_themes::Theme::builtin();
+    let block = render_action_output_block(
+        &theme,
+        "Incoming approval 7\nstatus: pending\n8 account=personal folder=INBOX\n",
+    );
+    let spans = block.content.spans();
+    let id_style = tau_cli_term::resolve::resolve(&theme, tau_themes::names::ACTION_ID);
+    let label_style = tau_cli_term::resolve::resolve(&theme, tau_themes::names::ACTION_LABEL);
+
+    let heading_id = spans
+        .iter()
+        .find(|span| span.text == "7")
+        .expect("heading approval id span");
+    let row_id = spans
+        .iter()
+        .find(|span| span.text == "8")
+        .expect("list row approval id span");
+    let status_label = spans
+        .iter()
+        .find(|span| span.text == "status:")
+        .expect("status label span");
+    let account_label = spans
+        .iter()
+        .find(|span| span.text == "account=")
+        .expect("key-value label span");
+
+    assert_eq!(heading_id.style, id_style);
+    assert_eq!(row_id.style, id_style);
+    assert_eq!(status_label.style, label_style);
+    assert_eq!(account_label.style, label_style);
+}
+
+#[test]
+fn render_action_error_block_uses_action_error_styles() {
+    let theme = tau_themes::Theme::builtin();
+    let block = render_action_error_block(&theme, "7", "invalid input");
+    let spans = block.content.spans();
+    let id_style = tau_cli_term::resolve::resolve(&theme, tau_themes::names::ACTION_ID);
+    let error_style = tau_cli_term::resolve::resolve(&theme, tau_themes::names::ACTION_ERROR);
+
+    assert_eq!(spans[0].text, "7");
+    assert_eq!(spans[0].style, id_style);
+    assert_eq!(spans[2].text, "invalid input");
+    assert_eq!(spans[2].style, error_style);
 }
 
 #[test]

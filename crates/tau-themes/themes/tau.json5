@@ -28,6 +28,13 @@
     "shell.output":         { },
     "progress.indicator":   { fg: "cyan", bold: true },
 
+    // -- Action output --
+    "action.output":        { },
+    "action.label":         { fg: "dark_grey" },
+    "action.value":         { },
+    "action.id":            { fg: "yellow", bold: true },
+    "action.error":         { fg: "red" },
+
     // -- Extensions --
     "extension.lifecycle":  { fg: "dark_grey" },
     "extension.status":     { },

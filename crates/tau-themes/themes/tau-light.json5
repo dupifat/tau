@@ -24,6 +24,13 @@
     "shell.output":         { },
     "progress.indicator":   { fg: "dark_cyan", bold: true },
 
+    // -- Action output --
+    "action.output":        { },
+    "action.label":         { fg: "grey" },
+    "action.value":         { },
+    "action.id":            { fg: "dark_yellow", bold: true },
+    "action.error":         { fg: "dark_red" },
+
     // -- Extensions --
     "extension.lifecycle":  { fg: "grey" },
     "extension.status":     { },

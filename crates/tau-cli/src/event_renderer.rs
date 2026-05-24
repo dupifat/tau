@@ -3297,8 +3297,7 @@ impl EventRenderer {
     }
 
     fn handle_action_result(&mut self, result: &tau_proto::ActionResult) {
-        use tau_cli_term::resolve::themed_block;
-        use tau_themes::names;
+        use crate::tool_render::render_action_output_block;
 
         let text = match &result.output {
             tau_proto::ActionOutput::Text { text } => text.clone(),
@@ -3316,21 +3315,16 @@ impl EventRenderer {
         };
         self.handle.print_output(
             "action-result",
-            themed_block(&self.theme, names::SYSTEM_INFO, text),
+            render_action_output_block(&self.theme, &text),
         );
     }
 
     fn handle_action_error(&mut self, error: &tau_proto::ActionError) {
-        use tau_cli_term::resolve::themed_block;
-        use tau_themes::names;
+        use crate::tool_render::render_action_error_block;
 
         self.handle.print_output(
             "action-error",
-            themed_block(
-                &self.theme,
-                names::SYSTEM_INFO,
-                format!("{}: {}", error.action_id, error.message),
-            ),
+            render_action_error_block(&self.theme, &error.action_id, &error.message),
         );
     }
 

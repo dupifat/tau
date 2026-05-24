@@ -86,6 +86,10 @@ pub struct RunArgs {
     #[arg(long)]
     pub config: Option<PathBuf>,
 
+    /// Read one prompt from stdin, submit it, print final output, and exit.
+    #[arg(long = "prompt-stdin")]
+    pub prompt_stdin: bool,
+
     /// Attach to an existing harness daemon for this project instead of
     /// spawning a new one. Errors if no daemon is running.
     #[arg(short = 'a', long)]

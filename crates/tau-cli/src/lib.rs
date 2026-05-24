@@ -10,6 +10,7 @@ mod event_renderer;
 mod print_prompt;
 mod print_tools;
 mod prompt_history;
+mod prompt_stdin;
 mod send;
 mod settings_registry;
 mod theme;
@@ -405,6 +406,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             cli::Command::Run(cli::RunArgs {
                 resume,
                 config: _config,
+                prompt_stdin,
                 attach,
             }) => {
                 let (session_id, session_status) = if attach {
@@ -429,14 +431,25 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 } else {
                     resolve_run_session_id(resume.as_deref())?
                 };
-                run_chat(
-                    &session_id,
-                    attach,
-                    session_status,
-                    harness.role.as_deref(),
-                    &role_cli_overrides,
-                    &extension_cli_overrides,
-                )
+                if prompt_stdin {
+                    prompt_stdin::run_prompt_stdin(
+                        &session_id,
+                        attach,
+                        session_status,
+                        harness.role.as_deref(),
+                        &role_cli_overrides,
+                        &extension_cli_overrides,
+                    )
+                } else {
+                    run_chat(
+                        &session_id,
+                        attach,
+                        session_status,
+                        harness.role.as_deref(),
+                        &role_cli_overrides,
+                        &extension_cli_overrides,
+                    )
+                }
             }
 
             cli::Command::SessionList { sessions_dir } => {

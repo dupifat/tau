@@ -62,6 +62,16 @@ fn startup_role_flag_is_parsed_for_default_run() {
 }
 
 #[test]
+fn prompt_stdin_flag_is_parsed_for_default_run() {
+    // `--prompt-stdin` keeps the normal harness/session args but replaces the
+    // terminal UI with the one-shot stdin client.
+    let cli = super::cli::Cli::parse_from(["tau", "--role", "manager", "--prompt-stdin"]);
+
+    assert!(cli.run.prompt_stdin);
+    assert_eq!(cli.harness.role.as_deref(), Some("manager"));
+}
+
+#[test]
 fn global_harness_flags_parse_before_dev_print_prompt() {
     // Hidden diagnostic commands use the same global harness args as normal
     // startup, including flags placed before the `dev` subcommand.

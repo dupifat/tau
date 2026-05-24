@@ -84,6 +84,7 @@ fn user_message_item(text: &str) -> ContextItem {
 fn provider_response_text(session_prompt_id: &str, text: &str) -> ProviderResponseFinished {
     ProviderResponseFinished {
         session_prompt_id: session_prompt_id.into(),
+        target_agent_id: None,
         output_items: vec![assistant_message_item(text)],
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         originator: tau_proto::PromptOriginator::User,
@@ -97,6 +98,7 @@ fn provider_response_text(session_prompt_id: &str, text: &str) -> ProviderRespon
 fn provider_response_tool_call(session_prompt_id: &str, call_id: &str) -> ProviderResponseFinished {
     ProviderResponseFinished {
         session_prompt_id: session_prompt_id.into(),
+        target_agent_id: None,
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: call_id.into(),
             name: tau_proto::ToolName::new("read"),
@@ -118,6 +120,7 @@ fn provider_response_tool_calls(
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
         session_prompt_id: session_prompt_id.into(),
+        target_agent_id: None,
         output_items: call_ids
             .iter()
             .map(|call_id| {
@@ -792,6 +795,7 @@ fn session_tree_captures_phase_from_provider_response_finished() {
     }));
     tree.apply_event(&Event::ProviderResponseFinished(ProviderResponseFinished {
         session_prompt_id: "sp-1".into(),
+        target_agent_id: None,
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
             content: vec![ContentPart::Text {
@@ -844,6 +848,7 @@ fn session_tree_captures_compacted_summary() {
     }));
     tree.apply_event(&Event::SessionCompacted(tau_proto::SessionCompacted {
         session_id: "session-1".into(),
+        target_agent_id: None,
         originator: tau_proto::PromptOriginator::User,
         original_input_tokens: None,
         compacted_input_tokens: None,
@@ -1038,6 +1043,7 @@ fn session_tree_folds_only_provider_tool_results_under_assistant_response() {
             None,
             Event::ProviderResponseFinished(ProviderResponseFinished {
                 session_prompt_id: "sp-tools".into(),
+                target_agent_id: None,
                 output_items: vec![ContextItem::ToolCall(ToolCallItem {
                     call_id: "call-1".into(),
                     name: tau_proto::ToolName::new("read"),
@@ -1170,6 +1176,7 @@ fn session_tree_folds_provider_tool_result_into_prompt_history() {
             None,
             Event::ProviderResponseFinished(ProviderResponseFinished {
                 session_prompt_id: "sp-tools".into(),
+                target_agent_id: None,
                 output_items: vec![ContextItem::ToolCall(ToolCallItem {
                     call_id: "call-1".into(),
                     name: tau_proto::ToolName::new("slow"),
@@ -1422,6 +1429,7 @@ fn session_store_rejects_duplicate_tool_call_ids_before_persisting() {
             None,
             Event::ProviderResponseFinished(ProviderResponseFinished {
                 session_prompt_id: "sp-duplicate".into(),
+                target_agent_id: None,
                 output_items: vec![
                     ContextItem::ToolCall(ToolCallItem {
                         call_id: "call-1".into(),

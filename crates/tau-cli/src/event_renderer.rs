@@ -28,9 +28,17 @@ pub(crate) struct EventRenderer {
     completion_data: tau_cli_term::CompletionData,
     action_state: ActionCommandState,
     theme: tau_themes::Theme,
-    /// Currently visible agent transcript. `None` means no agent has been
-    /// selected yet; the renderer starts on the main interactive agent.
+    /// Agent that prompt input targets. `None` means the UI is in the
+    /// start-new-agent state; the next user prompt will start/select an agent.
     current_agent_id: Option<String>,
+    /// Agent transcript currently rendered in the output area. This is tracked
+    /// separately from [`Self::current_agent_id`] so changing the input target
+    /// from the empty start-new-agent screen does not force a transcript swap.
+    displayed_agent_id: Option<String>,
+    /// Output and renderer bookkeeping for the no-agent screen shown after
+    /// `/agent none`. This keeps deselection from leaving the previously
+    /// selected agent's output in the visible renderer fields.
+    no_agent_ui_state: AgentUiState,
     /// Output and renderer bookkeeping for agents that are not currently
     /// visible. The currently visible agent lives in the fields on this struct
     /// so existing rendering code can stay direct and efficient.
@@ -892,13 +900,11 @@ impl EventRenderer {
             action_state: ActionCommandState::new(std::iter::empty::<&str>()),
             theme,
             current_agent_id: None,
+            displayed_agent_id: None,
+            no_agent_ui_state: AgentUiState::default(),
             agents_ui_state: HashMap::new(),
-            known_agents: std::sync::Arc::new(std::sync::Mutex::new(vec![
-                MAIN_AGENT_ID.to_owned(),
-            ])),
-            live_agents: std::sync::Arc::new(std::sync::Mutex::new(HashSet::from([
-                MAIN_AGENT_ID.to_owned()
-            ]))),
+            known_agents: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            live_agents: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
             query_agents: HashMap::new(),
             prompt_agents: HashMap::new(),
             tool_agents: HashMap::new(),
@@ -989,29 +995,73 @@ impl EventRenderer {
 
     pub(crate) fn switch_agent(&mut self, agent_id: String) {
         self.remember_agent(agent_id.clone());
-        if self.current_agent_id.is_none() {
-            self.current_agent_id = Some(agent_id.clone());
-            if let Ok(mut current) = self.current_agent_state.lock() {
-                *current = Some(agent_id);
-            }
+        let target_changed = self.current_agent_id.as_deref() != Some(agent_id.as_str());
+        let display_changed = self.displayed_agent_id.as_deref() != Some(agent_id.as_str());
+
+        if display_changed {
+            self.show_agent_transcript(agent_id.clone());
+        }
+
+        if target_changed {
+            self.set_current_agent_id(Some(agent_id));
             self.render_model_status();
-            return;
+            self.refresh_prompt_placeholder();
         }
-        if self.current_agent_id.as_deref() == Some(agent_id.as_str()) {
-            return;
+    }
+
+    pub(crate) fn clear_selected_agent(&mut self) {
+        let target_changed = self.current_agent_id.is_some();
+        let display_changed = self.displayed_agent_id.is_some();
+
+        if display_changed {
+            self.store_visible_agent_state();
+            let state = std::mem::take(&mut self.no_agent_ui_state);
+            self.restore_visible_agent_state(state);
+            self.displayed_agent_id = None;
         }
-        if let Some(current) = self.current_agent_id.clone() {
-            let state = self.take_visible_agent_state();
-            self.agents_ui_state.insert(current, state);
+
+        if target_changed {
+            self.set_current_agent_id(None);
+            self.render_model_status();
+            self.refresh_prompt_placeholder();
         }
-        let state = self.agents_ui_state.remove(&agent_id).unwrap_or_default();
-        self.restore_visible_agent_state(state);
-        self.rerender_visible_for_current_settings();
-        self.current_agent_id = Some(agent_id.clone());
+    }
+
+    fn store_visible_agent_state(&mut self) {
+        let state = self.take_visible_agent_state();
+        if let Some(displayed) = self.displayed_agent_id.clone() {
+            self.agents_ui_state.insert(displayed, state);
+        } else {
+            self.no_agent_ui_state = state;
+        }
+    }
+
+    fn show_agent_transcript(&mut self, agent_id: String) {
+        let needs_snapshot_swap =
+            self.displayed_agent_id.is_some() || self.agents_ui_state.contains_key(&agent_id);
+        if needs_snapshot_swap {
+            self.store_visible_agent_state();
+            let state = self.agents_ui_state.remove(&agent_id).unwrap_or_default();
+            self.restore_visible_agent_state(state);
+            self.rerender_visible_for_current_settings();
+        }
+        self.displayed_agent_id = Some(agent_id);
+    }
+
+    fn set_current_agent_id(&mut self, agent_id: Option<String>) {
+        self.current_agent_id = agent_id.clone();
         if let Ok(mut current) = self.current_agent_state.lock() {
-            *current = Some(agent_id);
+            *current = agent_id;
         }
-        self.render_model_status();
+    }
+
+    fn refresh_prompt_placeholder(&mut self) {
+        self.handle
+            .set_input_placeholder(crate::theme::prompt_input_placeholder(
+                &self.theme,
+                self.current_role.as_deref(),
+                self.current_agent_id.as_deref(),
+            ));
     }
 
     pub(crate) fn set_action_state(&mut self, action_state: ActionCommandState) {
@@ -1666,20 +1716,19 @@ impl EventRenderer {
     /// and `show-thinking` are intentionally preserved.
     fn clear_for_new_session(&mut self) {
         self.agents_ui_state.clear();
+        self.no_agent_ui_state = AgentUiState::default();
         self.query_agents.clear();
         self.prompt_agents.clear();
         self.tool_agents.clear();
         self.shell_agents.clear();
         if let Ok(mut agents) = self.known_agents.lock() {
-            *agents = vec![MAIN_AGENT_ID.to_owned()];
+            agents.clear();
         }
         if let Ok(mut agents) = self.live_agents.lock() {
-            *agents = HashSet::from([MAIN_AGENT_ID.to_owned()]);
+            agents.clear();
         }
-        self.current_agent_id = Some(MAIN_AGENT_ID.to_owned());
-        if let Ok(mut current) = self.current_agent_state.lock() {
-            *current = Some(MAIN_AGENT_ID.to_owned());
-        }
+        self.clear_selected_agent();
+        self.agents_ui_state.clear();
         self.prompts.clear();
         self.compaction_blocks.clear();
         self.last_user_block = None;
@@ -1756,20 +1805,38 @@ impl EventRenderer {
         let mut needs_space = false;
         let mut right_needs_space = false;
 
-        match (self.current_role.as_deref(), self.current_model.as_ref()) {
-            (Some(role), _) => push_status_chip(
+        if let Some(session_id) = self.current_session_id.as_ref() {
+            push_status_chip(
+                &mut themed,
+                session_style,
+                &mut needs_space,
+                format!("@{session_id}"),
+            );
+        }
+        match (
+            self.current_agent_id.as_deref(),
+            self.current_role.as_deref(),
+            self.current_model.as_ref(),
+        ) {
+            (Some(agent_id), _, _) => push_status_chip(
+                &mut themed,
+                role_style,
+                &mut needs_space,
+                format!("&{agent_id}"),
+            ),
+            (None, Some(role), _) => push_status_chip(
                 &mut themed,
                 role_style,
                 &mut needs_space,
                 format!("+{role}"),
             ),
-            (None, Some(model)) => push_status_chip(
+            (None, None, Some(model)) => push_status_chip(
                 &mut themed,
                 model_style,
                 &mut needs_space,
                 format!("={model}"),
             ),
-            (None, None) => push_status_chip(
+            (None, None, None) => push_status_chip(
                 &mut themed,
                 status_style,
                 &mut needs_space,
@@ -1826,26 +1893,6 @@ impl EventRenderer {
                 service_tier_style,
                 &mut needs_space,
                 format!("!{service_tier}"),
-            );
-        }
-        if let Some(agent_id) = self
-            .current_agent_id
-            .as_deref()
-            .filter(|agent_id| *agent_id != MAIN_AGENT_ID)
-        {
-            push_status_chip(
-                &mut themed,
-                session_style,
-                &mut needs_space,
-                format!("&{agent_id}"),
-            );
-        }
-        if let Some(session_id) = self.current_session_id.as_ref() {
-            push_status_chip(
-                &mut themed,
-                session_style,
-                &mut needs_space,
-                format!("@{session_id}"),
             );
         }
         if let Some(tools) = self.main_tools_status_chip() {
@@ -2213,22 +2260,51 @@ impl EventRenderer {
         self.learn_agent_metadata(event);
         let target_agent_id = self.agent_id_for_event(event);
         if self.current_agent_id.is_none() {
-            self.current_agent_id = Some(target_agent_id.clone());
-            if let Ok(mut current) = self.current_agent_state.lock() {
-                *current = Some(target_agent_id.clone());
+            if self.event_selects_agent_from_empty(event) {
+                if self.displayed_agent_id.as_deref() != Some(target_agent_id.as_str()) {
+                    self.show_agent_transcript(target_agent_id.clone());
+                }
+                self.set_current_agent_id(Some(target_agent_id.clone()));
+                self.refresh_prompt_placeholder();
+                self.render_model_status();
+                self.handle_recorded_at_for_visible_agent(event, recorded_at);
+                self.update_agent_in_progress();
+                return;
+            }
+            if matches!(event, Event::AgentMessage(_)) {
+                self.handle_recorded_at_for_visible_agent(event, recorded_at);
+                self.update_agent_in_progress();
+                return;
+            }
+            if target_agent_id != MAIN_AGENT_ID {
+                let visible_state = self.take_visible_agent_state();
+                let target_state = self
+                    .agents_ui_state
+                    .remove(&target_agent_id)
+                    .unwrap_or_default();
+                let handle = self.handle.clone();
+                handle.with_redraw_suppressed(|| {
+                    self.restore_hidden_agent_state(target_state);
+                    self.handle_recorded_at_for_visible_agent(event, recorded_at);
+                    let target_state = self.take_visible_agent_state();
+                    self.agents_ui_state.insert(target_agent_id, target_state);
+                    self.restore_hidden_agent_state(visible_state);
+                });
+                self.update_agent_in_progress();
+                return;
             }
             self.handle_recorded_at_for_visible_agent(event, recorded_at);
             self.update_agent_in_progress();
             return;
         }
-        if self.current_agent_id.as_deref() == Some(target_agent_id.as_str()) {
+        if self.displayed_agent_id.as_deref() == Some(target_agent_id.as_str()) {
             self.handle_recorded_at_for_visible_agent(event, recorded_at);
             self.update_agent_in_progress();
             return;
         }
 
         let visible_agent_id = self
-            .current_agent_id
+            .displayed_agent_id
             .clone()
             .unwrap_or_else(|| MAIN_AGENT_ID.to_owned());
         let visible_state = self.take_visible_agent_state();
@@ -2241,7 +2317,7 @@ impl EventRenderer {
         let handle = self.handle.clone();
         handle.with_redraw_suppressed(|| {
             self.restore_hidden_agent_state(target_state);
-            self.current_agent_id = Some(target_agent_id.clone());
+            self.displayed_agent_id = Some(target_agent_id.clone());
             self.handle_recorded_at_for_visible_agent(event, recorded_at);
             let target_state = self.take_visible_agent_state();
             self.agents_ui_state.insert(target_agent_id, target_state);
@@ -2251,8 +2327,26 @@ impl EventRenderer {
                 .unwrap_or_default();
             self.restore_hidden_agent_state(visible_state);
         });
-        self.current_agent_id = Some(visible_agent_id);
+        self.displayed_agent_id = Some(visible_agent_id);
         self.update_agent_in_progress();
+    }
+
+    fn event_selects_agent_from_empty(&self, event: &Event) -> bool {
+        match event {
+            Event::SessionPromptCreated(prompt) => {
+                prompt.target_agent_id.is_some() && prompt.originator.is_user()
+            }
+            Event::SessionCompactionRequested(request) => {
+                request.prompt.target_agent_id.is_some() && request.prompt.originator.is_user()
+            }
+            Event::SessionPromptQueued(queued) => {
+                queued.target_agent_id.is_some() && !queued.message_class.is_internal()
+            }
+            Event::UiPromptSubmitted(prompt) => {
+                prompt.target_agent_id.is_some() && prompt.originator.is_user()
+            }
+            _ => false,
+        }
     }
 
     fn update_agent_in_progress(&self) {
@@ -2285,7 +2379,11 @@ impl EventRenderer {
             }
             Event::UiPromptSubmitted(prompt) => {
                 if let Some(agent_id) = prompt.target_agent_id.as_deref() {
-                    self.remember_agent(agent_id.to_owned());
+                    if prompt.originator.is_user() {
+                        self.mark_agent_live(agent_id.to_owned());
+                    } else {
+                        self.remember_agent(agent_id.to_owned());
+                    }
                     if let tau_proto::PromptOriginator::Extension { query_id, .. } =
                         &prompt.originator
                     {
@@ -2318,18 +2416,64 @@ impl EventRenderer {
                         .insert(finished.command_id.to_string(), agent_id.to_owned());
                 }
             }
+            Event::SessionPromptQueued(queued) => {
+                if let Some(agent_id) = queued.target_agent_id.as_deref() {
+                    self.mark_agent_live(agent_id.to_owned());
+                }
+            }
             Event::SessionPromptCreated(prompt) => {
-                let agent_id = self.agent_id_for_originator(&prompt.originator);
+                let agent_id = prompt
+                    .target_agent_id
+                    .clone()
+                    .unwrap_or_else(|| self.agent_id_for_originator(&prompt.originator));
+                self.remember_agent(agent_id.clone());
+                if prompt.target_agent_id.is_some() {
+                    self.mark_agent_live(agent_id.clone());
+                }
                 self.prompt_agents
                     .insert(prompt.session_prompt_id.to_string(), agent_id);
             }
+            Event::SessionCompactionRequested(request) => {
+                let agent_id =
+                    request.prompt.target_agent_id.clone().unwrap_or_else(|| {
+                        self.agent_id_for_originator(&request.prompt.originator)
+                    });
+                self.mark_agent_live(agent_id.clone());
+                self.prompt_agents
+                    .insert(request.prompt.session_prompt_id.to_string(), agent_id);
+            }
             Event::ProviderResponseFinished(finished) => {
-                let agent_id = self.agent_id_for_originator(&finished.originator);
+                let agent_id = finished.target_agent_id.clone().unwrap_or_else(|| {
+                    self.agent_id_for_prompt(
+                        finished.session_prompt_id.as_str(),
+                        &finished.originator,
+                    )
+                });
+                if finished.originator.is_user() && finished.target_agent_id.is_some() {
+                    self.mark_agent_live(agent_id.clone());
+                } else {
+                    self.remember_agent(agent_id.clone());
+                }
                 self.prompt_agents
                     .insert(finished.session_prompt_id.to_string(), agent_id.clone());
                 for call in tool_calls_from_output_items(&finished.output_items) {
                     self.tool_agents
                         .insert(call.call_id.to_string(), agent_id.clone());
+                }
+            }
+            Event::SessionCompactionStarted(started) => {
+                if let Some(agent_id) = started.target_agent_id.as_deref() {
+                    self.remember_agent(agent_id.to_owned());
+                }
+            }
+            Event::SessionCompactionFinished(finished) => {
+                if let Some(agent_id) = finished.target_agent_id.as_deref() {
+                    self.remember_agent(agent_id.to_owned());
+                }
+            }
+            Event::SessionCompacted(compacted) => {
+                if let Some(agent_id) = compacted.target_agent_id.as_deref() {
+                    self.remember_agent(agent_id.to_owned());
                 }
             }
             Event::AgentMessage(message) => {
@@ -2436,33 +2580,70 @@ impl EventRenderer {
                 .clone()
                 .or_else(|| self.shell_agents.get(finished.command_id.as_str()).cloned())
                 .unwrap_or_else(|| MAIN_AGENT_ID.to_owned()),
-            Event::SessionPromptCreated(prompt) => self.agent_id_for_originator(&prompt.originator),
-            Event::SessionPromptTerminated(terminated) => {
-                self.agent_id_for_originator(&terminated.originator)
-            }
-            Event::ProviderPromptSubmitted(submitted) => {
-                self.agent_id_for_originator(&submitted.originator)
-            }
-            Event::ProviderResponseUpdated(update) => {
-                self.agent_id_for_originator(&update.originator)
-            }
+            Event::SessionPromptCreated(prompt) => prompt
+                .target_agent_id
+                .clone()
+                .unwrap_or_else(|| self.agent_id_for_originator(&prompt.originator)),
+            Event::SessionCompactionRequested(request) => request
+                .prompt
+                .target_agent_id
+                .clone()
+                .or_else(|| {
+                    self.prompt_agents
+                        .get(request.prompt.session_prompt_id.as_str())
+                        .cloned()
+                })
+                .unwrap_or_else(|| self.agent_id_for_originator(&request.prompt.originator)),
+            Event::SessionPromptTerminated(terminated) => self.agent_id_for_prompt(
+                terminated.session_prompt_id.as_str(),
+                &terminated.originator,
+            ),
+            Event::ProviderPromptSubmitted(submitted) => self
+                .prompt_agents
+                .get(submitted.session_prompt_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| self.agent_id_for_originator(&submitted.originator)),
+            Event::ProviderResponseUpdated(update) => self
+                .prompt_agents
+                .get(update.session_prompt_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| self.agent_id_for_originator(&update.originator)),
             Event::ProviderResponseFinished(finished) => {
-                self.agent_id_for_originator(&finished.originator)
+                finished.target_agent_id.clone().unwrap_or_else(|| {
+                    self.agent_id_for_prompt(
+                        finished.session_prompt_id.as_str(),
+                        &finished.originator,
+                    )
+                })
             }
-            Event::SessionCompactionStarted(started) => {
-                self.agent_id_for_originator(&started.originator)
-            }
-            Event::SessionCompactionFinished(finished) => {
-                self.agent_id_for_originator(&finished.originator)
-            }
-            Event::SessionCompacted(compacted) => {
-                self.agent_id_for_originator(&compacted.originator)
-            }
+            Event::SessionCompactionStarted(started) => started
+                .target_agent_id
+                .clone()
+                .unwrap_or_else(|| self.agent_id_for_originator(&started.originator)),
+            Event::SessionCompactionFinished(finished) => finished
+                .target_agent_id
+                .clone()
+                .unwrap_or_else(|| self.agent_id_for_originator(&finished.originator)),
+            Event::SessionCompacted(compacted) => compacted
+                .target_agent_id
+                .clone()
+                .unwrap_or_else(|| self.agent_id_for_originator(&compacted.originator)),
             _ => self
                 .current_agent_id
                 .clone()
                 .unwrap_or_else(|| MAIN_AGENT_ID.to_owned()),
         }
+    }
+
+    fn agent_id_for_prompt(
+        &self,
+        session_prompt_id: &str,
+        originator: &tau_proto::PromptOriginator,
+    ) -> String {
+        self.prompt_agents
+            .get(session_prompt_id)
+            .cloned()
+            .unwrap_or_else(|| self.agent_id_for_originator(originator))
     }
 
     fn agent_id_for_originator(&self, originator: &tau_proto::PromptOriginator) -> String {
@@ -2650,6 +2831,17 @@ impl EventRenderer {
             .front()
             .is_some_and(|(_, text)| text == &prompt.text)
         {
+            let Some((queued_id, text)) = self.queued_user_blocks.pop_front() else {
+                return;
+            };
+            self.handle.remove_block(queued_id);
+            self.reset_main_tool_usage();
+            let id = self.handle.print_output(
+                "user-prompt",
+                self.submitted_prompt_block(names::USER_PROMPT, text),
+            );
+            self.last_user_block = Some((id, prompt.text.clone()));
+            self.handle.redraw();
             return;
         }
         self.reset_main_tool_usage();
@@ -4057,11 +4249,7 @@ impl EventRenderer {
             Some(&selected.role),
         );
         self.handle.set_left_prompt(prompt);
-        self.handle
-            .set_input_placeholder(crate::theme::prompt_input_placeholder(
-                &self.theme,
-                Some(&selected.role),
-            ));
+        self.refresh_prompt_placeholder();
         self.handle.redraw();
         self.current_context_window = selected.context_window;
         self.render_model_status();

@@ -333,7 +333,7 @@ fn full_render_then_diff_render() {
 fn empty_input_renders_placeholder_without_moving_cursor() {
     let mut st = SharedState::new(80, 24, "> ".into());
     st.input_placeholder = Span::new(
-        "Write message to the engineer...",
+        "Write a message to engineer...",
         Style::default().fg(Color::DarkGrey).italic(),
     )
     .into();
@@ -342,7 +342,7 @@ fn empty_input_renders_placeholder_without_moving_cursor() {
 
     assert_eq!(
         line_text(&layout.all_lines[0]),
-        "> Write message to the engineer..."
+        "> Write a message to engineer..."
     );
     assert_eq!(layout.cursor_row, 0);
     assert_eq!(layout.cursor_col, 2);

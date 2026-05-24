@@ -21,6 +21,7 @@ fn published_line_preserves_enriched_token_usage() {
     let model: ModelId = "openai/gpt-5".parse().expect("model id");
     let event = Event::ProviderResponseFinished(ProviderResponseFinished {
         session_prompt_id: SessionPromptId::from("sp-0"),
+        target_agent_id: None,
         output_items: Vec::new(),
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         originator: PromptOriginator::User,

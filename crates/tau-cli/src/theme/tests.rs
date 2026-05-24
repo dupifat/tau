@@ -73,17 +73,25 @@ fn prompt_input_placeholder_keeps_placeholder_style_around_role_style() {
             "##,
     )
     .expect("test theme parses");
-    let prompt = prompt_input_placeholder(&theme, Some("engineer"));
+    let prompt = prompt_input_placeholder(&theme, Some("engineer"), None);
     let spans = prompt.spans();
 
     assert_eq!(spans.len(), 3);
-    assert_eq!(spans[0].text, "Write message to the ");
+    assert_eq!(spans[0].text, "Write a message to start a new ");
     assert_eq!(spans[0].style.fg, Some(tau_cli_term::Color::DarkGrey));
     assert!(spans[0].style.italic);
     assert_eq!(spans[1].text, "engineer");
     assert_eq!(spans[1].style.fg, Some(tau_cli_term::Color::Cyan));
     assert!(spans[1].style.bold);
     assert!(spans[1].style.italic);
+    assert_eq!(spans[2].text, " agent...");
+    assert_eq!(spans[2].style.fg, Some(tau_cli_term::Color::DarkGrey));
+    assert!(spans[2].style.italic);
+
+    let prompt = prompt_input_placeholder(&theme, Some("engineer"), Some("engineer_abc"));
+    let spans = prompt.spans();
+    assert_eq!(spans[0].text, "Write a message to ");
+    assert_eq!(spans[1].text, "engineer_abc");
     assert_eq!(spans[2].text, "...");
     assert_eq!(spans[2].style.fg, Some(tau_cli_term::Color::DarkGrey));
     assert!(spans[2].style.italic);

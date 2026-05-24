@@ -562,6 +562,7 @@ fn assemble_conversation_includes_tool_error_details() {
     tree.apply_event(&Event::ProviderResponseFinished(
         tau_proto::ProviderResponseFinished {
             session_prompt_id: "sp-tools".into(),
+            target_agent_id: None,
             output_items: vec![ContextItem::ToolCall(tau_proto::ToolCallItem {
                 call_id: "call-1".into(),
                 name: tau_proto::ToolName::new("shell"),
@@ -651,6 +652,7 @@ fn assemble_conversation_preserves_agent_phase() {
     tree.apply_event(&Event::ProviderResponseFinished(
         tau_proto::ProviderResponseFinished {
             session_prompt_id: "sp-1".into(),
+            target_agent_id: None,
             output_items: vec![ContextItem::Message(MessageItem {
                 role: ContextRole::Assistant,
                 content: vec![ContentPart::Text {
@@ -694,6 +696,7 @@ fn assemble_conversation_restarts_from_compacted_summary() {
     tree.apply_event(&Event::ProviderResponseFinished(
         tau_proto::ProviderResponseFinished {
             session_prompt_id: "sp-1".into(),
+            target_agent_id: None,
             output_items: vec![assistant_message("first answer")],
             stop_reason: tau_proto::ProviderStopReason::EndTurn,
             originator: tau_proto::PromptOriginator::User,
@@ -705,6 +708,7 @@ fn assemble_conversation_restarts_from_compacted_summary() {
     ));
     tree.apply_event(&Event::SessionCompacted(tau_proto::SessionCompacted {
             session_id: "session-1".into(),
+            target_agent_id: None,
             originator: tau_proto::PromptOriginator::User,
             original_input_tokens: None,
             compacted_input_tokens: None,
@@ -770,6 +774,7 @@ fn assemble_conversation_replays_reasoning_items_before_text() {
     tree.apply_event(&Event::ProviderResponseFinished(
         tau_proto::ProviderResponseFinished {
             session_prompt_id: "sp-1".into(),
+            target_agent_id: None,
             output_items: vec![
                 ContextItem::Reasoning(serde_json::from_str(&blob).expect("opaque reasoning item")),
                 assistant_message("here's what I found"),
@@ -819,6 +824,7 @@ fn assemble_conversation_persists_reasoning_on_tool_only_turn() {
     tree.apply_event(&Event::ProviderResponseFinished(
         tau_proto::ProviderResponseFinished {
             session_prompt_id: "sp-1".into(),
+            target_agent_id: None,
             output_items: vec![ContextItem::Reasoning(
                 serde_json::from_str(&blob).expect("opaque reasoning item"),
             )],

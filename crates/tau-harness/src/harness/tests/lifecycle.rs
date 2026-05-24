@@ -433,6 +433,7 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
 
     h.handle_provider_response_finished(ProviderResponseFinished {
         session_prompt_id: "sp-staged-tools".into(),
+        target_agent_id: None,
         output_items: vec![
             ContextItem::ToolCall(ToolCallItem {
                 call_id: "call-blocking".into(),
@@ -1029,6 +1030,7 @@ fn old_prompt_call_gets_tau_internal_unavailable_error() {
 
     h.handle_provider_response_finished(ProviderResponseFinished {
         session_prompt_id: spid,
+        target_agent_id: None,
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "c1".into(),
             name: ToolName::new("shell"),
@@ -1228,6 +1230,7 @@ fn unavailable_tool_is_reported_without_crashing() {
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
         session_prompt_id: "sp-x".into(),
+        target_agent_id: None,
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "c1".into(),
             name: ToolName::new("shell"),
@@ -1286,6 +1289,7 @@ fn disconnected_tool_completes_pending_call() {
         &cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
             session_prompt_id: "sp-main".into(),
+            target_agent_id: None,
             output_items: vec![ContextItem::ToolCall(ToolCallItem {
                 call_id: call_id.clone(),
                 name: tool_name.clone(),
@@ -1430,6 +1434,7 @@ fn disconnected_tool_is_removed_cleanly() {
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
         session_prompt_id: "sp-x".into(),
+        target_agent_id: None,
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "c1".into(),
             name: ToolName::new("shell"),
@@ -1614,6 +1619,7 @@ fn role_disabled_tool_is_reported_without_dispatch() {
 
     h.handle_provider_response_finished(ProviderResponseFinished {
         session_prompt_id: "sp-x".into(),
+        target_agent_id: None,
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "c1".into(),
             name: tau_proto::ToolName::new("shell"),
@@ -1829,6 +1835,7 @@ fn unavailable_tool_name_does_not_panic_and_surfaces_error() {
 
     let response = ProviderResponseFinished {
         session_prompt_id: "sp-x".into(),
+        target_agent_id: None,
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "c1".into(),
             name: ToolName::new("not_a_tool"),
@@ -1940,6 +1947,7 @@ fn empty_tool_call_id_rejects_response_before_commit() {
 
     let response = ProviderResponseFinished {
         session_prompt_id: "sp-x".into(),
+        target_agent_id: None,
         output_items: vec![
             ContextItem::ToolCall(ToolCallItem {
                 call_id: "".into(),
@@ -2016,6 +2024,7 @@ fn cancel_after_agent_thinking_terminalizes_tool_calls_before_dispatch() {
 
     h.handle_provider_response_finished(ProviderResponseFinished {
         session_prompt_id: "sp-x".into(),
+        target_agent_id: None,
         output_items: vec![
             ContextItem::ToolCall(ToolCallItem {
                 call_id: "c1".into(),
@@ -2073,6 +2082,7 @@ fn cancel_during_tools_terminalizes_inflight_and_queued_calls() {
     h.prompt_conversations.insert("sp-x".into(), cid.clone());
     h.handle_provider_response_finished(ProviderResponseFinished {
         session_prompt_id: "sp-x".into(),
+        target_agent_id: None,
         output_items: vec![
             ContextItem::ToolCall(ToolCallItem {
                 call_id: "c1".into(),

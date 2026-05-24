@@ -7,16 +7,17 @@ use tau_cli_term_raw::{Color, Term};
 use tau_proto::{
     AgentMessage, CborValue, ContentPart, ContextItem, ContextRole, Effort, Event,
     ExtAgentsMdAvailable, ExtensionReady, HarnessContextUsageChanged, HarnessRoleInfo,
-    HarnessRoleSelected, HarnessRolesAvailable, MessageItem, ProviderResponseFinished,
-    ProviderResponseUpdated, ProviderStopReason, ServiceTier, SessionPromptCreated,
-    SessionPromptQueued, SessionPromptSteered, SessionPromptTerminated,
-    SessionPromptTerminationReason, SessionStartReason, SessionStarted, ThinkingSummary,
-    ToolBackgroundResult, ToolCallItem, ToolCancelled, ToolError, ToolResult, UiPromptSubmitted,
-    UiRoleUpdateAction, Verbosity,
+    HarnessRoleSelected, HarnessRolesAvailable, MessageItem, ProviderPromptSubmitted,
+    ProviderResponseFinished, ProviderResponseUpdated, ProviderStopReason, ServiceTier,
+    SessionCompactionRequested, SessionPromptCreated, SessionPromptQueued, SessionPromptSteered,
+    SessionPromptTerminated, SessionPromptTerminationReason, SessionStartReason, SessionStarted,
+    ThinkingSummary, ToolBackgroundResult, ToolCallItem, ToolCancelled, ToolError, ToolResult,
+    UiPromptSubmitted, UiRoleUpdateAction, Verbosity,
 };
 
 use super::chat::{
-    DraftSlot, invalidate_pending_draft, is_local_slash_command, should_send_draft_snapshot,
+    DraftSlot, invalidate_pending_draft, is_local_slash_command, role_cycling_enabled,
+    should_send_draft_snapshot,
 };
 use super::event_renderer::EventRenderer;
 use super::tool_render::{
@@ -288,6 +289,7 @@ fn session_prompt_created(session_prompt_id: &str, session_id: &str) -> SessionP
     SessionPromptCreated {
         session_prompt_id: session_prompt_id.into(),
         session_id: session_id.into(),
+        target_agent_id: None,
         system_prompt: String::new(),
         context_items: Vec::new(),
         tools: Vec::new(),
@@ -300,6 +302,267 @@ fn session_prompt_created(session_prompt_id: &str, session_id: &str) -> SessionP
         ctx_id: None,
         previous_response_candidate: None,
     }
+}
+
+#[test]
+fn renderer_starts_without_selected_or_default_agent() {
+    // Regression: the UI opens in the start-new-agent state instead of
+    // preselecting a synthetic `main` agent.
+    let (_term, handle, _vt) = setup(80, 24);
+    let renderer = EventRenderer::new(
+        handle,
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    assert_eq!(
+        *renderer
+            .current_agent_state()
+            .lock()
+            .expect("current agent"),
+        None
+    );
+    assert!(
+        renderer
+            .known_agents()
+            .lock()
+            .expect("known agents")
+            .is_empty()
+    );
+    assert!(
+        renderer
+            .live_agents()
+            .lock()
+            .expect("live agents")
+            .is_empty()
+    );
+}
+
+#[test]
+fn first_agent_prompt_created_selects_new_agent_and_new_session_clears_it() {
+    // Regression: the first prompt created for the default conversation carries
+    // the new agent id; seeing it from the empty state selects that agent. A
+    // later `/new` session returns to the empty start-new-agent state.
+    let (_term, handle, _vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle,
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: "s1".into(),
+        reason: SessionStartReason::Initial,
+    }));
+    assert_eq!(
+        *renderer
+            .current_agent_state()
+            .lock()
+            .expect("current agent"),
+        None
+    );
+
+    renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
+        target_agent_id: Some("engineer_abc12345".to_owned()),
+        ..session_prompt_created("sp1", "s1")
+    }));
+    assert_eq!(
+        renderer
+            .current_agent_state()
+            .lock()
+            .expect("current agent")
+            .as_deref(),
+        Some("engineer_abc12345")
+    );
+
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: "s2".into(),
+        reason: SessionStartReason::New,
+    }));
+    assert_eq!(
+        *renderer
+            .current_agent_state()
+            .lock()
+            .expect("current agent"),
+        None
+    );
+}
+
+#[test]
+fn extension_prompt_with_target_does_not_select_from_empty_state() {
+    // Regression: extension side prompts now carry target_agent_id for routing,
+    // but `/agent none`/startup must stay on the no-agent screen until the user
+    // explicitly selects a transcript.
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: "s1".into(),
+        reason: SessionStartReason::Initial,
+    }));
+
+    let originator = tau_proto::PromptOriginator::Extension {
+        name: "core-subagents".into(),
+        query_id: "q-worker".to_owned(),
+    };
+    renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
+        target_agent_id: Some("worker-1".to_owned()),
+        originator: originator.clone(),
+        ..session_prompt_created("worker-sp", "s1")
+    }));
+
+    assert_eq!(
+        *renderer
+            .current_agent_state()
+            .lock()
+            .expect("current agent"),
+        None
+    );
+
+    renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        target_agent_id: Some("worker-1".to_owned()),
+        originator,
+        ..finished_response("worker-sp", vec![assistant_message_item("worker answer")])
+    }));
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "worker answer"));
+    assert_eq!(
+        *renderer
+            .current_agent_state()
+            .lock()
+            .expect("current agent"),
+        None
+    );
+
+    renderer.switch_agent("worker-1".to_owned());
+    sync(&handle);
+    assert!(vt.screen_contains(80, "worker answer"));
+    assert_eq!(
+        renderer
+            .current_agent_state()
+            .lock()
+            .expect("current agent")
+            .as_deref(),
+        Some("worker-1")
+    );
+}
+
+#[test]
+fn replayed_durable_first_user_prompt_selects_live_agent() {
+    // Regression: cold replay skips transient SessionPromptCreated events. A
+    // durable user prompt with a target must still select a live agent so the
+    // next Enter press sends a targeted follow-up instead of being rejected as
+    // "not live".
+    let (_term, handle, _vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle,
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: "s1".into(),
+        reason: SessionStartReason::Initial,
+    }));
+    renderer.handle(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "hello".to_owned(),
+        target_agent_id: Some("engineer_abc12345".to_owned()),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }));
+
+    assert_eq!(
+        renderer
+            .current_agent_state()
+            .lock()
+            .expect("current agent")
+            .as_deref(),
+        Some("engineer_abc12345")
+    );
+    assert!(
+        renderer
+            .live_agents()
+            .lock()
+            .expect("live agents")
+            .contains("engineer_abc12345")
+    );
+}
+
+#[test]
+fn compaction_provider_lifecycle_routes_to_selected_agent() {
+    // Regression: a compaction summary is requested through an internal
+    // auto-compact side conversation, but its provider prompt lifecycle belongs
+    // to the selected user agent so hidden activity does not remain stuck.
+    let (_term, handle, _vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle,
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+    let in_progress = renderer.agent_in_progress_state();
+    let mut compaction_prompt = session_prompt_created("compact-sp", "s1");
+    compaction_prompt.target_agent_id = Some("engineer_abc12345".to_owned());
+    compaction_prompt.originator = tau_proto::PromptOriginator::Extension {
+        name: "harness".into(),
+        query_id: "auto-compact-default".to_owned(),
+    };
+
+    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "hello".to_owned(),
+        target_agent_id: Some("engineer_abc12345".to_owned()),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }));
+    renderer.handle(&Event::SessionCompactionRequested(
+        SessionCompactionRequested {
+            prompt: compaction_prompt,
+        },
+    ));
+    renderer.handle(&Event::ProviderPromptSubmitted(ProviderPromptSubmitted {
+        session_prompt_id: "compact-sp".into(),
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "harness".into(),
+            query_id: "auto-compact-default".to_owned(),
+        },
+    }));
+    assert!(in_progress.load(std::sync::atomic::Ordering::Relaxed));
+
+    renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        session_prompt_id: "compact-sp".into(),
+        target_agent_id: Some("engineer_abc12345".to_owned()),
+        output_items: vec![assistant_message_item("compacted")],
+        stop_reason: ProviderStopReason::EndTurn,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "harness".into(),
+            query_id: "auto-compact-default".to_owned(),
+        },
+        usage: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    }));
+    assert!(!in_progress.load(std::sync::atomic::Ordering::Relaxed));
+}
+
+#[test]
+fn role_cycling_only_enabled_without_selected_agent() {
+    // Regression: role cycling changes the role used for the next new agent,
+    // so once an agent is selected it must stop mutating the live agent's role.
+    let current_agent_state = Arc::new(Mutex::new(None));
+    assert!(role_cycling_enabled(&current_agent_state));
+
+    *current_agent_state.lock().expect("current agent") = Some("engineer_abc12345".to_owned());
+    assert!(!role_cycling_enabled(&current_agent_state));
+
+    *current_agent_state.lock().expect("current agent") = None;
+    assert!(role_cycling_enabled(&current_agent_state));
 }
 
 fn tool_started(call_id: &str, tool_name: &str, arguments: CborValue) -> Event {
@@ -325,6 +588,7 @@ fn finished_response(
     };
     ProviderResponseFinished {
         session_prompt_id: session_prompt_id.into(),
+        target_agent_id: None,
         output_items,
         stop_reason,
         originator: tau_proto::PromptOriginator::User,
@@ -337,6 +601,9 @@ fn finished_response(
 
 #[test]
 fn first_agent_event_does_not_force_full_redraw() {
+    // Regression: starting from the initial start-new-agent screen only changes
+    // the input target. The already-visible empty transcript becomes the new
+    // agent transcript in-place instead of replacing the whole output snapshot.
     let (_term, handle, _vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -347,11 +614,117 @@ fn first_agent_event_does_not_force_full_redraw() {
         session_id: "s1".into(),
         reason: tau_proto::SessionStartReason::Initial,
     }));
-    renderer.handle(&Event::SessionPromptCreated(session_prompt_created(
-        "sp1", "s1",
-    )));
+    renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
+        target_agent_id: Some("engineer_abc12345".to_owned()),
+        ..session_prompt_created("sp1", "s1")
+    }));
     sync(&handle);
     assert_eq!(handle.full_render_count(), 0);
+}
+
+#[test]
+fn new_agent_after_new_session_does_not_force_full_redraw() {
+    // `/new` intentionally moves to the start-new-agent screen and clears the
+    // old transcript. Starting the next agent from that already-visible empty
+    // screen should only update target/status metadata, not redraw scrollback.
+    let (_term, handle, _vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: "s1".into(),
+        reason: SessionStartReason::Initial,
+    }));
+    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "first".into(),
+        target_agent_id: Some("engineer_one".into()),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }));
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: "s2".into(),
+        reason: SessionStartReason::New,
+    }));
+    sync(&handle);
+    let full_render_count = handle.full_render_count();
+
+    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        session_id: "s2".into(),
+        text: "second".into(),
+        target_agent_id: Some("engineer_two".into()),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }));
+    sync(&handle);
+
+    assert_eq!(handle.full_render_count(), full_render_count);
+}
+
+#[test]
+fn selecting_same_agent_does_not_force_full_redraw() {
+    // Regression: selecting the already-displayed target agent is a pure no-op
+    // for transcript rendering.
+    let (_term, handle, _vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+    renderer.switch_agent("worker-1".to_owned());
+    sync(&handle);
+    let full_render_count = handle.full_render_count();
+
+    renderer.switch_agent("worker-1".to_owned());
+    sync(&handle);
+
+    assert_eq!(handle.full_render_count(), full_render_count);
+}
+
+#[test]
+fn switching_between_displayed_agents_restores_transcripts() {
+    // The no-redraw fast path must not hide real transcript switches: moving
+    // between two agents still swaps the output snapshot and restores each
+    // agent's durable scrollback.
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+    renderer.switch_agent("worker-1".to_owned());
+    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "worker one transcript".into(),
+        target_agent_id: Some("worker-1".to_owned()),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }));
+    renderer.switch_agent("worker-2".to_owned());
+    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "worker two transcript".into(),
+        target_agent_id: Some("worker-2".to_owned()),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "worker two transcript"));
+    assert!(!vt.screen_contains(80, "worker one transcript"));
+    let full_render_count = handle.full_render_count();
+
+    renderer.switch_agent("worker-1".to_owned());
+    sync(&handle);
+
+    assert!(vt.screen_contains(80, "worker one transcript"));
+    assert!(!vt.screen_contains(80, "worker two transcript"));
+    assert!(handle.full_render_count() > full_render_count);
 }
 
 #[test]
@@ -385,6 +758,40 @@ fn hidden_agent_events_do_not_force_visible_full_redraw() {
     }));
     sync(&handle);
     assert_eq!(handle.full_render_count(), full_render_count);
+}
+
+#[test]
+fn clearing_selected_agent_preserves_previous_transcript() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        query_id: "q-worker".to_owned(),
+        agent_id: "worker-1".to_owned(),
+    }));
+    renderer.switch_agent("worker-1".to_owned());
+    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "worker transcript survives".into(),
+        target_agent_id: Some("worker-1".to_owned()),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }));
+    renderer.clear_selected_agent();
+    renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        query_id: "q-helper".to_owned(),
+        agent_id: "helper-1".to_owned(),
+    }));
+    renderer.switch_agent("helper-1".to_owned());
+    renderer.switch_agent("worker-1".to_owned());
+    sync(&handle);
+
+    assert!(vt.screen_contains(80, "worker transcript survives"));
 }
 
 #[test]
@@ -777,6 +1184,50 @@ fn agent_switch_preserves_separate_transcripts() {
     renderer.switch_agent("main".to_owned());
     sync(&handle);
     assert!(!vt.screen_contains(80, "worker answer"));
+}
+
+#[test]
+fn deselect_then_first_prompt_for_new_agent_does_not_inherit_prior_transcript() {
+    // Regression: `/agent none` must restore an empty no-agent screen. The
+    // first prompt that selects a new agent from that state should render into
+    // that agent's own fresh transcript rather than appending to the previously
+    // selected agent's terminal output.
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
+        session_id: "s1".into(),
+        reason: tau_proto::SessionStartReason::Initial,
+    }));
+    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "agent one prompt".to_owned(),
+        target_agent_id: Some("agent-one".to_owned()),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "agent one prompt"));
+
+    renderer.clear_selected_agent();
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "agent one prompt"));
+
+    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "agent two prompt".to_owned(),
+        target_agent_id: Some("agent-two".to_owned()),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "agent two prompt"));
+    assert!(!vt.screen_contains(80, "agent one prompt"));
 }
 
 #[test]
@@ -1193,11 +1644,74 @@ fn model_status_uses_symbol_prefixed_chips() {
         .into_iter()
         .find(|row| row.contains("+engineer"))
         .expect("status row");
-    assert!(status_row.starts_with("+engineer ~high @tau-agent-test"));
+    assert!(status_row.starts_with("@tau-agent-test +engineer ~high"));
     assert!(status_row.ends_with("#12k/200k"));
     assert!(!vt.screen_contains(80, "=test/model"));
     assert!(!vt.screen_contains(80, "v=high"));
     assert!(!vt.screen_contains(80, "ctx:"));
+}
+
+#[test]
+fn status_identity_matches_no_agent_placeholder_semantics() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
+        model: Some("test/model".into()),
+        context_window: None,
+        role: "engineer".into(),
+        baseline_params: None,
+        model_params: tau_proto::ModelParams::default(),
+    }));
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: "s1".into(),
+        reason: SessionStartReason::New,
+    }));
+    sync(&handle);
+
+    // In the no-agent/start-new-agent state, the status bar mirrors the prompt
+    // placeholder by showing the selected role immediately after the session.
+    let status_row = vt
+        .screen_text(100)
+        .into_iter()
+        .find(|row| row.contains("@s1"))
+        .expect("status row before agent selection");
+    assert!(status_row.starts_with("@s1 +engineer"));
+    assert!(!status_row.contains("&engineer_abc"));
+
+    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "hello".into(),
+        target_agent_id: Some("engineer_abc".into()),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }));
+    sync(&handle);
+
+    // Once an agent is selected, the same slot switches from role to agent id.
+    let status_row = vt
+        .screen_text(100)
+        .into_iter()
+        .find(|row| row.contains("@s1"))
+        .expect("status row after agent selection");
+    assert!(status_row.starts_with("@s1 &engineer_abc"));
+    assert!(!status_row.contains("+engineer"));
+
+    renderer.clear_selected_agent();
+    sync(&handle);
+
+    let status_row = vt
+        .screen_text(100)
+        .into_iter()
+        .find(|row| row.contains("@s1"))
+        .expect("status row after clearing agent selection");
+    assert!(status_row.starts_with("@s1 +engineer"));
+    assert!(!status_row.contains("&engineer_abc"));
 }
 
 #[test]
@@ -1230,6 +1744,7 @@ fn model_status_shows_main_tool_usage_before_context() {
     // side-conversation tool calls stay rolled up under their delegate.
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
         session_prompt_id: "side-sp".into(),
+        target_agent_id: None,
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "side-call".into(),
             name: tau_proto::ToolName::new("grep"),
@@ -1666,7 +2181,7 @@ fn role_default_knobs_are_hidden_and_overrides_follow_role() {
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "+engineer @s2"));
+    assert!(vt.screen_contains(80, "@s2 +engineer"));
     assert!(!vt.screen_contains(80, "^medium"));
     assert!(!vt.screen_contains(80, "~medium"));
 
@@ -1689,7 +2204,7 @@ fn role_default_knobs_are_hidden_and_overrides_follow_role() {
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "+engineer ~high @s2"));
+    assert!(vt.screen_contains(80, "@s2 +engineer ~high"));
 }
 
 #[test]
@@ -1736,7 +2251,7 @@ fn role_state_overrides_are_compared_to_role_baseline() {
     }));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "+engineer ^low ~high !off @s3"));
+    assert!(vt.screen_contains(80, "@s3 +engineer ^low ~high !off"));
 }
 
 #[test]
@@ -2149,10 +2664,9 @@ fn queued_prompt_then_late_ui_submit_advances_without_duplicate() {
         tau_themes::Theme::builtin(),
     );
 
-    // Regression: some paths can observe the durable queued event before
-    // a local UI echo. The late echo must not add a second copy, and the
-    // later prompt creation must promote the queued marker to one normal
-    // transcript item.
+    // Regression: replay/late-subscribe paths can observe a queued event before
+    // the matching UI submit. The submit must promote the queued marker to one
+    // normal transcript item rather than leaving stale "(queued)" text behind.
     renderer.handle(&Event::SessionPromptQueued(SessionPromptQueued {
         session_id: "s1".into(),
         text: "late echo".into(),
@@ -2167,22 +2681,6 @@ fn queued_prompt_then_late_ui_submit_advances_without_duplicate() {
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
     }));
-    sync(&handle);
-    assert!(vt.screen_contains(80, "late echo (queued)"));
-    assert_eq!(
-        vt.screen_text(80)
-            .iter()
-            .filter(|row| row.contains("late echo"))
-            .count(),
-        1,
-        "late UI echo should not duplicate queued prompt, got: {:?}",
-        vt.screen_text(80)
-    );
-
-    renderer.handle(&Event::SessionPromptCreated(session_prompt_created(
-        "sp-queued",
-        "s1",
-    )));
     sync(&handle);
     assert!(!vt.screen_contains(80, "late echo (queued)"));
     assert!(vt.screen_contains(80, "> late echo"));
@@ -2455,6 +2953,7 @@ fn compaction_lifecycle_renders_status_line() {
     renderer.handle(&Event::SessionCompactionStarted(
         tau_proto::SessionCompactionStarted {
             session_id: "s1".into(),
+            target_agent_id: None,
             originator: tau_proto::PromptOriginator::User,
             original_input_tokens: Some(226_200),
         },
@@ -2464,6 +2963,7 @@ fn compaction_lifecycle_renders_status_line() {
 
     renderer.handle(&Event::SessionCompacted(tau_proto::SessionCompacted {
         session_id: "s1".into(),
+        target_agent_id: None,
         originator: tau_proto::PromptOriginator::User,
         original_input_tokens: Some(226_200),
         compacted_input_tokens: Some(4_500),
@@ -2476,6 +2976,7 @@ fn compaction_lifecycle_renders_status_line() {
     renderer.handle(&Event::SessionCompactionFinished(
         tau_proto::SessionCompactionFinished {
             session_id: "s1".into(),
+            target_agent_id: None,
             originator: tau_proto::PromptOriginator::User,
             original_input_tokens: Some(226_200),
             compacted_input_tokens: Some(4_500),
@@ -2547,6 +3048,7 @@ fn replayed_compacted_event_renders_success_status() {
 
     renderer.handle(&Event::SessionCompacted(tau_proto::SessionCompacted {
         session_id: "s1".into(),
+        target_agent_id: None,
         originator: tau_proto::PromptOriginator::User,
         original_input_tokens: Some(226_200),
         compacted_input_tokens: Some(4_500),
@@ -2641,12 +3143,14 @@ fn side_conversation_compaction_is_hidden_from_main_transcript() {
     renderer.handle(&Event::SessionCompactionStarted(
         tau_proto::SessionCompactionStarted {
             session_id: "s1".into(),
+            target_agent_id: None,
             originator: originator.clone(),
             original_input_tokens: Some(10_000),
         },
     ));
     renderer.handle(&Event::SessionCompacted(tau_proto::SessionCompacted {
         session_id: "s1".into(),
+        target_agent_id: None,
         originator: originator.clone(),
         original_input_tokens: Some(10_000),
         compacted_input_tokens: Some(1_000),
@@ -2655,6 +3159,7 @@ fn side_conversation_compaction_is_hidden_from_main_transcript() {
     renderer.handle(&Event::SessionCompactionFinished(
         tau_proto::SessionCompactionFinished {
             session_id: "s1".into(),
+            target_agent_id: None,
             originator,
             original_input_tokens: Some(10_000),
             compacted_input_tokens: Some(1_000),
@@ -2679,6 +3184,7 @@ fn failed_compaction_renders_error_status() {
     renderer.handle(&Event::SessionCompactionStarted(
         tau_proto::SessionCompactionStarted {
             session_id: "s1".into(),
+            target_agent_id: None,
             originator: tau_proto::PromptOriginator::User,
             original_input_tokens: Some(226_200),
         },
@@ -2686,6 +3192,7 @@ fn failed_compaction_renders_error_status() {
     renderer.handle(&Event::SessionCompactionFinished(
         tau_proto::SessionCompactionFinished {
             session_id: "s1".into(),
+            target_agent_id: None,
             originator: tau_proto::PromptOriginator::User,
             original_input_tokens: Some(226_200),
             compacted_input_tokens: None,

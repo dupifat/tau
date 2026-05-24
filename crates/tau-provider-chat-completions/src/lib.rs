@@ -649,6 +649,7 @@ fn finish_success(
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
         session_prompt_id: session_prompt_id.clone(),
+        target_agent_id: None,
         output_items: state.output_items(),
         stop_reason: state.stop_reason,
         originator: prompt.originator.clone(),
@@ -667,6 +668,7 @@ fn finish_error(
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
         session_prompt_id: session_prompt_id.clone(),
+        target_agent_id: None,
         output_items: vec![assistant_text_item(format!("LLM error: {error}"))],
         stop_reason: ProviderStopReason::Error,
         originator: prompt.originator.clone(),

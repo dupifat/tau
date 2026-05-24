@@ -37,20 +37,27 @@ pub(crate) fn active_prompt_marker(
 pub(crate) fn prompt_input_placeholder(
     theme: &tau_themes::Theme,
     role: Option<&str>,
+    current_agent_id: Option<&str>,
 ) -> tau_cli_term::StyledText {
     let role = role.unwrap_or("agent");
     let mut text = ThemedText::new();
     let placeholder_style = text.add_style(tau_themes::names::PROMPT_PLACEHOLDER);
     let role_style = text.add_style(tau_themes::names::STATUS_ROLE);
 
-    text.push_tree(SpanTree::span(
-        placeholder_style,
-        vec![
-            SpanTree::text("Write message to the "),
-            SpanTree::span(role_style, vec![SpanTree::text(role)]),
+    let parts = match current_agent_id {
+        Some(agent_id) => vec![
+            SpanTree::text("Write a message to "),
+            SpanTree::span(role_style, vec![SpanTree::text(agent_id)]),
             SpanTree::text("..."),
         ],
-    ));
+        None => vec![
+            SpanTree::text("Write a message to start a new "),
+            SpanTree::span(role_style, vec![SpanTree::text(role)]),
+            SpanTree::text(" agent..."),
+        ],
+    };
+
+    text.push_tree(SpanTree::span(placeholder_style, parts));
     tau_cli_term::resolve::themed_text(theme, &text)
 }
 

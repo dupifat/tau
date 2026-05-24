@@ -20,8 +20,9 @@ use tau_proto::{
     FrameReader, FrameWriter, Intercept, InterceptAction, InterceptReply, InterceptionPriority,
     Message, MessageItem, ProviderResponseFinished, ProviderResponseUpdated,
     SessionCompactionRequested, SessionPromptCreated, SessionPromptId, SessionPromptQueued,
-    StartAgentRequest, Subscribe, ToolCallId, ToolCallItem, ToolExecutionMode, ToolName,
-    ToolResult, ToolResultItem, ToolResultStatus, ToolSpec, UiPromptDraft, UiPromptSubmitted,
+    SessionPromptRecalled, SessionPromptSteered, StartAgentRequest, Subscribe, ToolCallId,
+    ToolCallItem, ToolExecutionMode, ToolName, ToolResult, ToolResultItem, ToolResultStatus,
+    ToolSpec, UiPromptDraft, UiPromptSubmitted,
 };
 use tau_session_inspect::{
     default_session_id, format_session_entry, open_session_store, policy_lines, session_lines,
@@ -281,6 +282,7 @@ fn seed_assistant_tool_round(
         cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
             session_prompt_id: "sp-seeded-tools".into(),
+            target_agent_id: None,
             output_items: calls
                 .iter()
                 .map(|(call_id, tool_name)| {

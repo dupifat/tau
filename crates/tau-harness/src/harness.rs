@@ -689,6 +689,7 @@ enum PendingCompactionResume {
 struct PendingCompaction {
     target_cid: ConversationId,
     session_id: SessionId,
+    target_agent_id: Option<String>,
     originator: PromptOriginator,
     original_input_tokens: Option<u64>,
     resume: PendingCompactionResume,
@@ -1137,6 +1138,7 @@ where
                 writer.write_frame(&Frame::Event(Event::ProviderResponseFinished(
                     ProviderResponseFinished {
                         session_prompt_id: spid,
+                        target_agent_id: None,
                         output_items: vec![ContextItem::Compaction(OpaqueProviderItem(
                             CborValue::Map(vec![
                                 (
@@ -1189,6 +1191,7 @@ where
                     writer.write_frame(&Frame::Event(Event::ProviderResponseFinished(
                         ProviderResponseFinished {
                             session_prompt_id: spid,
+                            target_agent_id: None,
                             output_items: vec![ContextItem::Message(MessageItem {
                                 role: ContextRole::Assistant,
                                 content: vec![ContentPart::Text { text }],
@@ -1252,6 +1255,7 @@ where
                     writer.write_frame(&Frame::Event(Event::ProviderResponseFinished(
                         ProviderResponseFinished {
                             session_prompt_id: spid,
+                            target_agent_id: None,
                             output_items: vec![ContextItem::ToolCall(tool_call)],
                             stop_reason: ProviderStopReason::ToolCalls,
                             originator: prompt.originator.clone(),
@@ -1488,6 +1492,8 @@ impl Harness {
         harness
             .store
             .record_session_meta(eager_session_id, std::env::current_dir().ok())?;
+
+        harness.rehydrate_default_agent_from_session();
 
         for command in extension_connects {
             harness.queue_extension_connect(command)?;
@@ -1731,6 +1737,8 @@ impl Harness {
             .store
             .record_session_meta(eager_session_id, std::env::current_dir().ok())?;
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "session metadata recorded");
+
+        harness.rehydrate_default_agent_from_session();
 
         for command in extension_connects {
             harness.queue_extension_connect(command)?;
@@ -2482,6 +2490,7 @@ impl Harness {
             Event::UiCompactRequest(req) => Some(req.session_id.clone()),
             Event::UiCancelPrompt(req) => Some(req.session_id.clone()),
             Event::SessionPromptQueued(queued) => Some(queued.session_id.clone()),
+            Event::SessionPromptRecalled(recalled) => Some(recalled.session_id.clone()),
             Event::SessionPromptSteered(steered) => Some(steered.session_id.clone()),
             Event::SessionStarted(started) => Some(started.session_id.clone()),
             Event::SessionShutdown(shutdown) => Some(shutdown.session_id.clone()),
@@ -3872,7 +3881,8 @@ impl Harness {
                 Event::SessionPromptQueued(SessionPromptQueued {
                     session_id: prompt.session_id.clone(),
                     text: prompt.text.clone(),
-                    target_agent_id: None,
+                    target_agent_id: self
+                        .target_agent_id_for_conversation(&self.default_conversation_id),
                     message_class: prompt.message_class,
                 }),
             );
@@ -3929,7 +3939,7 @@ impl Harness {
         req: tau_proto::UiCompactRequest,
     ) -> Result<bool, HarnessError> {
         self.publish_event(Some(client_id), Event::UiCompactRequest(req.clone()));
-        self.handle_compact_request(req.session_id);
+        self.handle_compact_request(req.session_id, req.target_agent_id.as_deref());
         Ok(true)
     }
 
@@ -5649,7 +5659,7 @@ impl Harness {
         true
     }
 
-    fn handle_compact_request(&mut self, session_id: SessionId) {
+    fn handle_compact_request(&mut self, session_id: SessionId, target_agent_id: Option<&str>) {
         if session_id != self.current_session_id {
             self.emit_info(&format!(
                 "cannot compact session `{session_id}` in this harness; active session is `{}`",
@@ -5657,7 +5667,10 @@ impl Harness {
             ));
             return;
         }
-        let cid = self.default_conversation_id.clone();
+        let Some(cid) = self.conversation_id_for_target_agent(target_agent_id) else {
+            self.emit_info("unknown agent for compaction");
+            return;
+        };
         if self.pending_compaction_targeted_at(&cid) {
             self.emit_info("compaction is already in progress");
             return;
@@ -6019,6 +6032,7 @@ impl Harness {
             PendingCompaction {
                 target_cid: target_cid.clone(),
                 session_id: target_session_id.clone(),
+                target_agent_id: self.target_agent_id_for_conversation(target_cid),
                 originator: target_originator.clone(),
                 original_input_tokens,
                 resume,
@@ -6031,6 +6045,7 @@ impl Harness {
             None,
             Event::SessionCompactionStarted(tau_proto::SessionCompactionStarted {
                 session_id: target_session_id,
+                target_agent_id: self.target_agent_id_for_conversation(target_cid),
                 originator: target_originator,
                 original_input_tokens,
             }),
@@ -6061,6 +6076,9 @@ impl Harness {
             return Ok(PromptSubmission::Rejected { reason });
         }
 
+        let cid = self.default_conversation_id.clone();
+        self.ensure_agent_id_for_conversation(&cid);
+
         // A user prompt outranks any best-effort side conversation
         // (idle-summary etc.). The agent processes prompts on a
         // single thread, so an in-flight side query stuck in a
@@ -6069,7 +6087,6 @@ impl Harness {
         // dispatch second.
         self.preempt_blocking_ext_side_conversations(&session_id);
 
-        let cid = self.default_conversation_id.clone();
         if self.dispatch_blocked_for(&cid) || !self.session_initialized(&session_id) {
             self.conversations
                 .get_mut(&cid)
@@ -6384,6 +6401,9 @@ impl Harness {
         );
 
         self.current_session_id = new_session_id.clone();
+        if matches!(reason, tau_proto::SessionStartReason::Resume) {
+            self.rehydrate_default_agent_from_session();
+        }
         self.publish_delegate_roles_context();
 
         // Record cwd + acquire flock on the new session dir before
@@ -6987,6 +7007,44 @@ impl Harness {
         self.conversations.remove(cid)
     }
 
+    fn rehydrate_default_agent_from_session(&mut self) {
+        let Ok(events) = self.store.session_events(self.current_session_id.as_str()) else {
+            return;
+        };
+        let target_agent_id = events
+            .iter()
+            .filter_map(|entry| match &entry.event {
+                Event::UiPromptSubmitted(prompt) if prompt.originator.is_user() => {
+                    prompt.target_agent_id.clone()
+                }
+                Event::SessionPromptCreated(prompt) if prompt.originator.is_user() => {
+                    prompt.target_agent_id.clone()
+                }
+                Event::ProviderResponseFinished(finished) if finished.originator.is_user() => {
+                    finished.target_agent_id.clone()
+                }
+                Event::SessionCompactionStarted(started) if started.originator.is_user() => {
+                    started.target_agent_id.clone()
+                }
+                Event::SessionCompactionFinished(finished) if finished.originator.is_user() => {
+                    finished.target_agent_id.clone()
+                }
+                Event::SessionCompacted(compacted) if compacted.originator.is_user() => {
+                    compacted.target_agent_id.clone()
+                }
+                _ => None,
+            })
+            .last();
+        let Some(agent_id) = target_agent_id else {
+            return;
+        };
+        if let Some(conv) = self.conversations.get_mut(&self.default_conversation_id) {
+            conv.agent_id = Some(agent_id.clone());
+        }
+        self.agent_conversations
+            .insert(agent_id, self.default_conversation_id.clone());
+    }
+
     pub(crate) fn ensure_agent_id_for_conversation(
         &mut self,
         cid: &ConversationId,
@@ -7206,9 +7264,17 @@ impl Harness {
                 },
             );
         }
+        let target_agent_id = if is_compaction_request {
+            self.pending_compactions
+                .get(cid)
+                .and_then(|pending| pending.target_agent_id.clone())
+        } else {
+            self.target_agent_id_for_conversation(cid)
+        };
         let prompt = SessionPromptCreated {
             session_prompt_id: session_prompt_id.clone(),
             session_id,
+            target_agent_id,
             system_prompt,
             context_items,
             tools,
@@ -7556,7 +7622,7 @@ impl Harness {
     fn finish_pending_compaction(
         &mut self,
         summary_cid: ConversationId,
-        response: ProviderResponseFinished,
+        mut response: ProviderResponseFinished,
         source: Option<&str>,
     ) -> Result<(), HarnessError> {
         let requested_tool_calls = response_requests_tool_calls(&response);
@@ -7566,6 +7632,7 @@ impl Harness {
             return Ok(());
         };
 
+        response.target_agent_id = pending.target_agent_id.clone();
         self.publish_for_conversation_from(
             &summary_cid,
             source,
@@ -7588,6 +7655,7 @@ impl Harness {
                 None,
                 Event::SessionCompactionFinished(tau_proto::SessionCompactionFinished {
                     session_id: pending.session_id,
+                    target_agent_id: pending.target_agent_id,
                     originator: pending.originator,
                     original_input_tokens: pending.original_input_tokens,
                     compacted_input_tokens: None,
@@ -7626,6 +7694,7 @@ impl Harness {
                 &pending.target_cid,
                 Event::SessionCompacted(tau_proto::SessionCompacted {
                     session_id: pending.session_id.clone(),
+                    target_agent_id: pending.target_agent_id.clone(),
                     originator: pending.originator.clone(),
                     original_input_tokens: pending.original_input_tokens,
                     compacted_input_tokens,
@@ -7654,6 +7723,7 @@ impl Harness {
             None,
             Event::SessionCompactionFinished(tau_proto::SessionCompactionFinished {
                 session_id: pending.session_id.clone(),
+                target_agent_id: pending.target_agent_id.clone(),
                 originator: pending.originator.clone(),
                 original_input_tokens: pending.original_input_tokens,
                 compacted_input_tokens,
@@ -7772,6 +7842,8 @@ impl Harness {
             ));
             return Ok(());
         };
+        response.target_agent_id = self.target_agent_id_for_conversation(&cid);
+
         let stale_behind_newer_prompt = self.conversations.get(&cid).is_some_and(|conv| {
             conv.last_prompt_id
                 .as_ref()

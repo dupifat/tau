@@ -146,6 +146,7 @@ fn assistant_finished_response(
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
         session_prompt_id: session_prompt_id.into(),
+        target_agent_id: None,
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
             content: vec![ContentPart::Text {
@@ -198,6 +199,7 @@ fn tool_call_finished_response(
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
         session_prompt_id: session_prompt_id.into(),
+        target_agent_id: None,
         output_items: vec![ContextItem::ToolCall(tool_call)],
         stop_reason: ProviderStopReason::ToolCalls,
         originator,

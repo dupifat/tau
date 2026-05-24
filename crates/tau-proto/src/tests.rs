@@ -139,11 +139,13 @@ fn representative_events() -> Vec<Event> {
         }),
         Event::SessionCompactionStarted(SessionCompactionStarted {
             session_id: "s1".into(),
+            target_agent_id: None,
             originator: PromptOriginator::User,
             original_input_tokens: None,
         }),
         Event::SessionCompactionFinished(SessionCompactionFinished {
             session_id: "s1".into(),
+            target_agent_id: None,
             originator: PromptOriginator::User,
             original_input_tokens: None,
             compacted_input_tokens: None,
@@ -154,6 +156,7 @@ fn representative_events() -> Vec<Event> {
             prompt: SessionPromptCreated {
                 session_prompt_id: "sp-compact-1".into(),
                 session_id: "s1".into(),
+                target_agent_id: None,
                 system_prompt: "You are helpful.".to_owned(),
                 context_items: vec![user_text_item("compact this")],
                 tools: Vec::new(),
@@ -173,6 +176,7 @@ fn representative_events() -> Vec<Event> {
         Event::SessionPromptCreated(SessionPromptCreated {
             session_prompt_id: "sp-1".into(),
             session_id: "s1".into(),
+            target_agent_id: None,
             system_prompt: "You are helpful.".to_owned(),
             context_items: vec![user_text_item("hello")],
             tools: vec![ToolDefinition {
@@ -200,6 +204,7 @@ fn representative_events() -> Vec<Event> {
         }),
         Event::ProviderResponseFinished(ProviderResponseFinished {
             session_prompt_id: "sp-1".into(),
+            target_agent_id: None,
             output_items: vec![ContextItem::Message(MessageItem {
                 role: ContextRole::Assistant,
                 content: vec![ContentPart::Text {
@@ -592,6 +597,7 @@ fn execution_events_use_provider_wire_family() {
         (
             Event::ProviderResponseFinished(ProviderResponseFinished {
                 session_prompt_id: "sp-1".into(),
+                target_agent_id: None,
                 stop_reason: ProviderStopReason::EndTurn,
                 originator: PromptOriginator::User,
                 ..ProviderResponseFinished::default()
@@ -783,16 +789,29 @@ fn event_defaults_to_transient_marks_progress_kinds() {
         }),
         Event::SessionCompactionStarted(SessionCompactionStarted {
             session_id: "s1".into(),
+            target_agent_id: None,
             originator: PromptOriginator::User,
             original_input_tokens: None,
         }),
         Event::SessionCompactionFinished(SessionCompactionFinished {
             session_id: "s1".into(),
+            target_agent_id: None,
             originator: PromptOriginator::User,
             original_input_tokens: None,
             compacted_input_tokens: None,
             outcome: SessionCompactionOutcome::Succeeded,
             message: None,
+        }),
+        Event::SessionPromptQueued(SessionPromptQueued {
+            session_id: "s1".into(),
+            text: "queued".to_owned(),
+            target_agent_id: Some("worker".to_owned()),
+            message_class: PromptMessageClass::User,
+        }),
+        Event::SessionPromptRecalled(SessionPromptRecalled {
+            session_id: "s1".into(),
+            text: "queued".to_owned(),
+            target_agent_id: Some("worker".to_owned()),
         }),
         Event::SessionPromptTerminated(SessionPromptTerminated {
             session_id: "s1".into(),

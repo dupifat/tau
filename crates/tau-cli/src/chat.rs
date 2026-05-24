@@ -671,6 +671,7 @@ pub(crate) fn run_chat(
                 RendererCmd::RemoteDisconnect(reason) => renderer.handle_disconnect(reason),
                 RendererCmd::Set { name, value } => renderer.apply_setting(&name, &value),
                 RendererCmd::SwitchAgent { agent_id } => renderer.switch_agent(agent_id),
+                RendererCmd::ClearSelectedAgent => renderer.clear_selected_agent(),
                 RendererCmd::ToolTimerTick => renderer.handle_tool_timer_tick(),
             }
         }
@@ -817,6 +818,8 @@ enum RendererCmd {
     SwitchAgent {
         agent_id: String,
     },
+    /// Return to the start-new-agent prompt state.
+    ClearSelectedAgent,
     Remote {
         event: Box<Event>,
         recorded_at: UnixMicros,
@@ -1060,6 +1063,10 @@ impl<'a> TerminalInputSession<'a> {
                 }),
             );
             *self.session_id = new_id;
+            if let Ok(mut current) = self.ctx.current_agent_state.lock() {
+                *current = None;
+            }
+            let _ = self.ctx.renderer_tx.send(RendererCmd::ClearSelectedAgent);
             return Ok(CommandOutcome::Continue);
         }
 
@@ -1086,9 +1093,8 @@ impl<'a> TerminalInputSession<'a> {
             .current_agent_state
             .lock()
             .ok()
-            .and_then(|agent| agent.clone())
-            .unwrap_or_else(|| "main".to_owned());
-        (selected_agent != "main").then_some(selected_agent)
+            .and_then(|agent| agent.clone());
+        selected_agent.filter(|agent| agent != "main")
     }
 
     fn handle_tree_or_compact_command(&self, text: &str) -> bool {
@@ -1136,6 +1142,7 @@ impl<'a> TerminalInputSession<'a> {
                 self.writer,
                 &Event::UiCompactRequest(tau_proto::UiCompactRequest {
                     session_id: self.session_id.as_str().into(),
+                    target_agent_id: self.selected_side_agent_id(),
                 }),
             );
             return true;
@@ -1202,7 +1209,7 @@ impl<'a> TerminalInputSession<'a> {
                 .lock()
                 .ok()
                 .and_then(|agent| agent.clone())
-                .unwrap_or_else(|| "main".to_owned());
+                .unwrap_or_else(|| "none".to_owned());
             let agents = self
                 .ctx
                 .known_agents
@@ -1213,6 +1220,13 @@ impl<'a> TerminalInputSession<'a> {
                 "current agent: {current}; known: {}",
                 agents.join(", ")
             ));
+            return;
+        }
+        if arg == "none" {
+            if let Ok(mut current) = self.ctx.current_agent_state.lock() {
+                *current = None;
+            }
+            let _ = self.ctx.renderer_tx.send(RendererCmd::ClearSelectedAgent);
             return;
         }
         let known = self
@@ -1314,14 +1328,13 @@ impl<'a> TerminalInputSession<'a> {
         if command.is_empty() {
             return Ok(());
         }
-        let selected_agent = self
+        let target_agent_id = self
             .ctx
             .current_agent_state
             .lock()
             .ok()
             .and_then(|agent| agent.clone())
-            .unwrap_or_else(|| "main".to_owned());
-        let target_agent_id = (selected_agent != "main").then_some(selected_agent);
+            .filter(|agent| agent != "main");
         send_shell_command(
             self.writer,
             self.session_id,
@@ -1339,23 +1352,24 @@ impl<'a> TerminalInputSession<'a> {
             .current_agent_state
             .lock()
             .ok()
-            .and_then(|agent| agent.clone())
-            .unwrap_or_else(|| "main".to_owned());
-        let live = self
-            .ctx
-            .live_agents
-            .lock()
-            .map(|agents| agents.contains(&selected_agent))
-            .unwrap_or(false);
-        if !live {
-            self.output
-                .system_info(&format!("agent is not live: {selected_agent}"));
-            return None;
+            .and_then(|agent| agent.clone());
+        if let Some(selected_agent) = selected_agent.as_deref() {
+            let live = self
+                .ctx
+                .live_agents
+                .lock()
+                .map(|agents| agents.contains(selected_agent))
+                .unwrap_or(false);
+            if !live {
+                self.output
+                    .system_info(&format!("agent is not live: {selected_agent}"));
+                return None;
+            }
         }
         self.ctx
             .agent_in_progress
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        let target_agent_id = (selected_agent != "main").then_some(selected_agent);
+        let target_agent_id = selected_agent.filter(|agent| agent != "main");
         if send_event(
             self.writer,
             &Event::UiPromptSubmitted(UiPromptSubmitted {
@@ -1445,6 +1459,9 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn cycle_role_group(&self) {
+        if self.agent_is_selected() {
+            return;
+        }
         let output = &self.output;
         let groups = self
             .ctx
@@ -1471,7 +1488,14 @@ impl<'a> TerminalInputSession<'a> {
         }
     }
 
+    fn agent_is_selected(&self) -> bool {
+        !role_cycling_enabled(&self.ctx.current_agent_state)
+    }
+
     fn cycle_role_inner(&self) {
+        if self.agent_is_selected() {
+            return;
+        }
         let output = &self.output;
         let groups = self
             .ctx
@@ -1491,6 +1515,14 @@ impl<'a> TerminalInputSession<'a> {
             &|message| output.system_info(message),
         );
     }
+}
+
+pub(crate) fn role_cycling_enabled(current_agent_state: &Arc<Mutex<Option<String>>>) -> bool {
+    current_agent_state
+        .lock()
+        .ok()
+        .and_then(|agent| agent.clone())
+        .is_none()
 }
 
 fn terminal_input_loop(
@@ -1522,10 +1554,11 @@ fn build_agent_arg_completer(agents: Arc<Mutex<Vec<String>>>) -> tau_cli_term::A
             return Vec::new();
         }
         let needle = args.first().copied().unwrap_or("").to_lowercase();
-        let agents = agents
+        let mut agents = agents
             .lock()
             .map(|agents| agents.clone())
             .unwrap_or_default();
+        agents.insert(0, "none".to_owned());
         agents
             .into_iter()
             .filter(|agent| {
@@ -1780,6 +1813,29 @@ fn send_shell_command(
 #[cfg(test)]
 mod role_cycle_tests {
     use super::*;
+
+    #[test]
+    fn agent_completer_always_offers_none() {
+        // `/agent none` is the explicit way to return to the start-new-agent
+        // state, so completion must offer it even when no agents are known.
+        let completer = build_agent_arg_completer(Arc::new(Mutex::new(Vec::new())));
+
+        let completions = completer(&[""]);
+
+        assert!(completions.iter().any(|item| item.value == "none"));
+    }
+
+    #[test]
+    fn agent_completer_filters_none_like_agents() {
+        // The synthetic `none` candidate should participate in the same fuzzy
+        // filtering as real agent ids.
+        let completer = build_agent_arg_completer(Arc::new(Mutex::new(vec!["worker".to_owned()])));
+
+        let completions = completer(&["no"]);
+
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0].value, "none");
+    }
 
     fn groups() -> Vec<tau_proto::HarnessRoleGroup> {
         vec![

@@ -25,6 +25,7 @@ fn provider_response_contains_text(finished: &ProviderResponseFinished, needle: 
 fn response_with_tool_calls(call_ids: &[&str]) -> ProviderResponseFinished {
     ProviderResponseFinished {
         session_prompt_id: "sp-restored-tools".into(),
+        target_agent_id: None,
         output_items: call_ids
             .iter()
             .map(|call_id| {
@@ -422,7 +423,46 @@ fn extension_subscribe_receives_no_replayed_past_events() {
 }
 
 #[test]
-fn late_joining_ui_client_replays_only_final_session_events() {
+fn queued_and_recalled_prompt_lifecycle_is_not_durable() {
+    // Queue/recall state is process-local scheduler/UI state. Persisting only
+    // part of that lifecycle makes cold resume resurrect prompts that already
+    // dispatched or were recalled, so both events must remain transient.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    h.publish_event(
+        None,
+        Event::SessionPromptQueued(SessionPromptQueued {
+            session_id: "s1".into(),
+            text: "edit me".to_owned(),
+            target_agent_id: Some("worker".to_owned()),
+            message_class: tau_proto::PromptMessageClass::User,
+        }),
+    );
+    h.publish_event(
+        None,
+        Event::SessionPromptRecalled(SessionPromptRecalled {
+            session_id: "s1".into(),
+            text: "edit me".to_owned(),
+            target_agent_id: Some("worker".to_owned()),
+        }),
+    );
+
+    let events = h.store.session_events("s1").expect("session events");
+    assert!(
+        events.iter().all(|entry| !matches!(
+            entry.event,
+            Event::SessionPromptQueued(_) | Event::SessionPromptRecalled(_)
+        )),
+        "cold replay must not resurrect transient queue lifecycle events: {events:?}"
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -434,7 +474,7 @@ fn late_joining_ui_client_replays_only_final_session_events() {
         None,
         Event::SessionPromptQueued(SessionPromptQueued {
             session_id: "s1".into(),
-            text: "queued but not durable-final".to_owned(),
+            text: "queued for reconnect".to_owned(),
             target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
         }),
@@ -444,6 +484,7 @@ fn late_joining_ui_client_replays_only_final_session_events() {
         Event::SessionPromptCreated(SessionPromptCreated {
             session_prompt_id: spid.clone(),
             session_id: "s1".into(),
+            target_agent_id: None,
             system_prompt: String::new(),
             context_items: Vec::new(),
             tools: Vec::new(),
@@ -470,6 +511,7 @@ fn late_joining_ui_client_replays_only_final_session_events() {
         None,
         Event::SessionCompactionStarted(tau_proto::SessionCompactionStarted {
             session_id: "s1".into(),
+            target_agent_id: None,
             originator: tau_proto::PromptOriginator::User,
             original_input_tokens: None,
         }),
@@ -478,6 +520,7 @@ fn late_joining_ui_client_replays_only_final_session_events() {
         None,
         Event::SessionCompacted(tau_proto::SessionCompacted {
             session_id: "s1".into(),
+            target_agent_id: None,
             originator: tau_proto::PromptOriginator::User,
             original_input_tokens: None,
             compacted_input_tokens: None,
@@ -488,6 +531,7 @@ fn late_joining_ui_client_replays_only_final_session_events() {
         None,
         Event::ProviderResponseFinished(ProviderResponseFinished {
             session_prompt_id: spid,
+            target_agent_id: None,
             output_items: assistant_output("final"),
             stop_reason: tau_proto::ProviderStopReason::EndTurn,
             originator: Default::default(),
@@ -543,6 +587,60 @@ fn late_joining_ui_client_replays_only_final_session_events() {
 }
 
 #[test]
+fn late_joining_ui_client_replays_only_current_active_queue() {
+    // Queue lifecycle events are transient; durable replay must not resurrect
+    // prompts that already dispatched. A late UI still needs the harness's
+    // current in-memory queue so it can show prompts that are actually pending.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.conversations
+        .get_mut(&h.default_conversation_id)
+        .expect("default conversation")
+        .pending_prompts
+        .push_back(crate::conversation::PendingPrompt::user(
+            "still queued".to_owned(),
+        ));
+
+    let (server_end, client_end) = UnixStream::pair().expect("pair");
+    client_end
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .expect("read timeout");
+    h.accept_client(server_end).expect("accept");
+    let ui_conn = h
+        .bus
+        .connections()
+        .into_iter()
+        .find(|c| c.name == "socket-ui")
+        .expect("ui connection")
+        .id
+        .to_string();
+
+    h.handle_client_event(
+        &ui_conn,
+        Frame::Message(Message::Subscribe(Subscribe {
+            selectors: vec![EventSelector::Prefix("session.".to_owned())],
+        })),
+    )
+    .expect("subscribe");
+
+    let mut reader = FrameReader::new(BufReader::new(client_end));
+    let mut queued = Vec::new();
+    while let Ok(Some(frame)) = reader.read_frame() {
+        let (_log_id, inner) = frame.peel_log();
+        if let Frame::Event(Event::SessionPromptQueued(event)) = inner {
+            queued.push(event);
+        }
+    }
+
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].text, "still queued");
+    assert_eq!(queued[0].target_agent_id, None);
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
 fn late_joining_ui_client_replays_terminal_tool_events() {
     // Background completions and cancellation are terminal UI facts. A
     // late UI needs them to clear running tool blocks that were created
@@ -558,6 +656,7 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
         &cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
             session_prompt_id: "sp-terminal-tool-events".into(),
+            target_agent_id: None,
             output_items: vec![ContextItem::ToolCall(ToolCallItem {
                 call_id: "cancelled-call".into(),
                 name: ToolName::new("cancel_me"),
@@ -850,6 +949,7 @@ fn resumed_harness_replays_persisted_session_history() {
             .clone();
         h.handle_provider_response_finished(ProviderResponseFinished {
             session_prompt_id: spid,
+            target_agent_id: None,
             output_items: assistant_output("remembered potato"),
             stop_reason: tau_proto::ProviderStopReason::EndTurn,
             originator: tau_proto::PromptOriginator::User,
@@ -912,6 +1012,7 @@ fn thinking_is_persisted_but_excluded_from_prompt_replay() {
     let spid1 = h.send_prompt_to_agent("s1");
     h.handle_provider_response_finished(ProviderResponseFinished {
         session_prompt_id: spid1,
+        target_agent_id: None,
         output_items: assistant_output("answer"),
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         originator: tau_proto::PromptOriginator::User,

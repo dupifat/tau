@@ -371,6 +371,7 @@ fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
         &cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
             session_prompt_id: "sp-main".into(),
+            target_agent_id: None,
             output_items: vec![ContextItem::ToolCall(ToolCallItem {
                 call_id: call_id.clone(),
                 name: tool_name.clone(),
@@ -506,6 +507,7 @@ fn interception_drop_of_session_compacted_is_overridden() {
 
     let compacted = Event::SessionCompacted(tau_proto::SessionCompacted {
         session_id: "s1".into(),
+        target_agent_id: None,
         originator: tau_proto::PromptOriginator::User,
         original_input_tokens: None,
         compacted_input_tokens: None,

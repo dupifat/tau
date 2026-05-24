@@ -307,6 +307,7 @@ mod tests {
     ) -> ProviderResponseFinished {
         ProviderResponseFinished {
             session_prompt_id: spid.into(),
+            target_agent_id: None,
             output_items: vec![ContextItem::Message(MessageItem {
                 role: ContextRole::Assistant,
                 content: vec![ContentPart::Text {
@@ -331,6 +332,7 @@ mod tests {
 
         assert!(!output.capture_finished(&ProviderResponseFinished {
             session_prompt_id: "sp-tool".into(),
+            target_agent_id: None,
             stop_reason: ProviderStopReason::ToolCalls,
             originator: PromptOriginator::User,
             ..ProviderResponseFinished::default()
@@ -362,6 +364,7 @@ mod tests {
 
         assert!(output.capture_finished(&ProviderResponseFinished {
             session_prompt_id: "sp-final".into(),
+            target_agent_id: None,
             stop_reason: ProviderStopReason::EndTurn,
             originator: PromptOriginator::User,
             ..ProviderResponseFinished::default()

@@ -1623,8 +1623,9 @@ impl PromptMessageClass {
 pub struct UiPromptSubmitted {
     pub session_id: SessionId,
     pub text: String,
-    /// Target agent for this user-authored prompt. `None` means the main
-    /// interactive agent for backward compatibility.
+    /// Target agent for this user-authored prompt. `None` means no explicit
+    /// target was supplied; the harness routes it to the selected/default
+    /// conversation and stamps concrete routing on durable follow-up events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_agent_id: Option<String>,
     /// Whether this prompt text is user-authored or hidden internal control
@@ -1786,6 +1787,10 @@ pub struct UiNavigateTree {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiCompactRequest {
     pub session_id: SessionId,
+    /// Target agent conversation to compact. `None` leaves selection to the
+    /// harness for compatibility with older clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_agent_id: Option<String>,
 }
 
 /// Stop advancing an in-flight prompt at the next harness boundary.
@@ -1796,9 +1801,8 @@ pub struct UiCompactRequest {
 /// [`Self::session_prompt_id`] disambiguates the two cases:
 ///
 /// - `None` — broadcast cancel for the selected target conversation. The
-///   harness clears `target_agent_id`'s conversation, defaulting to main when
-///   `target_agent_id` is absent; the agent aborts whatever prompt it's
-///   currently retry-sleeping on.
+///   harness uses the current/default conversation when `target_agent_id` is
+///   absent; the agent aborts whatever prompt it's currently retry-sleeping on.
 /// - `Some(spid)` — targeted cancel. The agent only aborts if the in-flight
 ///   prompt's spid matches; otherwise the frame is left in the retry-loop's
 ///   deferred buffer so the wrong prompt isn't collateral damage. The agent
@@ -1809,8 +1813,8 @@ pub struct UiCompactRequest {
 pub struct UiCancelPrompt {
     /// Session whose active or queued prompt should be cancelled.
     pub session_id: SessionId,
-    /// Target agent conversation to cancel. `None` means the main interactive
-    /// conversation.
+    /// Target agent conversation to cancel. `None` leaves selection to the
+    /// harness's current/default conversation state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_agent_id: Option<String>,
     /// Optional target. See struct doc.
@@ -1824,8 +1828,8 @@ pub struct UiCancelPrompt {
 pub struct UiRecallQueuedPrompt {
     /// Session whose conversation queue should be recalled from.
     pub session_id: SessionId,
-    /// Target agent conversation to recall from. `None` means the main
-    /// interactive conversation.
+    /// Target agent conversation to recall from. `None` leaves selection to the
+    /// harness's current/default conversation state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_agent_id: Option<String>,
 }
@@ -1851,8 +1855,8 @@ pub struct UiShellCommand {
     pub command_id: crate::ShellCommandId,
     pub command: String,
     pub include_in_context: bool,
-    /// Target agent for this user-authored shell command. `None` means the
-    /// main interactive agent for backward compatibility.
+    /// Target agent for this user-authored shell command. `None` means no
+    /// explicit target; the harness uses its default conversation state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_agent_id: Option<String>,
 }
@@ -1864,8 +1868,8 @@ pub struct ShellCommandProgress {
     pub command_id: crate::ShellCommandId,
     pub stream: ShellStream,
     pub chunk: String,
-    /// Target agent for this user-authored shell command. `None` means the
-    /// main interactive agent for backward compatibility.
+    /// Target agent for this user-authored shell command. `None` means no
+    /// explicit target; the harness uses its default conversation state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_agent_id: Option<String>,
 }
@@ -1882,8 +1886,8 @@ pub struct ShellCommandFinished {
     pub session_id: SessionId,
     pub command: String,
     pub include_in_context: bool,
-    /// Target agent for this user-authored shell command. `None` means the
-    /// main interactive agent for backward compatibility.
+    /// Target agent for this user-authored shell command. `None` means no
+    /// explicit target; the harness uses its default conversation state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_agent_id: Option<String>,
     /// Interleaved stdout + stderr (truncated), the same shape the
@@ -1932,7 +1936,8 @@ pub struct SessionPromptQueued {
     pub session_id: SessionId,
     /// Queued prompt text.
     pub text: String,
-    /// Target agent for this queued prompt. `None` means main.
+    /// Target agent for this queued prompt. `None` is only used for older
+    /// events without explicit routing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_agent_id: Option<String>,
     /// Whether this prompt text is user-authored or hidden internal control
@@ -1948,7 +1953,8 @@ pub struct SessionPromptRecalled {
     pub session_id: SessionId,
     /// Recalled prompt text.
     pub text: String,
-    /// Target agent for this recalled prompt. `None` means main.
+    /// Target agent for this recalled prompt. `None` is only used for older
+    /// events without explicit routing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_agent_id: Option<String>,
 }
@@ -1967,7 +1973,8 @@ pub struct SessionPromptRecalled {
 pub struct SessionPromptSteered {
     pub session_id: SessionId,
     pub text: String,
-    /// Target agent for this steered prompt. `None` means main.
+    /// Target agent for this steered prompt. `None` is only used for older
+    /// events without explicit routing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_agent_id: Option<String>,
     /// Whether this prompt text is user-authored or hidden internal control
@@ -2080,6 +2087,12 @@ pub struct PromptToolsRef {
 pub struct SessionPromptCreated {
     pub session_prompt_id: SessionPromptId,
     pub session_id: SessionId,
+    /// Agent conversation this prompt belongs to. `None` is preserved for
+    /// older events and non-agent-specific prompts, but new user-facing
+    /// prompts should carry the durable agent id so clients can route UI
+    /// state without guessing from originator metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_agent_id: Option<String>,
     /// System prompt sent alongside the item timeline.
     pub system_prompt: String,
     /// Fully materialized context items for this turn.
@@ -2213,6 +2226,11 @@ pub struct SessionPromptPrewarmRequested {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SessionCompactionStarted {
     pub session_id: SessionId,
+    /// Target agent conversation this compaction belongs to. New user-facing
+    /// compactions carry this so UIs can route lifecycle state without
+    /// inferring `main` from the originator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_agent_id: Option<String>,
     /// Conversation that owns this compaction. UIs use this to hide
     /// sub-agent compaction lifecycle blocks from the main transcript.
     #[serde(default)]
@@ -2238,6 +2256,9 @@ pub enum SessionCompactionOutcome {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SessionCompactionFinished {
     pub session_id: SessionId,
+    /// Target agent conversation this compaction belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_agent_id: Option<String>,
     /// Conversation that owns this compaction. UIs use this to hide
     /// sub-agent compaction lifecycle blocks from the main transcript.
     #[serde(default)]
@@ -2268,6 +2289,9 @@ pub struct SessionCompactionFinished {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SessionCompacted {
     pub session_id: SessionId,
+    /// Target agent conversation this durable compaction summary belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_agent_id: Option<String>,
     /// Conversation that owns this durable compaction summary. UIs use
     /// this to hide sub-agent compaction results from the main transcript.
     #[serde(default)]
@@ -2369,6 +2393,11 @@ impl ProviderStopReason {
 pub struct ProviderResponseFinished {
     /// Prompt id the provider finished.
     pub session_prompt_id: SessionPromptId,
+    /// Target agent conversation this response belongs to. The harness stamps
+    /// this before publishing so replay can rebuild prompt-id routing without
+    /// replaying transient prompt-created events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_agent_id: Option<String>,
     /// Final provider output, including assistant messages, reasoning,
     /// compaction payloads, and/or requested tool calls.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2817,11 +2846,11 @@ impl Event {
                 | Self::ActionResult(_)
                 | Self::ActionError(_)
                 | Self::ShellCommandProgress(_)
-                | Self::SessionPromptQueued(_)
-                | Self::SessionPromptRecalled(_)
                 | Self::SessionCompactionStarted(_)
                 | Self::SessionCompactionFinished(_)
                 | Self::SessionCompactionRequested(_)
+                | Self::SessionPromptQueued(_)
+                | Self::SessionPromptRecalled(_)
                 | Self::SessionPromptCreated(_)
                 | Self::SessionPromptTerminated(_)
                 | Self::SessionPromptPrewarmRequested(_)

@@ -70,6 +70,7 @@ fn event_for_line(session_id: &str, text: &str) -> Option<Event> {
     if text == "/compact" {
         return Some(Event::UiCompactRequest(tau_proto::UiCompactRequest {
             session_id: session_id.into(),
+            target_agent_id: None,
         }));
     }
     if text == "/fast" || text.starts_with("/fast ") {

@@ -16,6 +16,7 @@
 use tau_proto::{
     ActionSchemaPublished, Event, EventSelector, Frame, HarnessContextUsageChanged,
     HarnessModelsAvailable, HarnessRoleSelected, HarnessRolesAvailable, Message,
+    SessionPromptQueued,
 };
 
 use crate::harness::{Harness, selector_matches_event};
@@ -39,6 +40,32 @@ impl Harness {
                     event: Box::new(entry.event),
                 }));
                 let _ = self.bus.send_to(client_id, entry.source.as_deref(), frame);
+            }
+        }
+        self.replay_active_queued_prompts(client_id, selectors);
+    }
+
+    fn replay_active_queued_prompts(&mut self, client_id: &str, selectors: &[EventSelector]) {
+        let mut agent_by_conversation = std::collections::HashMap::new();
+        for (agent_id, conversation_id) in &self.agent_conversations {
+            agent_by_conversation.insert(conversation_id.clone(), agent_id.clone());
+        }
+
+        for (conversation_id, conversation) in &self.conversations {
+            if conversation.session_id != self.current_session_id {
+                continue;
+            }
+            let target_agent_id = agent_by_conversation.get(conversation_id).cloned();
+            for prompt in &conversation.pending_prompts {
+                let event = Event::SessionPromptQueued(SessionPromptQueued {
+                    session_id: conversation.session_id.clone(),
+                    text: prompt.text.clone(),
+                    target_agent_id: target_agent_id.clone(),
+                    message_class: prompt.message_class,
+                });
+                if selector_matches_event(selectors, &event) {
+                    let _ = self.bus.send_to(client_id, None, Frame::Event(event));
+                }
             }
         }
     }

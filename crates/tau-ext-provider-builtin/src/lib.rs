@@ -1069,6 +1069,7 @@ fn simple_finished(
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
         session_prompt_id,
+        target_agent_id: None,
         output_items: vec![common::assistant_text_item(text)],
         stop_reason: ProviderStopReason::EndTurn,
         originator,
@@ -1757,6 +1758,7 @@ fn finish_stream<W: Write>(
     }
     let finished = ProviderResponseFinished {
         session_prompt_id: session_prompt_id.into(),
+        target_agent_id: None,
         stop_reason: stop_reason_from_output_items(&output_items),
         output_items,
         originator: originator.clone(),
@@ -1782,6 +1784,7 @@ fn finish_error<W: Write>(
 ) -> Result<(), Box<dyn Error>> {
     let finished = ProviderResponseFinished {
         session_prompt_id: session_prompt_id.into(),
+        target_agent_id: None,
         output_items: vec![common::assistant_text_item(format!("LLM error: {error}"))],
         stop_reason: ProviderStopReason::Error,
         originator: originator.clone(),

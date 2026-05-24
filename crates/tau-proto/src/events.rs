@@ -171,6 +171,10 @@ pub struct HarnessRoleSelected {
     /// stay visible in the status bar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline_params: Option<ModelParams>,
+    /// Effective parameters derived from the selected role plus runtime role
+    /// overrides for the currently resolved model.
+    #[serde(default)]
+    pub model_params: ModelParams,
 }
 
 /// Current context usage for the selected model.
@@ -345,12 +349,6 @@ impl std::fmt::Display for Effort {
     }
 }
 
-/// The harness announces the current effort.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct HarnessEffortChanged {
-    pub level: Effort,
-}
-
 /// Optional upstream service tier. `Fast` enables Fast mode on providers
 /// that expose it; `Flex` is an explicit lower-priority service tier.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -378,13 +376,6 @@ impl ServiceTier {
             Self::Flex => "flex",
         }
     }
-}
-
-/// The harness announces the current service tier.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct HarnessServiceTierChanged {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub service_tier: Option<ServiceTier>,
 }
 
 /// Output verbosity hint sent to providers that support it (OpenAI
@@ -515,12 +506,6 @@ impl fmt::Display for Verbosity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
-}
-
-/// The harness announces the current verbosity.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct HarnessVerbosityChanged {
-    pub level: Verbosity,
 }
 
 /// The harness announces which verbosity levels are valid for the
@@ -670,12 +655,6 @@ impl std::fmt::Display for ThinkingSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
-}
-
-/// The harness announces the current thinking-summary mode.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct HarnessThinkingSummaryChanged {
-    pub level: ThinkingSummary,
 }
 
 /// The harness announces which thinking-summary modes are valid for
@@ -2605,18 +2584,10 @@ pub enum Event {
     HarnessRoleSelected(HarnessRoleSelected),
     #[serde(rename = "harness.context_usage_changed")]
     HarnessContextUsageChanged(HarnessContextUsageChanged),
-    #[serde(rename = "harness.effort_changed")]
-    HarnessEffortChanged(HarnessEffortChanged),
-    #[serde(rename = "harness.service_tier_changed")]
-    HarnessServiceTierChanged(HarnessServiceTierChanged),
     #[serde(rename = "harness.efforts_available")]
     HarnessEffortsAvailable(HarnessEffortsAvailable),
-    #[serde(rename = "harness.verbosity_changed")]
-    HarnessVerbosityChanged(HarnessVerbosityChanged),
     #[serde(rename = "harness.verbosities_available")]
     HarnessVerbositiesAvailable(HarnessVerbositiesAvailable),
-    #[serde(rename = "harness.thinking_summary_changed")]
-    HarnessThinkingSummaryChanged(HarnessThinkingSummaryChanged),
     #[serde(rename = "harness.thinking_summaries_available")]
     HarnessThinkingSummariesAvailable(HarnessThinkingSummariesAvailable),
 
@@ -2741,12 +2712,8 @@ impl Event {
             Self::HarnessRolesAvailable(_) => EventName::HARNESS_ROLES_AVAILABLE,
             Self::HarnessRoleSelected(_) => EventName::HARNESS_ROLE_SELECTED,
             Self::HarnessContextUsageChanged(_) => EventName::HARNESS_CONTEXT_USAGE_CHANGED,
-            Self::HarnessEffortChanged(_) => EventName::HARNESS_EFFORT_CHANGED,
-            Self::HarnessServiceTierChanged(_) => EventName::HARNESS_SERVICE_TIER_CHANGED,
             Self::HarnessEffortsAvailable(_) => EventName::HARNESS_EFFORTS_AVAILABLE,
-            Self::HarnessVerbosityChanged(_) => EventName::HARNESS_VERBOSITY_CHANGED,
             Self::HarnessVerbositiesAvailable(_) => EventName::HARNESS_VERBOSITIES_AVAILABLE,
-            Self::HarnessThinkingSummaryChanged(_) => EventName::HARNESS_THINKING_SUMMARY_CHANGED,
             Self::HarnessThinkingSummariesAvailable(_) => {
                 EventName::HARNESS_THINKING_SUMMARIES_AVAILABLE
             }

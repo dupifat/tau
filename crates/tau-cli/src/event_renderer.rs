@@ -111,10 +111,9 @@ pub(crate) struct EventRenderer {
     /// Persisted state is intentionally excluded by the harness so the
     /// status bar can surface state adjustments from that baseline.
     baseline_params: Option<tau_proto::ModelParams>,
-    /// Current per-prompt model knobs. Mirrored into `effort_state` /
-    /// `verbosity_state` / `thinking_summary_state` so the input
-    /// thread can read individual fields for cycling helpers.
-    current_params: tau_proto::ModelParams,
+    /// Effective per-prompt model knobs derived from the selected role and
+    /// role overrides. Mirrored into input-thread atomics for cycling helpers.
+    model_params: tau_proto::ModelParams,
     /// Current model context usage percent. `None` when the context
     /// window is unknown for the selected model.
     current_context_percent: Option<u8>,
@@ -877,7 +876,7 @@ impl EventRenderer {
             state_dirs,
             current_model: None,
             current_role: None,
-            current_params: tau_proto::ModelParams::default(),
+            model_params: tau_proto::ModelParams::default(),
             role_defaults: HashMap::new(),
             baseline_params: None,
             current_context_percent: None,
@@ -1519,45 +1518,45 @@ impl EventRenderer {
         let show_effort = self.baseline_params.map_or_else(
             || {
                 self.role_default_effort()
-                    .map_or(!self.current_params.effort.is_default(), |default| {
-                        self.current_params.effort != default
+                    .map_or(!self.model_params.effort.is_default(), |default| {
+                        self.model_params.effort != default
                     })
             },
-            |default| self.current_params.effort != default.effort,
+            |default| self.model_params.effort != default.effort,
         );
         if show_effort {
             push_status_chip(
                 &mut themed,
                 effort_style,
                 &mut needs_space,
-                format!("^{}", self.current_params.effort.as_str()),
+                format!("^{}", self.model_params.effort.as_str()),
             );
         }
         let show_verbosity = self.baseline_params.map_or_else(
             || {
                 self.role_default_verbosity()
-                    .map_or(!self.current_params.verbosity.is_default(), |default| {
-                        self.current_params.verbosity != default
+                    .map_or(!self.model_params.verbosity.is_default(), |default| {
+                        self.model_params.verbosity != default
                     })
             },
-            |default| self.current_params.verbosity != default.verbosity,
+            |default| self.model_params.verbosity != default.verbosity,
         );
         if show_verbosity {
             push_status_chip(
                 &mut themed,
                 verbosity_style,
                 &mut needs_space,
-                format!("~{}", self.current_params.verbosity.as_str()),
+                format!("~{}", self.model_params.verbosity.as_str()),
             );
         }
         let show_service_tier = self
             .baseline_params
-            .map_or(self.current_params.service_tier.is_some(), |default| {
-                self.current_params.service_tier != default.service_tier
+            .map_or(self.model_params.service_tier.is_some(), |default| {
+                self.model_params.service_tier != default.service_tier
             });
         if show_service_tier {
             let service_tier = self
-                .current_params
+                .model_params
                 .service_tier
                 .map(|tier| tier.as_str())
                 .unwrap_or("off");
@@ -3454,31 +3453,6 @@ impl EventRenderer {
                 self.render_model_status();
                 true
             }
-            Event::HarnessEffortChanged(changed) => {
-                self.current_params.effort = changed.level;
-                self.effort_state
-                    .store(changed.level.as_u8(), std::sync::atomic::Ordering::Relaxed);
-                self.render_model_status();
-                true
-            }
-            Event::HarnessServiceTierChanged(changed) => {
-                self.handle_harness_service_tier_changed(changed);
-                true
-            }
-            Event::HarnessVerbosityChanged(changed) => {
-                self.current_params.verbosity = changed.level;
-                self.verbosity_state
-                    .store(changed.level.as_u8(), std::sync::atomic::Ordering::Relaxed);
-                self.render_model_status();
-                true
-            }
-            Event::HarnessThinkingSummaryChanged(changed) => {
-                self.current_params.thinking_summary = changed.level;
-                self.thinking_summary_state
-                    .store(changed.level.as_u8(), std::sync::atomic::Ordering::Relaxed);
-                self.render_model_status();
-                true
-            }
             _ => false,
         }
     }
@@ -3534,6 +3508,26 @@ impl EventRenderer {
         self.current_model = selected.model.clone();
         self.current_role = Some(selected.role.clone());
         self.baseline_params = selected.baseline_params;
+        self.model_params = selected.model_params;
+        self.effort_state.store(
+            selected.model_params.effort.as_u8(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.verbosity_state.store(
+            selected.model_params.verbosity.as_u8(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.thinking_summary_state.store(
+            selected.model_params.thinking_summary.as_u8(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.fast_service_tier_state.store(
+            matches!(
+                selected.model_params.service_tier,
+                Some(tau_proto::ServiceTier::Fast)
+            ),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         if let Ok(mut role) = self.current_role_state.lock() {
             *role = Some(selected.role.clone());
         }
@@ -3559,18 +3553,6 @@ impl EventRenderer {
             ));
         self.handle.redraw();
         self.current_context_window = selected.context_window;
-        self.render_model_status();
-    }
-
-    fn handle_harness_service_tier_changed(
-        &mut self,
-        changed: &tau_proto::HarnessServiceTierChanged,
-    ) {
-        self.current_params.service_tier = changed.service_tier;
-        self.fast_service_tier_state.store(
-            matches!(changed.service_tier, Some(tau_proto::ServiceTier::Fast)),
-            std::sync::atomic::Ordering::Relaxed,
-        );
         self.render_model_status();
     }
 

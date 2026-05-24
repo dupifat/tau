@@ -137,6 +137,7 @@ impl Harness {
                     model,
                 )
             }),
+            model_params: self.selected_model_params(),
             model: self.selected_model.clone(),
             context_window: self
                 .selected_model
@@ -159,14 +160,6 @@ impl Harness {
                 .bus
                 .send_to(client_id, None, Frame::Event(context_event));
         }
-        let effort_event = Event::HarnessEffortChanged(tau_proto::HarnessEffortChanged {
-            level: self.selected_params.effort,
-        });
-        if selector_matches_event(selectors, &effort_event) {
-            let _ = self
-                .bus
-                .send_to(client_id, None, Frame::Event(effort_event));
-        }
         let effort_levels = self
             .selected_model
             .as_ref()
@@ -181,14 +174,6 @@ impl Harness {
                 .bus
                 .send_to(client_id, None, Frame::Event(effort_levels_event));
         }
-        let verbosity_event = Event::HarnessVerbosityChanged(tau_proto::HarnessVerbosityChanged {
-            level: self.selected_params.verbosity,
-        });
-        if selector_matches_event(selectors, &verbosity_event) {
-            let _ = self
-                .bus
-                .send_to(client_id, None, Frame::Event(verbosity_event));
-        }
         let verbosity_levels = self
             .selected_model
             .as_ref()
@@ -202,15 +187,6 @@ impl Harness {
             let _ = self
                 .bus
                 .send_to(client_id, None, Frame::Event(verbosity_levels_event));
-        }
-        let thinking_event =
-            Event::HarnessThinkingSummaryChanged(tau_proto::HarnessThinkingSummaryChanged {
-                level: self.selected_params.thinking_summary,
-            });
-        if selector_matches_event(selectors, &thinking_event) {
-            let _ = self
-                .bus
-                .send_to(client_id, None, Frame::Event(thinking_event));
         }
         let thinking_levels = self
             .selected_model

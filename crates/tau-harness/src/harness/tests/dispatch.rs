@@ -3038,7 +3038,7 @@ fn model_switch_invalidates_chain_anchor() {
     h.shutdown().expect("shutdown");
 }
 
-/// Changing `selected_params` mid-conversation must bust the chain.
+/// Changing role-derived model parameters mid-conversation must bust the chain.
 /// The Codex Responses upstream stored its reasoning state against
 /// the *previous* turn's effort/verbosity/thinking-summary; sending
 /// a `previous_response_id` from a request whose non-input fields
@@ -3051,10 +3051,10 @@ fn params_drift_invalidates_chain_anchor() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
-    h.selected_params = tau_proto::ModelParams {
-        effort: tau_proto::Effort::Low,
-        ..Default::default()
-    };
+    h.available_roles
+        .get_mut(&h.selected_role.clone())
+        .expect("selected role")
+        .effort = Some(tau_proto::Effort::Low);
 
     h.submit_user_prompt("s1".into(), "first".to_owned())
         .expect("submit first");
@@ -3089,8 +3089,11 @@ fn params_drift_invalidates_chain_anchor() {
     })
     .expect("finish first");
 
-    // User dials effort up between turns.
-    h.selected_params.effort = tau_proto::Effort::High;
+    // User dials effort up between turns by updating the selected role override.
+    h.available_roles
+        .get_mut(&h.selected_role.clone())
+        .expect("selected role")
+        .effort = Some(tau_proto::Effort::High);
 
     h.submit_user_prompt("s1".into(), "second".to_owned())
         .expect("submit second");
@@ -3109,7 +3112,7 @@ fn params_drift_invalidates_chain_anchor() {
 /// chaining a request whose `instructions` field has new content
 /// would silently mix the skill's guidance with reasoning that
 /// never saw it. This is the more likely real-world trigger for a
-/// fingerprint miss than a manual `selected_params` flip: skills
+/// fingerprint miss than a manual role-parameter flip: skills
 /// auto-load as the agent works.
 #[test]
 fn system_prompt_drift_invalidates_chain_anchor() {
@@ -3267,7 +3270,6 @@ fn stable_params_preserve_chain_anchor() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
-    h.selected_params = tau_proto::ModelParams::default();
 
     h.submit_user_prompt("s1".into(), "first".to_owned())
         .expect("submit first");

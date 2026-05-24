@@ -253,18 +253,10 @@ impl EventName {
         Self::from_static(EventCategory::Harness, "role_selected");
     pub const HARNESS_CONTEXT_USAGE_CHANGED: Self =
         Self::from_static(EventCategory::Harness, "context_usage_changed");
-    pub const HARNESS_EFFORT_CHANGED: Self =
-        Self::from_static(EventCategory::Harness, "effort_changed");
-    pub const HARNESS_SERVICE_TIER_CHANGED: Self =
-        Self::from_static(EventCategory::Harness, "service_tier_changed");
     pub const HARNESS_EFFORTS_AVAILABLE: Self =
         Self::from_static(EventCategory::Harness, "efforts_available");
-    pub const HARNESS_VERBOSITY_CHANGED: Self =
-        Self::from_static(EventCategory::Harness, "verbosity_changed");
     pub const HARNESS_VERBOSITIES_AVAILABLE: Self =
         Self::from_static(EventCategory::Harness, "verbosities_available");
-    pub const HARNESS_THINKING_SUMMARY_CHANGED: Self =
-        Self::from_static(EventCategory::Harness, "thinking_summary_changed");
     pub const HARNESS_THINKING_SUMMARIES_AVAILABLE: Self =
         Self::from_static(EventCategory::Harness, "thinking_summaries_available");
 

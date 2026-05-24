@@ -273,7 +273,7 @@ fn provider_models_snapshot_selects_first_model_and_drains_queue() {
     .expect("handle provider snapshot");
 
     assert_eq!(h.selected_model.as_ref(), Some(&model_id));
-    assert_eq!(h.selected_params.effort, Effort::High);
+    assert_eq!(h.selected_model_params().effort, Effort::High);
     let conv = &h.conversations[&h.default_conversation_id];
     assert!(conv.pending_prompts.is_empty());
     assert!(matches!(
@@ -302,9 +302,12 @@ fn provider_model_metadata_drives_selection_state() {
 
     assert_eq!(h.selected_role, "senior-engineer");
     assert_eq!(h.selected_model.as_ref(), Some(&model_id));
-    assert_eq!(h.selected_params.effort, Effort::High);
-    assert_eq!(h.selected_params.verbosity, Verbosity::Low);
-    assert_eq!(h.selected_params.thinking_summary, ThinkingSummary::Auto);
+    assert_eq!(h.selected_model_params().effort, Effort::High);
+    assert_eq!(h.selected_model_params().verbosity, Verbosity::Low);
+    assert_eq!(
+        h.selected_model_params().thinking_summary,
+        ThinkingSummary::Auto
+    );
 
     let mut seq = 0;
     let mut selected = None;
@@ -336,9 +339,12 @@ fn provider_model_metadata_drives_selection_state() {
     )
     .expect("refresh provider metadata");
 
-    assert_eq!(h.selected_params.effort, Effort::Off);
-    assert_eq!(h.selected_params.verbosity, Verbosity::High);
-    assert_eq!(h.selected_params.thinking_summary, ThinkingSummary::Off);
+    assert_eq!(h.selected_model_params().effort, Effort::Off);
+    assert_eq!(h.selected_model_params().verbosity, Verbosity::High);
+    assert_eq!(
+        h.selected_model_params().thinking_summary,
+        ThinkingSummary::Off
+    );
 
     let mut seq = 0;
     let mut selected = None;

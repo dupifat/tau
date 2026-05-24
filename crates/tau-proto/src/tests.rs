@@ -286,14 +286,8 @@ fn representative_events() -> Vec<Event> {
             display: None,
             originator: PromptOriginator::User,
         }),
-        Event::HarnessVerbosityChanged(HarnessVerbosityChanged {
-            level: Verbosity::Low,
-        }),
         Event::HarnessVerbositiesAvailable(HarnessVerbositiesAvailable {
             levels: vec![Verbosity::Low, Verbosity::Medium, Verbosity::High],
-        }),
-        Event::HarnessThinkingSummaryChanged(HarnessThinkingSummaryChanged {
-            level: ThinkingSummary::Concise,
         }),
         Event::HarnessThinkingSummariesAvailable(HarnessThinkingSummariesAvailable {
             levels: vec![

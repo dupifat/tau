@@ -6,13 +6,13 @@ use tau_cli_term::TermHandle;
 use tau_cli_term_raw::{Color, Term};
 use tau_proto::{
     AgentMessage, CborValue, ContentPart, ContextItem, ContextRole, Effort, Event,
-    ExtAgentsMdAvailable, ExtensionReady, HarnessContextUsageChanged, HarnessEffortChanged,
-    HarnessRoleInfo, HarnessRoleSelected, HarnessRolesAvailable, HarnessVerbosityChanged,
-    MessageItem, ProviderResponseFinished, ProviderResponseUpdated, ProviderStopReason,
-    ServiceTier, SessionPromptCreated, SessionPromptQueued, SessionPromptSteered,
-    SessionPromptTerminated, SessionPromptTerminationReason, SessionStartReason, SessionStarted,
-    ThinkingSummary, ToolBackgroundResult, ToolCallItem, ToolCancelled, ToolError, ToolResult,
-    UiPromptSubmitted, UiRoleUpdateAction, Verbosity,
+    ExtAgentsMdAvailable, ExtensionReady, HarnessContextUsageChanged, HarnessRoleInfo,
+    HarnessRoleSelected, HarnessRolesAvailable, MessageItem, ProviderResponseFinished,
+    ProviderResponseUpdated, ProviderStopReason, ServiceTier, SessionPromptCreated,
+    SessionPromptQueued, SessionPromptSteered, SessionPromptTerminated,
+    SessionPromptTerminationReason, SessionStartReason, SessionStarted, ThinkingSummary,
+    ToolBackgroundResult, ToolCallItem, ToolCancelled, ToolError, ToolResult, UiPromptSubmitted,
+    UiRoleUpdateAction, Verbosity,
 };
 
 use super::chat::{
@@ -563,6 +563,7 @@ fn new_session_preserves_role_status() {
         context_window: Some(100_000),
         role: "engineer".into(),
         baseline_params: None,
+        model_params: tau_proto::ModelParams::default(),
     }));
     sync(&handle);
     assert!(vt.screen_contains(80, "+engineer"));
@@ -592,9 +593,10 @@ fn model_status_uses_symbol_prefixed_chips() {
         context_window: Some(200_000),
         role: "engineer".into(),
         baseline_params: None,
-    }));
-    renderer.handle(&Event::HarnessVerbosityChanged(HarnessVerbosityChanged {
-        level: Verbosity::High,
+        model_params: tau_proto::ModelParams {
+            verbosity: Verbosity::High,
+            ..Default::default()
+        },
     }));
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "tau-agent-test".into(),
@@ -635,6 +637,7 @@ fn model_status_shows_main_tool_usage_before_context() {
         context_window: Some(200_000),
         role: "engineer".into(),
         baseline_params: None,
+        model_params: tau_proto::ModelParams::default(),
     }));
     renderer.handle(&Event::HarnessContextUsageChanged(
         HarnessContextUsageChanged {
@@ -928,6 +931,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
         context_window: Some(200_000),
         role: "engineer".into(),
         baseline_params: None,
+        model_params: tau_proto::ModelParams::default(),
     }));
     renderer.handle(&Event::HarnessContextUsageChanged(
         HarnessContextUsageChanged {
@@ -1065,18 +1069,18 @@ fn role_default_knobs_are_hidden_and_overrides_follow_role() {
         model: Some("test/model".into()),
         context_window: Some(200_000),
         role: "engineer".into(),
+        model_params: tau_proto::ModelParams {
+            effort: tau_proto::Effort::Medium,
+            verbosity: Verbosity::Medium,
+            thinking_summary: tau_proto::ThinkingSummary::Auto,
+            service_tier: None,
+        },
         baseline_params: Some(tau_proto::ModelParams {
             effort: tau_proto::Effort::Medium,
             verbosity: Verbosity::Medium,
             thinking_summary: tau_proto::ThinkingSummary::Auto,
             service_tier: None,
         }),
-    }));
-    renderer.handle(&Event::HarnessEffortChanged(HarnessEffortChanged {
-        level: tau_proto::Effort::Medium,
-    }));
-    renderer.handle(&Event::HarnessVerbosityChanged(HarnessVerbosityChanged {
-        level: Verbosity::Medium,
     }));
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "s2".into(),
@@ -1088,8 +1092,22 @@ fn role_default_knobs_are_hidden_and_overrides_follow_role() {
     assert!(!vt.screen_contains(80, "^medium"));
     assert!(!vt.screen_contains(80, "~medium"));
 
-    renderer.handle(&Event::HarnessVerbosityChanged(HarnessVerbosityChanged {
-        level: Verbosity::High,
+    renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
+        model: Some("test/model".into()),
+        context_window: Some(200_000),
+        role: "engineer".into(),
+        model_params: tau_proto::ModelParams {
+            effort: tau_proto::Effort::Medium,
+            verbosity: Verbosity::High,
+            thinking_summary: tau_proto::ThinkingSummary::Auto,
+            service_tier: None,
+        },
+        baseline_params: Some(tau_proto::ModelParams {
+            effort: tau_proto::Effort::Medium,
+            verbosity: Verbosity::Medium,
+            thinking_summary: tau_proto::ThinkingSummary::Auto,
+            service_tier: None,
+        }),
     }));
     sync(&handle);
 
@@ -1121,6 +1139,12 @@ fn role_state_overrides_are_compared_to_role_baseline() {
         model: Some("test/model".into()),
         context_window: None,
         role: "engineer".into(),
+        model_params: tau_proto::ModelParams {
+            effort: tau_proto::Effort::Low,
+            verbosity: Verbosity::High,
+            thinking_summary: tau_proto::ThinkingSummary::Auto,
+            service_tier: None,
+        },
         baseline_params: Some(tau_proto::ModelParams {
             effort: tau_proto::Effort::Medium,
             verbosity: Verbosity::Medium,
@@ -1128,15 +1152,6 @@ fn role_state_overrides_are_compared_to_role_baseline() {
             service_tier: Some(tau_proto::ServiceTier::Fast),
         }),
     }));
-    renderer.handle(&Event::HarnessEffortChanged(HarnessEffortChanged {
-        level: tau_proto::Effort::Low,
-    }));
-    renderer.handle(&Event::HarnessVerbosityChanged(HarnessVerbosityChanged {
-        level: Verbosity::High,
-    }));
-    renderer.handle(&Event::HarnessServiceTierChanged(
-        tau_proto::HarnessServiceTierChanged { service_tier: None },
-    ));
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "s3".into(),
         reason: SessionStartReason::New,

@@ -57,10 +57,9 @@ use crate::harness::interception::{
 use crate::harness::subagents_tool::SubagentToolState;
 use crate::internal_tools::InternalToolHandlers;
 use crate::model::{
-    LoadedRoles, MissingDefaultRole, baseline_params_for_selection, clamp_effort,
-    clamp_thinking_summary, clamp_verbosity, context_percent_used, context_window_for_model,
-    efforts_for_model, fallback_role, load_roles, model_for_role, role_infos,
-    select_model_for_role, selected_params_for_role, thinking_summaries_for_model,
+    LoadedRoles, MissingDefaultRole, baseline_params_for_selection, context_percent_used,
+    context_window_for_model, efforts_for_model, fallback_role, load_roles, model_for_role,
+    role_infos, select_model_for_role, selected_params_for_role, thinking_summaries_for_model,
     verbosities_for_model,
 };
 use crate::prompt::{
@@ -964,11 +963,6 @@ pub struct Harness {
     /// Model currently resolved from [`Self::selected_role`] and provider
     /// availability. `None` means the role has no provider-published model yet.
     pub(crate) selected_model: Option<ModelId>,
-    /// Effective per-prompt knobs for the selected role/model pair. Stamped
-    /// onto outgoing [`tau_proto::SessionPromptCreated`] events and
-    /// mirrored through knob-change events; reseeded from role settings
-    /// whenever the selected role or its resolved model changes.
-    pub(crate) selected_params: tau_proto::ModelParams,
     /// State that belongs to exactly the currently bound session.
     /// Keep session-scoped counters here instead of as top-level
     /// harness fields, so `/new` resets them with one assignment.
@@ -1395,8 +1389,6 @@ impl Harness {
             sessions_dir.clone(),
             harness_settings.session_retention(),
         );
-        let selected_params = tau_proto::ModelParams::default();
-
         let default_conversation_id = ConversationId::new("default");
         let mut store = store;
         let default_head = store
@@ -1461,7 +1453,6 @@ impl Harness {
             role_overrides,
             selected_role,
             selected_model,
-            selected_params,
             current_session_state: CurrentSessionState::default(),
             prompt_models: std::collections::HashMap::new(),
             prompt_fingerprints: std::collections::HashMap::new(),
@@ -1642,8 +1633,6 @@ impl Harness {
             sessions_dir.clone(),
             harness_settings.session_retention(),
         );
-        let selected_params = tau_proto::ModelParams::default();
-
         let default_conversation_id = ConversationId::new("default");
         let mut store = store;
         let default_head = store
@@ -1708,7 +1697,6 @@ impl Harness {
             role_overrides,
             selected_role,
             selected_model,
-            selected_params,
             current_session_state: CurrentSessionState::default(),
             prompt_models: std::collections::HashMap::new(),
             prompt_fingerprints: std::collections::HashMap::new(),
@@ -5728,18 +5716,6 @@ impl Harness {
             &self.available_roles,
             &self.selected_role,
         );
-        self.selected_params = self
-            .selected_model
-            .as_ref()
-            .map(|model| {
-                selected_params_for_role(
-                    &self.provider_model_info,
-                    &self.available_roles,
-                    &self.selected_role,
-                    model,
-                )
-            })
-            .unwrap_or_default();
         if previous_model != self.selected_model {
             self.current_session_state.context_input_tokens = None;
             self.current_session_state.context_cached_tokens = None;
@@ -5836,13 +5812,6 @@ impl Harness {
             } else {
                 (Vec::new(), Vec::new(), Vec::new())
             };
-        if selected_model.is_some() {
-            self.selected_params.effort = clamp_effort(self.selected_params.effort, &effort_levels);
-            self.selected_params.verbosity =
-                clamp_verbosity(self.selected_params.verbosity, &verbosity_levels);
-            self.selected_params.thinking_summary =
-                clamp_thinking_summary(self.selected_params.thinking_summary, &thinking_levels);
-        }
         let context_window = selected_model
             .as_ref()
             .and_then(|model| context_window_for_model(&self.provider_model_info, model));
@@ -5867,6 +5836,10 @@ impl Harness {
                         model,
                     )
                 }),
+                model_params: selected_model
+                    .as_ref()
+                    .map(|model| self.params_for_role_model(&self.selected_role, model))
+                    .unwrap_or_default(),
                 model: selected_model,
                 context_window,
                 role: self.selected_role.clone(),
@@ -5882,38 +5855,14 @@ impl Harness {
         );
         self.publish_event(
             None,
-            Event::HarnessEffortChanged(tau_proto::HarnessEffortChanged {
-                level: self.selected_params.effort,
-            }),
-        );
-        self.publish_event(
-            None,
             Event::HarnessEffortsAvailable(tau_proto::HarnessEffortsAvailable {
                 levels: effort_levels,
             }),
         );
         self.publish_event(
             None,
-            Event::HarnessServiceTierChanged(tau_proto::HarnessServiceTierChanged {
-                service_tier: self.selected_params.service_tier,
-            }),
-        );
-        self.publish_event(
-            None,
-            Event::HarnessVerbosityChanged(tau_proto::HarnessVerbosityChanged {
-                level: self.selected_params.verbosity,
-            }),
-        );
-        self.publish_event(
-            None,
             Event::HarnessVerbositiesAvailable(tau_proto::HarnessVerbositiesAvailable {
                 levels: verbosity_levels,
-            }),
-        );
-        self.publish_event(
-            None,
-            Event::HarnessThinkingSummaryChanged(tau_proto::HarnessThinkingSummaryChanged {
-                level: self.selected_params.thinking_summary,
             }),
         );
         self.publish_event(
@@ -6784,7 +6733,11 @@ impl Harness {
             context_items,
             tools,
             model: Some(model),
-            model_params: self.selected_params,
+            model_params: self
+                .selected_model
+                .as_ref()
+                .map(|model| self.params_for_role_model(&self.selected_role, model))
+                .unwrap_or_default(),
             tool_choice: tau_proto::ToolChoice::Auto,
             originator: tau_proto::PromptOriginator::User,
             share_user_cache_key: false,
@@ -6941,7 +6894,13 @@ impl Harness {
                 .unwrap_or_default();
             (model, params)
         } else {
-            (self.selected_model.clone(), self.selected_params)
+            (
+                self.selected_model.clone(),
+                self.selected_model
+                    .as_ref()
+                    .map(|model| self.params_for_role_model(&self.selected_role, model))
+                    .unwrap_or_default(),
+            )
         };
         // Non-tool extension side conversations (`std-notifications`'
         // idle summary, etc.) must not execute tools — their whole
@@ -7151,6 +7110,13 @@ impl Harness {
     fn model_for_conversation_role(&self, conv: &Conversation) -> Option<ModelId> {
         let role_name = self.role_name_for_conversation(conv);
         model_for_role(&self.provider_model_info, &self.available_roles, &role_name)
+    }
+
+    pub(crate) fn selected_model_params(&self) -> tau_proto::ModelParams {
+        self.selected_model
+            .as_ref()
+            .map(|model| self.params_for_role_model(&self.selected_role, model))
+            .unwrap_or_default()
     }
 
     fn params_for_role_model(&self, role_name: &str, model: &ModelId) -> tau_proto::ModelParams {

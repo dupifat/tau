@@ -336,6 +336,25 @@ fn finished_response(
 }
 
 #[test]
+fn first_agent_event_does_not_force_full_redraw() {
+    let (_term, handle, _vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
+        session_id: "s1".into(),
+        reason: tau_proto::SessionStartReason::Initial,
+    }));
+    renderer.handle(&Event::SessionPromptCreated(session_prompt_created(
+        "sp1", "s1",
+    )));
+    sync(&handle);
+    assert_eq!(handle.full_render_count(), 0);
+}
+
+#[test]
 fn agent_switch_preserves_separate_transcripts() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(

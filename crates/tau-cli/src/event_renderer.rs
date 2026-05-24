@@ -907,7 +907,7 @@ impl EventRenderer {
             completion_data,
             action_state: ActionCommandState::new(std::iter::empty::<&str>()),
             theme,
-            current_agent_id: Some(MAIN_AGENT_ID.to_owned()),
+            current_agent_id: None,
             agents_ui_state: HashMap::new(),
             known_agents: std::sync::Arc::new(std::sync::Mutex::new(vec![
                 MAIN_AGENT_ID.to_owned(),
@@ -915,9 +915,7 @@ impl EventRenderer {
             query_agents: HashMap::new(),
             prompt_agents: HashMap::new(),
             tool_agents: HashMap::new(),
-            current_agent_state: std::sync::Arc::new(std::sync::Mutex::new(Some(
-                MAIN_AGENT_ID.to_owned(),
-            ))),
+            current_agent_state: std::sync::Arc::new(std::sync::Mutex::new(None)),
             prompts: HashMap::new(),
             compaction_blocks: HashMap::new(),
             last_user_block: None,
@@ -999,6 +997,14 @@ impl EventRenderer {
 
     pub(crate) fn switch_agent(&mut self, agent_id: String) {
         self.remember_agent(agent_id.clone());
+        if self.current_agent_id.is_none() {
+            self.current_agent_id = Some(agent_id.clone());
+            if let Ok(mut current) = self.current_agent_state.lock() {
+                *current = Some(agent_id);
+            }
+            self.render_model_status();
+            return;
+        }
         if self.current_agent_id.as_deref() == Some(agent_id.as_str()) {
             return;
         }
@@ -2136,6 +2142,14 @@ impl EventRenderer {
     pub(crate) fn handle_recorded_at(&mut self, event: &Event, recorded_at: UnixMicros) {
         self.learn_agent_metadata(event);
         let target_agent_id = self.agent_id_for_event(event);
+        if self.current_agent_id.is_none() {
+            self.current_agent_id = Some(target_agent_id.clone());
+            if let Ok(mut current) = self.current_agent_state.lock() {
+                *current = Some(target_agent_id.clone());
+            }
+            self.handle_recorded_at_for_visible_agent(event, recorded_at);
+            return;
+        }
         if self.current_agent_id.as_deref() == Some(target_agent_id.as_str()) {
             self.handle_recorded_at_for_visible_agent(event, recorded_at);
             return;

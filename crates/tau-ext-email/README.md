@@ -25,7 +25,7 @@ Email is hostile input. Message bodies, subjects, display names, addresses, MIME
 
 `email.list` returns bounded metadata and an `access` field for every message: `granted`, `denied`, or `on-demand`. For messages that do not pass the incoming policy, it redacts the full subject and attachment metadata, but includes a short lossy `subject_preview` containing only ASCII letters/digits, commas, semicolons, periods, spaces, and dashes.
 
-`email.read` first fetches bounded headers and makes a policy decision before body text is exposed to the model. If the message is not allowed, the tool creates an incoming approval and returns `approval_required` with a machine-readable `reason` and the same sanitized `subject_preview`; it does not return the body. The user can inspect the message with `/email in open <id>`, approve it with `/email in approve <id>`, or deny future exact reads with `/email in deny <id>`. After approval, the model must repeat the matching `email.read` call to fetch the content. After denial, matching reads return `access_denied` and do not create another approval.
+`email.read` first fetches bounded headers and makes a policy decision before exposing body-like text to the model. If the message is not allowed, the tool creates an incoming approval and returns `approval_required` with a machine-readable `reason`, the same sanitized `subject_preview`, and a heavily stripped `body_preview`. The preview has HTML removed, links replaced with `LINK`, and only ASCII letters/digits, spaces, commas, and periods inside the wrapper. The user can inspect the message with `/email in open <id>`, approve it with `/email in approve <id>`, or deny future exact reads with `/email in deny <id>`. After approval, the model must repeat the matching `email.read` call to fetch the content. After denial, matching reads return `access_denied` and do not create another approval.
 
 Incoming approval records are bound to account, folder, UID, UIDVALIDITY when available, normalized sender, date, and message-id. Approval is not just a free-floating id that can be reused for a different message.
 
@@ -71,13 +71,13 @@ Setting `allow_dmarc_only: true` allows aligned DMARC pass without aligned DKIM.
 
 ### Prompt injection remains possible
 
-A message that passes policy is authenticated as coming from an allowed sender; it is not safe. The body can still instruct the agent to ignore rules, reveal secrets, send mail, run tools, or manipulate the user. Treat email content as user-supplied data, not as system instructions.
+A message that passes policy is authenticated as coming from an allowed sender; it is not safe. The body can still instruct the agent to ignore rules, reveal secrets, send mail, run tools, or manipulate the user. Treat email content as user-supplied data, not as system instructions. Model-visible read bodies and unapproved previews are simplified and wrapped in `<external_unstrusted_message>...</external_unstrusted_message>` to mark the hostile boundary; the wrapper is not a safety guarantee.
 
 The extension reduces accidental exposure, but it cannot make email content semantically safe. Users should review surprising content and keep allowlists narrow.
 
 ### Display and output hardening
 
-The extension sanitizes model-facing and action-list text derived from email. Control characters, escape bytes, bidirectional formatting controls, newlines, and very long display fields are escaped or capped before display. Unapproved subject previews are stricter: they are short, ASCII-only, and limited to letters/digits plus `,`, `;`, `.`, space, and `-`. This is important because approval lists and status messages may be rendered in a terminal.
+The extension sanitizes model-facing and action-list text derived from email. Control characters, escape bytes, bidirectional formatting controls, newlines, and very long display fields are escaped or capped before display. Approved read bodies are simplified by stripping HTML, script/style/head/svg blocks, links, obvious quoted replies, and common signatures/disclaimers. Unapproved body previews are stricter: they remove HTML, replace links with `LINK`, cap length, and allow only ASCII letters/digits, spaces, commas, and periods inside the wrapper. Unapproved subject previews are short, ASCII-only, and limited to letters/digits plus `,`, `;`, `.`, space, and `-`. This is important because approval lists and status messages may be rendered in a terminal.
 
 Model-visible incoming `From` values are normalized to the address instead of trusting arbitrary display names. Raw authentication headers are not exposed to the model. Backend errors are capped before being returned.
 

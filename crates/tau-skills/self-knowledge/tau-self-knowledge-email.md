@@ -157,8 +157,8 @@ Advice:
 Incoming reads:
 
 - `email.list` shows bounded metadata, redacts untrusted message details, and includes `access=granted|denied|on-demand`.
-- `email.read` returns body content only if policy passes or an exact incoming approval exists.
-- If approval is needed, use `/email in list`, `/email in open <id>`, and `/email in approve <id>`.
+- `email.read` returns full body content only if policy passes or an exact incoming approval exists. Agent-visible read bodies are simplified and wrapped in `<external_unstrusted_message>...</external_unstrusted_message>`.
+- If approval is needed, `email.read` returns `approval_required` with a heavily stripped `body_preview`: HTML removed, links replaced with `LINK`, and only ASCII letters/digits, spaces, commas, and periods inside the wrapper. Use `/email in list`, `/email in open <id>`, and `/email in approve <id>`.
 - Use `/email in deny <id>` to persist an exact denial. Future matching reads return `access_denied` instead of creating another approval.
 - After approval, the agent must repeat the matching `email.read` call.
 

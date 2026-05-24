@@ -250,7 +250,10 @@ list folders and messages, read approved or policy-allowed content, send mail
 through approval gates, and safely manage message state with `mark_read`,
 `mark_unread`, `star`, `unstar`, and `trash`. Message listings include
 `access=granted|denied|on-demand`, and `/email in deny <id>` persists exact read
-denials so the agent does not keep asking for the same message. Agent access and
+denials so the agent does not keep asking for the same message. Reads always
+return simplified body text wrapped in `<external_unstrusted_message>`, while
+on-demand reads expose only a heavily stripped `body_preview` with HTML removed,
+links replaced by `LINK`, and a tiny ASCII character set. Agent access and
 mutation activity is appended as JSONL and can be reviewed with
 `/email log last [number]`.
 

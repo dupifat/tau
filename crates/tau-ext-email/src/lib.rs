@@ -20,6 +20,8 @@ use real_backend::RealEmailBackend;
 const READ_BODY_MAX_BYTES: usize = 64 * 1024;
 const READ_BODY_MAX_LINES: usize = 1000;
 const LIST_MAX_LIMIT: usize = 100;
+const DEFAULT_LIST_LIMIT: u32 = LIST_MAX_LIMIT as u32;
+const DEFAULT_FOLDER: &str = "INBOX";
 
 use tau_proto::{
     ACTION_SCHEMA_VERSION, Ack, ActionArg, ActionArgKind, ActionCommand, ActionError, ActionInvoke,
@@ -275,6 +277,7 @@ impl EmailExtensionConfig {
     pub fn validate(self) -> Result<ValidatedConfig, String> {
         let mut ids = BTreeSet::new();
         let mut accounts = BTreeMap::new();
+        let mut account_order = Vec::new();
         for account in self.accounts {
             if account.id.trim().is_empty() {
                 return Err("account id must not be empty".to_owned());
@@ -294,6 +297,7 @@ impl EmailExtensionConfig {
             if let Some(folder) = &account.folders.special_sent {
                 validate_folder_pattern(folder)?;
             }
+            account_order.push(account.id.clone());
             accounts.insert(
                 account.id.clone(),
                 ValidatedAccount::from_config(account, self.enable)?,
@@ -302,6 +306,7 @@ impl EmailExtensionConfig {
         Ok(ValidatedConfig {
             enable: self.enable,
             accounts,
+            account_order,
             policy: ValidatedPolicy {
                 incoming_allow: compile_address_patterns(&self.policy.incoming_allow)?,
                 outgoing_allow: compile_address_patterns(&self.policy.outgoing_allow)?,
@@ -317,6 +322,9 @@ pub struct ValidatedConfig {
     pub enable: bool,
     /// Accounts keyed by configured account ID.
     pub accounts: BTreeMap<String, ValidatedAccount>,
+    /// Account IDs in configuration order. Used for deterministic defaults
+    /// when a model omits the account argument.
+    pub account_order: Vec<String>,
     /// Compiled global policy.
     pub policy: ValidatedPolicy,
 }
@@ -1426,6 +1434,17 @@ impl<B: EmailBackend> Engine<B> {
         }
     }
 
+    fn resolve_account_id<'a>(&'a self, command: &str, id: &'a str) -> Result<&'a str, CborValue> {
+        if !id.is_empty() {
+            return Ok(id);
+        }
+        self.config
+            .account_order
+            .first()
+            .map(String::as_str)
+            .ok_or_else(|| error_envelope(Some(command), "account_not_found", "account not found"))
+    }
+
     fn account(&self, command: &str, id: &str) -> Result<&ValidatedAccount, CborValue> {
         if !self.config.enable {
             return Err(error_envelope(
@@ -1450,8 +1469,9 @@ impl<B: EmailBackend> Engine<B> {
     fn list_accounts(&self) -> CborValue {
         let accounts = self
             .config
-            .accounts
-            .values()
+            .account_order
+            .iter()
+            .filter_map(|id| self.config.accounts.get(id))
             .map(|a| {
                 cbor_map(vec![
                     ("id", CborValue::Text(a.id.clone())),
@@ -1477,6 +1497,10 @@ impl<B: EmailBackend> Engine<B> {
     }
 
     fn list_folders(&self, account_id: &str) -> CborValue {
+        let account_id = match self.resolve_account_id("list_folders", account_id) {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
         let account = match self.account("list_folders", account_id) {
             Ok(a) => a,
             Err(e) => return e,
@@ -1508,6 +1532,10 @@ impl<B: EmailBackend> Engine<B> {
     }
 
     fn list(&self, account_id: &str, folder: &str, limit: u32, cursor: Option<&str>) -> CborValue {
+        let account_id = match self.resolve_account_id("list", account_id) {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
         let account = match self.account("list", account_id) {
             Ok(a) => a,
             Err(e) => return e,
@@ -1589,6 +1617,10 @@ impl<B: EmailBackend> Engine<B> {
     }
 
     fn read(&self, account_id: &str, folder: &str, uid: &str) -> CborValue {
+        let account_id = match self.resolve_account_id("read", account_id) {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
         let account = match self.account("read", account_id) {
             Ok(a) => a,
             Err(e) => return e,
@@ -1753,7 +1785,7 @@ impl<B: EmailBackend> Engine<B> {
         reply_to: Option<String>,
         in_reply_to: Option<String>,
     ) -> CborValue {
-        let account_id = match account.or_else(|| self.config.accounts.keys().next().cloned()) {
+        let account_id = match account.or_else(|| self.config.account_order.first().cloned()) {
             Some(id) => id,
             None => return error_envelope(Some("send"), "account_not_found", "account not found"),
         };
@@ -2301,11 +2333,37 @@ fn email_tool_spec() -> ToolSpec {
     ToolSpec {
         name: tau_proto::ToolName::new(TOOL_NAME),
         model_visible_name: None,
-        description: Some("Controlled email access through configured accounts. Commands: list_accounts, list_folders, list, read, send. Reads and sends can require approval.".to_owned()),
+        description: Some("Controlled email access through configured accounts. Use command=list_accounts first if unsure. Commands: list_accounts (no args), list_folders (optional account), list (optional account/folder/limit, defaults to first account/INBOX/100), read (uid required; account/folder optional, default to first account/INBOX), send. Reads and sends can require approval.".to_owned()),
         tool_type: tau_proto::ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
-            "properties": {"command": {"type": "string", "enum": ["list_accounts", "list_folders", "list", "read", "send"]}, "args": {"type": "object", "additionalProperties": true}},
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "enum": ["list_accounts", "list_folders", "list", "read", "send"],
+                    "description": "Email operation to perform."
+                },
+                "args": {
+                    "type": "object",
+                    "description": "Command arguments. Use {} for list_accounts. For list_folders account is optional. For list, account/folder/limit are optional and default to first configured account, INBOX, and 100. For read, uid is required while account/folder default to first configured account and INBOX.",
+                    "properties": {
+                        "account": {"type": "string", "description": "Configured account id. Optional for list_folders, list, read, and send; defaults to the first configured account."},
+                        "folder": {"type": "string", "description": "Mailbox folder. Optional for list and read; defaults to INBOX."},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum messages to list. Optional; defaults to 100 and is capped at 100."},
+                        "cursor": {"type": "string", "description": "Pagination cursor returned by list."},
+                        "uid": {"type": "string", "description": "Message UID. Required for read."},
+                        "to": {"type": "array", "items": {"type": "string"}, "description": "Recipients. Required for send."},
+                        "cc": {"type": "array", "items": {"type": "string"}},
+                        "bcc": {"type": "array", "items": {"type": "string"}},
+                        "subject": {"type": "string", "description": "Subject. Required for send; may be empty."},
+                        "body_text": {"type": "string", "description": "Plain text body. Required for send; may be empty."},
+                        "from": {"type": "string", "description": "Optional From identity; normally omit to use the account default."},
+                        "reply_to": {"type": ["string", "null"]},
+                        "in_reply_to": {"type": ["string", "null"]}
+                    },
+                    "additionalProperties": false
+                }
+            },
             "required": ["command", "args"],
             "additionalProperties": false
         })),
@@ -2505,15 +2563,17 @@ fn parse_list_folders(
     args: &[(CborValue, CborValue)],
 ) -> Result<EmailCommand, CborValue> {
     let mut seen = BTreeSet::new();
-    let account = required_string(args, &mut seen, "account", Some(command))?;
+    let account = optional_string(args, &mut seen, "account", Some(command))?.unwrap_or_default();
     reject_extra(args, &seen, Some(command))?;
     Ok(EmailCommand::ListFolders { account })
 }
 fn parse_list(command: &str, args: &[(CborValue, CborValue)]) -> Result<EmailCommand, CborValue> {
     let mut seen = BTreeSet::new();
-    let account = required_string(args, &mut seen, "account", Some(command))?;
-    let folder = required_string(args, &mut seen, "folder", Some(command))?;
-    let limit = required_positive_u32(args, &mut seen, "limit", Some(command))?;
+    let account = optional_string(args, &mut seen, "account", Some(command))?.unwrap_or_default();
+    let folder = optional_string(args, &mut seen, "folder", Some(command))?
+        .unwrap_or_else(|| DEFAULT_FOLDER.to_owned());
+    let limit = optional_positive_u32(args, &mut seen, "limit", Some(command))?
+        .unwrap_or(DEFAULT_LIST_LIMIT);
     let cursor = optional_string(args, &mut seen, "cursor", Some(command))?;
     reject_extra(args, &seen, Some(command))?;
     Ok(EmailCommand::List {
@@ -2525,8 +2585,9 @@ fn parse_list(command: &str, args: &[(CborValue, CborValue)]) -> Result<EmailCom
 }
 fn parse_read(command: &str, args: &[(CborValue, CborValue)]) -> Result<EmailCommand, CborValue> {
     let mut seen = BTreeSet::new();
-    let account = required_string(args, &mut seen, "account", Some(command))?;
-    let folder = required_string(args, &mut seen, "folder", Some(command))?;
+    let account = optional_string(args, &mut seen, "account", Some(command))?.unwrap_or_default();
+    let folder = optional_string(args, &mut seen, "folder", Some(command))?
+        .unwrap_or_else(|| DEFAULT_FOLDER.to_owned());
     let uid = required_string(args, &mut seen, "uid", Some(command))?;
     reject_extra(args, &seen, Some(command))?;
     Ok(EmailCommand::Read {
@@ -2648,12 +2709,12 @@ fn optional_nullable_string(
         )),
     }
 }
-fn required_positive_u32(
+fn optional_positive_u32(
     entries: &[(CborValue, CborValue)],
     seen: &mut BTreeSet<String>,
     name: &str,
     command: Option<&str>,
-) -> Result<u32, CborValue> {
+) -> Result<Option<u32>, CborValue> {
     match field(entries, seen, name, command)? {
         Some(CborValue::Integer(value)) => {
             let raw: i128 = (*value).into();
@@ -2664,17 +2725,13 @@ fn required_positive_u32(
                     &format!("`{name}` must be a positive integer"),
                 ));
             }
-            Ok(raw as u32)
+            Ok(Some(raw as u32))
         }
+        Some(CborValue::Null) | None => Ok(None),
         Some(_) => Err(error_envelope(
             command,
             "invalid_input",
             &format!("`{name}` must be an integer"),
-        )),
-        None => Err(error_envelope(
-            command,
-            "invalid_input",
-            &format!("missing `{name}`"),
         )),
     }
 }

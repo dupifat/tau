@@ -501,6 +501,52 @@ fn list_accounts_returns_config_without_secrets_and_folders_are_whitelisted() {
 }
 
 #[test]
+fn omitted_read_scope_defaults_to_first_account_inbox_and_limit_100() {
+    // Local models often omit obvious list/read scope arguments. Keep the
+    // parser permissive and resolve omitted account at execution time so the
+    // default follows configuration order instead of lexical map order.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut engine = engine(&temp);
+
+    let folders = engine
+        .dispatch(parse_command(&command_args("list_folders", vec![])).expect("parse folders"));
+    assert_eq!(
+        data_field(&folders, "account"),
+        &CborValue::Text("work".to_owned())
+    );
+
+    let listed = engine.dispatch(parse_command(&command_args("list", vec![])).expect("parse list"));
+    assert_eq!(
+        data_field(&listed, "account"),
+        &CborValue::Text("work".to_owned())
+    );
+    assert_eq!(
+        data_field(&listed, "folder"),
+        &CborValue::Text("INBOX".to_owned())
+    );
+    let CborValue::Array(messages) = data_field(&listed, "messages") else {
+        panic!("messages")
+    };
+    assert_eq!(messages.len(), 2);
+
+    let read = engine.dispatch(
+        parse_command(&command_args(
+            "read",
+            vec![("uid", CborValue::Text("2".to_owned()))],
+        ))
+        .expect("parse read"),
+    );
+    assert_eq!(
+        data_field(&read, "account"),
+        &CborValue::Text("work".to_owned())
+    );
+    assert_eq!(
+        data_field(&read, "folder"),
+        &CborValue::Text("INBOX".to_owned())
+    );
+}
+
+#[test]
 fn failed_email_command_result_finishes_as_tool_error() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut engine = engine(&temp);
@@ -1466,6 +1512,33 @@ fn parser_accepts_and_rejects_command_shapes() {
     assert_eq!(
         parse_command(&command_args("list_accounts", vec![])).expect("parse"),
         EmailCommand::ListAccounts
+    );
+    assert_eq!(
+        parse_command(&command_args("list_folders", vec![])).expect("default account"),
+        EmailCommand::ListFolders {
+            account: String::new()
+        }
+    );
+    assert_eq!(
+        parse_command(&command_args("list", vec![])).expect("list defaults"),
+        EmailCommand::List {
+            account: String::new(),
+            folder: DEFAULT_FOLDER.to_owned(),
+            limit: DEFAULT_LIST_LIMIT,
+            cursor: None
+        }
+    );
+    assert_eq!(
+        parse_command(&command_args(
+            "read",
+            vec![("uid", CborValue::Text("1".to_owned()))]
+        ))
+        .expect("read defaults"),
+        EmailCommand::Read {
+            account: String::new(),
+            folder: DEFAULT_FOLDER.to_owned(),
+            uid: "1".to_owned()
+        }
     );
     assert!(
         parse_command(&command_args(

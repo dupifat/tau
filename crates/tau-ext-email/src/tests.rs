@@ -572,6 +572,71 @@ fn failed_email_command_result_finishes_as_tool_error() {
 }
 
 #[test]
+fn successful_email_tool_results_show_command_scope_and_counts() {
+    // Email uses one multiplexed tool, so the harness display must expose the
+    // subcommand, scope, and result counts instead of rendering a generic
+    // `email 0s email` status line.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut engine = engine(&temp);
+    let result = engine.dispatch(EmailCommand::List {
+        account: "work".to_owned(),
+        folder: "INBOX".to_owned(),
+        limit: 10,
+        cursor: None,
+    });
+
+    let event = finish_tool_result(
+        tool_started(
+            "list",
+            vec![
+                ("account", CborValue::Text("work".to_owned())),
+                ("folder", CborValue::Text("INBOX".to_owned())),
+                ("limit", CborValue::Integer(10.into())),
+            ],
+        ),
+        result,
+    );
+
+    let Event::ToolResult(result) = event else {
+        panic!("successful email command should be a tool result")
+    };
+    let display = result.display.expect("display");
+    assert_eq!(display.status, ToolDisplayStatus::Success);
+    assert_eq!(display.status_text, "ok");
+    assert_eq!(display.args, "list work/INBOX");
+    assert_eq!(display.stats.matches, Some(2));
+    assert_eq!(display.info_chips, vec!["2 messages".to_owned()]);
+}
+
+#[test]
+fn failed_email_tool_results_show_invoked_command_scope() {
+    // Parser errors can lack result data, so error displays should fall back to
+    // the original tool invocation arguments.
+    let event = finish_tool_result(
+        tool_started(
+            "read",
+            vec![
+                ("account", CborValue::Text("work".to_owned())),
+                ("folder", CborValue::Text("INBOX".to_owned())),
+                ("uid", CborValue::Text("6218".to_owned())),
+            ],
+        ),
+        error_envelope(Some("read"), "network_error", "IMAP parser failed"),
+    );
+
+    let Event::ToolError(error) = event else {
+        panic!("failed email command should be a tool error")
+    };
+    let display = error.display.expect("display");
+    assert_eq!(display.status, ToolDisplayStatus::Error);
+    assert_eq!(display.args, "read work/INBOX uid=6218");
+    assert_eq!(
+        display.status_text,
+        "email read failed (network_error): IMAP parser failed"
+    );
+}
+
+#[test]
 fn backend_errors_keep_backend_context_for_agent_debugging() {
     let error = backend_error_envelope(
         Some("list"),
@@ -620,13 +685,15 @@ fn incoming_list_redacts_untrusted_and_shows_whitelisted_subject() {
 }
 
 #[test]
-fn imap_fetch_requests_avoid_bodystructure_parser_failures() {
-    // Some servers emit valid BODYSTRUCTURE responses that async-imap's
-    // response parser rejects before Tau can inspect the message. Listing and
-    // metadata reads do not need BODYSTRUCTURE, and full reads can derive
-    // attachments from the RFC822 body instead.
+fn imap_fetch_requests_avoid_structured_parser_failures() {
+    // Some servers emit valid BODYSTRUCTURE or ENVELOPE responses that
+    // async-imap's response parser rejects before Tau can inspect the message.
+    // Fetch raw headers/bodies instead and parse them with the mail parser.
     assert!(!super::real_backend::FETCH_METADATA_ITEMS.contains("BODYSTRUCTURE"));
     assert!(!super::real_backend::FETCH_FULL_MESSAGE_ITEMS.contains("BODYSTRUCTURE"));
+    assert!(!super::real_backend::FETCH_METADATA_ITEMS.contains("ENVELOPE"));
+    assert!(!super::real_backend::FETCH_FULL_MESSAGE_ITEMS.contains("ENVELOPE"));
+    assert!(super::real_backend::FETCH_METADATA_ITEMS.contains("BODY.PEEK[HEADER]"));
     assert!(super::real_backend::FETCH_FULL_MESSAGE_ITEMS.contains("BODY.PEEK[]"));
 }
 

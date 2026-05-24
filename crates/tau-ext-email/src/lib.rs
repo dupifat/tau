@@ -26,8 +26,8 @@ const DEFAULT_FOLDER: &str = "INBOX";
 use tau_proto::{
     ACTION_SCHEMA_VERSION, Ack, ActionArg, ActionArgKind, ActionCommand, ActionError, ActionInvoke,
     ActionOutput, ActionResult, ActionSchema, CborValue, ConfigError, Event, Frame, FrameReader,
-    FrameWriter, LogEventId, Message, ToolDisplay, ToolDisplayStatus, ToolError, ToolExecutionMode,
-    ToolResult, ToolSpec, ToolStarted,
+    FrameWriter, LogEventId, Message, ToolDisplay, ToolDisplayStats, ToolDisplayStatus, ToolError,
+    ToolExecutionMode, ToolResult, ToolSpec, ToolStarted,
 };
 
 /// `tracing` target for events emitted from this extension.
@@ -2899,26 +2899,28 @@ fn finish_tool_result(invoke: ToolStarted, result: CborValue) -> Event {
     if cbor_bool_field(&result, "ok") == Some(false) {
         return tool_error(invoke, result);
     }
+    let display = success_display(&result);
     Event::ToolResult(ToolResult {
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,
         result,
         kind: tau_proto::ToolResultKind::Final,
-        display: Some(display(ToolDisplayStatus::Success, "email")),
+        display: Some(display),
         originator: tau_proto::PromptOriginator::User,
     })
 }
 
 fn tool_error(invoke: ToolStarted, details: CborValue) -> Event {
     let message = email_error_message(&details);
+    let display = error_display(&invoke.arguments, &details, &message);
     Event::ToolError(ToolError {
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,
         message: message.clone(),
         details: Some(details),
-        display: Some(display(ToolDisplayStatus::Error, &message)),
+        display: Some(display),
         originator: tau_proto::PromptOriginator::User,
     })
 }
@@ -3065,23 +3067,44 @@ fn cbor_map(entries: Vec<(&str, CborValue)>) -> CborValue {
             .collect(),
     )
 }
-fn cbor_text_field<'a>(value: &'a CborValue, field: &str) -> Option<&'a str> {
+fn cbor_field<'a>(value: &'a CborValue, field: &str) -> Option<&'a CborValue> {
     let CborValue::Map(entries) = value else {
         return None;
     };
-    entries.iter().find_map(|(key, value)| match (key, value) {
-        (CborValue::Text(key), CborValue::Text(value)) if key == field => Some(value.as_str()),
+    entries.iter().find_map(|(key, value)| match key {
+        CborValue::Text(key) if key == field => Some(value),
         _ => None,
     })
 }
-fn cbor_bool_field(value: &CborValue, field: &str) -> Option<bool> {
-    let CborValue::Map(entries) = value else {
-        return None;
-    };
-    entries.iter().find_map(|(key, value)| match (key, value) {
-        (CborValue::Text(key), CborValue::Bool(value)) if key == field => Some(*value),
+
+fn cbor_text_field<'a>(value: &'a CborValue, field: &str) -> Option<&'a str> {
+    match cbor_field(value, field) {
+        Some(CborValue::Text(value)) => Some(value.as_str()),
         _ => None,
-    })
+    }
+}
+fn cbor_bool_field(value: &CborValue, field: &str) -> Option<bool> {
+    match cbor_field(value, field) {
+        Some(CborValue::Bool(value)) => Some(*value),
+        _ => None,
+    }
+}
+
+fn cbor_integer_field_string(value: &CborValue, field: &str) -> Option<String> {
+    match cbor_field(value, field) {
+        Some(CborValue::Integer(value)) => {
+            let raw: i128 = (*value).into();
+            Some(raw.to_string())
+        }
+        _ => None,
+    }
+}
+
+fn cbor_array_len(value: &CborValue, field: &str) -> Option<u64> {
+    match cbor_field(value, field) {
+        Some(CborValue::Array(values)) => Some(values.len() as u64),
+        _ => None,
+    }
 }
 fn cbor_nested_text_field<'a>(value: &'a CborValue, outer: &str, inner: &str) -> Option<&'a str> {
     let CborValue::Map(entries) = value else {
@@ -3093,12 +3116,205 @@ fn cbor_nested_text_field<'a>(value: &'a CborValue, outer: &str, inner: &str) ->
     })?;
     cbor_text_field(nested, inner)
 }
-fn display(status: ToolDisplayStatus, status_text: &str) -> ToolDisplay {
+fn success_display(result: &CborValue) -> ToolDisplay {
+    let command = cbor_text_field(result, "command").unwrap_or("email");
+    let status_text = cbor_text_field(result, "status").unwrap_or("ok");
+    let status = if status_text == "approval_required" {
+        ToolDisplayStatus::Warning
+    } else {
+        ToolDisplayStatus::Success
+    };
+    let data = cbor_field(result, "data");
     ToolDisplay {
+        args: email_display_args(command, data).unwrap_or_default(),
+        stats: email_display_stats(command, data),
+        info_chips: email_display_info(command, data),
         status,
         status_text: status_text.to_owned(),
         ..Default::default()
     }
+}
+
+fn error_display(arguments: &CborValue, details: &CborValue, message: &str) -> ToolDisplay {
+    let command = cbor_text_field(details, "command").unwrap_or("email");
+    let data = cbor_field(details, "data");
+    ToolDisplay {
+        args: email_display_args(command, data)
+            .or_else(|| invocation_display_args(arguments))
+            .unwrap_or_default(),
+        status: ToolDisplayStatus::Error,
+        status_text: message.to_owned(),
+        ..Default::default()
+    }
+}
+
+fn invocation_display_args(arguments: &CborValue) -> Option<String> {
+    let command = cbor_text_field(arguments, "command")?;
+    let args = cbor_field(arguments, "args");
+    match command {
+        "list_accounts" => Some("list_accounts".to_owned()),
+        "list_folders" => args
+            .and_then(|args| cbor_text_field(args, "account"))
+            .map(|account| format!("list_folders {account}"))
+            .or_else(|| Some("list_folders".to_owned())),
+        "list" => {
+            let account = args.and_then(|args| cbor_text_field(args, "account"));
+            let folder = args.and_then(|args| cbor_text_field(args, "folder"));
+            match (account, folder) {
+                (Some(account), Some(folder)) => Some(format!("list {account}/{folder}")),
+                (Some(account), None) => Some(format!("list {account}")),
+                (None, Some(folder)) => Some(format!("list {folder}")),
+                (None, None) => Some("list".to_owned()),
+            }
+        }
+        "read" => {
+            let account = args.and_then(|args| cbor_text_field(args, "account"));
+            let folder = args.and_then(|args| cbor_text_field(args, "folder"));
+            let uid = args.and_then(|args| {
+                cbor_text_field(args, "uid")
+                    .map(str::to_owned)
+                    .or_else(|| cbor_integer_field_string(args, "uid"))
+            });
+            let mut display = match (account, folder) {
+                (Some(account), Some(folder)) => format!("read {account}/{folder}"),
+                (Some(account), None) => format!("read {account}"),
+                (None, Some(folder)) => format!("read {folder}"),
+                (None, None) => "read".to_owned(),
+            };
+            if let Some(uid) = uid {
+                display.push_str(&format!(" uid={uid}"));
+            }
+            Some(display)
+        }
+        "send" => {
+            let account = args.and_then(|args| cbor_text_field(args, "account"));
+            let recipients = args
+                .and_then(|args| cbor_array_len(args, "to"))
+                .map(|count| format!(" to={count}"))
+                .unwrap_or_default();
+            Some(match account {
+                Some(account) => format!("send {account}{recipients}"),
+                None => format!("send{recipients}"),
+            })
+        }
+        other => Some(other.to_owned()),
+    }
+}
+
+fn email_display_args(command: &str, data: Option<&CborValue>) -> Option<String> {
+    match command {
+        "list_accounts" => Some("list_accounts".to_owned()),
+        "list_folders" => data
+            .and_then(|data| cbor_text_field(data, "account"))
+            .map(|account| format!("list_folders {account}"))
+            .or_else(|| Some("list_folders".to_owned())),
+        "list" => match (
+            data.and_then(|data| cbor_text_field(data, "account")),
+            data.and_then(|data| cbor_text_field(data, "folder")),
+        ) {
+            (Some(account), Some(folder)) => Some(format!("list {account}/{folder}")),
+            _ => data.map(|_| "list".to_owned()),
+        },
+        "read" => {
+            let scope = match (
+                data.and_then(|data| cbor_text_field(data, "account")),
+                data.and_then(|data| cbor_text_field(data, "folder")),
+            ) {
+                (Some(account), Some(folder)) => format!(" {account}/{folder}"),
+                _ => String::new(),
+            };
+            match data.and_then(|data| cbor_text_field(data, "uid")) {
+                Some(uid) => Some(format!("read{scope} uid={uid}")),
+                None => data.map(|_| format!("read{scope}")),
+            }
+        }
+        "send" => data
+            .and_then(|data| cbor_text_field(data, "account"))
+            .map(|account| format!("send {account}"))
+            .or_else(|| data.map(|_| "send".to_owned())),
+        other => Some(other.to_owned()),
+    }
+}
+
+fn email_display_stats(command: &str, data: Option<&CborValue>) -> ToolDisplayStats {
+    let Some(data) = data else {
+        return ToolDisplayStats::default();
+    };
+    match command {
+        "list_accounts" => count_stats(cbor_array_len(data, "accounts")),
+        "list_folders" => count_stats(cbor_array_len(data, "folders")),
+        "list" => count_stats(cbor_array_len(data, "messages")),
+        "read" => cbor_text_field(data, "body_text")
+            .map(ToolDisplayStats::for_text)
+            .unwrap_or_default(),
+        "send" => count_stats(
+            cbor_array_len(data, "accepted_recipients")
+                .or_else(|| cbor_array_len(data, "allowed_recipients"))
+                .or_else(|| cbor_array_len(data, "blocked_recipients")),
+        ),
+        _ => ToolDisplayStats::default(),
+    }
+}
+
+fn count_stats(count: Option<u64>) -> ToolDisplayStats {
+    ToolDisplayStats {
+        matches: count,
+        ..Default::default()
+    }
+}
+
+fn email_display_info(command: &str, data: Option<&CborValue>) -> Vec<String> {
+    let Some(data) = data else {
+        return Vec::new();
+    };
+    let mut chips = Vec::new();
+    match command {
+        "list_accounts" => push_count_chip(&mut chips, cbor_array_len(data, "accounts"), "account"),
+        "list_folders" => push_count_chip(&mut chips, cbor_array_len(data, "folders"), "folder"),
+        "list" => {
+            push_count_chip(&mut chips, cbor_array_len(data, "messages"), "message");
+            if cbor_bool_field(data, "truncated") == Some(true) {
+                chips.push("truncated".to_owned());
+            }
+        }
+        "read" => {
+            push_count_chip(
+                &mut chips,
+                cbor_array_len(data, "attachments"),
+                "attachment",
+            );
+            if cbor_bool_field(data, "body_truncated") == Some(true) {
+                chips.push("truncated".to_owned());
+            }
+        }
+        "send" => {
+            push_count_chip(
+                &mut chips,
+                cbor_array_len(data, "accepted_recipients")
+                    .or_else(|| cbor_array_len(data, "allowed_recipients")),
+                "allowed recipient",
+            );
+            push_count_chip(
+                &mut chips,
+                cbor_array_len(data, "blocked_recipients"),
+                "blocked recipient",
+            );
+        }
+        _ => {}
+    }
+    chips
+}
+
+fn push_count_chip(chips: &mut Vec<String>, count: Option<u64>, singular: &str) {
+    let Some(count) = count else {
+        return;
+    };
+    let suffix = if count == 1 {
+        singular.to_owned()
+    } else {
+        format!("{singular}s")
+    };
+    chips.push(format!("{count} {suffix}"));
 }
 
 #[cfg(test)]

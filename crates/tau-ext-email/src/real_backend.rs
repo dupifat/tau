@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use async_imap::imap_proto::types::{Address as ImapAddress, BodyStructure, NameAttribute};
+use async_imap::imap_proto::types::NameAttribute;
 use async_imap::types::Flag;
 use async_imap::{Client, Session};
 use futures_util::TryStreamExt;
@@ -30,8 +30,8 @@ use super::{
     ValidatedSmtpConfig,
 };
 
-pub(super) const FETCH_METADATA_ITEMS: &str = "(UID FLAGS INTERNALDATE ENVELOPE)";
-pub(super) const FETCH_FULL_MESSAGE_ITEMS: &str = "(UID FLAGS INTERNALDATE ENVELOPE BODY.PEEK[])";
+pub(super) const FETCH_METADATA_ITEMS: &str = "(UID FLAGS INTERNALDATE BODY.PEEK[HEADER])";
+pub(super) const FETCH_FULL_MESSAGE_ITEMS: &str = "(UID FLAGS INTERNALDATE BODY.PEEK[])";
 
 /// Production IMAP/SMTP backend for configured email accounts.
 pub struct RealEmailBackend {
@@ -489,49 +489,39 @@ async fn resolve_password(
 }
 
 fn metadata_from_fetch(fetch: &async_imap::types::Fetch, uidvalidity: &str) -> BackendMessage {
-    let envelope = fetch.envelope();
-    let uid = fetch.uid.unwrap_or(fetch.message).to_string();
-    let date = envelope
-        .and_then(|env| env.date.as_ref())
-        .map(|bytes| bytes_to_string(bytes.as_ref()))
-        .or_else(|| fetch.internal_date().map(|date| date.to_rfc3339()))
-        .unwrap_or_default();
-    let from = envelope
-        .and_then(|env| env.from.as_deref())
-        .and_then(first_imap_address)
-        .unwrap_or_default();
-    let to = envelope
-        .and_then(|env| env.to.as_deref())
-        .map(imap_address_list)
-        .unwrap_or_default();
-    let cc = envelope
-        .and_then(|env| env.cc.as_deref())
-        .map(imap_address_list)
-        .unwrap_or_default();
-    let subject = envelope
-        .and_then(|env| env.subject.as_ref())
-        .map(|bytes| bytes_to_string(bytes.as_ref()))
-        .unwrap_or_default();
-    let message_id = envelope
-        .and_then(|env| env.message_id.as_ref())
-        .map(|bytes| bytes_to_string(bytes.as_ref()));
-    let has_attachments = fetch
-        .bodystructure()
-        .is_some_and(bodystructure_has_attachment);
-    BackendMessage {
-        uid,
+    let fallback = BackendMessage {
+        uid: fetch.uid.unwrap_or(fetch.message).to_string(),
         uidvalidity: uidvalidity.to_owned(),
-        date,
-        from,
-        to,
-        cc,
-        subject,
+        date: fetch
+            .internal_date()
+            .map(|date| date.to_rfc3339())
+            .unwrap_or_default(),
+        from: String::new(),
+        to: Vec::new(),
+        cc: Vec::new(),
+        subject: String::new(),
         body_text: String::new(),
         flags: fetch.flags().map(flag_to_string).collect(),
-        has_attachments,
+        has_attachments: false,
         attachments: Vec::new(),
-        message_id,
-    }
+        message_id: None,
+    };
+    fetch
+        .header()
+        .map(|header| parse_backend_message_metadata_from_rfc822(&fallback, header))
+        .unwrap_or(fallback)
+}
+
+fn parse_backend_message_metadata_from_rfc822(
+    fallback: &BackendMessage,
+    raw: &[u8],
+) -> BackendMessage {
+    let Some(parsed) = MessageParser::default().parse(raw) else {
+        return fallback.clone();
+    };
+    let mut message = fallback.clone();
+    apply_parsed_headers(&mut message, &parsed);
+    message
 }
 
 pub(crate) fn parse_backend_message_from_rfc822(
@@ -545,6 +535,21 @@ pub(crate) fn parse_backend_message_from_rfc822(
         return message;
     };
     let mut message = fallback.clone();
+    apply_parsed_headers(&mut message, &parsed);
+    message.body_text = parsed_body_text(&parsed);
+    message.attachments = parsed
+        .attachments()
+        .map(|part| BackendAttachment {
+            filename: part.attachment_name().map(str::to_owned),
+            content_type: part.content_type().map(content_type_string),
+            size_bytes: Some(part.len() as u64),
+        })
+        .collect();
+    message.has_attachments = message.has_attachments || !message.attachments.is_empty();
+    message
+}
+
+fn apply_parsed_headers(message: &mut BackendMessage, parsed: &mail_parser::Message<'_>) {
     if let Some(from) = parsed.from().and_then(parsed_address_first) {
         message.from = from;
     }
@@ -565,17 +570,6 @@ pub(crate) fn parse_backend_message_from_rfc822(
     if let Some(message_id) = parsed.message_id() {
         message.message_id = Some(message_id.to_owned());
     }
-    message.body_text = parsed_body_text(&parsed);
-    message.attachments = parsed
-        .attachments()
-        .map(|part| BackendAttachment {
-            filename: part.attachment_name().map(str::to_owned),
-            content_type: part.content_type().map(content_type_string),
-            size_bytes: Some(part.len() as u64),
-        })
-        .collect();
-    message.has_attachments = message.has_attachments || !message.attachments.is_empty();
-    message
 }
 
 fn parsed_body_text(parsed: &mail_parser::Message<'_>) -> String {
@@ -690,24 +684,6 @@ fn imap_error(error: async_imap::error::Error) -> String {
     }
 }
 
-fn bytes_to_string(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).trim().to_owned()
-}
-
-fn first_imap_address(addresses: &[ImapAddress<'_>]) -> Option<String> {
-    addresses.iter().find_map(imap_address_string)
-}
-
-fn imap_address_list(addresses: &[ImapAddress<'_>]) -> Vec<String> {
-    addresses.iter().filter_map(imap_address_string).collect()
-}
-
-fn imap_address_string(address: &ImapAddress<'_>) -> Option<String> {
-    let mailbox = String::from_utf8_lossy(address.mailbox.as_ref()?.as_ref());
-    let host = String::from_utf8_lossy(address.host.as_ref()?.as_ref());
-    Some(format!("{mailbox}@{host}"))
-}
-
 fn parsed_address_first(address: &ParsedAddress<'_>) -> Option<String> {
     parsed_address_list(Some(address)).into_iter().next()
 }
@@ -745,41 +721,6 @@ fn flag_to_string(flag: Flag<'_>) -> String {
         Flag::MayCreate => "may_create".to_owned(),
         Flag::Custom(value) => value.trim_start_matches('\\').to_ascii_lowercase(),
     }
-}
-
-fn bodystructure_has_attachment(body: &BodyStructure<'_>) -> bool {
-    match body {
-        BodyStructure::Basic { common, .. }
-        | BodyStructure::Text { common, .. }
-        | BodyStructure::Message { common, .. } => common_has_attachment(common),
-        BodyStructure::Multipart { common, bodies, .. } => {
-            common_has_attachment(common) || bodies.iter().any(bodystructure_has_attachment)
-        }
-    }
-}
-
-fn common_has_attachment(common: &async_imap::imap_proto::types::BodyContentCommon<'_>) -> bool {
-    common
-        .disposition
-        .as_ref()
-        .is_some_and(|disposition| disposition.ty.eq_ignore_ascii_case("attachment"))
-        || body_params_have_name(
-            common
-                .disposition
-                .as_ref()
-                .and_then(|d| d.params.as_deref()),
-        )
-        || body_params_have_name(common.ty.params.as_deref())
-}
-
-fn body_params_have_name(
-    params: Option<&[(std::borrow::Cow<'_, str>, std::borrow::Cow<'_, str>)]>,
-) -> bool {
-    params.is_some_and(|params| {
-        params.iter().any(|(name, _)| {
-            name.eq_ignore_ascii_case("filename") || name.eq_ignore_ascii_case("name")
-        })
-    })
 }
 
 impl fmt::Debug for RealEmailBackend {

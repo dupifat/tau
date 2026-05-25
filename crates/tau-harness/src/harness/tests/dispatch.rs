@@ -9707,8 +9707,9 @@ fn message_tool_to_agent_queues_internal_prompt_markup() {
     h.shutdown().expect("shutdown");
 }
 
-/// Agent ids are minted once per conversation, are role-prefixed, and are
-/// removed from the reverse lookup when the conversation is torn down.
+/// Agent ids are minted once per conversation, are role-prefixed with a short
+/// suffix, and are removed from the reverse lookup when the conversation is
+/// torn down.
 #[test]
 fn agent_id_generation_is_stable_and_cleaned_up() {
     let td = TempDir::new().expect("tempdir");
@@ -9720,7 +9721,7 @@ fn agent_id_generation_is_stable_and_cleaned_up() {
     let second = h.ensure_agent_id_for_conversation(&cid).expect("agent id");
     assert_eq!(first, second);
     assert!(first.starts_with("senior-engineer_"));
-    assert_eq!(first.len(), "senior-engineer_".len() + 8);
+    assert_eq!(first.len(), "senior-engineer_".len() + 4);
     assert_eq!(h.agent_conversations.get(&first), Some(&cid));
 
     h.remove_conversation(&cid);

@@ -133,7 +133,7 @@ impl<'a> InternalToolHost<'a> {
 
     /// Mint an agent id appropriate for `role`.
     pub fn mint_agent_id_for_role(&self, role: &str) -> String {
-        crate::harness::mint_agent_id_for_role(role)
+        self.harness.mint_available_agent_id_for_role(role)
     }
 
     /// Enqueue a start-agent request from an internal handler without draining.

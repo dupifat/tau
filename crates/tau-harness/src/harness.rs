@@ -442,15 +442,37 @@ fn hex_bytes(bytes: &[u8]) -> String {
     out
 }
 
+const AGENT_ID_SUFFIX_BYTES: usize = 2;
+const AGENT_ID_SUFFIX_MAX_ATTEMPTS: usize = 4096;
+
 fn random_agent_id_suffix() -> String {
     use rand::RngCore as _;
-    let mut bytes = [0u8; 4];
+    let mut bytes = [0u8; AGENT_ID_SUFFIX_BYTES];
     rand::thread_rng().fill_bytes(&mut bytes);
     hex_bytes(&bytes)
 }
 
-pub fn mint_agent_id_for_role(role: &str) -> String {
-    format!("{role}_{}", random_agent_id_suffix())
+fn mint_available_agent_id_for_role_with(
+    role: &str,
+    mut is_taken: impl FnMut(&str) -> bool,
+    mut next_suffix: impl FnMut() -> String,
+) -> String {
+    let mut attempts = 0;
+    while attempts < AGENT_ID_SUFFIX_MAX_ATTEMPTS {
+        let agent_id = format!("{role}_{}", next_suffix());
+        if !is_taken(&agent_id) {
+            return agent_id;
+        }
+        attempts += 1;
+    }
+    panic!(
+        "unable to mint unique agent id for role `{role}` after {AGENT_ID_SUFFIX_MAX_ATTEMPTS} attempts"
+    );
+}
+
+#[cfg(test)]
+fn mint_agent_id_for_role(role: &str) -> String {
+    mint_available_agent_id_for_role_with(role, |_| false, random_agent_id_suffix)
 }
 
 fn built_in_discovered_skills() -> HashMap<tau_proto::SkillName, DiscoveredSkill> {
@@ -7011,30 +7033,27 @@ impl Harness {
         let Ok(events) = self.store.session_events(self.current_session_id.as_str()) else {
             return;
         };
-        let target_agent_id = events
-            .iter()
-            .filter_map(|entry| match &entry.event {
-                Event::UiPromptSubmitted(prompt) if prompt.originator.is_user() => {
-                    prompt.target_agent_id.clone()
-                }
-                Event::SessionPromptCreated(prompt) if prompt.originator.is_user() => {
-                    prompt.target_agent_id.clone()
-                }
-                Event::ProviderResponseFinished(finished) if finished.originator.is_user() => {
-                    finished.target_agent_id.clone()
-                }
-                Event::SessionCompactionStarted(started) if started.originator.is_user() => {
-                    started.target_agent_id.clone()
-                }
-                Event::SessionCompactionFinished(finished) if finished.originator.is_user() => {
-                    finished.target_agent_id.clone()
-                }
-                Event::SessionCompacted(compacted) if compacted.originator.is_user() => {
-                    compacted.target_agent_id.clone()
-                }
-                _ => None,
-            })
-            .last();
+        let target_agent_id = events.iter().rev().find_map(|entry| match &entry.event {
+            Event::UiPromptSubmitted(prompt) if prompt.originator.is_user() => {
+                prompt.target_agent_id.clone()
+            }
+            Event::SessionPromptCreated(prompt) if prompt.originator.is_user() => {
+                prompt.target_agent_id.clone()
+            }
+            Event::ProviderResponseFinished(finished) if finished.originator.is_user() => {
+                finished.target_agent_id.clone()
+            }
+            Event::SessionCompactionStarted(started) if started.originator.is_user() => {
+                started.target_agent_id.clone()
+            }
+            Event::SessionCompactionFinished(finished) if finished.originator.is_user() => {
+                finished.target_agent_id.clone()
+            }
+            Event::SessionCompacted(compacted) if compacted.originator.is_user() => {
+                compacted.target_agent_id.clone()
+            }
+            _ => None,
+        });
         let Some(agent_id) = target_agent_id else {
             return;
         };
@@ -7043,6 +7062,23 @@ impl Harness {
         }
         self.agent_conversations
             .insert(agent_id, self.default_conversation_id.clone());
+    }
+
+    fn agent_id_is_taken(&self, agent_id: &str) -> bool {
+        self.agent_conversations.contains_key(agent_id)
+            || self.stopped_agent_ids.contains(agent_id)
+            || self
+                .pending_start_agent_requests
+                .iter()
+                .any(|pending| pending.agent_id == agent_id)
+    }
+
+    pub(crate) fn mint_available_agent_id_for_role(&self, role: &str) -> String {
+        mint_available_agent_id_for_role_with(
+            role,
+            |agent_id| self.agent_id_is_taken(agent_id),
+            random_agent_id_suffix,
+        )
     }
 
     pub(crate) fn ensure_agent_id_for_conversation(
@@ -7056,7 +7092,7 @@ impl Harness {
             }
             self.role_name_for_conversation(conv)
         };
-        let agent_id = mint_agent_id_for_role(&role);
+        let agent_id = self.mint_available_agent_id_for_role(&role);
         if let Some(conv) = self.conversations.get_mut(cid) {
             conv.agent_id = Some(agent_id.clone());
         }

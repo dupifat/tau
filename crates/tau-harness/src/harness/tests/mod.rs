@@ -51,6 +51,36 @@ fn echo_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
 }
 
 #[test]
+fn minted_agent_ids_use_short_hex_suffixes() {
+    // Agent ids are shown in delegated tool output, so keep the
+    // harness-owned random suffix compact while preserving the
+    // `<role>_<suffix>` shape expected by routing and display code.
+    let agent_id = super::mint_agent_id_for_role("engineer");
+    let suffix = agent_id
+        .strip_prefix("engineer_")
+        .expect("agent id should include the role prefix");
+
+    assert_eq!(suffix.len(), 4);
+    assert!(suffix.chars().all(|ch| ch.is_ascii_hexdigit()));
+}
+
+#[test]
+fn minting_agent_ids_retries_suffix_collisions() {
+    // Four hex characters intentionally make collisions more likely than the
+    // old long suffix. The harness must resolve them centrally instead of
+    // forcing delegate/start-agent callers to handle uniqueness themselves.
+    let mut suffixes =
+        std::collections::VecDeque::from(["cafe".to_owned(), "cafe".to_owned(), "babe".to_owned()]);
+    let agent_id = super::mint_available_agent_id_for_role_with(
+        "engineer",
+        |agent_id| agent_id == "engineer_cafe",
+        || suffixes.pop_front().expect("test suffix exhausted"),
+    );
+
+    assert_eq!(agent_id, "engineer_babe");
+}
+
+#[test]
 fn render_self_knowledge_content_inserts_config_defaults() {
     let rendered = crate::harness::render_self_knowledge_content(std::borrow::Cow::Borrowed(
         "__TAU_SELF_KNOWLEDGE_HARNESS_CONFIG__\n__TAU_SELF_KNOWLEDGE_UI_CONFIG__",

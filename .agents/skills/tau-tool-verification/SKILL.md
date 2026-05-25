@@ -37,6 +37,20 @@ With a single empty line separating headers from the main payload.
 `<prefix>(optional-per-line-flags) <line-content>` structure. If that's the case
 the tool description should mention it.
 
+Tool outputs with non-trivial fields encoded into line-oriented
+payloads should include a `format` header describing field order and names.
+For example, an email listing can use:
+
+```text
+format: uid date from flags access attachments subject...
+
+6212 2016-04-23T17:32:52Z builds@travis-ci.org seen,redacted preview 0 Hi there, from us
+```
+
+The `...` suffic on last field in the format is used to indicate it's a multi-word field that will extend till the end of the line.
+
+Tool implementation must take care ensuring newlines and special characters are stripped from field values, and empty values use some placeholders (e.g. `-`) to avoid breaking the meaning of each line.
+
 Many headers are optional, and skipped for their default most natural values
 for token efficiency. Keep tool output compact: include only non-default,
 non-redundant values that help the agent decide what to do next. Do not emit

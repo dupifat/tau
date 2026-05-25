@@ -3708,6 +3708,74 @@ fn enter_bindings_override_default_newline_and_submit() {
     assert_eq!(handle.get_buffer(), "draft");
 }
 
+/// When the completion menu is open, completion navigation keys must be
+/// consumed before matching configurable bindings. This keeps global bindings
+/// such as Shift-Tab role cycling from stealing completion-menu navigation.
+#[test]
+fn completion_keys_take_precedence_over_bindings() {
+    let buf = SharedBuffer::new();
+    let (mut term, handle, input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+    term.set_completion_source(Some(Box::new(|buffer: &str, _cursor: usize| {
+        if buffer == "/" {
+            vec![
+                Candidate {
+                    label: "/model".to_owned(),
+                    description: "switch model".to_owned(),
+                    replacement: "/model".to_owned(),
+                },
+                Candidate {
+                    label: "/quit".to_owned(),
+                    description: "exit".to_owned(),
+                    replacement: "/quit".to_owned(),
+                },
+            ]
+        } else {
+            Vec::new()
+        }
+    })));
+    term.set_bindings(vec![
+        ("BackTab".to_owned(), "backtab".to_owned()),
+        ("Enter".to_owned(), "plain-enter".to_owned()),
+    ]);
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('/'),
+            KeyModifiers::NONE,
+        )))
+        .expect("send slash");
+    assert!(matches!(
+        term.get_next_event().expect("open completion"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "/");
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::BackTab,
+            KeyModifiers::SHIFT,
+        )))
+        .expect("send backtab");
+    assert!(matches!(
+        term.get_next_event().expect("cycle completion"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "/quit");
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )))
+        .expect("send enter");
+    assert!(matches!(
+        term.get_next_event().expect("accept completion"),
+        Event::CompletionAccept
+    ));
+    assert_eq!(handle.get_buffer(), "/quit");
+}
+
 /// If the row leaving the viewport changed, the scrolling planner should know
 /// it can still render that prefix before it drops.
 #[test]

@@ -1502,6 +1502,41 @@ impl Term {
             .cloned()
     }
 
+    /// Handles keys that belong to an open completion menu before any
+    /// configurable binding can match them. Returns `None` when no completion
+    /// action applies, letting normal key handling continue.
+    fn handle_completion_key(
+        &self,
+        key: KeyEvent,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+    ) -> Option<Event> {
+        match key.code {
+            KeyCode::Tab => {
+                let mut st = self.handle.lock();
+                st.cycle_completion(1).then_some(Event::BufferChanged)
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                let mut st = self.handle.lock();
+                st.cycle_completion(-1).then_some(Event::BufferChanged)
+            }
+            KeyCode::Down => {
+                let mut st = self.handle.lock();
+                st.cycle_completion(1).then_some(Event::BufferChanged)
+            }
+            KeyCode::Esc => {
+                let mut st = self.handle.lock();
+                st.dismiss_completion().then_some(Event::BufferChanged)
+            }
+            KeyCode::Enter if ctrl || (!shift && !alt) => {
+                let mut st = self.handle.lock();
+                st.accept_completion().then_some(Event::CompletionAccept)
+            }
+            _ => None,
+        }
+    }
+
     fn insert_newline(&self) -> Event {
         {
             let mut st = self.handle.lock();
@@ -1557,6 +1592,10 @@ impl Term {
         let ctrl_c = matches!(key.code, KeyCode::Char('c')) && ctrl;
         if !ctrl_c {
             self.handle.lock().ctrl_c_cancel_armed = false;
+        }
+
+        if let Some(event) = self.handle_completion_key(key, ctrl, shift, alt) {
+            return Ok(Some(event));
         }
 
         match key.code {

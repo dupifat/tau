@@ -38,7 +38,7 @@ These keys are handled by the raw terminal prompt when no configurable binding m
 | `C-w` | Kill the word before the cursor. |
 | `Backspace`, `Delete` | Delete text around the cursor. |
 | Arrow keys | Move within multiline input, completion candidates, or prompt history. |
-| `Shift-Tab` | Cycle completion candidates backward when a completion menu is open. Otherwise this is configurable as `BackTab`. |
+| `Shift-Tab` | Cycle completion candidates backward when a completion menu is open; this takes precedence over configured `BackTab` bindings. Otherwise this is configurable as `BackTab`. |
 | `Esc` | Dismiss the completion menu. |
 
 

@@ -439,6 +439,7 @@ Default bindings:
 
 ```json5
 bind: {
+  Enter: { action: "submit-prompt" },
   "C-Enter": { action: "submit-prompt" },
   "C-f": {
     action: "shell-prompt-insert",

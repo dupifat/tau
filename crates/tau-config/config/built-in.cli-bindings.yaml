@@ -5,6 +5,8 @@
 # `command` is optional — prompt actions like `submit-prompt`,
 # `prompt-previous`, and `prompt-next` don't shell out, so they omit
 # it entirely.
+Enter:
+  action: submit-prompt
 C-Enter:
   action: submit-prompt
 C-f:

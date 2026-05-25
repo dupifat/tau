@@ -83,6 +83,7 @@ fn cli_settings_user_binding_keeps_built_in_chords() {
     );
     assert!(s.bind.contains_key("C-t"));
     assert!(s.bind.contains_key("C-o"));
+    assert_eq!(s.bind.get("Enter").expect("Enter").action, "submit-prompt");
     assert_eq!(
         s.bind.get("C-Enter").expect("C-Enter").action,
         "submit-prompt"

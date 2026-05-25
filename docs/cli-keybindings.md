@@ -7,7 +7,7 @@ Keep this document in sync with `crates/tau-config/config/built-in.cli-bindings.
 
 | Key | Action | Description |
 | --- | --- | --- |
-| `C-Enter` | `submit-prompt` | Submit the prompt, or accept a previewed completion without submitting. |
+| `Enter`, `C-Enter` | `submit-prompt` | Submit the prompt, or accept a previewed completion without submitting. |
 | `C-f` | `shell-prompt-insert` | Pick a file with `fzf` and insert it at the cursor. |
 | `C-r` | `prompt-history-search` | Search past prompts with `fzf`, preview the highlighted prompt, and replace the current prompt with the selected prompt. |
 | `C-t` | `shell-prompt-insert` | Search files with ripgrep through `fzf` and insert the selected path. |
@@ -22,11 +22,11 @@ Keep this document in sync with `crates/tau-config/config/built-in.cli-bindings.
 
 ## Built-in editing keys
 
-These keys are handled by the raw terminal prompt when no configurable binding matches. The built-in `C-Enter` binding preserves the raw submit fallback.
+These keys are handled by the raw terminal prompt when no configurable binding matches. The built-in `Enter` binding makes plain Enter submit by default; bind `Enter` to `insert-newline` to restore the raw editing fallback.
 
 | Key | Behavior |
 | --- | --- |
-| `Enter` | Insert a newline. |
+| `Enter` | Insert a newline when not bound; submits by default via the built-in binding. |
 | `C-Enter` | Submit the prompt. |
 | `Shift-Enter`, `Alt-Enter` | Insert a newline. |
 | `C-d` on an empty prompt | Exit Tau when no agent/session work is in progress; otherwise print a notice to use `/quit` and keep the session running. |

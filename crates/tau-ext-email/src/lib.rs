@@ -2720,6 +2720,53 @@ fn paged_messages(
     })
 }
 
+fn format_account_line(account: &ValidatedAccount, extension_enabled: bool) -> CborValue {
+    let mut flags = Vec::new();
+    flags.push(if extension_enabled && account.enable {
+        "enabled"
+    } else {
+        "disabled"
+    });
+    flags.push(if account.imap_configured() {
+        "imap"
+    } else {
+        "noimap"
+    });
+    flags.push(if account.smtp_configured() {
+        "smtp"
+    } else {
+        "nosmtp"
+    });
+    let display_name = account
+        .display_name
+        .as_deref()
+        .map(|name| safe_model_line(name, MAX_HEADER_VALUE_CHARS))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "-".to_owned());
+    CborValue::Text(format!(
+        "{} {} {} {}",
+        list_token(&account.id, MAX_HEADER_VALUE_CHARS),
+        flags.join(","),
+        list_token(&account.from_normalized, MAX_ADDRESS_CHARS),
+        display_name
+    ))
+}
+
+fn format_folder_line(folder: BackendFolder) -> CborValue {
+    let flags = if folder.selectable {
+        "selectable"
+    } else {
+        "noselect"
+    };
+    let name = safe_model_line(&folder.name, MAX_HEADER_VALUE_CHARS);
+    let name = if name.is_empty() {
+        "-".to_owned()
+    } else {
+        name
+    };
+    CborValue::Text(format!("{} {}", flags, name))
+}
+
 fn format_list_message_line(message: BackendMessage, access: &str) -> String {
     let readable = access == ACCESS_FULL;
     let mut flags = safe_model_vec(message.flags, MAX_FLAGS, MAX_HEADER_VALUE_CHARS);
@@ -3031,27 +3078,18 @@ impl<B: EmailBackend> Engine<B> {
             .account_order
             .iter()
             .filter_map(|id| self.config.accounts.get(id))
-            .map(|a| {
-                cbor_map(vec![
-                    ("id", CborValue::Text(a.id.clone())),
-                    (
-                        "display_name",
-                        a.display_name
-                            .clone()
-                            .map(CborValue::Text)
-                            .unwrap_or(CborValue::Null),
-                    ),
-                    ("from", CborValue::Text(a.from_normalized.clone())),
-                    ("enabled", CborValue::Bool(self.config.enable && a.enable)),
-                    ("imap_configured", CborValue::Bool(a.imap_configured())),
-                    ("smtp_configured", CborValue::Bool(a.smtp_configured())),
-                ])
-            })
+            .map(|account| format_account_line(account, self.config.enable))
             .collect();
         ok_envelope(
             "list_accounts",
             "ok",
-            cbor_map(vec![("accounts", CborValue::Array(accounts))]),
+            cbor_map(vec![
+                (
+                    "format",
+                    CborValue::Text("id flags from display_name".to_owned()),
+                ),
+                ("accounts", CborValue::Array(accounts)),
+            ]),
         )
     }
 
@@ -3069,22 +3107,7 @@ impl<B: EmailBackend> Engine<B> {
                 let visible = folders
                     .into_iter()
                     .filter(|f| account.folders.allows(&f.name))
-                    .map(|f| {
-                        cbor_map(vec![
-                            (
-                                "name",
-                                CborValue::Text(safe_model_line(&f.name, MAX_HEADER_VALUE_CHARS)),
-                            ),
-                            (
-                                "delimiter",
-                                CborValue::Text(safe_model_line(
-                                    &f.delimiter,
-                                    MAX_HEADER_VALUE_CHARS,
-                                )),
-                            ),
-                            ("selectable", CborValue::Bool(f.selectable)),
-                        ])
-                    })
+                    .map(format_folder_line)
                     .collect();
                 ok_envelope(
                     "list_folders",
@@ -3094,6 +3117,7 @@ impl<B: EmailBackend> Engine<B> {
                             "account",
                             CborValue::Text(safe_model_line(account_id, MAX_HEADER_VALUE_CHARS)),
                         ),
+                        ("format", CborValue::Text("flags name".to_owned())),
                         ("folders", CborValue::Array(visible)),
                     ]),
                 )
@@ -4577,7 +4601,7 @@ fn email_tool_spec() -> ToolSpec {
     ToolSpec {
         name: tau_proto::ToolName::new(TOOL_NAME),
         model_visible_name: None,
-        description: Some("Controlled email access through configured accounts. Use command=list_accounts first if unsure. Commands: list_accounts (no args), list_folders (optional account), list_recent (optional account/folder/limit/days, defaults to first account/INBOX/100/7 and searches by IMAP internal date), list_by_uid (optional account/folder/limit/cursor, pages by descending UID), read (uid required; account/folder optional, default to first account/INBOX), request_full (same target as read; asks the user to approve full content), mark_read, mark_unread, star, unstar, trash, send. List results are line-oriented and include a format header. request_full and sends can require approval; message-management commands do not.".to_owned()),
+        description: Some("Controlled email access through configured accounts. Use command=list_accounts first if unsure. Commands: list_accounts (no args, line-oriented), list_folders (optional account, line-oriented), list_recent (optional account/folder/limit/days, defaults to first account/INBOX/100/7 and searches by IMAP internal date), list_by_uid (optional account/folder/limit/cursor, pages by descending UID), read (uid required; account/folder optional, default to first account/INBOX), request_full (same target as read; asks the user to approve full content), mark_read, mark_unread, star, unstar, trash, send. List results are line-oriented and include a format header. request_full and sends can require approval; message-management commands do not.".to_owned()),
         tool_type: tau_proto::ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",

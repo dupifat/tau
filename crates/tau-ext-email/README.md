@@ -208,8 +208,8 @@ Folder allowlists are glob patterns over mailbox folder names. Empty `folders.al
 
 The model-visible tool name is `email`. Commands are selected through the `command` argument:
 
-- `list_accounts`
-- `list_folders`
+- `list_accounts` — returns `format: id flags from display_name` plus one line per account.
+- `list_folders` — returns `format: flags name` plus one line per visible folder. Folder names are the full IMAP path returned by the server, such as `Archive/2026` or `Archive.2026`.
 - `list_recent`
 - `list_by_uid`
 - `read`
@@ -221,7 +221,7 @@ The model-visible tool name is `email`. Commands are selected through the `comma
 - `trash`
 - `send`
 
-`list_recent` accepts optional `account`, `folder`, `limit`, `cursor`, and `days`; `days` defaults to 7. `list_by_uid` accepts optional `account`, `folder`, `limit`, and `cursor`. `read`, `request_full`, `mark_read`, `mark_unread`, `star`, `unstar`, and `trash` take the same `account`/`folder`/`uid` target. `request_full` creates or reuses a pending incoming approval so the user can decide whether the agent may read the full message. Message-management commands do not require content approval. `trash` moves the message to the account's IMAP Trash mailbox.
+`list_recent` accepts optional `account`, `folder`, `limit`, `cursor`, and `days`; `days` defaults to 7. `list_by_uid` accepts optional `account`, `folder`, `limit`, and `cursor`. List-style commands return a `format` header and one line per listed item. `read`, `request_full`, `mark_read`, `mark_unread`, `star`, `unstar`, and `trash` take the same `account`/`folder`/`uid` target. `request_full` creates or reuses a pending incoming approval so the user can decide whether the agent may read the full message. Message-management commands do not require content approval. `trash` moves the message to the account's IMAP Trash mailbox.
 
 Use `list_accounts` first when the account id is not known.
 

@@ -432,13 +432,6 @@ fn assert_unapproved_preview_only(result: &CborValue) {
     assert!(text_field(data, "body_preview").is_some());
 }
 
-fn array_field<'a>(value: &'a CborValue, name: &str) -> &'a [CborValue] {
-    match map_get(value, name).expect("array") {
-        CborValue::Array(values) => values,
-        other => panic!("expected array, got {other:?}"),
-    }
-}
-
 #[test]
 fn registers_single_email_tool() {
     let mut pair = spawn_extension();
@@ -647,10 +640,17 @@ fn list_accounts_returns_config_without_secrets_and_folders_are_whitelisted() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut engine = engine(&temp);
     let accounts = engine.dispatch(EmailCommand::ListAccounts);
+    assert_eq!(
+        data_field(&accounts, "format"),
+        &CborValue::Text("id flags from display_name".to_owned())
+    );
     let CborValue::Array(items) = data_field(&accounts, "accounts") else {
         panic!("accounts array")
     };
-    assert_eq!(text_field(&items[0], "id"), Some("work".to_owned()));
+    assert_eq!(
+        items[0],
+        CborValue::Text("work enabled,imap,smtp alice@company.com Work".to_owned())
+    );
     assert!(format!("{accounts:?}").contains("alice@company.com"));
     assert!(!format!("{accounts:?}").contains("email_password"));
     assert!(!format!("{accounts:?}").contains("secret"));
@@ -658,11 +658,14 @@ fn list_accounts_returns_config_without_secrets_and_folders_are_whitelisted() {
     let folders = engine.dispatch(EmailCommand::ListFolders {
         account: "work".to_owned(),
     });
-    let names: Vec<_> = array_field(map_get(&folders, "data").expect("data"), "folders")
-        .iter()
-        .filter_map(|f| text_field(f, "name"))
-        .collect();
-    assert_eq!(names, vec!["INBOX".to_owned()]);
+    assert_eq!(
+        data_field(&folders, "format"),
+        &CborValue::Text("flags name".to_owned())
+    );
+    let CborValue::Array(folders) = data_field(&folders, "folders") else {
+        panic!("folders")
+    };
+    assert_eq!(folders, &[CborValue::Text("selectable INBOX".to_owned())]);
 }
 
 #[test]

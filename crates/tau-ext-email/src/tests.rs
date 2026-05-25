@@ -743,7 +743,7 @@ fn successful_email_tool_results_show_command_scope_and_counts() {
     // `email 0s email` status line.
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut engine = engine(&temp);
-    let result = engine.dispatch(EmailCommand::List {
+    let result = engine.dispatch(EmailCommand::ListByUid {
         account: "work".to_owned(),
         folder: "INBOX".to_owned(),
         limit: 10,
@@ -768,7 +768,7 @@ fn successful_email_tool_results_show_command_scope_and_counts() {
     let display = result.display.expect("display");
     assert_eq!(display.status, ToolDisplayStatus::Success);
     assert_eq!(display.status_text, "ok");
-    assert_eq!(display.args, "list work/INBOX");
+    assert_eq!(display.args, "list_by_uid work/INBOX");
     assert_eq!(display.stats.matches, Some(2));
     assert_eq!(display.info_chips, vec!["2 messages".to_owned()]);
 }
@@ -876,7 +876,7 @@ fn backend_errors_keep_sanitized_backend_context_for_agent_debugging() {
 fn incoming_list_shows_sanitized_untrusted_subject_preview_and_whitelisted_subject() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut engine = engine(&temp);
-    let result = engine.dispatch(EmailCommand::List {
+    let result = engine.dispatch(EmailCommand::ListByUid {
         account: "work".to_owned(),
         folder: "INBOX".to_owned(),
         limit: 10,
@@ -2334,7 +2334,7 @@ fn incoming_deny_persists_none_access_but_request_full_can_ask_again() {
             .is_empty()
     );
 
-    let listed = engine.dispatch(EmailCommand::List {
+    let listed = engine.dispatch(EmailCommand::ListByUid {
         account: "work".to_owned(),
         folder: "INBOX".to_owned(),
         limit: 10,
@@ -2770,7 +2770,7 @@ fn read_body_and_list_results_report_truncation_metadata() {
         &CborValue::Integer((READ_BODY_MAX_BYTES as u64).into())
     );
 
-    let listed = engine.dispatch(EmailCommand::List {
+    let listed = engine.dispatch(EmailCommand::ListByUid {
         account: "work".to_owned(),
         folder: "INBOX".to_owned(),
         limit: 1,
@@ -2782,7 +2782,7 @@ fn read_body_and_list_results_report_truncation_metadata() {
         &CborValue::Text("1".to_owned())
     );
 
-    let second_page = engine.dispatch(EmailCommand::List {
+    let second_page = engine.dispatch(EmailCommand::ListByUid {
         account: "work".to_owned(),
         folder: "INBOX".to_owned(),
         limit: 1,
@@ -3082,7 +3082,7 @@ fn spoofed_from_and_policy_errors_do_not_leak_content() {
         Some("policy_denied")
     );
 
-    let denied = engine.dispatch(EmailCommand::List {
+    let denied = engine.dispatch(EmailCommand::ListByUid {
         account: "work".to_owned(),
         folder: "Private".to_owned(),
         limit: 10,
@@ -3183,12 +3183,35 @@ fn parser_accepts_and_rejects_command_shapes() {
         }
     );
     assert_eq!(
-        parse_command(&command_args("list", vec![])).expect("list defaults"),
-        EmailCommand::List {
+        parse_command(&command_args("list", vec![])).expect("legacy list defaults"),
+        EmailCommand::ListByUid {
             account: String::new(),
             folder: DEFAULT_FOLDER.to_owned(),
             limit: DEFAULT_LIST_LIMIT,
             cursor: None
+        }
+    );
+    assert_eq!(
+        parse_command(&command_args("list_by_uid", vec![])).expect("list_by_uid defaults"),
+        EmailCommand::ListByUid {
+            account: String::new(),
+            folder: DEFAULT_FOLDER.to_owned(),
+            limit: DEFAULT_LIST_LIMIT,
+            cursor: None
+        }
+    );
+    assert_eq!(
+        parse_command(&command_args(
+            "list_recent",
+            vec![("days", CborValue::Integer(3.into()))]
+        ))
+        .expect("list_recent defaults"),
+        EmailCommand::ListRecent {
+            account: String::new(),
+            folder: DEFAULT_FOLDER.to_owned(),
+            limit: DEFAULT_LIST_LIMIT,
+            cursor: None,
+            days: 3
         }
     );
     assert_eq!(

@@ -247,8 +247,9 @@ tool-specific instructions share one prompt assembly path.
 ### `std-email` — controlled IMAP/SMTP access
 
 The email extension exposes one `email` tool for configured mail accounts. It can
-list folders and messages, read approved or policy-allowed content, request full
-read approval with `request_full`, send mail through approval gates, and safely
+list folders, recent messages by IMAP internal date with `list_recent`, raw
+UID-ordered pages with `list_by_uid`, read approved or policy-allowed content,
+request full read approval with `request_full`, send mail through approval gates, and safely
 manage message state with `mark_read`, `mark_unread`, `star`, `unstar`, and
 `trash`. Message listings include `access=full|preview|none`; `preview` reads
 return only a heavily stripped `body_preview` with HTML removed, links replaced

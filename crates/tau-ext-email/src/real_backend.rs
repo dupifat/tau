@@ -33,6 +33,7 @@ use super::{
 
 pub(super) const READ_MESSAGE_FETCH_MAX_BYTES: usize = READ_BODY_MAX_BYTES * 4;
 pub(super) const METADATA_HEADER_FETCH_MAX_BYTES: usize = 32 * 1024;
+const RECENT_SEARCH_FETCH_WINDOW: usize = 1000;
 pub(super) const FETCH_METADATA_ITEMS: &str = "(UID FLAGS INTERNALDATE BODY.PEEK[HEADER]<0.32768>)";
 pub(super) const FETCH_FULL_MESSAGE_ITEMS: &str =
     "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[]<0.262144>)";
@@ -121,11 +122,11 @@ impl EmailBackend for RealEmailBackend {
     }
 
     fn list_messages(&self, account: &str, folder: &str) -> Result<Vec<BackendMessage>, String> {
-        self.list_messages_page(account, folder, 100, 0)
+        self.list_messages_by_uid_page(account, folder, 100, 0)
             .map(|page| page.messages)
     }
 
-    fn list_messages_page(
+    fn list_messages_by_uid_page(
         &self,
         account: &str,
         folder: &str,
@@ -136,7 +137,23 @@ impl EmailBackend for RealEmailBackend {
         let timeout_seconds = account.imap_config()?.timeout_seconds;
         let folder = folder.to_owned();
         self.block_with_timeout(timeout_seconds, async move {
-            list_messages_page_async(&account, &folder, limit, offset).await
+            list_messages_by_uid_page_async(&account, &folder, limit, offset).await
+        })
+    }
+
+    fn list_recent_messages_page(
+        &self,
+        account: &str,
+        folder: &str,
+        limit: usize,
+        offset: usize,
+        days: u32,
+    ) -> Result<BackendMessagePage, String> {
+        let account = self.account(account)?;
+        let timeout_seconds = account.imap_config()?.timeout_seconds;
+        let folder = folder.to_owned();
+        self.block_with_timeout(timeout_seconds, async move {
+            list_recent_messages_page_async(&account, &folder, limit, offset, days).await
         })
     }
 
@@ -271,7 +288,7 @@ impl AsyncWrite for RealImapStream {
     }
 }
 
-async fn list_messages_page_async(
+async fn list_messages_by_uid_page_async(
     account: &RealAccount,
     folder: &str,
     limit: usize,
@@ -320,6 +337,117 @@ async fn list_messages_page_async(
         next_cursor: truncated.then(|| offset.saturating_add(fetch_count).to_string()),
         truncated,
     })
+}
+
+async fn list_recent_messages_page_async(
+    account: &RealAccount,
+    folder: &str,
+    limit: usize,
+    offset: usize,
+    days: u32,
+) -> Result<BackendMessagePage, String> {
+    if limit == 0 {
+        return Ok(BackendMessagePage {
+            messages: Vec::new(),
+            next_cursor: None,
+            truncated: false,
+        });
+    }
+    let mut session = connect_imap(account).await?;
+    let mailbox = session.examine(folder).await.map_err(imap_error)?;
+    let uidvalidity = mailbox
+        .uid_validity
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    let since = imap_since_date(days)?;
+    let mut uids = session
+        .uid_search(format!("SINCE {since}"))
+        .await
+        .map_err(imap_error)?
+        .into_iter()
+        .collect::<Vec<_>>();
+    uids.sort_unstable_by(|left, right| right.cmp(left));
+    let total_matches = uids.len();
+    let fetch_start = offset.min(total_matches);
+    let fetch_end = offset
+        .saturating_add(limit)
+        .min(total_matches)
+        .min(fetch_start.saturating_add(RECENT_SEARCH_FETCH_WINDOW));
+    let page_uids = &uids[fetch_start..fetch_end];
+    if page_uids.is_empty() {
+        let _ = session.logout().await;
+        return Ok(BackendMessagePage {
+            messages: Vec::new(),
+            next_cursor: None,
+            truncated: false,
+        });
+    }
+    let uid_set = page_uids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut fetches = session
+        .uid_fetch(uid_set, FETCH_METADATA_ITEMS)
+        .await
+        .map_err(imap_error)?;
+    let mut messages = Vec::new();
+    while let Some(fetch) = fetches.try_next().await.map_err(imap_error)? {
+        let internal_timestamp = fetch
+            .internal_date()
+            .map(|date| date.timestamp())
+            .unwrap_or_default();
+        let uid = fetch.uid.unwrap_or(fetch.message);
+        messages.push((
+            internal_timestamp,
+            uid,
+            metadata_from_fetch(&fetch, &uidvalidity),
+        ));
+    }
+    drop(fetches);
+    let _ = session.logout().await;
+
+    messages
+        .sort_unstable_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
+    let truncated = offset.saturating_add(limit) < total_matches;
+    let next_offset = offset.saturating_add(limit);
+    Ok(BackendMessagePage {
+        messages: messages
+            .into_iter()
+            .take(limit)
+            .map(|(_, _, message)| message)
+            .collect(),
+        next_cursor: truncated.then(|| next_offset.to_string()),
+        truncated,
+    })
+}
+
+fn imap_since_date(days: u32) -> Result<String, String> {
+    let now_days = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "internal_error: system clock is before Unix epoch".to_owned())?
+        .as_secs()
+        / 86_400;
+    let since_days = now_days.saturating_sub(u64::from(days.saturating_sub(1)));
+    let (year, month, day) = civil_date_from_unix_days(since_days as i64);
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    Ok(format!("{day}-{}-{year}", MONTHS[month - 1]))
+}
+
+fn civil_date_from_unix_days(days: i64) -> (i32, usize, u8) {
+    let z = days + 719_468;
+    let era = if 0 <= z { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + if month <= 2 { 1 } else { 0 };
+    (year as i32, month as usize, day as u8)
 }
 
 async fn message_metadata_async(

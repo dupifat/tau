@@ -23,7 +23,7 @@ Email is hostile input. Message bodies, subjects, display names, addresses, MIME
 
 ### Incoming email gating
 
-`email.list` returns bounded metadata and an `access` field for every message: `full`, `preview`, or `none`. `full` means `email.read` can return simplified full content. `preview` means `email.read` returns only a stripped `body_preview`. `none` means `email.read` returns an `approval_required` error and no body preview.
+`email.list_recent` and `email.list_by_uid` return bounded metadata and an `access` field for every message: `full`, `preview`, or `none`. `full` means `email.read` can return simplified full content. `preview` means `email.read` returns only a stripped `body_preview`. `none` means `email.read` returns an `approval_required` error and no body preview.
 
 For messages that do not have `full` access, listing redacts the full subject and attachment metadata, but includes a short lossy `subject_preview` containing only ASCII letters/digits, commas, semicolons, periods, spaces, and dashes.
 
@@ -85,7 +85,7 @@ Model-visible incoming `From` values are normalized to the address instead of tr
 
 ### Bounded IMAP access
 
-Metadata and body fetches are bounded. Header fetches use a fixed byte window, body reads have a byte and line cap, and outputs mark truncation. List operations only inspect a bounded recent message window instead of sorting an entire mailbox. UID and folder arguments are validated before use, and returned UIDs are checked against the requested UID.
+Metadata and body fetches are bounded. Header fetches use a fixed byte window, body reads have a byte and line cap, and outputs mark truncation. `list_recent` uses IMAP `UID SEARCH SINCE` against server internal dates and sorts the matched metadata by internal date descending. `list_by_uid` pages a bounded newest-UID window without claiming date order. UID and folder arguments are validated before use, and returned UIDs are checked against the requested UID.
 
 If authentication headers are truncated during the metadata fetch, the extension denies auto-read with `auth truncated` instead of guessing.
 
@@ -210,7 +210,8 @@ The model-visible tool name is `email`. Commands are selected through the `comma
 
 - `list_accounts`
 - `list_folders`
-- `list`
+- `list_recent`
+- `list_by_uid`
 - `read`
 - `request_full`
 - `mark_read`
@@ -220,7 +221,7 @@ The model-visible tool name is `email`. Commands are selected through the `comma
 - `trash`
 - `send`
 
-`read`, `request_full`, `mark_read`, `mark_unread`, `star`, `unstar`, and `trash` take the same `account`/`folder`/`uid` target. `request_full` creates or reuses a pending incoming approval so the user can decide whether the agent may read the full message. Message-management commands do not require content approval. `trash` moves the message to the account's IMAP Trash mailbox.
+`list_recent` accepts optional `account`, `folder`, `limit`, `cursor`, and `days`; `days` defaults to 7. `list_by_uid` accepts optional `account`, `folder`, `limit`, and `cursor`. `read`, `request_full`, `mark_read`, `mark_unread`, `star`, `unstar`, and `trash` take the same `account`/`folder`/`uid` target. `request_full` creates or reuses a pending incoming approval so the user can decide whether the agent may read the full message. Message-management commands do not require content approval. `trash` moves the message to the account's IMAP Trash mailbox.
 
 Use `list_accounts` first when the account id is not known.
 

@@ -685,9 +685,9 @@ fn skill_search_stats(matches: &[SkillSearchHit]) -> ToolDisplayStats {
 }
 fn skill_search_guidance(total_matches: usize) -> String {
     if total_matches == 0 {
-        return "No skills matched. Try different terms, fewer terms, or set search_content: true if the body may mention the topic.".to_owned();
+        return include_str!("prompts/skill_search_guidance_empty.md").to_owned();
     }
-    "Call `skill` again with only an exact `name` to load a specific match, or narrow `query` with a more distinctive term. Multi-term queries use OR semantics and rank by matched term count, so adding generic terms may not reduce matches. The top match was not auto-loaded because other matches also existed.".to_owned()
+    include_str!("prompts/skill_search_guidance_ambiguous.md").to_owned()
 }
 fn push_matched_field(fields: &mut Vec<String>, field: &str) {
     if !fields.iter().any(|existing| existing == field) {

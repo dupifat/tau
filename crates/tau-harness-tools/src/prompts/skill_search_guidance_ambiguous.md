@@ -1,0 +1,1 @@
+Call `skill` again with only an exact `name` to load a specific match, or narrow `query` with a more distinctive term. Multi-term queries use OR semantics and rank by matched term count, so adding generic terms may not reduce matches. The top match was not auto-loaded because other matches also existed.

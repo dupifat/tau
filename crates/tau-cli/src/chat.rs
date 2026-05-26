@@ -688,6 +688,11 @@ pub(crate) fn run_chat(
             suspended_agents.clone(),
         ),
     );
+    completion_data.set_agent_mention_completer(build_agent_mention_completer(
+        known_agents.clone(),
+        live_agents.clone(),
+        suspended_agents.clone(),
+    ));
     completion_data.set_arg_completer(
         tau_cli_term::CommandName::new("/session"),
         build_session_arg_completer(),
@@ -1866,6 +1871,43 @@ fn build_agent_arg_completer(
     })
 }
 
+fn build_agent_mention_completer(
+    known_agents: Arc<Mutex<Vec<String>>>,
+    live_agents: Arc<Mutex<std::collections::HashSet<String>>>,
+    suspended_agents: Arc<Mutex<std::collections::HashSet<String>>>,
+) -> tau_cli_term::ArgCompleter {
+    use tau_cli_term::CompletionItem;
+
+    Arc::new(move |args: &[&str]| {
+        if args.len() != 1 {
+            return Vec::new();
+        }
+        let known = known_agents
+            .lock()
+            .map(|agents| agents.clone())
+            .unwrap_or_default();
+        let live = live_agents
+            .lock()
+            .map(|agents| agents.clone())
+            .unwrap_or_default();
+        let suspended = suspended_agents
+            .lock()
+            .map(|agents| agents.clone())
+            .unwrap_or_default();
+        let active: std::collections::HashSet<_> = live
+            .into_iter()
+            .filter(|agent| !suspended.contains(agent))
+            .collect();
+        let needle = args[0].to_lowercase();
+        known
+            .into_iter()
+            .filter(|agent| active.contains(agent))
+            .filter(|agent| completion_matches(agent, &needle))
+            .map(|agent| CompletionItem::new(agent, "agent"))
+            .collect()
+    })
+}
+
 fn completion_matches(candidate: &str, needle: &str) -> bool {
     let lower = candidate.to_lowercase();
     needle.is_empty() || lower.starts_with(needle) || lower.contains(needle)
@@ -2275,6 +2317,28 @@ mod role_cycle_tests {
 
         assert!(live.lock().unwrap().is_empty());
         assert!(suspended.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn agent_mention_completer_offers_only_active_agents() {
+        // Prompt-text `&agent` completion is for routing to active agents. It
+        // must not suggest suspended agents even though `/agent resume` does.
+        let known = Arc::new(Mutex::new(vec!["helper".to_owned(), "worker".to_owned()]));
+        let live = Arc::new(Mutex::new(std::collections::HashSet::from([
+            "helper".to_owned(),
+            "worker".to_owned(),
+        ])));
+        let suspended = Arc::new(Mutex::new(std::collections::HashSet::from([
+            "helper".to_owned()
+        ])));
+        let completer = build_agent_mention_completer(known, live, suspended);
+
+        let values: Vec<_> = completer(&[""])
+            .into_iter()
+            .map(|item| item.value)
+            .collect();
+
+        assert_eq!(values, vec!["worker"]);
     }
 
     #[test]

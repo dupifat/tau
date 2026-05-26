@@ -98,6 +98,7 @@ struct CompletionInner {
     arg_completers: HashMap<CommandName, ArgCompleter>,
     dynamic_arg_completers: HashMap<CommandName, ArgCompleter>,
     dynamic_commands: Vec<SlashCommand>,
+    agent_mention_completer: Option<ArgCompleter>,
 }
 
 /// Thread-safe storage for dynamic slash-command and argument completions.
@@ -196,6 +197,23 @@ impl CompletionData {
             .cloned()
     }
 
+    /// Registers prompt-text completion for active agent mentions typed as
+    /// `&<partial-agent-id>`.
+    pub fn set_agent_mention_completer(&self, completer: ArgCompleter) {
+        self.inner
+            .lock()
+            .expect("completion data lock")
+            .agent_mention_completer = Some(completer);
+    }
+
+    fn get_agent_mention_completer(&self) -> Option<ArgCompleter> {
+        self.inner
+            .lock()
+            .expect("completion data lock")
+            .agent_mention_completer
+            .clone()
+    }
+
     fn dynamic_commands(&self) -> Vec<SlashCommand> {
         self.inner
             .lock()
@@ -236,6 +254,9 @@ pub(crate) fn build_candidates_with_home(
     }
 
     if !buffer.starts_with('/') {
+        if let Some(agent_token) = agent_mention_token(buffer, cursor) {
+            return build_agent_mention_candidates(data, &agent_token);
+        }
         return Vec::new();
     }
 
@@ -302,6 +323,41 @@ fn is_filesystem_prefix(buffer: &str) -> bool {
         || buffer.starts_with("../")
         || buffer == "~"
         || buffer.starts_with("~/")
+}
+
+fn agent_mention_token(buffer: &str, cursor: usize) -> Option<PathToken<'_>> {
+    let before_cursor = buffer.get(..cursor)?;
+    let after_cursor = buffer.get(cursor..)?;
+    let token_start = before_cursor
+        .char_indices()
+        .rev()
+        .find_map(|(idx, ch)| ch.is_whitespace().then_some(idx + ch.len_utf8()))
+        .unwrap_or(0);
+    let token_end = after_cursor
+        .char_indices()
+        .find_map(|(idx, ch)| ch.is_whitespace().then_some(cursor + idx))
+        .unwrap_or(buffer.len());
+    let prefix = &buffer[token_start..cursor];
+    prefix.starts_with('&').then_some(PathToken {
+        prefix,
+        before: &buffer[..token_start],
+        after: &buffer[token_end..],
+    })
+}
+
+fn build_agent_mention_candidates(data: &CompletionData, token: &PathToken<'_>) -> Vec<Candidate> {
+    let Some(completer) = data.get_agent_mention_completer() else {
+        return Vec::new();
+    };
+    let partial = token.prefix.strip_prefix('&').unwrap_or(token.prefix);
+    completer(&[partial])
+        .into_iter()
+        .map(|item| Candidate {
+            label: item.value.clone(),
+            description: item.description.clone(),
+            replacement: format!("{}&{}{}", token.before, item.value, token.after),
+        })
+        .collect()
 }
 
 fn home_dir() -> Option<PathBuf> {

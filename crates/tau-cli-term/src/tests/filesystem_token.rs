@@ -67,6 +67,32 @@ fn slash_command_buffer_does_not_route_to_filesystem() {
 }
 
 #[test]
+fn ampersand_token_completes_agent_mentions_in_prompt_text() {
+    // Agent mentions are prompt-text completions, not slash commands. Accepting
+    // one must replace only the current `&...` token and preserve surrounding
+    // prompt text.
+    let data = CompletionData::new();
+    data.set_agent_mention_completer(std::sync::Arc::new(|args| {
+        assert_eq!(args, ["wo"]);
+        vec![crate::completion::CompletionItem::new("worker", "agent")]
+    }));
+    let buffer = "ask &wo for help";
+    let cursor = "ask &wo".len();
+
+    let cands = build_candidates(
+        &[SlashCommand::new("/model", "Switch model")],
+        &data,
+        buffer,
+        cursor,
+    );
+
+    assert_eq!(cands.len(), 1);
+    assert_eq!(cands[0].label, "worker");
+    assert_eq!(cands[0].description, "agent");
+    assert_eq!(cands[0].replacement, "ask &worker for help");
+}
+
+#[test]
 fn non_slash_non_path_buffer_returns_nothing() {
     let cands = build_candidates(
         &[SlashCommand::new("/model", "Switch model")],

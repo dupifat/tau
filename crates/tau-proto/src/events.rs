@@ -2495,6 +2495,8 @@ pub enum ProviderStopReason {
     EndTurn,
     /// The model stopped because it emitted tool calls that Tau should run.
     ToolCalls,
+    /// The model stopped because the provider output-token cap was reached.
+    Length,
     /// The response represents a compaction window rather than a normal turn.
     Compaction,
     /// The turn ended with an error message synthesized by Tau.

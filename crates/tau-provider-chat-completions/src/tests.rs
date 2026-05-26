@@ -9,8 +9,43 @@ fn provider() -> ChatCompletionsProvider {
             display_name: None,
             context_window: 128_000,
         }],
+        max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
         extra_body: BTreeMap::new(),
         compat: ChatCompletionsCompat::openai_defaults(),
+    }
+}
+
+fn resolved_provider(provider: &ChatCompletionsProvider) -> ResolvedProvider {
+    ResolvedProvider {
+        base_url: provider.base_url.clone(),
+        api_key: provider.api_key.clone(),
+        max_output_tokens: provider.max_output_tokens,
+        extra_body: provider.extra_body.clone(),
+        compat: provider.compat,
+    }
+}
+
+fn prompt() -> tau_proto::AgentPromptCreated {
+    tau_proto::AgentPromptCreated {
+        agent_prompt_id: "ap-test".into(),
+        agent_id: "agent-test".into(),
+        system_prompt: String::new(),
+        context_items: vec![ContextItem::Message(tau_proto::MessageItem {
+            role: ContextRole::User,
+            content: vec![ContentPart::Text {
+                text: "hello".to_owned(),
+            }],
+            phase: None,
+        })],
+        tools: Vec::new(),
+        tools_ref: None,
+        model: None,
+        model_params: tau_proto::ModelParams::default(),
+        tool_choice: ToolChoice::Auto,
+        originator: tau_proto::PromptOriginator::User,
+        share_user_cache_key: false,
+        ctx_id: None,
+        previous_response_candidate: None,
     }
 }
 
@@ -75,6 +110,82 @@ fn provider_config_rejects_unknown_fields() {
     .expect_err("model entry should reject unknown fields");
 
     assert!(error.to_string().contains("unknown field"), "got: {error}");
+}
+
+#[test]
+fn chat_request_sets_default_max_tokens_for_generic_providers() {
+    // llama.cpp and other local Chat Completions servers can default to a tiny
+    // output cap when clients omit max_tokens. Generic profiles should send a
+    // Tau cap explicitly so tool-heavy turns do not stop after a preamble.
+    let mut provider = provider();
+    provider.compat.max_completion_tokens = false;
+    let request = build_request(
+        &resolved_provider(&provider),
+        &provider.models[0],
+        &prompt(),
+    );
+    let json = serde_json::to_value(request).expect("request json");
+
+    assert_eq!(json["max_tokens"], DEFAULT_MAX_OUTPUT_TOKENS);
+    assert!(json.get("max_completion_tokens").is_none());
+}
+
+#[test]
+fn chat_request_uses_max_completion_tokens_when_enabled() {
+    // OpenAI-compatible reasoning models can reject the legacy max_tokens name.
+    // The existing compatibility switch now selects the modern wire field for
+    // the same Tau-owned output cap.
+    let provider = provider();
+    let request = build_request(
+        &resolved_provider(&provider),
+        &provider.models[0],
+        &prompt(),
+    );
+    let json = serde_json::to_value(request).expect("request json");
+
+    assert_eq!(json["max_completion_tokens"], DEFAULT_MAX_OUTPUT_TOKENS);
+    assert!(json.get("max_tokens").is_none());
+}
+
+#[test]
+fn extra_body_output_token_cap_overrides_automatic_cap() {
+    // Provider profiles can still use non-standard caps or deliberately lower
+    // limits through extra_body. Avoid serializing a duplicate max token field
+    // when the profile already owns either Chat Completions cap spelling.
+    let mut provider = provider();
+    provider.compat.max_completion_tokens = false;
+    provider
+        .extra_body
+        .insert("max_tokens".to_owned(), serde_json::json!(128));
+    let request = build_request(
+        &resolved_provider(&provider),
+        &provider.models[0],
+        &prompt(),
+    );
+    let json = serde_json::to_value(request).expect("request json");
+
+    assert_eq!(json["max_tokens"], 128);
+    assert!(json.get("max_completion_tokens").is_none());
+}
+
+#[test]
+fn length_finish_reason_maps_to_length_stop_reason() {
+    // Regression coverage for diagnosing local-server premature stops: a raw
+    // Chat Completions `finish_reason: length` is distinct from a normal
+    // end-turn and should survive into Tau's provider response metadata.
+    let mut state = StreamState::new();
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{
+                "delta": {},
+                "finish_reason": "length"
+            }]
+        }),
+        &mut |_, _| {},
+    );
+
+    assert_eq!(state.stop_reason, ProviderStopReason::Length);
 }
 
 #[test]

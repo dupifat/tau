@@ -13,10 +13,13 @@ use tau_proto::{
 };
 
 const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
+/// Default Chat Completions output-token cap Tau sends when no
+/// provider-specific override is set.
+pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
 const EMPTY_RESPONSE_MAX_ATTEMPTS: usize = 2;
 
 /// One Chat Completions-compatible provider entry.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChatCompletionsProvider {
     /// Base URL without `/chat/completions`, e.g. `https://api.openai.com/v1`.
@@ -29,6 +32,16 @@ pub struct ChatCompletionsProvider {
     /// Model ids to publish under this provider namespace.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ChatCompletionsModel>,
+    /// Maximum output tokens requested from the upstream provider.
+    ///
+    /// Chat Completions servers often have small server-side defaults when the
+    /// client omits this field. Set to `0` to omit Tau's automatic cap and rely
+    /// on provider defaults or `extra_body` overrides.
+    #[serde(
+        default = "default_max_output_tokens",
+        skip_serializing_if = "is_default_max_output_tokens"
+    )]
+    pub max_output_tokens: u32,
     /// Extra JSON fields merged into each Chat Completions request body.
     ///
     /// Local and OpenAI-compatible servers use non-standard knobs for reasoning
@@ -83,6 +96,27 @@ fn is_false(value: &bool) -> bool {
 
 const fn default_context_window() -> u64 {
     DEFAULT_CONTEXT_WINDOW
+}
+
+const fn default_max_output_tokens() -> u32 {
+    DEFAULT_MAX_OUTPUT_TOKENS
+}
+
+fn is_default_max_output_tokens(value: &u32) -> bool {
+    *value == DEFAULT_MAX_OUTPUT_TOKENS
+}
+
+impl Default for ChatCompletionsProvider {
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            api_key: String::new(),
+            models: Vec::new(),
+            max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+            extra_body: BTreeMap::new(),
+            compat: ChatCompletionsCompat::default(),
+        }
+    }
 }
 
 impl ChatCompletionsCompat {
@@ -168,6 +202,7 @@ pub fn run_prompt_for_provider<W: Write>(
         ResolvedProvider {
             base_url: provider.base_url.clone(),
             api_key: provider.api_key.clone(),
+            max_output_tokens: provider.max_output_tokens,
             extra_body: provider.extra_body.clone(),
             compat: provider.compat,
         },
@@ -180,6 +215,7 @@ pub fn run_prompt_for_provider<W: Write>(
 struct ResolvedProvider {
     base_url: String,
     api_key: String,
+    max_output_tokens: u32,
     extra_body: BTreeMap<String, serde_json::Value>,
     compat: ChatCompletionsCompat,
 }
@@ -397,6 +433,10 @@ struct ChatRequest {
     prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u32>,
     #[serde(flatten)]
     extra_body: BTreeMap<String, serde_json::Value>,
 }
@@ -431,6 +471,7 @@ fn build_request(
         (ToolChoice::Auto, false) => Some("auto"),
         (ToolChoice::Auto, true) => None,
     };
+    let (max_tokens, max_completion_tokens) = output_token_cap_fields(provider);
     ChatRequest {
         model: model.id.as_str().to_owned(),
         messages,
@@ -448,9 +489,25 @@ fn build_request(
             .compat
             .reasoning_effort
             .then(|| effort_wire(prompt.model_params.effort)),
+        max_tokens,
+        max_completion_tokens,
         extra_body: provider.extra_body.clone(),
         tools,
         tool_choice,
+    }
+}
+
+fn output_token_cap_fields(provider: &ResolvedProvider) -> (Option<u32>, Option<u32>) {
+    if provider.max_output_tokens == 0
+        || provider.extra_body.contains_key("max_tokens")
+        || provider.extra_body.contains_key("max_completion_tokens")
+    {
+        return (None, None);
+    }
+    if provider.compat.max_completion_tokens {
+        (None, Some(provider.max_output_tokens))
+    } else {
+        (Some(provider.max_output_tokens), None)
     }
 }
 
@@ -610,6 +667,7 @@ fn apply_event(
     match choice["finish_reason"].as_str() {
         Some("tool_calls") => state.stop_reason = ProviderStopReason::ToolCalls,
         Some("stop") => state.stop_reason = ProviderStopReason::EndTurn,
+        Some("length") => state.stop_reason = ProviderStopReason::Length,
         _ => {}
     }
 }

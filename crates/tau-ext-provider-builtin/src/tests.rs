@@ -42,6 +42,18 @@ fn profile_storage_kinds_do_not_carry_openai_prefix() {
 }
 
 #[test]
+fn chat_completions_add_defaults_to_legacy_max_tokens() {
+    // The setup wizard is usually used for local OpenAI-compatible servers.
+    // Those should get Tau's output cap through `max_tokens`, not OpenAI's
+    // newer `max_completion_tokens` spelling.
+    let compat = chat_completions_add_compat();
+
+    assert!(!compat.max_completion_tokens);
+    assert!(compat.stream_options);
+    assert!(compat.prompt_cache_key);
+}
+
+#[test]
 fn provider_profiles_reject_unknown_fields() {
     // Provider profiles are user-authored persistent config. Unknown fields are
     // usually misspellings or stale schema, so accepting them hides mistakes.

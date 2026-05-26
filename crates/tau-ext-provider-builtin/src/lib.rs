@@ -166,11 +166,19 @@ fn cmd_add_chat_completions() -> Result<(), Box<dyn Error>> {
         base_url,
         api_key,
         models,
+        max_output_tokens: tau_provider_chat_completions::DEFAULT_MAX_OUTPUT_TOKENS,
         extra_body: BTreeMap::new(),
-        compat: tau_provider_chat_completions::ChatCompletionsCompat::openai_defaults(),
+        compat: chat_completions_add_compat(),
     };
     save_profile(&name, &BuiltinProviderProfile::ChatCompletions(profile))?;
     Ok(())
+}
+
+fn chat_completions_add_compat() -> tau_provider_chat_completions::ChatCompletionsCompat {
+    tau_provider_chat_completions::ChatCompletionsCompat {
+        max_completion_tokens: false,
+        ..tau_provider_chat_completions::ChatCompletionsCompat::openai_defaults()
+    }
 }
 
 fn cmd_remove(name_arg: Option<&str>) -> Result<(), Box<dyn Error>> {

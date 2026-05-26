@@ -5,6 +5,7 @@
 //! small [`ConnectionSink`] interface.
 
 mod action_registry;
+mod agent_store;
 mod bus;
 mod connection;
 mod memory;
@@ -19,6 +20,9 @@ mod tests;
 pub use action_registry::{
     ActionProviderSchema, ActionRegistry, ActionRegistryError, ActionRouteError,
 };
+pub use agent_store::{
+    AgentAppendOutcome, AgentStore, AgentStoreError, agent_is_locked, list_agent_metas,
+};
 pub use bus::EventBus;
 pub use connection::{
     AllowAll, Connection, ConnectionMetadata, ConnectionOrigin, ConnectionSendError,
@@ -30,11 +34,13 @@ pub use policy::{
     SubscriptionPolicyError,
 };
 pub use session::{
-    BackgroundToolCallState, BackgroundToolCompletion, BackgroundToolPlaceholder, NodeId,
-    PersistedSessionEvent, SessionEntry, SessionMeta, SessionNode, SessionTree,
+    AgentEntry, AgentEventParent, AgentEventValidationError, AgentMessageDirection, AgentMeta,
+    AgentNode, AgentTree, BackgroundToolCallState, BackgroundToolCompletion,
+    BackgroundToolPlaceholder, NodeId, PersistedAgentEvent, SessionMeta,
 };
 pub use session_store::{
-    AppendOutcome, SessionStore, SessionStoreError, list_session_metas, session_is_locked,
+    AppendOutcome, PersistedSessionEvent, SessionMembership, SessionStore, SessionStoreError,
+    list_session_metas, session_is_locked,
 };
 pub use tool_registry::{
     RegisterToolReport, ToolArgumentValidationError, ToolProvider, ToolProviderKind, ToolRegistry,

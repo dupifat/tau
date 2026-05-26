@@ -27,8 +27,16 @@ fn socket_transport_supports_later_attached_end_to_end_clients() {
         .open_session_store()
         .expect("session store should reopen");
     let session = store.session("session-1").expect("session should exist");
+    let agent_store = runtime
+        .open_agent_store()
+        .expect("agent store should reopen");
     // Optional AGENTS.md preamble + 2 × (user, tool.req, tool.res, agent).
-    let entry_count = session.current_branch().len();
+    let entry_count: usize = session
+        .loaded_agents()
+        .into_iter()
+        .filter_map(|agent_id| agent_store.agent(agent_id.as_str()))
+        .map(|agent| agent.current_branch().len())
+        .sum();
     assert!(
         (8..=9).contains(&entry_count),
         "expected two persisted prompt/tool cycles, got {entry_count} entries"

@@ -115,10 +115,9 @@ pub(crate) fn mint_session_id(cwd: &Path) -> String {
     mint_short_id(basename)
 }
 
-fn pick_resume_session(cwd: &Path) -> Result<Option<String>, CliError> {
+fn pick_resume_session(_cwd: &Path) -> Result<Option<String>, CliError> {
     let sessions_dir = tau_session_inspect::default_sessions_dir();
     let mut metas = tau_harness::list_session_metas(&sessions_dir)?;
-    metas.retain(|(_, meta)| meta.cwd.as_deref() == Some(cwd));
     metas.sort_by_key(|(_, meta)| std::cmp::Reverse(meta.last_touched));
     metas.truncate(RESUME_PICKER_LIMIT);
     if metas.is_empty() {
@@ -130,7 +129,7 @@ fn pick_resume_session(cwd: &Path) -> Result<Option<String>, CliError> {
 
     let rows = metas
         .into_iter()
-        .map(|(sid, meta)| {
+        .map(|(sid, _meta)| {
             let locked = tau_harness::session_is_locked(&sessions_dir, sid.as_str())
                 .unwrap_or_else(|error| {
                     tracing::warn!(
@@ -141,12 +140,8 @@ fn pick_resume_session(cwd: &Path) -> Result<Option<String>, CliError> {
                     );
                     false
                 });
-            let preview = meta
-                .latest_user_prompt_preview
-                .map(|p| format!(" — {p}"))
-                .unwrap_or_default();
             let id = sid.as_str().to_owned();
-            let item = format!("{}{}", sid.as_str(), preview);
+            let item = sid.as_str().to_owned();
             (id, item, locked)
         })
         .collect::<Vec<_>>();

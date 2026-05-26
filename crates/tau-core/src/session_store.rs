@@ -1,13 +1,9 @@
-//! Append-only on-disk persistence of per-session protocol events.
+//! Append-only on-disk persistence of session membership facts.
 //!
-//! Each session is just a CBOR event log plus a small JSON sidecar.
-//! The in-memory [`SessionTree`] is a *derived* view, folded from the
-//! persisted events via [`SessionTree::from_events`]; nothing else
-//! mutates it. Writers go through [`SessionStore::append_session_event`],
-//! which appends one durable record to disk and applies the same
-//! event to the cached tree.
+//! Sessions are durable membership containers only. Agent transcripts live in
+//! [`crate::AgentStore`] under the global agents directory.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -17,50 +13,37 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use tau_proto::{ConnectionId, Event, LogEventId, NodeId, SessionId, UnixMicros};
+use tau_proto::{AgentId, ConnectionId, Event, LogEventId, SessionId, UnixMicros};
 
-use crate::session::{
-    PersistedSessionEvent, SessionEventValidationError, SessionMeta, SessionTree,
-};
+use crate::session::SessionMeta;
 
-/// Errors returned by the append-only session store.
+/// Errors returned by append-only durable stores.
 #[derive(Debug)]
 pub enum SessionStoreError {
-    CreateParentDirectory {
-        path: PathBuf,
-        source: io::Error,
-    },
-    Open {
-        path: PathBuf,
-        source: io::Error,
-    },
-    Read {
-        path: PathBuf,
-        source: io::Error,
-    },
-    Write {
-        path: PathBuf,
-        source: io::Error,
-    },
+    /// Failed to create a store directory.
+    CreateParentDirectory { path: PathBuf, source: io::Error },
+    /// Failed to open a store file.
+    Open { path: PathBuf, source: io::Error },
+    /// Failed to read a store file.
+    Read { path: PathBuf, source: io::Error },
+    /// Failed to write a store file.
+    Write { path: PathBuf, source: io::Error },
+    /// Failed to decode a CBOR record.
     Decode {
         path: PathBuf,
         source: tau_proto::DecodeError,
     },
+    /// Failed to encode a CBOR record.
     Encode {
         path: PathBuf,
         source: tau_proto::EncodeError,
     },
-    /// Another process holds the exclusive lock on this session.
-    Locked {
-        path: PathBuf,
-        holder: String,
-    },
-    InvalidSessionDir {
-        path: PathBuf,
-    },
-    InvalidEvent {
-        source: SessionEventValidationError,
-    },
+    /// Another process holds the exclusive lock for this object.
+    Locked { path: PathBuf, holder: String },
+    /// A session directory could not be converted to UTF-8.
+    InvalidSessionDir { path: PathBuf },
+    /// The event is not a session membership fact for this session.
+    InvalidEvent { message: String },
 }
 
 impl fmt::Display for SessionStoreError {
@@ -71,27 +54,21 @@ impl fmt::Display for SessionStoreError {
                 "failed to create parent directory for session store {}: {source}",
                 path.display()
             ),
-            Self::Open { path, source } => {
-                write!(
-                    f,
-                    "failed to open session store {}: {source}",
-                    path.display()
-                )
-            }
-            Self::Read { path, source } => {
-                write!(
-                    f,
-                    "failed to read session store {}: {source}",
-                    path.display()
-                )
-            }
-            Self::Write { path, source } => {
-                write!(
-                    f,
-                    "failed to write session store {}: {source}",
-                    path.display()
-                )
-            }
+            Self::Open { path, source } => write!(
+                f,
+                "failed to open session store {}: {source}",
+                path.display()
+            ),
+            Self::Read { path, source } => write!(
+                f,
+                "failed to read session store {}: {source}",
+                path.display()
+            ),
+            Self::Write { path, source } => write!(
+                f,
+                "failed to write session store {}: {source}",
+                path.display()
+            ),
             Self::Decode { path, source } => write!(
                 f,
                 "failed to decode session store record from {}: {source}",
@@ -113,7 +90,9 @@ impl fmt::Display for SessionStoreError {
                 "invalid session directory name (non-utf8): {}",
                 path.display()
             ),
-            Self::InvalidEvent { source } => write!(f, "invalid session event: {source}"),
+            Self::InvalidEvent { message } => {
+                write!(f, "invalid session membership event: {message}")
+            }
         }
     }
 }
@@ -121,70 +100,118 @@ impl fmt::Display for SessionStoreError {
 impl Error for SessionStoreError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::CreateParentDirectory { source, .. } => Some(source),
-            Self::Open { source, .. } => Some(source),
-            Self::Read { source, .. } => Some(source),
-            Self::Write { source, .. } => Some(source),
+            Self::CreateParentDirectory { source, .. }
+            | Self::Open { source, .. }
+            | Self::Read { source, .. }
+            | Self::Write { source, .. } => Some(source),
             Self::Decode { source, .. } => Some(source),
             Self::Encode { source, .. } => Some(source),
-            Self::InvalidEvent { source } => Some(source),
-            Self::Locked { .. } => None,
-            Self::InvalidSessionDir { .. } => None,
+            Self::Locked { .. } | Self::InvalidSessionDir { .. } | Self::InvalidEvent { .. } => {
+                None
+            }
         }
     }
 }
 
-/// Append-only persistence for per-session protocol events, with a
-/// derived [`SessionTree`] cached in memory.
-///
-/// Each session lives in its own directory under `sessions_dir` (the
-/// per-session subdirectory of `state_dir`, typically
-/// `<state_dir>/sessions/`):
-///
-/// ```text
-/// <sessions_dir>/<session_id>/
-///   events.cbor   # length-prefixed PersistedSessionEvent stream — the source of truth
-///   meta.json     # SessionMeta sidecar (cwd, created_at, last_touched)
-///   lock          # exclusively flock'd while this store has the session loaded for write
-/// ```
-///
-/// Existing session dirs are loaded lazily. Startup constructs an
-/// empty store and loads individual session trees on first access.
-/// Flocks are still taken lazily on first write so read-only
-/// consumers (e.g. inspection commands) don't contend with a running
-/// daemon.
-/// Result of one [`SessionStore::append_session_event_at`] call:
-/// the durable event id and, when the event produced a tree node,
-/// that node's id. Callers maintaining a per-conversation branch
-/// cursor advance it from `folded_node_id` rather than from the
-/// global `tree.head()` so non-folding events (e.g. an
-/// `ProviderResponseFinished` carrying only tool calls) don't sync
-/// the cursor onto a sibling conversation's last fold.
+/// Result of one session membership append.
 #[derive(Clone, Debug)]
 pub struct AppendOutcome {
+    /// Durable event id assigned to the appended membership fact.
     pub id: LogEventId,
-    pub folded_node_id: Option<NodeId>,
+    /// Session membership events never fold transcript nodes.
+    pub folded_node_id: Option<tau_proto::NodeId>,
 }
 
+/// One durable session-owned membership fact.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PersistedSessionEvent {
+    /// Monotonic id within this session membership log.
+    pub id: LogEventId,
+    /// Connection that published the fact, when known.
+    pub source: Option<ConnectionId>,
+    /// Membership protocol event (`session.agent_loaded` or
+    /// `session.agent_unloaded`).
+    pub event: Event,
+    /// Wall-clock micros since UNIX epoch when the event was appended.
+    #[serde(default)]
+    pub recorded_at: UnixMicros,
+}
+
+/// Folded membership view for one session.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SessionMembership {
+    session_id: SessionId,
+    loaded_agents: HashSet<AgentId>,
+    next_event_id: LogEventId,
+}
+
+impl SessionMembership {
+    /// Builds a session membership view from durable membership facts.
+    #[must_use]
+    pub fn from_events(session_id: SessionId, events: &[PersistedSessionEvent]) -> Self {
+        let mut tree = Self {
+            session_id,
+            loaded_agents: HashSet::new(),
+            next_event_id: LogEventId::new(0),
+        };
+        for record in events {
+            tree.apply_event(&record.event);
+            tree.next_event_id = LogEventId::new(record.id.get() + 1);
+        }
+        tree
+    }
+
+    /// Returns the session identifier.
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Returns true when `agent_id` is currently loaded in this session.
+    #[must_use]
+    pub fn contains_agent(&self, agent_id: &AgentId) -> bool {
+        self.loaded_agents.contains(agent_id)
+    }
+
+    /// Returns currently loaded agents in this session.
+    #[must_use]
+    pub fn loaded_agents(&self) -> Vec<&AgentId> {
+        let mut agents: Vec<_> = self.loaded_agents.iter().collect();
+        agents.sort();
+        agents
+    }
+
+    fn next_event_id(&self) -> LogEventId {
+        self.next_event_id
+    }
+
+    fn advance_next_event_id(&mut self) {
+        self.next_event_id = LogEventId::new(self.next_event_id.get() + 1);
+    }
+
+    fn apply_event(&mut self, event: &Event) {
+        match event {
+            Event::SessionAgentLoaded(loaded) if loaded.session_id == self.session_id => {
+                self.loaded_agents.insert(loaded.agent_id.clone());
+            }
+            Event::SessionAgentUnloaded(unloaded) if unloaded.session_id == self.session_id => {
+                self.loaded_agents.remove(&unloaded.agent_id);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Append-only persistence for session membership facts.
 #[derive(Debug)]
 pub struct SessionStore {
     sessions_dir: PathBuf,
-    sessions: HashMap<SessionId, SessionTree>,
-    /// Held flocks per session, acquired lazily on first write. Released
-    /// when this store is dropped (the OS releases the flock when the
-    /// file handle closes).
+    sessions: HashMap<SessionId, SessionMembership>,
     locks: HashMap<SessionId, File>,
 }
 
 impl SessionStore {
-    /// Opens the session store rooted at `sessions_dir`, eagerly loading
-    /// every session subdirectory found there.
-    ///
-    /// Cost is O(total bytes across every session's `events.cbor`),
-    /// so this is intended for read-only inspection callers (e.g.
-    /// `tau session list`) that genuinely need every tree resident in
-    /// memory. Daemon startup should use [`Self::open_lazy`] and
-    /// load individual trees on demand via [`Self::load_session`].
+    /// Opens the session store and eagerly loads existing membership logs.
     pub fn open(sessions_dir: impl Into<PathBuf>) -> Result<Self, SessionStoreError> {
         let sessions_dir = sessions_dir.into();
         let mut store = Self::open_lazy(sessions_dir.clone())?;
@@ -197,26 +224,19 @@ impl SessionStore {
                 source,
             })?;
             let path = entry.path();
-            if !path.is_dir() {
+            if !path.is_dir() || !path.join("events.cbor").exists() {
                 continue;
             }
-            let events_path = path.join("events.cbor");
-            if !events_path.exists() {
-                continue;
-            }
-            let session_id_str = path
+            let session_id = path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .ok_or_else(|| SessionStoreError::InvalidSessionDir { path: path.clone() })?;
-            store.load_session_if_needed(session_id_str)?;
+            store.load_session_if_needed(session_id)?;
         }
         Ok(store)
     }
 
-    /// Opens the session store rooted at `sessions_dir` without
-    /// loading session event logs. Individual sessions are loaded on
-    /// write; callers that need a pre-existing tree should use
-    /// [`Self::open`].
+    /// Opens the session store without loading existing membership logs.
     pub fn open_lazy(sessions_dir: impl Into<PathBuf>) -> Result<Self, SessionStoreError> {
         let sessions_dir = sessions_dir.into();
         fs::create_dir_all(&sessions_dir).map_err(|source| {
@@ -225,7 +245,6 @@ impl SessionStore {
                 source,
             }
         })?;
-
         Ok(Self {
             sessions_dir,
             sessions: HashMap::new(),
@@ -233,31 +252,27 @@ impl SessionStore {
         })
     }
 
-    fn load_session_if_needed(&mut self, session_id: &str) -> Result<(), SessionStoreError> {
-        let sid: SessionId = session_id.into();
-        if self.sessions.contains_key(&sid) {
-            return Ok(());
-        }
-        let events_path = self.session_dir(session_id).join("events.cbor");
-        if !events_path.exists() {
-            return Ok(());
-        }
-        let events = load_session_events(&events_path)?;
-        let tree = SessionTree::from_events(sid.clone(), &events);
-        self.sessions.insert(sid, tree);
-        Ok(())
-    }
-
-    /// Returns the path to one session's directory (created lazily on
-    /// write).
     fn session_dir(&self, session_id: &str) -> PathBuf {
         self.sessions_dir.join(session_id)
     }
 
-    /// Acquires an exclusive flock on the session's `lock` file if not
-    /// already held.
+    fn load_session_if_needed(&mut self, session_id: &str) -> Result<(), SessionStoreError> {
+        let sid = SessionId::from(session_id);
+        if self.sessions.contains_key(&sid) {
+            return Ok(());
+        }
+        let path = self.session_dir(session_id).join("events.cbor");
+        if !path.exists() {
+            return Ok(());
+        }
+        let events = load_session_events(&path)?;
+        self.sessions
+            .insert(sid.clone(), SessionMembership::from_events(sid, &events));
+        Ok(())
+    }
+
     fn ensure_locked(&mut self, session_id: &str) -> Result<(), SessionStoreError> {
-        let sid: SessionId = session_id.into();
+        let sid = SessionId::from(session_id);
         if self.locks.contains_key(&sid) {
             return Ok(());
         }
@@ -280,13 +295,6 @@ impl SessionStore {
                 source,
             })?;
         if FileExt::try_lock_exclusive(&file).is_err() {
-            // Read the holder's `pid=...` line from the same fd we
-            // just tried to lock. flock is released by the kernel on
-            // process exit, so reaching this branch implies the
-            // holder is alive (modulo a thin race window where the
-            // holder has the lock but hasn't yet written its pid; in
-            // that case `holder` is empty, which Display handles
-            // fine).
             let mut holder = String::new();
             let _ = file.read_to_string(&mut holder);
             return Err(SessionStoreError::Locked {
@@ -294,7 +302,6 @@ impl SessionStore {
                 holder,
             });
         }
-        // Replace lock contents with our PID + start time.
         file.set_len(0).map_err(|source| SessionStoreError::Write {
             path: lock_path.clone(),
             source,
@@ -304,56 +311,35 @@ impl SessionStore {
                 path: lock_path.clone(),
                 source,
             })?;
-        let pid = std::process::id();
-        let now = unix_now();
-        writeln!(&mut file, "pid={pid} start={now}").map_err(|source| {
-            SessionStoreError::Write {
-                path: lock_path.clone(),
+        writeln!(&mut file, "pid={} start={}", std::process::id(), unix_now()).map_err(
+            |source| SessionStoreError::Write {
+                path: lock_path,
                 source,
-            }
-        })?;
+            },
+        )?;
         self.locks.insert(sid, file);
         Ok(())
     }
 
-    /// Appends one non-transient protocol event to the durable
-    /// per-session event log and applies it to the in-memory tree.
-    /// The persisted event is the single source of truth — both the
-    /// on-disk log and the derived [`SessionTree`] are populated from
-    /// it here, so they cannot drift.
-    ///
-    /// Convenience wrapper around
-    /// [`SessionStore::append_session_event_at`] that uses the
-    /// session tree's current head as the fold parent — the legacy
-    /// behaviour from before per-conversation parent stamping.
+    /// Appends one session membership event.
     pub fn append_session_event(
         &mut self,
         session_id: &str,
         source: Option<ConnectionId>,
         event: Event,
     ) -> Result<AppendOutcome, SessionStoreError> {
-        self.append_session_event_at(session_id, source, None, event, UnixMicros::now())
+        self.append_session_event_at(session_id, source, event, UnixMicros::now())
     }
 
-    /// Like [`SessionStore::append_session_event`] but folds the
-    /// event onto an explicit fold parent instead of the session
-    /// tree's current write cursor. The harness uses this when
-    /// publishing on a conversation's behalf, so cross-conversation
-    /// events don't have to bounce a shared `head` cursor through
-    /// `UiNavigateTree`.
-    ///
-    /// `parent_node_id` is a tri-state matching
-    /// [`SessionTree::apply_event_at`]: `None` inherits the tree's
-    /// head (legacy), `Some(None)` folds at root, `Some(Some(id))`
-    /// folds under `id`.
+    /// Like [`Self::append_session_event`] with an explicit timestamp.
     pub fn append_session_event_at(
         &mut self,
         session_id: &str,
         source: Option<ConnectionId>,
-        parent_node_id: Option<Option<NodeId>>,
         event: Event,
         recorded_at: UnixMicros,
     ) -> Result<AppendOutcome, SessionStoreError> {
+        validate_membership_event(session_id, &event)?;
         self.ensure_locked(session_id)?;
         self.load_session_if_needed(session_id)?;
         let session_dir = self.session_dir(session_id);
@@ -363,88 +349,65 @@ impl SessionStore {
                 source,
             }
         })?;
-        let events_path = session_dir.join("events.cbor");
-
-        let sid: SessionId = session_id.into();
+        let sid = SessionId::from(session_id);
         let tree = self
             .sessions
             .entry(sid.clone())
-            .or_insert_with(|| SessionTree::from_events(sid, &[]));
-        tree.validate_event(&event)
-            .map_err(|source| SessionStoreError::InvalidEvent { source })?;
-        // Cached: `from_events` populated this from the highest
-        // persisted id at load time; we keep it advanced below.
-        // Avoids re-reading and re-decoding the entire on-disk log
-        // on every write.
-        let next_id = tree.next_event_id();
+            .or_insert_with(|| SessionMembership::from_events(sid, &[]));
+        let id = tree.next_event_id();
         let record = PersistedSessionEvent {
-            id: next_id,
+            id,
             source,
             event: event.clone(),
-            // Persistence stores only the inner Option<NodeId>;
-            // explicit-root (`Some(None)`) and inherit-head (`None`)
-            // collapse to `None` on the wire. See `from_events`.
-            parent_node_id: parent_node_id.flatten(),
             recorded_at,
         };
-        append_cbor_record(&events_path, &record)?;
-        touch_meta_for_event(&session_dir.join("meta.json"), &event)?;
-
-        let folded_node_id = tree.apply_event_at(parent_node_id, &event);
+        append_cbor_record(&session_dir.join("events.cbor"), &record)?;
+        touch_meta(&session_dir.join("meta.json"))?;
+        tree.apply_event(&event);
         tree.advance_next_event_id();
-
         Ok(AppendOutcome {
-            id: next_id,
-            folded_node_id,
+            id,
+            folded_node_id: None,
         })
     }
 
-    /// Loads durable per-session protocol events.
+    /// Loads durable session membership events.
     pub fn session_events(
         &self,
         session_id: &str,
     ) -> Result<Vec<PersistedSessionEvent>, SessionStoreError> {
-        let path = self.session_dir(session_id).join("events.cbor");
-        load_session_events(&path)
+        load_session_events(&self.session_dir(session_id).join("events.cbor"))
     }
 
-    /// Returns the per-session storage root this store is rooted at
-    /// (typically `<state_dir>/sessions/`).
+    /// Returns the storage root for session membership containers.
     #[must_use]
     pub fn sessions_dir(&self) -> &Path {
         &self.sessions_dir
     }
 
-    /// Returns one session tree if it exists, loading a persisted log
-    /// on demand.
+    /// Returns one session membership view, loading it on demand.
     pub fn load_session(
         &mut self,
         session_id: &str,
-    ) -> Result<Option<&SessionTree>, SessionStoreError> {
+    ) -> Result<Option<&SessionMembership>, SessionStoreError> {
         self.load_session_if_needed(session_id)?;
         Ok(self.sessions.get(&SessionId::from(session_id)))
     }
 
-    /// Returns one already-loaded session tree if it exists.
+    /// Returns one already-loaded session membership view.
     #[must_use]
-    pub fn session(&self, session_id: &str) -> Option<&SessionTree> {
+    pub fn session(&self, session_id: &str) -> Option<&SessionMembership> {
         self.sessions.get(&SessionId::from(session_id))
     }
 
-    /// Returns all known sessions.
+    /// Returns all loaded session membership views.
     #[must_use]
-    pub fn sessions(&self) -> Vec<&SessionTree> {
+    pub fn sessions(&self) -> Vec<&SessionMembership> {
         self.sessions.values().collect()
     }
 
-    /// Records initial cwd metadata for a session if not already
-    /// present. Idempotent: subsequent calls only update
-    /// `last_touched`.
-    pub fn record_session_meta(
-        &mut self,
-        session_id: &str,
-        cwd: Option<PathBuf>,
-    ) -> Result<(), SessionStoreError> {
+    /// Records or refreshes session metadata without storing workspace state.
+    pub fn record_session_meta(&mut self, session_id: &str) -> Result<(), SessionStoreError> {
         self.ensure_locked(session_id)?;
         let path = self.session_dir(session_id).join("meta.json");
         let now = unix_now();
@@ -452,22 +415,28 @@ impl SessionStore {
         if meta.created_at == 0 {
             meta.created_at = now;
         }
-        if meta.cwd.is_none() {
-            meta.cwd = cwd;
-        }
         meta.last_touched = now;
         write_meta(&path, &meta)
     }
 }
 
-/// Lists session metadata across `sessions_dir` without taking any flocks.
-///
-/// Sessions whose `meta.json` is missing are skipped silently (the
-/// session may have just been created and not yet touched). A
-/// `meta.json` that *exists* but fails to parse is also skipped, but
-/// emits a warning to stderr so a corrupt sidecar does not become
-/// invisible to operators. The goal is best-effort discovery for
-/// `-r` resumption, not strict listing.
+fn validate_membership_event(session_id: &str, event: &Event) -> Result<(), SessionStoreError> {
+    match event {
+        Event::SessionAgentLoaded(loaded) if loaded.session_id == session_id => Ok(()),
+        Event::SessionAgentUnloaded(unloaded) if unloaded.session_id == session_id => Ok(()),
+        Event::SessionAgentLoaded(_) | Event::SessionAgentUnloaded(_) => {
+            Err(SessionStoreError::InvalidEvent {
+                message: "membership event session_id did not match target session".to_owned(),
+            })
+        }
+        _ => Err(SessionStoreError::InvalidEvent {
+            message: "session store only persists session.agent_loaded/session.agent_unloaded"
+                .to_owned(),
+        }),
+    }
+}
+
+/// Lists session metadata across `sessions_dir` without taking flocks.
 pub fn list_session_metas(sessions_dir: &Path) -> io::Result<Vec<(SessionId, SessionMeta)>> {
     let mut out = Vec::new();
     if !sessions_dir.exists() {
@@ -499,7 +468,7 @@ pub fn list_session_metas(sessions_dir: &Path) -> io::Result<Vec<(SessionId, Ses
     Ok(out)
 }
 
-/// Best-effort check whether a session's lock is currently held.
+/// Best-effort check whether a session lock is currently held.
 pub fn session_is_locked(sessions_dir: &Path, session_id: &str) -> io::Result<bool> {
     let lock_path = sessions_dir.join(session_id).join("lock");
     let file = match OpenOptions::new().read(true).write(true).open(&lock_path) {
@@ -539,43 +508,14 @@ fn write_meta(path: &Path, meta: &SessionMeta) -> Result<(), SessionStoreError> 
     })
 }
 
-fn touch_meta_for_event(path: &Path, event: &Event) -> Result<(), SessionStoreError> {
+fn touch_meta(path: &Path) -> Result<(), SessionStoreError> {
     let now = unix_now();
     let mut meta = read_meta(path).unwrap_or_default();
     if meta.created_at == 0 {
         meta.created_at = now;
     }
     meta.last_touched = now;
-    if let Some(text) = user_prompt_text(event) {
-        meta.latest_user_prompt_preview = Some(preview_text(text, 48));
-    }
     write_meta(path, &meta)
-}
-
-fn user_prompt_text(event: &Event) -> Option<&str> {
-    match event {
-        Event::UiPromptSubmitted(prompt)
-            if prompt.originator.is_user() && !prompt.message_class.is_internal() =>
-        {
-            Some(&prompt.text)
-        }
-        Event::SessionPromptSteered(steered) if !steered.message_class.is_internal() => {
-            Some(&steered.text)
-        }
-        _ => None,
-    }
-}
-
-fn preview_text(text: &str, max: usize) -> String {
-    let single_line: String = text
-        .chars()
-        .map(|c| if c == '\n' { ' ' } else { c })
-        .collect();
-    if single_line.chars().count() < max + 1 {
-        single_line
-    } else {
-        format!("{}…", single_line.chars().take(max).collect::<String>())
-    }
 }
 
 fn append_cbor_record<T: Serialize>(path: &Path, record: &T) -> Result<(), SessionStoreError> {
@@ -584,7 +524,6 @@ fn append_cbor_record<T: Serialize>(path: &Path, record: &T) -> Result<(), Sessi
         path: path.to_path_buf(),
         source,
     })?;
-
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -603,11 +542,6 @@ fn append_cbor_record<T: Serialize>(path: &Path, record: &T) -> Result<(), Sessi
             path: path.to_path_buf(),
             source,
         })?;
-    // Durability: sync_data() guards against the failure mode where
-    // the kernel acknowledged the write (length + payload bytes
-    // visible) but a crash before flush leaves a torn record on
-    // disk. read_cbor_records would then either error or — pre-bound
-    // — try to allocate a garbage length on the next read.
     file.sync_data().map_err(|source| SessionStoreError::Write {
         path: path.to_path_buf(),
         source,
@@ -619,19 +553,10 @@ fn load_session_events(path: &Path) -> Result<Vec<PersistedSessionEvent>, Sessio
         return Ok(Vec::new());
     }
     let mut events = Vec::new();
-    read_cbor_records(path, |record: PersistedSessionEvent| {
-        events.push(record);
-    })?;
+    read_cbor_records(path, |record: PersistedSessionEvent| events.push(record))?;
     Ok(events)
 }
 
-/// Largest individual CBOR record we'll allocate from the
-/// length-prefix on disk. A torn or corrupt log can have garbage in
-/// the 8-byte length header; without a sanity bound a single
-/// `vec![0; record_length]` could try to allocate up to
-/// `usize::MAX` bytes. 64 MiB is generous compared to any session
-/// event we actually persist (largest are tool results, which live
-/// in the same KB-to-MB range as user-visible chat content).
 const MAX_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 
 fn read_cbor_records<T, F>(path: &Path, mut handle: F) -> Result<(), SessionStoreError>
@@ -655,7 +580,6 @@ where
                 });
             }
         }
-
         let record_length = u64::from_le_bytes(length_bytes);
         if record_length > MAX_RECORD_BYTES {
             return Err(SessionStoreError::Read {
@@ -663,8 +587,7 @@ where
                 source: io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
-                        "record length {record_length} exceeds maximum {MAX_RECORD_BYTES} \
-                         (likely a corrupt or torn write)"
+                        "record length {record_length} exceeds maximum {MAX_RECORD_BYTES} (likely a corrupt or torn write)"
                     ),
                 ),
             });
@@ -675,7 +598,7 @@ where
                 path: path.to_path_buf(),
                 source,
             })?;
-        let record: T = ciborium::from_reader(record_bytes.as_slice()).map_err(|source| {
+        let record = ciborium::from_reader(record_bytes.as_slice()).map_err(|source| {
             SessionStoreError::Decode {
                 path: path.to_path_buf(),
                 source,
@@ -684,6 +607,3 @@ where
         handle(record);
     }
 }
-
-#[cfg(test)]
-mod tests;

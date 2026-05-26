@@ -355,8 +355,8 @@ pub fn run_daemon_with_config(
 /// plus the final response.
 ///
 /// Stamps the outgoing `UiPromptSubmitted` with a unique `ctx_id` and
-/// uses the matching `SessionPromptCreated` to capture the
-/// `session_prompt_id` the harness allocated for this submission.
+/// uses the matching `AgentPromptCreated` to capture the
+/// `agent_prompt_id` the harness allocated for this submission.
 /// Without this, opening a fresh socket against a daemon that has
 /// served a previous prompt would replay that prompt's terminal
 /// `ProviderResponseFinished` to the new subscriber and the helper
@@ -375,6 +375,7 @@ pub fn send_daemon_message_with_trace(
     })))?;
     peer.send(&Frame::Message(Message::Subscribe(Subscribe {
         selectors: vec![
+            EventSelector::Prefix("agent.".to_owned()),
             EventSelector::Prefix("provider.".to_owned()),
             EventSelector::Prefix("session.".to_owned()),
             EventSelector::Prefix("tool.".to_owned()),
@@ -396,7 +397,7 @@ pub fn send_daemon_message_with_trace(
     let started_at = Instant::now();
     let mut lifecycle_messages = Vec::new();
     let mut progress_messages = Vec::new();
-    // Counter parsed out of the `SessionPromptCreated` whose `ctx_id`
+    // Counter parsed out of the `AgentPromptCreated` whose `ctx_id`
     // matches our submit. The terminal `ProviderResponseFinished` has a
     // spid counter `>= our_spid_counter` (equal when no tool calls,
     // higher when tool-result follow-ups bump the counter).
@@ -426,15 +427,15 @@ pub fn send_daemon_message_with_trace(
                 ) => {
                     lifecycle_messages.push(format_extension_event(event));
                 }
-                Frame::Event(Event::SessionPromptCreated(prompt))
+                Frame::Event(Event::AgentPromptCreated(prompt))
                     if prompt.ctx_id.as_deref() == Some(ctx_id.as_str()) =>
                 {
-                    our_spid_counter = parse_spid_counter(prompt.session_prompt_id.as_ref());
+                    our_spid_counter = parse_spid_counter(prompt.agent_prompt_id.as_ref());
                 }
                 Frame::Event(Event::ProviderResponseFinished(finished))
                     if tool_calls_from_output_items(&finished.output_items).is_empty()
                         && our_spid_counter.is_some_and(|ours| {
-                            parse_spid_counter(finished.session_prompt_id.as_ref())
+                            parse_spid_counter(finished.agent_prompt_id.as_ref())
                                 .is_some_and(|c| ours <= c)
                         }) =>
                 {
@@ -473,7 +474,7 @@ fn next_ctx_id() -> String {
 }
 
 /// Parses the `sp-N` counter the harness assigns when allocating a
-/// new `SessionPromptId`. Returns `None` if the format ever changes —
+/// new `AgentPromptId`. Returns `None` if the format ever changes —
 /// callers treat that as "can't correlate" rather than panicking.
 fn parse_spid_counter(spid: &str) -> Option<u64> {
     spid.strip_prefix("sp-").and_then(|s| s.parse().ok())

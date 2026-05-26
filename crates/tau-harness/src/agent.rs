@@ -1,28 +1,23 @@
-//! Per-conversation state tracked by the harness.
+//! Per-agent runtime state tracked by the harness.
 //!
-//! A *conversation* is one logical thread of prompts/responses
-//! within a session: the user's interactive UI prompts on one branch,
-//! plus any side conversations spawned by extensions via
-//! [`tau_proto::StartAgentRequest`] on their own branches. Each
-//! conversation has its own local cursor (`head`) into the session
-//! tree so multiple in-flight conversations can coexist without their
-//! tree positions clobbering each other.
+//! An [`Agent`] is one live prompt/tool execution context loaded into the
+//! current harness session. The durable transcript lives in `tau-core`'s
+//! `AgentTree`; this module stores the harness-owned runtime state layered on
+//! top of that transcript: the selected branch head, queued prompts, turn
+//! lifecycle, tool progress, and side-agent ancestry used for routing.
 //!
-//! The harness multiplexes incoming agent / tool events back to the
-//! right conversation via two id maps it owns:
-//! `prompt_conversations: HashMap<SessionPromptId, ConversationId>`
-//! and `tool_conversations: HashMap<ToolCallId, ConversationId>`.
-//! Both keys are looked up first; the conversation then yields the
-//! `session_id` that the older `prompt_sessions` /
-//! `pending_tool_sessions` maps used to carry directly.
+//! The harness multiplexes incoming agent and tool events back to the owning
+//! agent via two id maps it owns:
+//! `prompt_agents: HashMap<AgentPromptId, AgentId>` and
+//! `tool_agents: HashMap<ToolCallId, AgentId>`.
 
 use std::collections::VecDeque;
 
 use tau_core::NodeId;
 use tau_proto::{
-    ConnectionId, ModelId, ModelParams, PromptMessageClass, PromptOriginator, ProviderBackend,
-    SessionId, SessionPromptId, ToolCallId, ToolChoice, ToolDefinition, ToolDisplayStats,
-    ToolExecutionMode,
+    AgentId, AgentPromptId, ConnectionId, ModelId, ModelParams, PromptMessageClass,
+    PromptOriginator, ProviderBackend, SessionId, ToolCallId, ToolChoice, ToolDefinition,
+    ToolDisplayStats, ToolExecutionMode,
 };
 
 use crate::dedup::ResultDedupMap;
@@ -107,46 +102,16 @@ pub(crate) struct ChainFingerprintParts {
     pub(crate) tool_choice: [u8; 32],
 }
 
-/// Opaque per-process conversation identifier. Not on the wire — the
-/// harness mints these locally and uses them as routing keys.
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub struct ConversationId(String);
-
-impl ConversationId {
-    pub(crate) fn new(s: impl Into<String>) -> Self {
-        Self(s.into())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for ConversationId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::borrow::Borrow<str> for ConversationId {
-    fn borrow(&self) -> &str {
-        &self.0
-    }
-}
-
-/// Per-conversation turn state. There is no global agent slot — the
-/// agent extension serializes its own consumption of
-/// `SessionPromptCreated` events. State per conversation is what gates
-/// dispatch of the *next* prompt for that conversation.
+/// Per-agent turn state. There is no global execution slot — each loaded agent
+/// tracks whether its next prompt can be dispatched.
 #[derive(Clone, Debug, Default)]
-pub(crate) enum ConversationTurnState {
+pub(crate) enum AgentTurnState {
     #[default]
     Idle,
     Compacting,
     AgentThinking {
         #[allow(dead_code)]
-        session_prompt_id: SessionPromptId,
+        agent_prompt_id: AgentPromptId,
     },
     ToolsRunning {
         remaining_calls: Vec<ToolCallId>,
@@ -158,40 +123,40 @@ pub(crate) struct PendingCancel {
     pub(crate) reason: String,
 }
 
-/// One in-flight conversation tracked by the harness.
+/// One loaded agent tracked by the harness.
 ///
-/// The user's main UI thread is the *default* conversation, present
-/// for the harness's whole lifetime. Side queries from extensions
-/// spawn additional conversations that are removed once their final
-/// response is routed back.
+/// The user's main interactive agent is always present while the harness runs.
+/// Additional agents may be loaded for extension side work, delegated tasks, or
+/// compaction flows, and can later be removed from live runtime state while
+/// leaving their durable transcripts intact.
 #[derive(Debug)]
-pub(crate) struct Conversation {
-    /// Owning conversation id. Duplicates the key in the harness's
-    /// `conversations` map, but pinning it on the conversation itself
-    /// lets future code carry a `&Conversation` without also threading
+pub(crate) struct Agent {
+    /// Owning agent id. Duplicates the key in the harness's agent map, but
+    /// pinning it on the struct itself
+    /// lets future code carry a `&Agent` without also threading
     /// the id through every call site.
     #[allow(dead_code)]
-    pub(crate) id: ConversationId,
+    pub(crate) id: AgentId,
     pub(crate) session_id: SessionId,
     pub(crate) originator: PromptOriginator,
-    /// Local cursor — where the *next* event for this conversation
-    /// should be parented in the session tree. The tree's own `head`
-    /// is whichever conversation appended last; this field is what
-    /// `publish_for_conversation` snaps the tree head back to before
-    /// emitting an event for this conversation.
+    /// Local cursor — where the *next* transcript event for this agent
+    /// should be parented in the owning agent tree. The tree's own `head`
+    /// is whichever loaded agent appended last; this field is what
+    /// `publish_for_agent` snaps the tree head back to before
+    /// emitting an event for this agent.
     pub(crate) head: Option<NodeId>,
-    /// For [`PromptOriginator::Extension`] conversations: the
+    /// For [`PromptOriginator::Extension`] agents: the
     /// connection id of the extension that issued the
     /// [`tau_proto::StartAgentRequest`], so the harness knows where to
     /// route the matching [`tau_proto::StartAgentResult`].
     pub(crate) source_connection: Option<ConnectionId>,
-    /// Session prompt id of the prompt currently in flight for this
-    /// conversation, or `None` if nothing is pending.
-    pub(crate) in_flight_prompt: Option<SessionPromptId>,
-    /// Per-conversation prompt queue: prompts waiting to be dispatched
-    /// once this conversation's `turn_state` returns to `Idle`. Other
-    /// conversations dispatch independently; the agent extension
-    /// serializes its own consumption of `SessionPromptCreated`.
+    /// Agent prompt id of the prompt currently in flight for this agent, or
+    /// `None` if nothing is pending.
+    pub(crate) in_flight_prompt: Option<AgentPromptId>,
+    /// Per-agent prompt queue: prompts waiting to be dispatched once this
+    /// agent's `turn_state` returns to `Idle`. Other loaded agents dispatch
+    /// independently; the provider extension
+    /// serializes its own consumption of `AgentPromptCreated`.
     pub(crate) pending_prompts: VecDeque<PendingPrompt>,
     /// Pending user/control-plane request to stop this conversation at
     /// the next stable turn boundary. Stored like queued prompts so
@@ -202,26 +167,26 @@ pub(crate) struct Conversation {
     /// Most recent materialized prompt emitted for this conversation.
     /// The next prompt can reference its message prefix instead of
     /// repeating the full conversation history.
-    pub(crate) last_prompt_id: Option<SessionPromptId>,
+    pub(crate) last_prompt_id: Option<AgentPromptId>,
     /// Correlation tag carried in by a [`tau_proto::UiPromptSubmitted`]
-    /// and copied onto the next [`tau_proto::SessionPromptCreated`] this
+    /// and copied onto the next [`tau_proto::AgentPromptCreated`] this
     /// conversation emits. Cleared once consumed. Currently only set
     /// for the synchronous dispatch path; queued prompts drop the tag,
     /// since the queue stores text only.
     pub(crate) next_ctx_id: Option<String>,
-    pub(crate) turn_state: ConversationTurnState,
-    /// For side conversations spawned by a tool-implementing extension
+    pub(crate) turn_state: AgentTurnState,
+    /// For side agents spawned by a tool-implementing extension
     /// (currently just `delegate`): the parent agent's tool call id
     /// that this conversation is fulfilling. Lets the harness emit
     /// [`tau_proto::DelegateProgress`] under that call id as the
-    /// sub-agent runs. `None` for the default conversation and for
+    /// sub-agent runs. `None` for the default agent and for
     /// non-tool ext-queries (e.g. notifications' idle summary).
     pub(crate) parent_tool_call_id: Option<ToolCallId>,
-    /// Direct parent conversation resolved when this side conversation is
+    /// Direct parent agent resolved when this side agent is
     /// spawned. Kept alongside `parent_tool_call_id` because the tool-call
     /// routing map can be cleared before teardown needs to hand background
     /// completions back to the parent.
-    pub(crate) parent_conversation_id: Option<ConversationId>,
+    pub(crate) parent_agent_id: Option<AgentId>,
     /// Display name supplied by the parent agent for the delegated
     /// task, surfaced in the UI alongside `parent_tool_call_id`. Only
     /// set when `parent_tool_call_id` is.
@@ -234,15 +199,15 @@ pub(crate) struct Conversation {
     pub(crate) role: Option<String>,
     /// Stable id assigned when this conversation first starts an agent turn.
     pub(crate) agent_id: Option<String>,
-    /// Scheduling mode requested for this delegate side conversation. `None`
-    /// for the default conversation and non-tool side conversations.
+    /// Scheduling mode requested for this delegate side agent. `None`
+    /// for the default agent and non-tool side agents.
     pub(crate) delegate_execution_mode: Option<ToolExecutionMode>,
     /// Number of tool calls currently in flight on this conversation.
     pub(crate) tools_in_flight: u32,
     /// Cumulative tool calls this conversation has started (in-flight
     /// + completed). Used as the `total` in `DelegateProgress`.
     pub(crate) tools_total: u32,
-    /// Most recent input-token count this conversation's agent
+    /// Most recent input-token count this agent's agent
     /// reported on a finished response. Used for `DelegateProgress`.
     pub(crate) context_input_tokens: Option<u64>,
     /// Most recent percent-of-context-window this conversation's
@@ -263,18 +228,18 @@ pub(crate) struct Conversation {
     /// at intake of every `ToolResult` / `ToolError` to collapse a
     /// duplicate's payload into a short pointer that refers back to
     /// the original. Branch-scoped: rebuilt from
-    /// [`Conversation::head`] whenever the cursor moves
+    /// [`Agent::head`] whenever the cursor moves
     /// non-linearly. See `crate::dedup` for the full rationale.
     pub(crate) result_dedup: ResultDedupMap,
 }
 
-/// See [`Conversation::chain_anchor`].
+/// See [`Agent::chain_anchor`].
 #[derive(Clone, Debug)]
 pub(crate) struct ChainAnchor {
     /// `response.id` returned by the provider on the most recent
     /// successful turn for this conversation.
     pub(crate) response_id: String,
-    /// The conversation's tree cursor at the moment the anchor was
+    /// The agent's tree cursor at the moment the anchor was
     /// captured (after the finished response was folded). The chain
     /// is valid only while the current `head` descends from this
     /// node — if a `UiNavigateTree` jumps to a different branch, the
@@ -302,7 +267,7 @@ pub(crate) struct ChainAnchor {
     pub(crate) request_fingerprint: [u8; 32],
     /// Per-field hashes for the same provider-visible request fields.
     /// Only used for diagnostics when the aggregate fingerprint
-    /// mismatches, so the next session log says which field drifted.
+    /// mismatches, so the next cache diagnostic says which field drifted.
     pub(crate) request_fingerprint_parts: ChainFingerprintParts,
 }
 
@@ -311,8 +276,8 @@ pub(crate) struct ChainAnchor {
 pub(crate) enum PendingPromptSource {
     /// A normal user or harness steering prompt.
     General,
-    /// A prompt created from an `agent.message` delivery.
-    AgentMessage,
+    /// A prompt created from an `agent.message_received` delivery.
+    AgentMessageReceived,
 }
 
 /// A queued prompt plus its user/internal classification.
@@ -364,12 +329,12 @@ impl PendingPrompt {
         }
     }
 
-    /// Create a hidden queued prompt from an `agent.message` delivery.
-    pub(crate) fn agent_message(text: String) -> Self {
+    /// Create a hidden queued prompt from an `agent.message_received` delivery.
+    pub(crate) fn agent_message_received(text: String) -> Self {
         Self {
             text,
             message_class: PromptMessageClass::Internal,
-            source: PendingPromptSource::AgentMessage,
+            source: PendingPromptSource::AgentMessageReceived,
         }
     }
 
@@ -379,16 +344,16 @@ impl PendingPrompt {
         self.message_class.is_internal()
     }
 
-    /// Whether this prompt came from an `agent.message` delivery.
+    /// Whether this prompt came from an `agent.message_received` delivery.
     #[must_use]
-    pub(crate) fn is_agent_message(&self) -> bool {
-        self.source == PendingPromptSource::AgentMessage
+    pub(crate) fn is_agent_message_received(&self) -> bool {
+        self.source == PendingPromptSource::AgentMessageReceived
     }
 }
 
-impl Conversation {
+impl Agent {
     pub(crate) fn new(
-        id: ConversationId,
+        id: AgentId,
         session_id: SessionId,
         originator: PromptOriginator,
         head: Option<NodeId>,
@@ -405,9 +370,9 @@ impl Conversation {
             pending_cancel: None,
             last_prompt_id: None,
             next_ctx_id: None,
-            turn_state: ConversationTurnState::Idle,
+            turn_state: AgentTurnState::Idle,
             parent_tool_call_id: None,
-            parent_conversation_id: None,
+            parent_agent_id: None,
             task_name: None,
             delegate_input_stats: ToolDisplayStats::default(),
             role: None,

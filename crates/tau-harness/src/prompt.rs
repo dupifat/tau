@@ -1,8 +1,8 @@
 //! Building blocks for the per-turn prompt: the system prompt body, the
 //! AGENTS.md context message, and the conversation assembly that turns a
-//! [`tau_core::SessionTree`] into item-based prompt context.
+//! [`tau_core::AgentTree`] into item-based prompt context.
 
-use tau_core::SessionEntry;
+use tau_core::AgentEntry;
 use tau_proto::{ContextItem, PromptFragment};
 
 use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill};
@@ -438,7 +438,7 @@ pub(crate) fn chrono_free_date() -> String {
 
 /// Converts the branch ending at `head` into LLM prompt context
 /// items. Each conversation tracks its own head; with multiple
-/// side conversations interleaving tree mutations (one delegate's
+/// side agents interleaving tree mutations (one delegate's
 /// teardown snapping `tree.head` to the default conv, another
 /// delegate's tool result arriving moments later), `tree.head()` is
 /// not reliable as the prompt-assembly cursor — use the conv's own
@@ -448,31 +448,47 @@ pub(crate) struct AssembledPromptContext {
 }
 
 pub(crate) fn assemble_conversation_from(
-    tree: &tau_core::SessionTree,
+    tree: &tau_core::AgentTree,
     head: Option<tau_core::NodeId>,
 ) -> Vec<ContextItem> {
     assemble_prompt_context_from(tree, head).context_items
 }
 
 pub(crate) fn assemble_prompt_context_from(
-    tree: &tau_core::SessionTree,
+    tree: &tau_core::AgentTree,
     head: Option<tau_core::NodeId>,
 ) -> AssembledPromptContext {
     let mut context_items: Vec<ContextItem> = Vec::new();
 
     for entry in tree.branch_from(head) {
         match entry {
-            SessionEntry::UserInput { items } => {
+            AgentEntry::UserInput { items } => {
                 context_items.extend(items.iter().cloned());
             }
-            SessionEntry::AssistantResponse { output_items, .. } => {
+            AgentEntry::AssistantResponse { output_items, .. } => {
                 context_items.extend(output_items.iter().cloned());
             }
-            SessionEntry::ToolResults { items } => {
+            AgentEntry::ToolResults { items } => {
                 context_items.extend(items.iter().cloned().map(ContextItem::ToolResult));
             }
-            SessionEntry::Compaction { replacement_window } => {
+            AgentEntry::Compaction { replacement_window } => {
                 context_items = replacement_window.clone();
+            }
+            AgentEntry::AgentMessage {
+                direction, message, ..
+            } => {
+                context_items.push(ContextItem::Message(tau_proto::MessageItem {
+                    role: match direction {
+                        tau_core::AgentMessageDirection::Outbound => {
+                            tau_proto::ContextRole::Assistant
+                        }
+                        tau_core::AgentMessageDirection::Inbound => tau_proto::ContextRole::User,
+                    },
+                    content: vec![tau_proto::ContentPart::Text {
+                        text: message.clone(),
+                    }],
+                    phase: None,
+                }));
             }
         }
     }

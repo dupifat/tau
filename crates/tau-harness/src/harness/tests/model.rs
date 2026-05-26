@@ -256,12 +256,7 @@ fn provider_models_snapshot_selects_first_model_and_drains_queue() {
             .expect("submit prompt"),
         PromptSubmission::Queued,
     );
-    assert_eq!(
-        h.conversations[&h.default_conversation_id]
-            .pending_prompts
-            .len(),
-        1,
-    );
+    assert_eq!(h.agents[&h.default_agent_id].pending_prompts.len(), 1,);
 
     let model_id: ModelId = "openai/gpt-4.1".parse().expect("model id");
     h.handle_extension_event(
@@ -274,11 +269,11 @@ fn provider_models_snapshot_selects_first_model_and_drains_queue() {
 
     assert_eq!(h.selected_model.as_ref(), Some(&model_id));
     assert_eq!(h.selected_model_params().effort, Effort::High);
-    let conv = &h.conversations[&h.default_conversation_id];
+    let conv = &h.agents[&h.default_agent_id];
     assert!(conv.pending_prompts.is_empty());
     assert!(matches!(
         conv.turn_state,
-        ConversationTurnState::AgentThinking { .. }
+        AgentTurnState::AgentThinking { .. }
     ));
 }
 

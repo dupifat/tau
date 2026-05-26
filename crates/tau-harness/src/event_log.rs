@@ -17,10 +17,10 @@ pub(crate) type EventSeq = u64;
 ///
 /// `recorded_at` is stamped by [`EventLog::append`] at the moment
 /// the entry is created. It matches the value carried on the wire
-/// `LogEvent` envelope and the value persisted to the durable
-/// per-session log — sampling the clock here once and threading the
-/// same value through every downstream observer keeps offline timing
-/// analyses consistent with what live subscribers saw.
+/// `LogEvent` envelope and any value persisted to durable semantic
+/// logs — sampling the clock here once and threading the same value
+/// through every downstream observer keeps offline timing analyses
+/// consistent with what live subscribers saw.
 #[derive(Clone, Debug)]
 pub(crate) struct LogEntry {
     pub seq: EventSeq,
@@ -64,7 +64,7 @@ impl EventLog {
     ///
     /// Stamping happens here (the single chokepoint every event passes
     /// through on its way to the bus) so the value the wire `LogEvent`
-    /// envelope carries, the value followers see on replay, and the
+    /// envelope carries, the value followers see on replay, and any
     /// value persisted to disk are all the same micros — offline
     /// timing analyses agree with what live consumers saw.
     pub(crate) fn append(

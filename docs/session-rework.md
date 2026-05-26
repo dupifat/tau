@@ -1,6 +1,9 @@
 # Session Rework
 
-This document sketches a proposed architecture change for Tau's session model.
+This document sketches a historical proposed architecture change for Tau's
+session model. It is superseded for transcript persistence by
+[`agents-rework.md`](agents-rework.md): sessions are now membership containers,
+while durable conversation transcripts live in global agent logs.
 
 ## Problem
 

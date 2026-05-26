@@ -19,15 +19,16 @@ The default `tau` binary bundles all first-party components and dispatches via
 hidden `tau ext <name>` subcommands; you can replace any of them by editing
 `harness.yaml`.
 
-### Persisted event log
+### Persisted event logs
 
-Durable session-scoped protocol events are appended to
-`<state_dir>/sessions/<session_id>/events.cbor` (length-prefixed CBOR stream);
-transient UI requests and progress updates are not. The in-memory
-[`SessionTree`] is rebuilt from the log on resume, so the on-disk record and the
-live view cannot drift. Because the log is a stream of typed events rather than
-a flat transcript, sessions branch into a tree: rewinding
-to an earlier turn keeps the abandoned branch on disk.
+Tau separates session membership from agent transcripts. Session membership
+facts are appended to `<state_dir>/sessions/<session_id>/events.cbor`; agent
+transcript facts are appended to `<state_dir>/agents/<agent_id>/events.cbor`
+(length-prefixed CBOR streams). On resume, the harness folds the session
+membership journal, loads the current agents, and replays each loaded agent log
+once to rebuild its `AgentTree`. Because agent logs are streams of typed events
+rather than flat transcripts, agents branch into trees: rewinding to an earlier
+turn keeps the abandoned branch on disk.
 
 ```
 $ tau session-list
@@ -36,8 +37,8 @@ $ tau -r                  # pick a recent session for this cwd
 $ tau -r <id>             # resume a specific one
 ```
 
-Inside the UI, `/tree` prints the branch graph and `/tree <node-id>` rewinds
-the head to that node.
+Inside the UI, `/tree` prints the selected agent's branch graph and `/tree
+<node-id>` rewinds that agent's head to the node.
 
 ### Interception system
 
@@ -82,7 +83,7 @@ Configure handshake. Secret entries are required by default; set
 ### Model parameters: effort, verbosity, thinking summary, service tier
 
 Per-prompt knobs are bundled into a single `ModelParams` struct
-that the harness stamps onto every `SessionPromptCreated` and that
+that the harness stamps onto every `AgentPromptCreated` and that
 backends thread through to the provider request:
 
 - **`effort`** — reasoning effort. Six levels (`off`, `minimal`, `low`,
@@ -168,8 +169,8 @@ of the bar to keep it compact.
 ### Prompt input caching
 
 For providers that support it, Tau emits stable `prompt_cache_key` routing
-keys (derived from base URL and session id) so cache hits survive restarts
-within a session, and sets `prompt_cache_retention` where
+keys (derived from base URL and agent id) so cache hits survive restarts
+within an agent transcript, and sets `prompt_cache_retention` where
 available. Side-query turns (e.g. delegated sub-agents) get a distinct key so
 parallel delegations don't pile onto the user agent's routing bucket and trip
 OpenAI's `>15 RPM`-per-key overflow heuristic. Provider compatibility flags live
@@ -263,7 +264,7 @@ be reviewed with `/email log last [number]`.
 
 Publishes hardcoded `chatgpt/*` model metadata from provider-owned ChatGPT OAuth
 state and owns model execution for that namespace. The harness assembles prompts,
-then routes the selected provider's `session.prompt_created` event directly to
+then routes the selected provider's `agent.prompt_created` event directly to
 this extension; there is no built-in `core-agent` process.
 
 Responses conversations chain via `previous_response_id` after the first turn:
@@ -276,12 +277,12 @@ upstream rejects the stored id (server-side expiry), the provider falls back to
 a full-replay retry once before surfacing the error.
 
 The ChatGPT/Codex surface additionally routes turns over a persistent
-**WebSocket** connection. One connection per `(account, session)` lives in a
+**WebSocket** connection. One connection per `(account, agent)` lives in a
 small LRU pool inside `provider-builtin`, so the server-side connection-local
 response cache stays warm across turns of the same conversation — including
-when Tau context-switches between sessions (sub-agent delegations interleaved
-with the parent). Connections age out before the upstream's 60-minute hard cap,
-and refreshed OAuth tokens invalidate stale sockets on next use.
+when sub-agent delegations are interleaved with the parent. Connections age out
+before the upstream's 60-minute hard cap, and refreshed OAuth tokens invalidate
+stale sockets on next use.
 
 ### `std-notifications` — idle and turn notifications
 
@@ -340,24 +341,23 @@ Type `/` for menu autocompletion. The built-in set:
 | ------------------- | ---------------------------------------------------- |
 | `/quit`             | Exit the session                                     |
 | `/detach`           | Leave the UI, keep the harness running for reattach  |
-| `/session new`      | Close the current session and start a fresh no-agent session |
+| `/session new`      | Close the current session and start a fresh session |
 | `/agent new`        | Clear this UI's selected agent; next untargeted prompt mints a new agent |
-| `/agent switch <id>` | Switch this UI to an active agent transcript (`none` clears selection) |
-| `/agent suspend [id]` | Mark an agent suspended in harness state until resumed |
-| `/agent resume <id>` | Mark a suspended agent active for switching and prompts |
+| `/agent switch <id>` | Switch this UI to an active loaded-agent transcript (`none` clears selection) |
+| `/agent suspend [id]` | Hide a loaded agent from this UI's active choices until resumed |
+| `/agent resume <id>` | Return a hidden loaded agent to this UI's active choices |
 | `/model <role>`     | Switch agent role                                    |
 | `/role <role> ...`  | Switch, create, edit, or delete an agent role        |
 | `/fast`             | Toggle Codex Fast mode (`service_tier: fast`)        |
-| `/tree [id]`        | Print session tree; with `id`, rewind head           |
+| `/tree [id]`        | Print selected agent tree; with `id`, rewind head    |
 | `/set <name> <val>` | Set a UI setting (Tab cycles names + values)         |
 
-A session is the harness's session-scoped state, backed by the durable event
-log. Starting a new session resets harness/UI session state and begins with no
-agents. The "current agent" selection is local to each attached UI: `/agent new`
-and `/agent switch` do not synchronize selection to other UIs. Active vs.
-suspended agent lifecycle state is harness-owned and replayed through session
-events; completed delegated agents are kept resumable but auto-suspended unless
-a user interacted with them while they were running.
+A session is an agent-membership container backed by a durable membership log.
+Starting a new session resets harness/UI session state; prompts create/load
+agents whose transcripts are stored under `<state_dir>/agents/<agent_id>/`. The
+"current agent" selection is local to each attached UI: `/agent new`, `/agent
+switch`, `/agent suspend`, and `/agent resume` do not synchronize selection or
+hidden-agent preferences to other UIs.
 
 Available `/set` names include `show-diff` (expanded vs. compact diffs),
 `show-thinking` (agent reasoning summaries), `show-cache-stats`
@@ -582,5 +582,5 @@ key list.
 `/detach` leaves the harness daemon running so the agent can keep working in
 the background; `tau --attach` reconnects later. `tau -r` opens a picker for
 recent sessions in the current `cwd` (showing lock status and the latest user
-prompt), `tau -r <id>` picks a specific one. The session tree, including
-abandoned branches, is preserved across restarts.
+prompt), `tau -r <id>` picks a specific one. Session membership and loaded agent
+trees, including abandoned branches, are preserved across restarts.

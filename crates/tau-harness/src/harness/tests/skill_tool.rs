@@ -85,7 +85,7 @@ fn skill_tool_reads_file_content() {
 
     // Directly invoke the skill tool handler.
     append_user_message_via_event(&mut h, "s1", "load skill");
-    let cid_for_state = h.default_conversation_id.clone();
+    let cid_for_state = h.default_agent_id.clone();
     seed_assistant_tool_round(&mut h, &cid_for_state, &[("call-skill", "skill")]);
     let call = AgentToolCall {
         id: "call-skill".into(),
@@ -97,7 +97,7 @@ fn skill_tool_reads_file_content() {
         )]),
         display: None,
     };
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     h.handle_skill_tool_call(&cid, &call).expect("skill call");
 
     // Verify the tool result was folded into the item-model transcript.
@@ -119,7 +119,7 @@ fn skill_tool_returns_error_for_missing_query() {
 
     let mut h = echo_harness(&sp).expect("start");
     append_user_message_via_event(&mut h, "s1", "load skill");
-    let cid_for_state = h.default_conversation_id.clone();
+    let cid_for_state = h.default_agent_id.clone();
     seed_assistant_tool_round(&mut h, &cid_for_state, &[("call-missing", "skill")]);
     let call = AgentToolCall {
         id: "call-missing".into(),
@@ -131,7 +131,7 @@ fn skill_tool_returns_error_for_missing_query() {
         )]),
         display: None,
     };
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     h.handle_skill_tool_call(&cid, &call).expect("skill call");
 
     let err = latest_tool_error(&h, "s1", "call-missing");
@@ -144,7 +144,7 @@ fn skill_tool_rejects_malformed_search_content() {
     let sp = td.path().join("state");
 
     let mut h = echo_harness(&sp).expect("start");
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     seed_assistant_tool_round(&mut h, &cid, &[("call-bad-bool", "skill")]);
     h.handle_skill_tool_call(
         &cid,
@@ -249,7 +249,7 @@ fn skill_tool_search_matches_name_description_and_optional_content() {
         },
     );
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     let call_search = |query: &str, search_content: bool, id: &str| AgentToolCall {
         id: id.into(),
         name: tau_proto::ToolName::new("skill"),
@@ -268,11 +268,11 @@ fn skill_tool_search_matches_name_description_and_optional_content() {
     };
 
     let read_matches = |h: &Harness, call_id: &str| -> Vec<String> {
-        let events = h.store.session_events("s1").expect("events");
+        let events = event_log_events(h);
         let result = events
             .iter()
             .rev()
-            .find_map(|entry| match &entry.event {
+            .find_map(|entry| match entry {
                 Event::ToolResult(r) if r.call_id.as_str() == call_id => Some(r.result.clone()),
                 _ => None,
             })
@@ -304,22 +304,22 @@ fn skill_tool_search_matches_name_description_and_optional_content() {
             .collect()
     };
     let read_display = |h: &Harness, call_id: &str| -> tau_proto::ToolDisplay {
-        let events = h.store.session_events("s1").expect("events");
+        let events = event_log_events(h);
         events
             .iter()
             .rev()
-            .find_map(|entry| match &entry.event {
+            .find_map(|entry| match entry {
                 Event::ToolResult(r) if r.call_id.as_str() == call_id => r.display.clone(),
                 _ => None,
             })
             .expect("tool result display")
     };
     let read_loaded_name = |h: &Harness, call_id: &str| -> String {
-        let events = h.store.session_events("s1").expect("events");
+        let events = event_log_events(h);
         let result = events
             .iter()
             .rev()
-            .find_map(|entry| match &entry.event {
+            .find_map(|entry| match entry {
                 Event::ToolResult(r) if r.call_id.as_str() == call_id => Some(r.result.clone()),
                 _ => None,
             })
@@ -452,7 +452,7 @@ fn skill_tool_search_accepts_multiple_terms_and_ranks_by_matched_terms() {
         },
     );
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     let call_search = |query: &str, id: &str| AgentToolCall {
         id: id.into(),
         name: tau_proto::ToolName::new("skill"),
@@ -465,11 +465,11 @@ fn skill_tool_search_accepts_multiple_terms_and_ranks_by_matched_terms() {
     };
 
     let read_match_records = |h: &Harness, call_id: &str| -> Vec<(String, u64)> {
-        let events = h.store.session_events("s1").expect("events");
+        let events = event_log_events(h);
         let result = events
             .iter()
             .rev()
-            .find_map(|entry| match &entry.event {
+            .find_map(|entry| match entry {
                 Event::ToolResult(r) if r.call_id.as_str() == call_id => Some(r.result.clone()),
                 _ => None,
             })
@@ -533,11 +533,11 @@ fn skill_tool_search_accepts_multiple_terms_and_ranks_by_matched_terms() {
     seed_assistant_tool_round(&mut h, &cid, &[("call-single", "skill")]);
     h.handle_skill_tool_call(&cid, &call_search(T2, "call-single"))
         .expect("single term");
-    let events = h.store.session_events("s1").expect("events");
+    let events = event_log_events(h);
     let loaded_name = events
         .iter()
         .rev()
-        .find_map(|entry| match &entry.event {
+        .find_map(|entry| match entry {
             Event::ToolResult(r) if r.call_id.as_str() == "call-single" => Some(r.result.clone()),
             _ => None,
         })
@@ -568,10 +568,10 @@ fn skill_tool_search_accepts_multiple_terms_and_ranks_by_matched_terms() {
         },
     )
     .expect("call");
-    let events = h.store.session_events("s1").expect("events");
+    let events = event_log_events(h);
     let saw_error = events.iter().rev().any(|entry| {
         matches!(
-            &entry.event,
+            entry,
             Event::ToolError(e) if e.call_id.as_str() == "call-empty"
         )
     });
@@ -604,7 +604,7 @@ fn skill_tool_load_truncates_large_skill_content() {
         },
     );
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     seed_assistant_tool_round(&mut h, &cid, &[("call-large", "skill")]);
     h.handle_skill_tool_call(&cid, &skill_call("zqx-large", false, "call-large"))
         .expect("skill call");
@@ -643,7 +643,7 @@ fn skill_tool_errors_when_frontmatter_exceeds_read_limit() {
         },
     );
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     seed_assistant_tool_round(&mut h, &cid, &[("call-frontmatter", "skill")]);
     h.handle_skill_tool_call(
         &cid,
@@ -677,7 +677,7 @@ fn skill_tool_search_caps_match_output() {
         );
     }
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     seed_assistant_tool_round(&mut h, &cid, &[("call-limit", "skill")]);
     h.handle_skill_tool_call(&cid, &skill_call("zqxlimit", false, "call-limit"))
         .expect("skill call");
@@ -725,7 +725,7 @@ fn skill_tool_loads_exact_single_term_match_even_with_other_hits() {
         );
     }
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     seed_assistant_tool_round(&mut h, &cid, &[("call-exact", "skill")]);
     h.handle_skill_tool_call(
         &cid,
@@ -768,7 +768,7 @@ fn skill_tool_search_result_includes_guidance_and_matched_fields() {
         );
     }
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     seed_assistant_tool_round(&mut h, &cid, &[("call-guidance", "skill")]);
     h.handle_skill_tool_call(&cid, &skill_call("zqxguidance", false, "call-guidance"))
         .expect("skill call");
@@ -924,7 +924,7 @@ fn built_in_tau_self_knowledge_skills_are_available_without_file_paths() {
     assert!(!prompt.contains("<name>tau-self-knowledge-community</name>"));
     assert!(!prompt.contains("<name>tau-self-knowledge-debugging</name>"));
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     seed_assistant_tool_round(&mut h, &cid, &[("call-built-in", "skill")]);
     h.handle_skill_tool_call(
         &cid,
@@ -1067,15 +1067,13 @@ fn skill_call(query: &str, search_content: bool, id: &str) -> AgentToolCall {
     }
 }
 
-fn latest_tool_result(h: &Harness, session_id: &str, call_id: &str) -> CborValue {
-    h.store
-        .session(session_id)
-        .expect("session")
+fn latest_tool_result(h: &Harness, _session_id: &str, call_id: &str) -> CborValue {
+    default_agent_tree(h)
         .nodes()
         .iter()
         .rev()
         .find_map(|node| match &node.entry {
-            SessionEntry::ToolResults { items } => items
+            AgentEntry::ToolResults { items } => items
                 .iter()
                 .find(|item| item.call_id.as_str() == call_id)
                 .map(|item| item.output.raw.clone()),
@@ -1084,15 +1082,13 @@ fn latest_tool_result(h: &Harness, session_id: &str, call_id: &str) -> CborValue
         .expect("tool result")
 }
 
-fn latest_tool_error(h: &Harness, session_id: &str, call_id: &str) -> String {
-    h.store
-        .session(session_id)
-        .expect("session")
+fn latest_tool_error(h: &Harness, _session_id: &str, call_id: &str) -> String {
+    default_agent_tree(h)
         .nodes()
         .iter()
         .rev()
         .find_map(|node| match &node.entry {
-            SessionEntry::ToolResults { items } => items.iter().find_map(|item| {
+            AgentEntry::ToolResults { items } => items.iter().find_map(|item| {
                 (item.call_id.as_str() == call_id).then(|| match &item.status {
                     ToolResultStatus::Error { message } => Some(message.clone()),
                     _ => None,
@@ -1367,7 +1363,7 @@ fn aliased_tool_name_is_advertised_and_routed_via_internal_tool() {
     );
     assert!(!defs.iter().any(|d| d.name == "shell"));
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     h.execute_agent_tool_call(
         &cid,
         &AgentToolCall {
@@ -1391,11 +1387,10 @@ fn aliased_tool_name_is_advertised_and_routed_via_internal_tool() {
     );
 
     seed_assistant_tool_round(&mut h, &cid, &[("call-alias", "shell")]);
-    let session = h.store.session("s1").expect("session");
     assert!(
-        session.nodes().iter().any(|node| matches!(
+        default_agent_tree(&h).nodes().iter().any(|node| matches!(
             &node.entry,
-            SessionEntry::AssistantResponse { output_items, .. }
+            AgentEntry::AssistantResponse { output_items, .. }
                 if output_items.iter().any(|item| {
                     matches!(
                         item,

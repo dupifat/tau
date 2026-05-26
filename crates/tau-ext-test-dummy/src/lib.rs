@@ -5,9 +5,9 @@ use rand::Rng;
 #[cfg(test)]
 use rand::{SeedableRng, rngs::StdRng};
 use tau_proto::{
-    ConfigError, Emit, Event, EventSelector, Frame, FrameReader, FrameWriter, HarnessInfo,
-    HarnessInfoLevel, InterceptAction, InterceptReply, InterceptionPriority, Message, ToolError,
-    ToolExecutionMode, ToolResult, ToolResultKind, ToolSpec, UiPromptSubmitted,
+    AgentPromptSubmitted, ConfigError, Emit, Event, EventSelector, Frame, FrameReader, FrameWriter,
+    HarnessInfo, HarnessInfoLevel, InterceptAction, InterceptReply, InterceptionPriority, Message,
+    ToolError, ToolExecutionMode, ToolResult, ToolResultKind, ToolSpec,
 };
 
 pub const RESTART_TEST_DUMMY_TOOL_NAME: &str = "restart_test_dummy";
@@ -109,7 +109,7 @@ where
     tau_extension::Handshake::tool("tau-ext-test-dummy")
         .subscribe([tau_proto::EventName::TOOL_STARTED])
         .intercept(
-            EventSelector::Exact(tau_proto::EventName::UI_PROMPT_SUBMITTED),
+            EventSelector::Exact(tau_proto::EventName::AGENT_PROMPT_SUBMITTED),
             InterceptionPriority::new(0),
         )
         .register_tool(ToolSpec {
@@ -140,9 +140,9 @@ where
         match inner {
             Frame::Message(Message::InterceptRequest(req)) => {
                 let mutated = match req.event.as_ref() {
-                    Event::UiPromptSubmitted(prompt) => {
+                    Event::AgentPromptSubmitted(prompt) => {
                         correct_tao_to_tau(&prompt.text).map(|fixed| {
-                            Event::UiPromptSubmitted(UiPromptSubmitted {
+                            Event::AgentPromptSubmitted(AgentPromptSubmitted {
                                 text: fixed,
                                 message_class: tau_proto::PromptMessageClass::User,
                                 ..prompt.clone()

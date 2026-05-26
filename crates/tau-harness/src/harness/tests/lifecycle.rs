@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use super::*;
-use crate::conversation::PendingPrompt;
+use crate::agent::PendingPrompt;
 use crate::extension::{ExtensionConnectCommand, ExtensionEntry, ExtensionState, spawn_in_process};
 use crate::harness::{
     PendingTool, extension_disconnected_tool_call_error_message,
@@ -22,11 +22,11 @@ fn context_text(item: &ContextItem) -> Option<&str> {
     }
 }
 
-fn prompt_has_tool(prompt: &SessionPromptCreated, name: &str) -> bool {
+fn prompt_has_tool(prompt: &AgentPromptCreated, name: &str) -> bool {
     prompt.tools.iter().any(|tool| tool.name == name)
 }
 
-fn context_text_count(prompt: &SessionPromptCreated, text: &str) -> usize {
+fn context_text_count(prompt: &AgentPromptCreated, text: &str) -> usize {
     prompt
         .context_items
         .iter()
@@ -34,15 +34,13 @@ fn context_text_count(prompt: &SessionPromptCreated, text: &str) -> usize {
         .count()
 }
 
-fn session_prompt_text_count(h: &Harness, text: &str) -> usize {
-    h.store
-        .session_events("s1")
-        .expect("session events")
+fn agent_prompt_text_count(h: &Harness, text: &str) -> usize {
+    loaded_agent_events(h, "s1")
         .iter()
-        .filter(|entry| {
+        .filter(|event| {
             matches!(
-                &entry.event,
-                Event::UiPromptSubmitted(prompt)
+                event,
+                Event::AgentPromptSubmitted(prompt)
                     if prompt.message_class.is_internal() && prompt.text == text
             )
         })
@@ -64,7 +62,7 @@ fn event_log_contains_source_event(
     false
 }
 
-fn prompt_context_contains(prompt: &SessionPromptCreated, needle: &str) -> bool {
+fn prompt_context_contains(prompt: &AgentPromptCreated, needle: &str) -> bool {
     prompt
         .context_items
         .iter()
@@ -415,11 +413,11 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
     )
     .expect("stage tool");
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     seed_agent_thinking(&mut h, &cid, "sp-staged-tools");
-    h.prompt_conversations
+    h.prompt_agents
         .insert("sp-staged-tools".into(), cid.clone());
-    h.publish_for_conversation(
+    h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -432,8 +430,8 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: "sp-staged-tools".into(),
-        target_agent_id: None,
+        agent_prompt_id: "sp-staged-tools".into(),
+        agent_id: "main".into(),
         output_items: vec![
             ContextItem::ToolCall(ToolCallItem {
                 call_id: "call-blocking".into(),
@@ -811,7 +809,6 @@ fn extension_emit_and_start_agent_request_are_staged_until_ready() {
         conn_id,
         Frame::Event(Event::StartAgentRequest(StartAgentRequest {
             query_id: "q-staged".to_owned(),
-            agent_id: "test-agent-q-staged".to_owned(),
             instruction: "STAGED START AGENT REQUEST".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -825,11 +822,7 @@ fn extension_emit_and_start_agent_request_are_staged_until_ready() {
     assert!(!event_log_contains_source_event(&h, conn_id, |event| {
         event.name() == custom_name
     }));
-    assert!(
-        !h.conversations
-            .keys()
-            .any(|cid| cid.as_str().contains("q-staged"))
-    );
+    assert!(!h.agents.keys().any(|cid| cid.as_str().contains("q-staged")));
     assert!(h.prompt_snapshots.is_empty());
 
     h.handle_extension_message(
@@ -843,11 +836,7 @@ fn extension_emit_and_start_agent_request_are_staged_until_ready() {
     assert!(event_log_contains_source_event(&h, conn_id, |event| {
         event.name() == custom_name
     }));
-    assert!(
-        h.conversations
-            .keys()
-            .any(|cid| cid.as_str().contains("q-staged"))
-    );
+    assert!(h.agents.keys().any(|cid| cid.as_str().contains("q-staged")));
     assert!(
         h.prompt_snapshots
             .values()
@@ -1029,8 +1018,8 @@ fn old_prompt_call_gets_tau_internal_unavailable_error() {
     unregister_shell(&mut h);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid,
-        target_agent_id: None,
+        agent_prompt_id: spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "c1".into(),
             name: ToolName::new("shell"),
@@ -1047,11 +1036,10 @@ fn old_prompt_call_gets_tau_internal_unavailable_error() {
     .expect("unavailable old tool call should be closed");
 
     let expected = unavailable_tool_error_message(&ToolName::new("shell"));
-    let session = h.store.session("s1").expect("session");
-    assert!(session.nodes().iter().any(|node| {
+    assert!(default_agent_tree(&h).nodes().iter().any(|node| {
         matches!(
             &node.entry,
-            SessionEntry::ToolResults { items }
+            AgentEntry::ToolResults { items }
                 if items.iter().any(|item| {
                     item.call_id.as_str() == "c1"
                         && matches!(
@@ -1078,13 +1066,13 @@ fn unregister_queues_unavailable_notice_for_next_user_prompt_only() {
     unregister_shell(&mut h);
 
     assert!(h.prompt_snapshots.is_empty());
-    assert_eq!(session_prompt_text_count(&h, &notice), 0);
+    assert_eq!(agent_prompt_text_count(&h, &notice), 0);
 
-    let cid = h.default_conversation_id.clone();
-    h.dispatch_prompt_for_conversation(&cid, PendingPrompt::user("after unregister".to_owned()))
+    let cid = h.default_agent_id.clone();
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("after unregister".to_owned()))
         .expect("dispatch user prompt");
 
-    let prompt = read_prompt_created(&h, &SessionPromptId::from("sp-0"));
+    let prompt = read_prompt_created(&h, &AgentPromptId::from("sp-0"));
     let notice_pos = prompt
         .context_items
         .iter()
@@ -1096,7 +1084,7 @@ fn unregister_queues_unavailable_notice_for_next_user_prompt_only() {
         .position(|item| context_text(item) == Some("after unregister"))
         .expect("user prompt in prompt");
     assert!(notice_pos < user_pos);
-    assert_eq!(session_prompt_text_count(&h, &notice), 1);
+    assert_eq!(agent_prompt_text_count(&h, &notice), 1);
 
     h.shutdown().expect("shutdown");
 }
@@ -1114,13 +1102,13 @@ fn reregister_before_notice_delivery_dequeues_unavailable_notice() {
     unregister_shell(&mut h);
     reregister_shell(&mut h, spec);
 
-    let cid = h.default_conversation_id.clone();
-    h.dispatch_prompt_for_conversation(&cid, PendingPrompt::user("after reconnect".to_owned()))
+    let cid = h.default_agent_id.clone();
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("after reconnect".to_owned()))
         .expect("dispatch user prompt");
 
-    let prompt = read_prompt_created(&h, &SessionPromptId::from("sp-0"));
+    let prompt = read_prompt_created(&h, &AgentPromptId::from("sp-0"));
     assert_eq!(context_text_count(&prompt, &notice), 0);
-    assert_eq!(session_prompt_text_count(&h, &notice), 0);
+    assert_eq!(agent_prompt_text_count(&h, &notice), 0);
     assert!(prompt_has_tool(&prompt, "shell"));
 
     h.shutdown().expect("shutdown");
@@ -1141,17 +1129,17 @@ fn reregister_after_notice_delivery_queues_available_again_notice() {
     let available = tool_available_again_notice_prompt(&ToolName::new("shell"));
     unregister_shell(&mut h);
 
-    let cid = h.default_conversation_id.clone();
-    h.dispatch_prompt_for_conversation(&cid, PendingPrompt::user("after unregister".to_owned()))
+    let cid = h.default_agent_id.clone();
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("after unregister".to_owned()))
         .expect("dispatch unavailable prompt");
-    let first_prompt = read_prompt_created(&h, &SessionPromptId::from("sp-0"));
+    let first_prompt = read_prompt_created(&h, &AgentPromptId::from("sp-0"));
     assert_eq!(context_text_count(&first_prompt, &unavailable), 1);
 
     reregister_shell(&mut h, spec);
-    h.dispatch_prompt_for_conversation(&cid, PendingPrompt::user("after reregister".to_owned()))
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("after reregister".to_owned()))
         .expect("dispatch available prompt");
 
-    let second_prompt = read_prompt_created(&h, &SessionPromptId::from("sp-1"));
+    let second_prompt = read_prompt_created(&h, &AgentPromptId::from("sp-1"));
     let available_pos = second_prompt
         .context_items
         .iter()
@@ -1163,7 +1151,7 @@ fn reregister_after_notice_delivery_queues_available_again_notice() {
         .position(|item| context_text(item) == Some("after reregister"))
         .expect("user prompt in prompt");
     assert!(available_pos < user_pos);
-    assert_eq!(session_prompt_text_count(&h, &available), 1);
+    assert_eq!(agent_prompt_text_count(&h, &available), 1);
     assert!(prompt_has_tool(&second_prompt, "shell"));
 
     h.shutdown().expect("shutdown");
@@ -1185,16 +1173,16 @@ fn duplicate_provider_keeps_tool_available_without_notice() {
     unregister_shell(&mut h);
     assert_eq!(h.registry.providers_for("shell").len(), 1);
 
-    let cid = h.default_conversation_id.clone();
-    h.dispatch_prompt_for_conversation(
+    let cid = h.default_agent_id.clone();
+    h.dispatch_prompt_for_agent(
         &cid,
         PendingPrompt::user("after partial unregister".to_owned()),
     )
     .expect("dispatch user prompt");
 
-    let prompt = read_prompt_created(&h, &SessionPromptId::from("sp-0"));
+    let prompt = read_prompt_created(&h, &AgentPromptId::from("sp-0"));
     assert_eq!(context_text_count(&prompt, &notice), 0);
-    assert_eq!(session_prompt_text_count(&h, &notice), 0);
+    assert_eq!(agent_prompt_text_count(&h, &notice), 0);
     assert!(prompt_has_tool(&prompt, "shell"));
 
     h.shutdown().expect("shutdown");
@@ -1214,10 +1202,10 @@ fn unavailable_tool_is_reported_without_crashing() {
     let removed = h.registry.unregister_connection(&conn_id);
     assert!(removed.iter().any(|t| t == "shell"));
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_conversations.insert("sp-x".into(), cid.clone());
-    h.publish_for_conversation(
+    h.prompt_agents.insert("sp-x".into(), cid.clone());
+    h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -1229,8 +1217,8 @@ fn unavailable_tool_is_reported_without_crashing() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: "sp-x".into(),
-        target_agent_id: None,
+        agent_prompt_id: "sp-x".into(),
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "c1".into(),
             name: ToolName::new("shell"),
@@ -1247,11 +1235,10 @@ fn unavailable_tool_is_reported_without_crashing() {
     .expect("unavailable tool should be rejected cleanly");
 
     let expected = unavailable_tool_error_message(&ToolName::new("shell"));
-    let session = h.store.session("s1").expect("session");
-    assert!(session.nodes().iter().any(|node| {
+    assert!(default_agent_tree(&h).nodes().iter().any(|node| {
         matches!(
             &node.entry,
-            SessionEntry::ToolResults { items }
+            AgentEntry::ToolResults { items }
                 if items.iter().any(|item| {
                     item.call_id.as_str() == "c1"
                         && matches!(
@@ -1261,7 +1248,7 @@ fn unavailable_tool_is_reported_without_crashing() {
                 })
         )
     }));
-    let followup_prompt = read_prompt_created(&h, &SessionPromptId::from("sp-0"));
+    let followup_prompt = read_prompt_created(&h, &AgentPromptId::from("sp-0"));
     assert!(
         followup_prompt
             .context_items
@@ -1284,12 +1271,15 @@ fn disconnected_tool_completes_pending_call() {
         .to_owned();
     let call_id: ToolCallId = "call-1".into();
     let tool_name = ToolName::new("shell");
-    let cid = h.default_conversation_id.clone();
-    h.publish_for_conversation(
+    let cid = h.default_agent_id.clone();
+    let agent_id = h
+        .ensure_agent_id_for_agent(&cid)
+        .expect("default conversation has an agent id");
+    h.publish_for_agent(
         &cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
-            session_prompt_id: "sp-main".into(),
-            target_agent_id: None,
+            agent_prompt_id: "sp-main".into(),
+            agent_id: agent_id.into(),
             output_items: vec![ContextItem::ToolCall(ToolCallItem {
                 call_id: call_id.clone(),
                 name: tool_name.clone(),
@@ -1304,7 +1294,7 @@ fn disconnected_tool_completes_pending_call() {
             ws_pool_delta: None,
         }),
     );
-    h.tool_conversations.insert(call_id.clone(), cid.clone());
+    h.tool_agents.insert(call_id.clone(), cid.clone());
     h.pending_tools.insert(
         call_id.clone(),
         PendingTool {
@@ -1320,8 +1310,8 @@ fn disconnected_tool_completes_pending_call() {
         call_id.clone(),
         tau_proto::ToolExecutionMode::Exclusive,
     );
-    if let Some(conv) = h.conversations.get_mut(&cid) {
-        conv.turn_state = ConversationTurnState::ToolsRunning {
+    if let Some(conv) = h.agents.get_mut(&cid) {
+        conv.turn_state = AgentTurnState::ToolsRunning {
             remaining_calls: vec![call_id.clone()],
         };
     }
@@ -1335,21 +1325,20 @@ fn disconnected_tool_completes_pending_call() {
     // `ToolsRunning -> AgentThinking`, not back to `Idle`.
     assert!(matches!(h.turn_state, TurnState::Idle));
     assert!(matches!(
-        h.conversations
-            .get(&h.default_conversation_id)
+        h.agents
+            .get(&h.default_agent_id)
             .expect("default conversation")
             .turn_state,
-        ConversationTurnState::AgentThinking { .. }
+        AgentTurnState::AgentThinking { .. }
     ));
-    assert!(!h.tool_conversations.contains_key(&call_id));
+    assert!(!h.tool_agents.contains_key(&call_id));
     assert!(!h.pending_tool_providers.contains_key(&call_id));
 
     let expected = extension_disconnected_tool_call_error_message(&call_id);
-    let session = h.store.session("s1").expect("session");
-    assert!(session.nodes().iter().any(|node| {
+    assert!(default_agent_tree(&h).nodes().iter().any(|node| {
         matches!(
             &node.entry,
-            SessionEntry::ToolResults { items }
+            AgentEntry::ToolResults { items }
                 if items.iter().any(|item| {
                     item.call_id == call_id
                         && matches!(
@@ -1418,10 +1407,10 @@ fn disconnected_tool_is_removed_cleanly() {
             .any(|m| m == "extension shell exited")
     );
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_conversations.insert("sp-x".into(), cid.clone());
-    h.publish_for_conversation(
+    h.prompt_agents.insert("sp-x".into(), cid.clone());
+    h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -1433,8 +1422,8 @@ fn disconnected_tool_is_removed_cleanly() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: "sp-x".into(),
-        target_agent_id: None,
+        agent_prompt_id: "sp-x".into(),
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "c1".into(),
             name: ToolName::new("shell"),
@@ -1451,11 +1440,10 @@ fn disconnected_tool_is_removed_cleanly() {
     .expect("removed tool should be rejected cleanly");
 
     let expected = unavailable_tool_error_message(&ToolName::new("shell"));
-    let session = h.store.session("s1").expect("session");
-    assert!(session.nodes().iter().any(|node| {
+    assert!(default_agent_tree(&h).nodes().iter().any(|node| {
         matches!(
             &node.entry,
-            SessionEntry::ToolResults { items }
+            AgentEntry::ToolResults { items }
                 if items.iter().any(|item| {
                     item.call_id.as_str() == "c1"
                         && matches!(
@@ -1602,10 +1590,10 @@ fn role_disabled_tool_is_reported_without_dispatch() {
 
     h.selected_model = Some("test/model".into());
     h.selected_role = "engineer".to_owned();
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_conversations.insert("sp-x".into(), cid.clone());
-    h.publish_for_conversation(
+    h.prompt_agents.insert("sp-x".into(), cid.clone());
+    h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -1618,8 +1606,8 @@ fn role_disabled_tool_is_reported_without_dispatch() {
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: "sp-x".into(),
-        target_agent_id: None,
+        agent_prompt_id: "sp-x".into(),
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "c1".into(),
             name: tau_proto::ToolName::new("shell"),
@@ -1644,11 +1632,10 @@ fn role_disabled_tool_is_reported_without_dispatch() {
     })
     .expect("disabled tool call should be handled");
 
-    let session = h.store.session("s1").expect("session");
-    assert!(session.nodes().iter().any(|node| {
+    assert!(default_agent_tree(&h).nodes().iter().any(|node| {
         matches!(
             &node.entry,
-            SessionEntry::ToolResults { items }
+            AgentEntry::ToolResults { items }
                 if items.iter().any(|item| {
                     item.call_id.as_str() == "c1"
                         && matches!(
@@ -1704,12 +1691,12 @@ fn agents_context_is_injected_at_session_init() {
 
     assert!(matches!(h.turn_state, TurnState::Idle));
 
-    let events = h.store.session_events("s1").expect("session events");
+    let events = loaded_agent_events(&h, "s1");
     let injected = events
         .iter()
         .rev()
-        .find_map(|entry| match &entry.event {
-            Event::SessionUserMessageInjected(injected)
+        .find_map(|event| match event {
+            Event::AgentUserMessageInjected(injected)
                 if injected.text.contains("# AGENTS.md instructions")
                     && injected.text.contains("/repo/pkg") =>
             {
@@ -1747,14 +1734,12 @@ fn resumed_session_init_does_not_reinject_agents_context() {
         .to_owned();
     let marker = "resume AGENTS marker";
     let count_marker_injections = |h: &Harness| -> usize {
-        h.store
-            .session_events("s1")
-            .expect("session events")
+        loaded_agent_events(h, "s1")
             .iter()
-            .filter(|entry| {
+            .filter(|event| {
                 matches!(
-                    &entry.event,
-                    Event::SessionUserMessageInjected(injected)
+                    event,
+                    Event::AgentUserMessageInjected(injected)
                         if injected.text.contains(marker)
                 )
             })
@@ -1762,12 +1747,15 @@ fn resumed_session_init_does_not_reinject_agents_context() {
     };
 
     h.discovered_agents_files.clear();
-    let cid = h.default_conversation_id.clone();
-    h.publish_event_for_conversation(
+    let cid = h.default_agent_id.clone();
+    let agent_id = h
+        .ensure_agent_id_for_agent(&cid)
+        .expect("default conversation has an agent id");
+    h.publish_event_for_agent(
         &cid,
         None,
-        Event::SessionUserMessageInjected(tau_proto::SessionUserMessageInjected {
-            session_id: "s1".into(),
+        Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            agent_id: agent_id.into(),
             text: format!("# AGENTS.md instructions\n{marker}"),
             message_class: tau_proto::PromptMessageClass::User,
         }),
@@ -1818,10 +1806,10 @@ fn unavailable_tool_name_does_not_panic_and_surfaces_error() {
     // Pre-seed as if the agent had just been prompted and is now
     // responding with tool_calls.
     h.selected_model = Some("test/model".into());
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_conversations.insert("sp-x".into(), cid.clone());
-    h.publish_for_conversation(
+    h.prompt_agents.insert("sp-x".into(), cid.clone());
+    h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -1834,8 +1822,8 @@ fn unavailable_tool_name_does_not_panic_and_surfaces_error() {
     );
 
     let response = ProviderResponseFinished {
-        session_prompt_id: "sp-x".into(),
-        target_agent_id: None,
+        agent_prompt_id: "sp-x".into(),
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "c1".into(),
             name: ToolName::new("not_a_tool"),
@@ -1873,17 +1861,16 @@ fn unavailable_tool_name_does_not_panic_and_surfaces_error() {
     // emit a matching `function_call` / `function_call_output`
     // without the latter looking unpaired.
     let expected = unavailable_tool_error_message(&ToolName::new("not_a_tool"));
-    let session = h.store.session("s1").expect("session");
     let mut saw_call = false;
     let mut saw_error = false;
-    for node in session.nodes() {
+    for node in default_agent_tree(&h).nodes() {
         match &node.entry {
-            SessionEntry::AssistantResponse { output_items, .. } => {
+            AgentEntry::AssistantResponse { output_items, .. } => {
                 saw_call |= output_items.iter().any(|item| {
                     matches!(item, ContextItem::ToolCall(call) if call.call_id.as_str() == "c1")
                 });
             }
-            SessionEntry::ToolResults { items } => {
+            AgentEntry::ToolResults { items } => {
                 saw_error |= items.iter().any(|item| {
                     item.call_id.as_str() == "c1"
                         && matches!(
@@ -1930,10 +1917,10 @@ fn empty_tool_call_id_rejects_response_before_commit() {
             background_support: None,
         },
     );
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_conversations.insert("sp-x".into(), cid.clone());
-    h.publish_for_conversation(
+    h.prompt_agents.insert("sp-x".into(), cid.clone());
+    h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -1946,8 +1933,8 @@ fn empty_tool_call_id_rejects_response_before_commit() {
     );
 
     let response = ProviderResponseFinished {
-        session_prompt_id: "sp-x".into(),
-        target_agent_id: None,
+        agent_prompt_id: "sp-x".into(),
+        agent_id: "main".into(),
         output_items: vec![
             ContextItem::ToolCall(ToolCallItem {
                 call_id: "".into(),
@@ -1989,13 +1976,12 @@ fn empty_tool_call_id_rejects_response_before_commit() {
     );
 
     // No tool work should be scheduled and the malformed assistant
-    // response should not be committed to the session tree.
+    // response should not be committed to the agent tree.
     assert!(h.tool_turn.is_empty());
-    let session = h.store.session("s1").expect("session");
-    assert!(session.nodes().iter().all(|node| {
+    assert!(default_agent_tree(&h).nodes().iter().all(|node| {
         !matches!(
             node.entry,
-            SessionEntry::AssistantResponse { .. } | SessionEntry::ToolResults { .. }
+            AgentEntry::AssistantResponse { .. } | AgentEntry::ToolResults { .. }
         )
     }));
 
@@ -2009,22 +1995,22 @@ fn cancel_after_agent_thinking_terminalizes_tool_calls_before_dispatch() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_conversations.insert("sp-x".into(), cid.clone());
+    h.prompt_agents.insert("sp-x".into(), cid.clone());
     h.handle_client_event(
         "ui",
         Frame::Event(Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
             session_id: "s1".into(),
             target_agent_id: None,
-            session_prompt_id: None,
+            agent_prompt_id: None,
         })),
     )
     .expect("cancel");
 
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: "sp-x".into(),
-        target_agent_id: None,
+        agent_prompt_id: "sp-x".into(),
+        agent_id: "main".into(),
         output_items: vec![
             ContextItem::ToolCall(ToolCallItem {
                 call_id: "c1".into(),
@@ -2050,15 +2036,14 @@ fn cancel_after_agent_thinking_terminalizes_tool_calls_before_dispatch() {
 
     assert!(h.tool_turn.is_empty());
     assert!(matches!(
-        h.conversations.get(&cid).expect("conversation").turn_state,
-        ConversationTurnState::Idle
+        h.agents.get(&cid).expect("conversation").turn_state,
+        AgentTurnState::Idle
     ));
-    let session = h.store.session("s1").expect("session");
-    let cancelled: Vec<_> = session
+    let cancelled: Vec<_> = default_agent_tree(&h)
         .nodes()
         .iter()
         .filter_map(|node| match &node.entry {
-            SessionEntry::ToolResults { items } => Some(items.iter()),
+            AgentEntry::ToolResults { items } => Some(items.iter()),
             _ => None,
         })
         .flatten()
@@ -2077,12 +2062,12 @@ fn cancel_during_tools_terminalizes_inflight_and_queued_calls() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_conversations.insert("sp-x".into(), cid.clone());
+    h.prompt_agents.insert("sp-x".into(), cid.clone());
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: "sp-x".into(),
-        target_agent_id: None,
+        agent_prompt_id: "sp-x".into(),
+        agent_id: "main".into(),
         output_items: vec![
             ContextItem::ToolCall(ToolCallItem {
                 call_id: "c1".into(),
@@ -2121,22 +2106,21 @@ fn cancel_during_tools_terminalizes_inflight_and_queued_calls() {
         Frame::Event(Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
             session_id: "s1".into(),
             target_agent_id: None,
-            session_prompt_id: None,
+            agent_prompt_id: None,
         })),
     )
     .expect("cancel");
 
     assert!(h.tool_turn.is_empty());
     assert!(matches!(
-        h.conversations.get(&cid).expect("conversation").turn_state,
-        ConversationTurnState::Idle
+        h.agents.get(&cid).expect("conversation").turn_state,
+        AgentTurnState::Idle
     ));
-    let session = h.store.session("s1").expect("session");
-    let cancelled: Vec<_> = session
+    let cancelled: Vec<_> = default_agent_tree(&h)
         .nodes()
         .iter()
         .filter_map(|node| match &node.entry {
-            SessionEntry::ToolResults { items } => Some(items.iter()),
+            AgentEntry::ToolResults { items } => Some(items.iter()),
             _ => None,
         })
         .flatten()

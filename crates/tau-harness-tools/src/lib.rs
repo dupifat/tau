@@ -16,9 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tau_harness::internal_tools::{InternalSkill, InternalSkillSource};
-use tau_harness::{
-    AgentToolCall, ConversationId, HarnessError, InternalToolHandler, InternalToolHost,
-};
+use tau_harness::{AgentId, AgentToolCall, HarnessError, InternalToolHandler, InternalToolHost};
 use tau_proto::{
     BackgroundSupport, CborValue, Event, PromptOriginator, StartAgentRequest, ToolCallId,
     ToolDisplay, ToolDisplayStats, ToolDisplayStatus, ToolError, ToolExecutionMode, ToolName,
@@ -129,7 +127,7 @@ impl BuiltinTools {
     fn handle_delegate_tool_call(
         &self,
         host: &mut InternalToolHost<'_>,
-        cid: &ConversationId,
+        cid: &AgentId,
         call: &AgentToolCall,
         visible_tool_name: ToolName,
     ) -> Result<(), HarnessError> {
@@ -149,7 +147,7 @@ impl BuiltinTools {
                 return Ok(());
             }
         };
-        let Some(self_agent_id) = host.ensure_agent_id_for_conversation(cid) else {
+        let Some(self_agent_id) = host.ensure_agent_id_for_agent(cid) else {
             host.finish_tool_with_error(
                 cid,
                 call_id,
@@ -160,14 +158,41 @@ impl BuiltinTools {
             );
             return Ok(());
         };
-        let role_for_id = parsed.role.as_deref().unwrap_or("engineer");
-        let agent_id = host.mint_agent_id_for_role(role_for_id);
         let query_id = {
             let mut state = self.state.lock().expect("builtin tool state poisoned");
             let query_id = format!("delegate-{}", state.next_delegate_query_id);
             state.next_delegate_query_id += 1;
-            state.pending_delegates.insert(
-                query_id.clone(),
+            query_id
+        };
+        let start_request = StartAgentRequest {
+            query_id: query_id.clone(),
+            instruction: delegate_instruction(&self_agent_id, &parsed.prompt),
+            role: parsed.role,
+            execution_mode: parsed.execution_mode,
+            input_stats: ToolDisplayStats::for_text(&parsed.prompt),
+            tool_call_id: Some(call_id.clone()),
+            task_name: Some(parsed.task_name),
+        };
+        let agent_id = match host.enqueue_start_agent_request_without_draining(start_request) {
+            Ok(agent_id) => agent_id,
+            Err(message) => {
+                host.finish_tool_with_error(
+                    cid,
+                    call_id,
+                    visible_tool_name,
+                    call.tool_type,
+                    message,
+                    Some(call.arguments.clone()),
+                );
+                return Ok(());
+            }
+        };
+        self.state
+            .lock()
+            .expect("builtin tool state poisoned")
+            .pending_delegates
+            .insert(
+                query_id,
                 PendingDelegate {
                     call_id: call_id.clone(),
                     tool_name: visible_tool_name.clone(),
@@ -176,34 +201,6 @@ impl BuiltinTools {
                     agent_id: agent_id.clone(),
                 },
             );
-            query_id
-        };
-        let start_request = StartAgentRequest {
-            query_id: query_id.clone(),
-            agent_id: agent_id.clone(),
-            instruction: delegate_instruction(&self_agent_id, &parsed.prompt),
-            role: parsed.role,
-            execution_mode: parsed.execution_mode,
-            input_stats: ToolDisplayStats::for_text(&parsed.prompt),
-            tool_call_id: Some(call_id.clone()),
-            task_name: Some(parsed.task_name),
-        };
-        if let Err(message) = host.enqueue_start_agent_request_without_draining(start_request) {
-            self.state
-                .lock()
-                .expect("builtin tool state poisoned")
-                .pending_delegates
-                .remove(&query_id);
-            host.finish_tool_with_error(
-                cid,
-                call_id,
-                visible_tool_name,
-                call.tool_type,
-                message,
-                Some(call.arguments.clone()),
-            );
-            return Ok(());
-        }
         host.background_tool_call(
             &call_id,
             CborValue::Text(delegate_background_placeholder(
@@ -287,7 +284,7 @@ impl BuiltinTools {
 fn started_call(
     host: &mut InternalToolHost<'_>,
     started: &ToolStarted,
-) -> Option<(ConversationId, AgentToolCall, ToolName)> {
+) -> Option<(AgentId, AgentToolCall, ToolName)> {
     host.internal_started_call(started)
 }
 
@@ -296,7 +293,7 @@ const MAX_SKILL_SEARCH_MATCHES: usize = 50;
 
 fn handle_skill_tool_call(
     host: &mut InternalToolHost<'_>,
-    conversation_id: &ConversationId,
+    conversation_id: &AgentId,
     call: &AgentToolCall,
     visible_tool_name: ToolName,
 ) -> Result<(), HarnessError> {
@@ -755,7 +752,7 @@ fn push_normalized_skill_term(terms: &mut Vec<String>, current: &mut String) {
 
 fn handle_message_tool_call(
     host: &mut InternalToolHost<'_>,
-    conversation_id: &ConversationId,
+    conversation_id: &AgentId,
     call: &AgentToolCall,
     visible_tool_name: ToolName,
 ) -> Result<(), HarnessError> {
@@ -789,7 +786,7 @@ impl BuiltinTools {
     fn handle_cancel_tool_call(
         &self,
         host: &mut InternalToolHost<'_>,
-        conversation_id: &ConversationId,
+        conversation_id: &AgentId,
         call: &AgentToolCall,
         visible_tool_name: ToolName,
     ) -> Result<(), HarnessError> {

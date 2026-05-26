@@ -1,10 +1,10 @@
-//! Tree-structured session history types and the persisted-event
+//! Tree-structured agent transcript types and the persisted-event
 //! record they are derived from.
 //!
-//! The on-disk source of truth is the per-session protocol-event log
-//! ([`PersistedSessionEvent`] / `events.cbor`); the in-memory
-//! [`SessionTree`] is built from it via [`SessionTree::from_events`]
-//! and kept in sync incrementally by [`SessionTree::apply_event`]. No
+//! The on-disk source of truth is the per-agent protocol-event log
+//! ([`PersistedAgentEvent`] / `events.cbor`); the in-memory
+//! [`AgentTree`] is built from it via [`AgentTree::from_events`]
+//! and kept in sync incrementally by [`AgentTree::apply_event`]. No
 //! other API mutates the tree, so the on-disk log and the cached
 //! view cannot drift.
 
@@ -13,18 +13,19 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use tau_proto::{
-    ConnectionId, ContentPart, ContextItem, ContextRole, Event, LogEventId, MessageItem,
-    PromptOriginator, ProviderBackend, ProviderTokenUsage, SessionId, ToolBackgroundError,
+    AgentHeadMoved, AgentId, AgentMessageId, AgentMessageReceived, AgentMessageRecipient,
+    AgentMessageSent, ConnectionId, ContentPart, ContextItem, ContextRole, Event, LogEventId,
+    MessageItem, PromptOriginator, ProviderBackend, ProviderTokenUsage, ToolBackgroundError,
     ToolBackgroundResult, ToolCallId, ToolCallItem, ToolName, ToolResultItem, ToolResultKind,
     ToolResultStatus, ToolType, UnixMicros,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SessionEventValidationError {
+pub struct AgentEventValidationError {
     message: String,
 }
 
-impl SessionEventValidationError {
+impl AgentEventValidationError {
     fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -32,34 +33,70 @@ impl SessionEventValidationError {
     }
 }
 
-impl std::fmt::Display for SessionEventValidationError {
+impl std::fmt::Display for AgentEventValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message)
     }
 }
 
-impl std::error::Error for SessionEventValidationError {}
+impl std::error::Error for AgentEventValidationError {}
 
 /// Default starting `LogEventId` for a tree with no events.
 const FIRST_EVENT_ID: u64 = 0;
 
-/// One persisted chat or tool activity entry belonging to a session.
+/// Direction of a cross-agent message projection in one agent transcript.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMessageDirection {
+    /// The current agent sent the message.
+    Outbound,
+    /// The current agent received the message.
+    Inbound,
+}
+
+/// One persisted chat, tool, compaction, or cross-agent-message entry belonging
+/// to an agent.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum SessionEntry {
+pub enum AgentEntry {
+    /// User-style model input recorded in the transcript.
     UserInput {
+        /// Context items appended by the user or harness.
         items: Vec<ContextItem>,
     },
+    /// Assistant output accepted from a provider.
     AssistantResponse {
+        /// Provider-native response id, when available.
         provider_response_id: Option<String>,
+        /// Backend that produced the response, when known.
         backend: Option<ProviderBackend>,
+        /// Provider output items folded into the transcript.
         output_items: Vec<ContextItem>,
+        /// Provider token usage for the response, when available.
         usage: Option<ProviderTokenUsage>,
     },
+    /// Terminal provider-visible results for a tool round.
     ToolResults {
+        /// Results ordered by the model's original tool-call order.
         items: Vec<ToolResultItem>,
     },
+    /// Compaction replacement window for the current branch.
     Compaction {
+        /// Replacement context items that summarize earlier branch history.
         replacement_window: Vec<ContextItem>,
+    },
+    /// Cross-agent message projection stored in this agent's transcript.
+    AgentMessage {
+        /// Stable logical message id shared by sender and recipient
+        /// projections.
+        message_id: AgentMessageId,
+        /// Whether this projection is outbound or inbound for this agent.
+        direction: AgentMessageDirection,
+        /// Sender agent id.
+        sender_id: AgentId,
+        /// Recipient agent or user.
+        recipient: AgentMessageRecipient,
+        /// Message body.
+        message: String,
     },
 }
 
@@ -107,57 +144,80 @@ pub struct BackgroundToolCallState {
 // with existing `tau_core::NodeId` consumers.
 pub use tau_proto::NodeId;
 
-/// One node in the session tree.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct SessionNode {
-    pub id: NodeId,
-    pub parent_id: Option<NodeId>,
-    pub entry: SessionEntry,
+/// Durable encoding of the explicit fold parent chosen for one agent event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "node_id")]
+pub enum AgentEventParent {
+    /// Inherit the agent tree's current head when folding this event.
+    InheritHead,
+    /// Fold this event at the transcript root with no parent node.
+    Root,
+    /// Fold this event under the given existing node.
+    Under(NodeId),
 }
 
-/// Tree-structured session history with branching.
+impl AgentEventParent {
+    #[must_use]
+    pub const fn resolve(self, head: Option<NodeId>) -> Option<NodeId> {
+        match self {
+            Self::InheritHead => head,
+            Self::Root => None,
+            Self::Under(node_id) => Some(node_id),
+        }
+    }
+}
+
+/// One node in the agent tree.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentNode {
+    pub id: NodeId,
+    pub parent_id: Option<NodeId>,
+    pub entry: AgentEntry,
+}
+
+/// Tree-structured agent transcript with branching.
 ///
 /// Each entry is a node with a unique id and parent pointer. The
 /// `head` tracks the *write cursor* — where the next append will
 /// land. Branching = moving the cursor back to an earlier node; the
 /// next append creates a new branch off that node. There is only ever
 /// one cursor; multiple "branch tips" are derived as the leaves of
-/// the tree (see [`SessionTree::leaves`]).
+/// the tree (see [`AgentTree::leaves`]).
 ///
 /// The tree is never mutated through any imperative API on this type
-/// from outside `tau-core`; it is built by folding the per-session
-/// durable event log via [`SessionTree::from_events`] /
-/// [`SessionTree::apply_event`]. That keeps a single source of truth
+/// from outside `tau-core`; it is built by folding the per-agent
+/// durable event log via [`AgentTree::from_events`] /
+/// [`AgentTree::apply_event`]. That keeps a single source of truth
 /// (the event log on disk) and removes the possibility for the tree
 /// and the events log to disagree.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct SessionTree {
-    pub(crate) session_id: SessionId,
-    pub(crate) nodes: Vec<SessionNode>,
+pub struct AgentTree {
+    pub(crate) agent_id: AgentId,
+    pub(crate) nodes: Vec<AgentNode>,
     pub(crate) head: Option<NodeId>,
-    /// Id the next durable event appended to this session's log
+    /// Id the next durable event appended to this agent's log
     /// should receive. Cached here so that
-    /// [`SessionStore::append_session_event_at`] doesn't have to
+    /// [`AgentStore::append_agent_event_at`] doesn't have to
     /// re-decode the entire on-disk log on every write to look at
     /// the last id (the previous behaviour was O(N) per append,
-    /// quadratic over a long session).
+    /// quadratic over a long agent).
     pub(crate) next_event_id: LogEventId,
     pending_tool_rounds: HashMap<NodeId, PendingToolRound>,
     tool_call_rounds: HashMap<ToolCallId, NodeId>,
 }
 
-impl SessionTree {
-    /// Returns the session identifier.
+impl AgentTree {
+    /// Returns the agent identifier.
     #[must_use]
-    pub fn session_id(&self) -> &str {
-        &self.session_id
+    pub fn agent_id(&self) -> &str {
+        &self.agent_id
     }
 
     /// Returns the current head node id, if any.
     ///
     /// This is the *write cursor* — where the next append from a
     /// folded event will be parented. To enumerate the tips of every
-    /// existing branch, use [`SessionTree::leaves`] instead.
+    /// existing branch, use [`AgentTree::leaves`] instead.
     #[must_use]
     pub fn head(&self) -> Option<NodeId> {
         self.head
@@ -165,19 +225,19 @@ impl SessionTree {
 
     /// Returns a node by id.
     #[must_use]
-    pub fn node(&self, id: NodeId) -> Option<&SessionNode> {
+    pub fn node(&self, id: NodeId) -> Option<&AgentNode> {
         self.nodes.get(id.get() as usize)
     }
 
     /// Returns all nodes.
     #[must_use]
-    pub fn nodes(&self) -> &[SessionNode] {
+    pub fn nodes(&self) -> &[AgentNode] {
         &self.nodes
     }
 
     /// Returns the entries along the current branch (root to head).
     #[must_use]
-    pub fn current_branch(&self) -> Vec<&SessionEntry> {
+    pub fn current_branch(&self) -> Vec<&AgentEntry> {
         self.branch_from(self.head)
     }
 
@@ -189,7 +249,7 @@ impl SessionTree {
     /// tree mutations, so `tree.head()` is unreliable for that
     /// purpose.
     #[must_use]
-    pub fn branch_from(&self, head: Option<NodeId>) -> Vec<&SessionEntry> {
+    pub fn branch_from(&self, head: Option<NodeId>) -> Vec<&AgentEntry> {
         self.branch_node_ids_from(head)
             .into_iter()
             .filter_map(|id| self.node(id).map(|node| &node.entry))
@@ -214,7 +274,7 @@ impl SessionTree {
             let Some(round) = self.pending_tool_rounds.get(&node_id) else {
                 continue;
             };
-            let Some(SessionEntry::AssistantResponse { output_items, .. }) =
+            let Some(AgentEntry::AssistantResponse { output_items, .. }) =
                 self.node(node_id).map(|node| &node.entry)
             else {
                 continue;
@@ -248,7 +308,7 @@ impl SessionTree {
     pub fn background_tool_calls_from(
         &self,
         head: Option<NodeId>,
-        events: &[PersistedSessionEvent],
+        events: &[PersistedAgentEvent],
     ) -> Vec<BackgroundToolCallState> {
         let branch_call_ids = self.tool_call_ids_from_branch(head);
         if branch_call_ids.is_empty() {
@@ -335,7 +395,7 @@ impl SessionTree {
     pub fn unresolved_background_tool_calls_from(
         &self,
         head: Option<NodeId>,
-        events: &[PersistedSessionEvent],
+        events: &[PersistedAgentEvent],
     ) -> Vec<BackgroundToolPlaceholder> {
         self.background_tool_calls_from(head, events)
             .into_iter()
@@ -347,7 +407,7 @@ impl SessionTree {
     fn tool_call_ids_from_branch(&self, head: Option<NodeId>) -> HashSet<ToolCallId> {
         let mut call_ids = HashSet::new();
         for node_id in self.branch_node_ids_from(head) {
-            let Some(SessionEntry::AssistantResponse { output_items, .. }) =
+            let Some(AgentEntry::AssistantResponse { output_items, .. }) =
                 self.node(node_id).map(|node| &node.entry)
             else {
                 continue;
@@ -401,9 +461,9 @@ impl SessionTree {
             .collect()
     }
 
-    fn append_node_at(&mut self, parent: Option<NodeId>, entry: SessionEntry) -> NodeId {
+    fn append_node_at(&mut self, parent: Option<NodeId>, entry: AgentEntry) -> NodeId {
         let id = NodeId::new(self.nodes.len() as u64);
-        self.nodes.push(SessionNode {
+        self.nodes.push(AgentNode {
             id,
             parent_id: parent,
             entry,
@@ -412,16 +472,16 @@ impl SessionTree {
         id
     }
 
-    /// Folds a slice of durable session events into a fresh tree.
+    /// Folds a slice of durable agent events into a fresh tree.
     ///
     /// Replay is purely positional: NodeIds are assigned by insertion
     /// order, so the same event slice always yields the same tree.
-    /// Events that don't directly produce a session entry (lifecycle
+    /// Events that don't directly produce an agent entry (lifecycle
     /// chatter, harness info, etc.) are ignored.
     #[must_use]
-    pub fn from_events(session_id: SessionId, events: &[PersistedSessionEvent]) -> Self {
+    pub fn from_events(agent_id: AgentId, events: &[PersistedAgentEvent]) -> Self {
         let mut tree = Self {
-            session_id,
+            agent_id,
             nodes: Vec::new(),
             head: None,
             next_event_id: LogEventId::new(FIRST_EVENT_ID),
@@ -429,22 +489,15 @@ impl SessionTree {
             tool_call_rounds: HashMap::new(),
         };
         for entry in events {
-            // Persisted records store the inner `Option<NodeId>` only
-            // (serde collapses `Some(None)` to `None`), so `None` in
-            // the durable record always means "inherit head" on
-            // replay. Sessions that branch via explicit-root publishes
-            // (e.g. fresh sub-agent contexts) lose that distinction
-            // across daemon restarts — acceptable today since side
-            // conversations are not resumed across restarts.
-            tree.apply_event_at(entry.parent_node_id.map(Some), &entry.event);
+            tree.apply_event_at(entry.parent, &entry.event);
             tree.next_event_id = LogEventId::new(entry.id.get() + 1);
         }
         tree
     }
 
     /// Returns the id the next durable event appended to this
-    /// session's log should receive. Maintained incrementally by
-    /// `SessionStore::append_session_event_at`; on replay,
+    /// agent's log should receive. Maintained incrementally by
+    /// `AgentStore::append_agent_event_at`; on replay,
     /// initialised from the highest persisted event id.
     #[must_use]
     pub fn next_event_id(&self) -> LogEventId {
@@ -452,53 +505,42 @@ impl SessionTree {
     }
 
     /// Bumps the cached next-event-id after a successful append.
-    /// Crate-internal — only the session store mutates this.
+    /// Crate-internal — only the agent store mutates this.
     pub(crate) fn advance_next_event_id(&mut self) {
         self.next_event_id = LogEventId::new(self.next_event_id.get() + 1);
     }
 
     /// Incrementally apply one durable event to the tree. Mirrors the
-    /// fold rules of [`SessionTree::from_events`]. Tree-folding events
+    /// fold rules of [`AgentTree::from_events`]. Tree-folding events
     /// are parented at the current `head`; for callers that need to
     /// fold an event onto a *specific* branch (without first emitting
-    /// a `UiNavigateTree` to bounce `head` there), use
-    /// [`SessionTree::apply_event_at`].
+    /// an [`AgentHeadMoved`] to bounce `head` there), use
+    /// [`AgentTree::apply_event_at`].
     pub fn apply_event(&mut self, event: &Event) {
-        self.apply_event_at(None, event);
+        self.apply_event_at(AgentEventParent::InheritHead, event);
     }
 
-    /// Like [`SessionTree::apply_event`] but parents the produced
-    /// node under an explicit fold parent. The `Option<Option<NodeId>>`
-    /// tri-state distinguishes:
-    /// * `None` — no caller-supplied parent; inherit the tree's current `head`
-    ///   (legacy behaviour, used by transient publishes and by replay of older
-    ///   persisted records).
-    /// * `Some(None)` — fold the produced node at the *root* (no parent). Used
-    ///   to start a fresh branch (e.g. a sub-agent's first turn) without
-    ///   inheriting the tree's current cursor.
-    /// * `Some(Some(id))` — fold under the given node.
+    /// Like [`AgentTree::apply_event`] but parents the produced node using an
+    /// explicit fold-parent policy.
+    ///
+    /// [`AgentEventParent::InheritHead`] keeps the current single-cursor
+    /// behavior. [`AgentEventParent::Root`] starts a fresh branch at the
+    /// transcript root without inheriting the current cursor.
+    /// [`AgentEventParent::Under`] folds under a specific existing node.
     ///
     /// Returns the id of the node this event produced, or `None` for
     /// events that don't fold (transient lifecycle chatter, an
-    /// `ProviderResponseFinished` carrying only tool calls, a
-    /// `UiNavigateTree`, etc.). Callers tracking a per-conversation
+    /// [`AgentHeadMoved`], etc.). Callers tracking a per-conversation
     /// branch cursor must advance it only when this returns `Some` —
     /// `tree.head()` is the *global* write cursor, so syncing blindly
     /// to it after a non-folding event would steal whichever other
     /// conversation's node the cursor last visited.
-    pub fn apply_event_at(
-        &mut self,
-        parent: Option<Option<NodeId>>,
-        event: &Event,
-    ) -> Option<NodeId> {
-        let parent = match parent {
-            None => self.head,
-            Some(explicit) => explicit,
-        };
+    pub fn apply_event_at(&mut self, parent: AgentEventParent, event: &Event) -> Option<NodeId> {
+        let parent = parent.resolve(self.head);
         match event {
-            Event::UiPromptSubmitted(prompt) => Some(self.append_node_at(
+            Event::AgentPromptSubmitted(prompt) => Some(self.append_node_at(
                 parent,
-                SessionEntry::UserInput {
+                AgentEntry::UserInput {
                     items: vec![ContextItem::Message(MessageItem {
                         role: ContextRole::User,
                         content: vec![ContentPart::Text {
@@ -508,9 +550,9 @@ impl SessionTree {
                     })],
                 },
             )),
-            Event::SessionUserMessageInjected(injected) => Some(self.append_node_at(
+            Event::AgentUserMessageInjected(injected) => Some(self.append_node_at(
                 parent,
-                SessionEntry::UserInput {
+                AgentEntry::UserInput {
                     items: vec![ContextItem::Message(MessageItem {
                         role: ContextRole::User,
                         content: vec![ContentPart::Text {
@@ -520,9 +562,9 @@ impl SessionTree {
                     })],
                 },
             )),
-            Event::SessionPromptSteered(steered) => Some(self.append_node_at(
+            Event::AgentPromptSteered(steered) => Some(self.append_node_at(
                 parent,
-                SessionEntry::UserInput {
+                AgentEntry::UserInput {
                     items: vec![ContextItem::Message(MessageItem {
                         role: ContextRole::User,
                         content: vec![ContentPart::Text {
@@ -532,16 +574,22 @@ impl SessionTree {
                     })],
                 },
             )),
-            Event::SessionCompacted(compacted) => Some(self.append_node_at(
+            Event::AgentCompacted(compacted) => Some(self.append_node_at(
                 parent,
-                SessionEntry::Compaction {
+                AgentEntry::Compaction {
                     replacement_window: compacted.replacement_window.clone(),
                 },
             )),
+            Event::AgentMessageSent(message) => self
+                .agent_message_entry_from_sent(message)
+                .map(|entry| self.append_node_at(parent, entry)),
+            Event::AgentMessageReceived(message) => self
+                .agent_message_entry_from_received(message)
+                .map(|entry| self.append_node_at(parent, entry)),
             Event::ProviderResponseFinished(response) => {
                 let node_id = self.append_node_at(
                     parent,
-                    SessionEntry::AssistantResponse {
+                    AgentEntry::AssistantResponse {
                         provider_response_id: response.provider_response_id.clone(),
                         backend: response.backend.clone(),
                         output_items: response.output_items.clone(),
@@ -612,10 +660,9 @@ impl SessionTree {
                 },
                 output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Null),
             }),
-            Event::UiNavigateTree(req) => {
-                let target = NodeId::new(req.node_id);
-                if (target.get() as usize) < self.nodes.len() {
-                    self.head = Some(target);
+            Event::AgentHeadMoved(moved) => {
+                if moved.agent_id == self.agent_id && self.node(moved.node_id).is_some() {
+                    self.head = Some(moved.node_id);
                 }
                 None
             }
@@ -623,35 +670,76 @@ impl SessionTree {
         }
     }
 
+    fn agent_message_entry_from_sent(&self, message: &AgentMessageSent) -> Option<AgentEntry> {
+        (message.sender_id == self.agent_id).then(|| AgentEntry::AgentMessage {
+            message_id: message.message_id.clone(),
+            direction: AgentMessageDirection::Outbound,
+            sender_id: message.sender_id.clone(),
+            recipient: message.recipient.clone(),
+            message: message.message.clone(),
+        })
+    }
+
+    fn agent_message_entry_from_received(
+        &self,
+        message: &AgentMessageReceived,
+    ) -> Option<AgentEntry> {
+        (message.recipient_id == self.agent_id).then(|| AgentEntry::AgentMessage {
+            message_id: message.message_id.clone(),
+            direction: AgentMessageDirection::Inbound,
+            sender_id: message.sender_id.clone(),
+            recipient: AgentMessageRecipient::Agent {
+                agent_id: message.recipient_id.clone(),
+            },
+            message: message.message.clone(),
+        })
+    }
+
+    /// Validate an explicit fold parent before persisting an event.
+    ///
+    /// [`AgentEventParent::Under`] must reference an existing node in this
+    /// agent tree; otherwise replay would preserve a dangling parent pointer
+    /// and later branch assembly would silently truncate history.
+    pub fn validate_event_parent(
+        &self,
+        parent: AgentEventParent,
+    ) -> Result<(), AgentEventValidationError> {
+        if let AgentEventParent::Under(node_id) = parent
+            && self.node(node_id).is_none()
+        {
+            return Err(AgentEventValidationError::new(format!(
+                "agent event parent referenced unknown node_id: {node_id}"
+            )));
+        }
+        Ok(())
+    }
+
     /// Validate an event against the current transcript fold state before
     /// appending it to the durable log.
-    pub fn validate_event(&self, event: &Event) -> Result<(), SessionEventValidationError> {
+    pub fn validate_event(&self, event: &Event) -> Result<(), AgentEventValidationError> {
         match event {
-            Event::ProviderResponseFinished(response) => {
-                let mut seen = HashSet::new();
-                for item in &response.output_items {
-                    let ContextItem::ToolCall(call) = item else {
-                        continue;
-                    };
-                    if call.call_id.as_str().is_empty() {
-                        return Err(SessionEventValidationError::new(
-                            "agent response contained an empty tool call id",
-                        ));
-                    }
-                    if !seen.insert(call.call_id.clone()) {
-                        return Err(SessionEventValidationError::new(format!(
-                            "agent response contained duplicate tool call id: {}",
-                            call.call_id
-                        )));
-                    }
-                    if self.tool_call_rounds.contains_key(&call.call_id) {
-                        return Err(SessionEventValidationError::new(format!(
-                            "agent response reused open tool call id: {}",
-                            call.call_id
-                        )));
-                    }
-                }
+            Event::AgentStarted(started) if started.agent_id == self.agent_id => Ok(()),
+            Event::AgentPromptSubmitted(prompt) if prompt.agent_id == self.agent_id => Ok(()),
+            Event::AgentUserMessageInjected(injected) if injected.agent_id == self.agent_id => {
                 Ok(())
+            }
+            Event::AgentPromptSteered(steered) if steered.agent_id == self.agent_id => Ok(()),
+            Event::AgentCompacted(compacted) if compacted.agent_id == self.agent_id => Ok(()),
+            Event::AgentMessageSent(message)
+                if self.agent_message_entry_from_sent(message).is_some() =>
+            {
+                Ok(())
+            }
+            Event::AgentMessageReceived(message)
+                if self.agent_message_entry_from_received(message).is_some() =>
+            {
+                Ok(())
+            }
+            Event::AgentHeadMoved(moved) if moved.agent_id == self.agent_id => {
+                self.validate_head_moved(moved)
+            }
+            Event::ProviderResponseFinished(response) if response.agent_id == self.agent_id => {
+                self.validate_provider_response(response)
             }
             Event::ProviderToolResult(result) => {
                 self.validate_terminal_tool_result(&result.call_id)
@@ -660,8 +748,63 @@ impl SessionTree {
             Event::ToolCancelled(cancelled) => {
                 self.validate_terminal_tool_result(&cancelled.call_id)
             }
-            _ => Ok(()),
+            Event::ToolBackgroundResult(result) => self.validate_known_tool_call(&result.call_id),
+            Event::ToolBackgroundError(error) => self.validate_known_tool_call(&error.call_id),
+            Event::AgentStarted(_)
+            | Event::AgentPromptSubmitted(_)
+            | Event::AgentUserMessageInjected(_)
+            | Event::AgentPromptSteered(_)
+            | Event::AgentCompacted(_)
+            | Event::AgentMessageSent(_)
+            | Event::AgentMessageReceived(_)
+            | Event::AgentHeadMoved(_)
+            | Event::ProviderResponseFinished(_) => Err(AgentEventValidationError::new(
+                "agent event agent_id did not match target agent",
+            )),
+            _ => Err(AgentEventValidationError::new(
+                "agent store only persists agent transcript events",
+            )),
         }
+    }
+
+    fn validate_provider_response(
+        &self,
+        response: &tau_proto::ProviderResponseFinished,
+    ) -> Result<(), AgentEventValidationError> {
+        let mut seen = HashSet::new();
+        for item in &response.output_items {
+            let ContextItem::ToolCall(call) = item else {
+                continue;
+            };
+            if call.call_id.as_str().is_empty() {
+                return Err(AgentEventValidationError::new(
+                    "agent response contained an empty tool call id",
+                ));
+            }
+            if !seen.insert(call.call_id.clone()) {
+                return Err(AgentEventValidationError::new(format!(
+                    "agent response contained duplicate tool call id: {}",
+                    call.call_id
+                )));
+            }
+            if self.tool_call_rounds.contains_key(&call.call_id) {
+                return Err(AgentEventValidationError::new(format!(
+                    "agent response reused open tool call id: {}",
+                    call.call_id
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_head_moved(&self, moved: &AgentHeadMoved) -> Result<(), AgentEventValidationError> {
+        if self.node(moved.node_id).is_none() {
+            return Err(AgentEventValidationError::new(format!(
+                "head move referenced unknown node_id: {}",
+                moved.node_id
+            )));
+        }
+        Ok(())
     }
 
     fn record_terminal_tool_result(&mut self, item: ToolResultItem) -> Option<NodeId> {
@@ -702,26 +845,40 @@ impl SessionTree {
             .collect();
         Some(self.append_node_at(
             Some(round.assistant_node_id),
-            SessionEntry::ToolResults { items },
+            AgentEntry::ToolResults { items },
         ))
+    }
+
+    fn validate_known_tool_call(
+        &self,
+        call_id: &ToolCallId,
+    ) -> Result<(), AgentEventValidationError> {
+        if self.tool_call_ids_from_branch(self.head).contains(call_id)
+            || self.tool_call_rounds.contains_key(call_id)
+        {
+            return Ok(());
+        }
+        Err(AgentEventValidationError::new(format!(
+            "background tool completion for unknown call_id: {call_id}"
+        )))
     }
 
     fn validate_terminal_tool_result(
         &self,
         call_id: &ToolCallId,
-    ) -> Result<(), SessionEventValidationError> {
+    ) -> Result<(), AgentEventValidationError> {
         let Some(assistant_node_id) = self.tool_call_rounds.get(call_id) else {
-            return Err(SessionEventValidationError::new(format!(
+            return Err(AgentEventValidationError::new(format!(
                 "terminal tool result for unknown or already-closed call_id: {call_id}"
             )));
         };
         let Some(round) = self.pending_tool_rounds.get(assistant_node_id) else {
-            return Err(SessionEventValidationError::new(format!(
+            return Err(AgentEventValidationError::new(format!(
                 "tool call mapped to missing pending round: {call_id}"
             )));
         };
         if round.terminal_results.contains_key(call_id) {
-            return Err(SessionEventValidationError::new(format!(
+            return Err(AgentEventValidationError::new(format!(
                 "duplicate terminal tool result for call_id: {call_id}"
             )));
         }
@@ -729,40 +886,23 @@ impl SessionTree {
     }
 }
 
-/// One durable session-scoped protocol event.
+/// One durable agent-scoped protocol event.
 ///
-/// `parent_node_id` is the explicit fold parent that was passed to
-/// `SessionStore::append_session_event_at` at write time. Carrying
-/// it on the persisted record (rather than on the wire) preserves
-/// cross-conversation branching across replay without requiring the
-/// publisher-side `UiNavigateTree` head-bouncing dance the harness
-/// used to do. Older records without this field deserialize as
-/// `None` and replay against the live `tree.head()` — matching the
-/// legacy single-cursor fold and so back-compatible.
-///
-/// Lossy round-trip on the tri-state: the in-memory API distinguishes
-/// `None` (inherit head) from `Some(None)` (explicit-root, e.g. a
-/// fresh sub-agent context), but only the inner `Option<NodeId>` is
-/// persisted — `Some(None)` collapses to `None` on disk. On replay,
-/// both look like "inherit head", so sessions branched via
-/// explicit-root publishes lose that distinction across daemon
-/// restarts.
-//
-// TODO(sub-agent-resume): when sub-agent contexts need to be resumed
-// across restarts, persist the tri-state explicitly (e.g. an enum
-// `{Inherit, Root, Under(NodeId)}`) instead of `Option<NodeId>`. See
-// also `SessionTree::from_events`.
+/// `parent` is the explicit fold parent that was passed to
+/// `AgentStore::append_agent_event_at` at write time. Carrying it on the
+/// persisted record (rather than on the wire) preserves cross-conversation
+/// branching across replay without requiring the publisher-side
+/// `UiNavigateTree` head-bouncing dance.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PersistedSessionEvent {
+pub struct PersistedAgentEvent {
     pub id: LogEventId,
     pub source: Option<ConnectionId>,
     pub event: Event,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_node_id: Option<NodeId>,
+    pub parent: AgentEventParent,
     /// Wall-clock micros since UNIX epoch when the event was
     /// appended, matching the value carried on the wire `LogEvent`
     /// envelope and stamped in
-    /// [`crate::SessionStore::append_session_event_at`]. `UnixMicros(0)` on
+    /// [`crate::AgentStore::append_agent_event_at`]. `UnixMicros(0)` on
     /// records written before this field existed (deserialized via
     /// `#[serde(default)]`). Used for offline inspection — inter-turn
     /// timing, RPM bursts, cache-miss correlation — never for replay
@@ -771,16 +911,25 @@ pub struct PersistedSessionEvent {
     pub recorded_at: UnixMicros,
 }
 
-/// Per-session sidecar metadata at `<sessions_dir>/<session_id>/meta.json`.
+/// Per-agent sidecar metadata at `<agents_dir>/<agent_id>/meta.json`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct SessionMeta {
-    /// Working directory at the time of session creation.
+pub struct AgentMeta {
+    /// Working directory at the time of agent creation.
     pub cwd: Option<PathBuf>,
-    /// Unix epoch seconds when the session was first created.
+    /// Unix epoch seconds when the agent was first created.
     pub created_at: u64,
     /// Unix epoch seconds of the most recent append.
     pub last_touched: u64,
     /// Preview of the latest user-authored prompt, used by the resume picker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_user_prompt_preview: Option<String>,
+}
+
+/// Per-session sidecar metadata at `<sessions_dir>/<session_id>/meta.json`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SessionMeta {
+    /// Unix epoch seconds when the session was first created.
+    pub created_at: u64,
+    /// Unix epoch seconds of the most recent membership append.
+    pub last_touched: u64,
 }

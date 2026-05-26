@@ -121,17 +121,16 @@ pub struct ResponsesConfig {
 ///
 /// `~/.local/state/tau/sessions/<session_id>/debug/provider-requests/`.
 pub fn maybe_debug_write_provider_request(
-    session_prompt_id: &str,
+    agent_prompt_id: &str,
     config: &ResponsesConfig,
     request: &PromptPayload<'_>,
     transport: tau_proto::ProviderBackendTransport,
 ) {
-    if let Err(error) = debug_write_provider_request(session_prompt_id, config, request, transport)
-    {
+    if let Err(error) = debug_write_provider_request(agent_prompt_id, config, request, transport) {
         tracing::warn!(
             target: crate::LOG_TARGET,
             session_id = %request.session_id,
-            session_prompt_id,
+            agent_prompt_id,
             "failed to write provider request debug log: {error}",
         );
     }
@@ -148,7 +147,7 @@ pub fn debug_provider_request_dir(session_id: &str) -> Option<PathBuf> {
 }
 
 fn debug_write_provider_request(
-    session_prompt_id: &str,
+    agent_prompt_id: &str,
     config: &ResponsesConfig,
     request: &PromptPayload<'_>,
     transport: tau_proto::ProviderBackendTransport,
@@ -166,7 +165,7 @@ fn debug_write_provider_request(
         tau_proto::ProviderBackendTransport::Websocket => "websocket",
     };
     let path = dir.join(format!(
-        "{ts}-{session_prompt_id}-{transport_label}-request.json"
+        "{ts}-{agent_prompt_id}-{transport_label}-request.json"
     ));
     let body = match transport {
         tau_proto::ProviderBackendTransport::HttpSse => {
@@ -178,7 +177,7 @@ fn debug_write_provider_request(
     };
     let metadata = serde_json::json!({
         "session_id": request.session_id,
-        "session_prompt_id": session_prompt_id,
+        "agent_prompt_id": agent_prompt_id,
         "transport": transport_label,
         "backend": "responses",
         "model": config.model_id,
@@ -212,12 +211,12 @@ fn debug_write_provider_request(
 /// mentions `previous_response`; transient 5xx / network errors
 /// surface to the harness retry layer unchanged.
 pub fn responses_stream(
-    session_prompt_id: &str,
+    agent_prompt_id: &str,
     config: &ResponsesConfig,
     request: &PromptPayload<'_>,
     on_update: &mut impl FnMut(&str, Option<&str>),
 ) -> Result<StreamState, LlmError> {
-    let first = responses_stream_once(session_prompt_id, config, request, on_update);
+    let first = responses_stream_once(agent_prompt_id, config, request, on_update);
     if request.previous_response.is_none() {
         return first;
     }
@@ -242,7 +241,7 @@ pub fn responses_stream(
         session_id: request.session_id,
         share_user_cache_key: false,
     };
-    let mut state = responses_stream_once(session_prompt_id, config, &fallback, on_update)?;
+    let mut state = responses_stream_once(agent_prompt_id, config, &fallback, on_update)?;
     state.stale_chain_fallback = true;
     Ok(state)
 }
@@ -297,7 +296,7 @@ fn is_stale_chain_error(error: &LlmError) -> bool {
 }
 
 fn responses_stream_once(
-    session_prompt_id: &str,
+    agent_prompt_id: &str,
     config: &ResponsesConfig,
     request: &PromptPayload<'_>,
     on_update: &mut impl FnMut(&str, Option<&str>),
@@ -305,7 +304,7 @@ fn responses_stream_once(
     let url = config.surface.responses_url(&config.base_url);
 
     maybe_debug_write_provider_request(
-        session_prompt_id,
+        agent_prompt_id,
         config,
         request,
         tau_proto::ProviderBackendTransport::HttpSse,

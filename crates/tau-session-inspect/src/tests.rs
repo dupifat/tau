@@ -31,7 +31,7 @@ fn assistant_preview_represents_multiple_messages_and_tool_calls_in_order() {
         Some("first tool.call read src/main.rs second")
     );
     assert_eq!(
-        format_session_entry(&SessionEntry::AssistantResponse {
+        format_session_entry(&AgentEntry::AssistantResponse {
             provider_response_id: None,
             backend: None,
             output_items,
@@ -43,7 +43,7 @@ fn assistant_preview_represents_multiple_messages_and_tool_calls_in_order() {
 
 #[test]
 fn tool_results_preview_includes_every_result_in_round() {
-    let entry = SessionEntry::ToolResults {
+    let entry = AgentEntry::ToolResults {
         items: vec![
             tau_proto::ToolResultItem {
                 call_id: "call-1".into(),

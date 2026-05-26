@@ -15,7 +15,8 @@ Tau follows the XDG directory layout on Linux:
   - `cli.yaml`, `cli.d/*.yaml` — CLI display preferences and key bindings.
   - `harness.yaml`, `harness.d/*.yaml` — harness roles/defaults, extensions, tools, and session retention.
 - State: `~/.local/state/tau/` or the platform/user state directory.
-  - `sessions/<session_id>/` — durable session events, metadata, logs, and debug captures.
+  - `sessions/<session_id>/` — durable session membership, metadata, logs, and debug captures.
+  - `agents/<agent_id>/` — durable agent transcripts and metadata.
   - `cli.json` — persisted CLI runtime toggles.
   - `policy.cbor` — persisted socket-client policy decisions.
   - `auth.d/<provider>.json` — provider credentials; `auth.json` may exist as legacy credentials.

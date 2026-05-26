@@ -1,7 +1,7 @@
 use super::*;
 
-fn conv(id: &str) -> ConversationId {
-    ConversationId::new(id)
+fn conv(id: &str) -> AgentId {
+    (id).into()
 }
 
 fn wait_args_empty() -> CborValue {
@@ -62,13 +62,13 @@ fn background_error(
     }
 }
 
-fn start_wait_any(tracker: &mut WaitTracker, owner: &ConversationId, call_id: &str) -> WaitStart {
+fn start_wait_any(tracker: &mut WaitTracker, owner: &AgentId, call_id: &str) -> WaitStart {
     tracker.handle_wait_invoke(owner, call_id.into(), wait_tool_name(), &wait_args_empty())
 }
 
 fn start_wait_exact(
     tracker: &mut WaitTracker,
-    owner: &ConversationId,
+    owner: &AgentId,
     wait_call_id: &str,
     target_call_id: &str,
 ) -> WaitStart {
@@ -118,7 +118,7 @@ fn rewrite_conversation_id_updates_wait_tracker_owners_and_any_waits() {
             .is_none()
     );
 
-    tracker.rewrite_conversation_id(&old, &new);
+    tracker.rewrite_agent_id(&old, &new);
 
     assert_eq!(tracker.call_owners.get(&call_id), Some(&new));
     assert!(!tracker.any_waiters.contains_key(&old));

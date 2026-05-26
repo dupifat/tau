@@ -6,8 +6,8 @@ fn cbor_text(s: &str) -> CborValue {
     CborValue::Text(s.to_owned())
 }
 
-fn result_entry(call_id: &str, content: &str) -> SessionEntry {
-    SessionEntry::ToolResults {
+fn result_entry(call_id: &str, content: &str) -> AgentEntry {
+    AgentEntry::ToolResults {
         items: vec![ToolResultItem {
             call_id: ToolCallId::from(call_id),
             tool_type: ToolType::Function,
@@ -132,7 +132,7 @@ fn error_details_distinguish_otherwise_identical_messages() {
 /// Regression guard: `note_head_advanced_to` must skip the
 /// advance when `built_for` is `None`. The harness calls this hook
 /// on *every* fold (including ones that don't pass through dedup
-/// intake — `UserMessage` from session re-init, `AgentMessage`,
+/// intake — user messages from session re-init, message projections,
 /// `ToolRequest`). On a freshly resumed session the map starts
 /// empty with `built_for == None`; if such a fold advanced the
 /// cursor unconditionally, `needs_rebuild(new_head)` would return

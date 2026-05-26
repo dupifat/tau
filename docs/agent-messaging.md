@@ -1,6 +1,6 @@
 # Agent messaging tool
 
-The harness-owned `message` tool lets an agent send an asynchronous short text note to the user or to another agent. Every sent message is recorded as an `agent.message` event. UI display depends on `/set show-messages`; when shown fully it renders as:
+The harness-owned `message` tool lets an agent send an asynchronous short text note to the user or to another agent. Every successful send is recorded as an `agent.message_sent` sender projection; agent recipients also get a separate `agent.message_received` recipient projection with the same `message_id`. UI display depends on `/set show-messages`; when shown fully it renders as:
 
 ```text
 Message from <sender> to <recipient>:
@@ -35,8 +35,8 @@ Start the other agent with `delegate`. The instant background placeholder includ
 
 ```text
 tau_internal: true
-self_agent_id: engineer_parent
-sub_agent_id: engineer_ab12cd34
+self_agent_id: senior-engineer_a
+sub_agent_id: engineer_b
 
 Tool call `call_123` is running in the background.
 ```
@@ -44,33 +44,33 @@ Tool call `call_123` is running in the background.
 Use `sub_agent_id` as `recipient_id`:
 
 ```text
-message({"recipient_id":"engineer_ab12cd34","message":"Please also inspect crates/tau-cli/src/event_renderer.rs."})
+message({"recipient_id":"engineer_b","message":"Please also inspect crates/tau-cli/src/event_renderer.rs."})
 ```
 
 The UI may display the message, summarize it, or hide it depending on `/set show-messages`. The recipient agent also receives a hidden internal prompt with the message body XML-escaped inside a `<message>` wrapper.
 
 ## Invalid recipients and arguments
 
-A non-`user` recipient must be a live or pending `agent_id`. Otherwise the tool fails and no `agent.message` event is emitted.
+A non-`user` recipient must be a live or pending `agent_id`. Otherwise the tool fails and no `agent.message_sent` or `agent.message_received` projection is emitted.
 
 If the id was never known, the tool reports an unknown recipient:
 
 ```text
-message({"recipient_id":"engineer_missing","message":"hello"})
+message({"recipient_id":"engineer_0","message":"hello"})
 ```
 
 ```text
-unknown message recipient: `engineer_missing`
+unknown message recipient: `engineer_0`
 ```
 
 If the id belonged to an agent that has already finished or was canceled before it could start, the tool reports a stopped recipient:
 
 ```text
-message({"recipient_id":"engineer_done","message":"hello"})
+message({"recipient_id":"engineer_1","message":"hello"})
 ```
 
 ```text
-stopped message recipient: `engineer_done`
+stopped message recipient: `engineer_1`
 ```
 
 Tool arguments are schema-validated before dispatch. Unknown extra fields are rejected before any logical tool invocation is logged.

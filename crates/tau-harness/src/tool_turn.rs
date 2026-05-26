@@ -10,16 +10,15 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
-use tau_proto::{BackgroundSupport, ToolCallId, ToolExecutionMode, ToolName, ToolType};
+use tau_proto::{AgentId, BackgroundSupport, ToolCallId, ToolExecutionMode, ToolName, ToolType};
 
-use crate::conversation::ConversationId;
 use crate::harness::AgentToolCall;
 
 /// A tool call emitted by an agent response but not yet completed.
 #[derive(Clone, Debug)]
 pub(crate) struct PendingToolInvocation {
-    /// Conversation that owns the tool call.
-    pub(crate) conversation_id: ConversationId,
+    /// Agent that owns the tool call.
+    pub(crate) conversation_id: AgentId,
     /// Tool call payload to route when selected.
     pub(crate) invocation: AgentToolCall,
     /// Execution mode resolved at enqueue time.
@@ -47,7 +46,7 @@ pub(crate) enum ForegroundAction {
 
 #[derive(Clone, Debug)]
 struct InFlightToolInvocation {
-    conversation_id: ConversationId,
+    conversation_id: AgentId,
     execution_mode: ToolExecutionMode,
     foreground_pending: bool,
     backgrounded: bool,
@@ -58,7 +57,7 @@ impl ToolTurnMachine {
     /// Enqueue one tool invocation at the back of the turn queue.
     pub(crate) fn push(
         &mut self,
-        conversation_id: ConversationId,
+        conversation_id: AgentId,
         invocation: AgentToolCall,
         execution_mode: ToolExecutionMode,
         background_support: BackgroundSupport,
@@ -97,7 +96,7 @@ impl ToolTurnMachine {
     #[cfg(test)]
     pub(crate) fn record_in_flight_for_test(
         &mut self,
-        conversation_id: ConversationId,
+        conversation_id: AgentId,
         call_id: ToolCallId,
         execution_mode: ToolExecutionMode,
     ) {
@@ -149,10 +148,7 @@ impl ToolTurnMachine {
     }
 
     /// Backgrounded calls still actually running for `conversation_id`.
-    pub(crate) fn backgrounded_calls_for(
-        &self,
-        conversation_id: &ConversationId,
-    ) -> Vec<ToolCallId> {
+    pub(crate) fn backgrounded_calls_for(&self, conversation_id: &AgentId) -> Vec<ToolCallId> {
         self.in_flight_tool_execution_modes
             .iter()
             .filter_map(|(call_id, in_flight)| {
@@ -194,7 +190,7 @@ impl ToolTurnMachine {
     /// `remaining`.
     pub(crate) fn cancel_queued_for(
         &mut self,
-        conversation_id: &ConversationId,
+        conversation_id: &AgentId,
         remaining: &HashSet<ToolCallId>,
     ) -> Vec<(ToolCallId, ToolName, ToolType)> {
         let mut queued = Vec::new();
@@ -215,7 +211,7 @@ impl ToolTurnMachine {
 
     /// Rewrite queued and in-flight owner conversation ids after a harness
     /// conversation has been re-keyed.
-    pub(crate) fn rewrite_conversation_id(&mut self, old: &ConversationId, new: &ConversationId) {
+    pub(crate) fn rewrite_agent_id(&mut self, old: &AgentId, new: &AgentId) {
         for pending in &mut self.pending_tool_invocations {
             if &pending.conversation_id == old {
                 pending.conversation_id = new.clone();
@@ -268,14 +264,14 @@ impl ToolTurnMachine {
 
     /// Whether `conversation_id` has queued work.
     #[cfg(test)]
-    pub(crate) fn any_pending_for(&self, conversation_id: &ConversationId) -> bool {
+    pub(crate) fn any_pending_for(&self, conversation_id: &AgentId) -> bool {
         self.pending_tool_invocations
             .iter()
             .any(|pending| &pending.conversation_id == conversation_id)
     }
 
     /// Whether `conversation_id` has foreground in-flight work.
-    pub(crate) fn any_in_flight_for(&self, conversation_id: &ConversationId) -> bool {
+    pub(crate) fn any_in_flight_for(&self, conversation_id: &AgentId) -> bool {
         self.in_flight_tool_execution_modes
             .values()
             .any(|in_flight| {
@@ -320,7 +316,7 @@ impl ToolTurnMachine {
     }
 
     fn next_dispatchable_index(&self) -> Option<usize> {
-        let mut blocked_convs: HashSet<&ConversationId> = HashSet::new();
+        let mut blocked_convs: HashSet<&AgentId> = HashSet::new();
         for (idx, pending) in self.pending_tool_invocations.iter().enumerate() {
             if blocked_convs.contains(&pending.conversation_id) {
                 continue;
@@ -337,7 +333,7 @@ impl ToolTurnMachine {
 
     fn has_incompatible_in_flight_for(
         &self,
-        conversation_id: &ConversationId,
+        conversation_id: &AgentId,
         execution_mode: ToolExecutionMode,
     ) -> bool {
         self.in_flight_tool_execution_modes

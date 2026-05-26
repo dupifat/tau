@@ -5,7 +5,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use tau_config::settings::TauDirs;
-use tau_core::{PolicyStore, SessionStore};
+use tau_core::{AgentStore, AgentStoreError, PolicyStore, SessionStore};
 use tau_harness::{
     HarnessError, ServeOptions, run_daemon_with_echo, run_embedded_message_with_echo,
     send_daemon_message,
@@ -87,6 +87,11 @@ impl TestRuntime {
     /// Opens the session store for assertions.
     pub fn open_session_store(&self) -> Result<SessionStore, InspectError> {
         open_session_store(tau_config::settings::sessions_dir_of(&self.state_dir))
+    }
+
+    /// Opens the agent store for transcript assertions.
+    pub fn open_agent_store(&self) -> Result<AgentStore, AgentStoreError> {
+        AgentStore::open(self.state_dir.join("agents"))
     }
 
     /// Opens the policy store for assertions.

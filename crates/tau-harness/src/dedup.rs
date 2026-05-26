@@ -25,8 +25,8 @@
 //!    `call_id` the model can't see in its own assembled history.
 //!
 //! 2. **First-write-only.** Replacement happens at result-intake time, before
-//!    the result is folded into the session tree. Once recorded the entry is
-//!    frozen for the rest of the session, preserving the harness's
+//!    the result is folded into the agent tree. Once recorded the entry is
+//!    frozen for the rest of the agent branch, preserving the harness's
 //!    linear-prefix invariant for the upstream prompt cache.
 //!
 //! 3. **Threshold gated.** Results whose serialized form is below
@@ -36,7 +36,7 @@
 
 use std::collections::HashMap;
 
-use tau_core::SessionEntry;
+use tau_core::AgentEntry;
 use tau_proto::{CborValue, NodeId, ToolCallId, ToolResultStatus};
 
 use crate::INTERNAL_MARKER;
@@ -91,13 +91,13 @@ impl ResultDedupMap {
     /// session resume / session switch.
     pub(crate) fn rebuild_from_branch<'a>(
         &mut self,
-        branch: impl IntoIterator<Item = &'a SessionEntry>,
+        branch: impl IntoIterator<Item = &'a AgentEntry>,
         new_head: Option<NodeId>,
         threshold: usize,
     ) {
         self.map.clear();
         for entry in branch {
-            let SessionEntry::ToolResults { items } = entry else {
+            let AgentEntry::ToolResults { items } = entry else {
                 continue;
             };
             for item in items {
@@ -163,7 +163,7 @@ impl ResultDedupMap {
     /// has never been populated for this conversation (fresh harness
     /// after session resume; map cleared after a navigation). A
     /// commit at this stage might be a non-dedup-eligible event (a
-    /// `UserMessage` from session re-init, an `AgentMessage`) whose
+    /// user message from session re-init, a message projection) whose
     /// fold doesn't pass through `dedup_tool_result`. Advancing
     /// unconditionally would mark the map as "in sync with this new
     /// head" while still empty, making the next dedup intake skip

@@ -24,8 +24,8 @@ fn provider_response_contains_text(finished: &ProviderResponseFinished, needle: 
 
 fn response_with_tool_calls(call_ids: &[&str]) -> ProviderResponseFinished {
     ProviderResponseFinished {
-        session_prompt_id: "sp-restored-tools".into(),
-        target_agent_id: None,
+        agent_prompt_id: "sp-restored-tools".into(),
+        agent_id: "main".into(),
         output_items: call_ids
             .iter()
             .map(|call_id| {
@@ -65,27 +65,94 @@ fn seed_restored_tool_round(state_dir: &Path, call_ids: &[&str], completed_call_
         .append_session_event(
             "s1",
             None,
-            Event::UiPromptSubmitted(UiPromptSubmitted {
+            Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                 session_id: "s1".into(),
+                agent_id: "main".into(),
+            }),
+        )
+        .expect("seed session membership");
+    let mut agent_store =
+        tau_core::AgentStore::open(state_dir.join("agents")).expect("agent store");
+    agent_store
+        .append_agent_event(
+            "main",
+            None,
+            Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                agent_id: "main".into(),
                 text: "before restart".to_owned(),
-                target_agent_id: None,
                 message_class: tau_proto::PromptMessageClass::User,
                 originator: tau_proto::PromptOriginator::User,
                 ctx_id: None,
             }),
         )
         .expect("seed user prompt");
-    store
-        .append_session_event(
-            "s1",
+    agent_store
+        .append_agent_event(
+            "main",
             None,
             Event::ProviderResponseFinished(response_with_tool_calls(call_ids)),
         )
         .expect("seed assistant tool calls");
     for call_id in completed_call_ids {
-        store
-            .append_session_event(
-                "s1",
+        agent_store
+            .append_agent_event(
+                "main",
+                None,
+                Event::ProviderToolResult(successful_tool_result(call_id)),
+            )
+            .expect("seed completed tool call");
+    }
+}
+
+fn seed_restored_tool_round_for_agent(
+    state_dir: &Path,
+    session_id: &str,
+    agent_id: &str,
+    call_ids: &[&str],
+    completed_call_ids: &[&str],
+) {
+    let sessions_dir = tau_config::settings::sessions_dir_of(state_dir);
+    let mut store = tau_core::SessionStore::open(&sessions_dir).expect("session store");
+    store
+        .append_session_event(
+            session_id,
+            None,
+            Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                session_id: session_id.into(),
+                agent_id: agent_id.into(),
+            }),
+        )
+        .expect("seed session membership");
+    let mut agent_store =
+        tau_core::AgentStore::open(state_dir.join("agents")).expect("agent store");
+    agent_store
+        .append_agent_event(
+            agent_id,
+            None,
+            Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                agent_id: agent_id.into(),
+                text: format!("before restart for {agent_id}"),
+                message_class: tau_proto::PromptMessageClass::User,
+                originator: tau_proto::PromptOriginator::User,
+                ctx_id: None,
+            }),
+        )
+        .expect("seed user prompt");
+    agent_store
+        .append_agent_event(
+            agent_id,
+            None,
+            Event::ProviderResponseFinished(ProviderResponseFinished {
+                agent_prompt_id: format!("sp-{agent_id}").into(),
+                agent_id: agent_id.into(),
+                ..response_with_tool_calls(call_ids)
+            }),
+        )
+        .expect("seed assistant tool calls");
+    for call_id in completed_call_ids {
+        agent_store
+            .append_agent_event(
+                agent_id,
                 None,
                 Event::ProviderToolResult(successful_tool_result(call_id)),
             )
@@ -94,11 +161,9 @@ fn seed_restored_tool_round(state_dir: &Path, call_ids: &[&str], completed_call_
 }
 
 fn provider_tool_errors(h: &Harness, call_id: &str) -> Vec<tau_proto::ToolError> {
-    h.store
-        .session_events("s1")
-        .expect("session events")
+    loaded_agent_events(h, "s1")
         .into_iter()
-        .filter_map(|entry| match entry.event {
+        .filter_map(|event| match event {
             Event::ProviderToolError(error) if error.call_id.as_str() == call_id => Some(error),
             _ => None,
         })
@@ -106,7 +171,7 @@ fn provider_tool_errors(h: &Harness, call_id: &str) -> Vec<tau_proto::ToolError>
 }
 
 fn prompt_tool_result<'a>(
-    prompt: &'a SessionPromptCreated,
+    prompt: &'a AgentPromptCreated,
     call_id: &str,
 ) -> Option<&'a ToolResultItem> {
     prompt.context_items.iter().find_map(|item| match item {
@@ -199,6 +264,23 @@ fn repeated_resume_does_not_duplicate_synthetic_tool_errors() {
 }
 
 #[test]
+fn resume_repairs_unresolved_tool_call_on_non_default_loaded_agent() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    seed_restored_tool_round_for_agent(&sp, "s1", "aaa_agent", &[], &[]);
+    seed_restored_tool_round_for_agent(&sp, "s1", "zzz_agent", &["side-interrupted-call"], &[]);
+
+    let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
+        .expect("resume");
+
+    let errors = provider_tool_errors(&h, "side-interrupted-call");
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].message.contains("Side effects may have occurred"));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
 fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
@@ -208,10 +290,20 @@ fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
         .append_session_event(
             "s1",
             Some(HARNESS_CONNECTION_ID.into()),
-            Event::AgentMessage(tau_proto::AgentMessage {
+            Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                 session_id: "s1".into(),
-                sender_id: "agent-1".to_owned(),
-                recipient_id: "user".to_owned(),
+                agent_id: "agent-1".into(),
+            }),
+        )
+        .expect("seed session membership");
+    h.agent_store
+        .append_agent_event(
+            "agent-1",
+            Some(HARNESS_CONNECTION_ID.into()),
+            Event::AgentMessageSent(tau_proto::AgentMessageSent {
+                message_id: "test-message".into(),
+                sender_id: "agent-1".to_owned().into(),
+                recipient: tau_proto::AgentMessageRecipient::User,
                 message: "persisted hello".to_owned(),
             }),
         )
@@ -234,7 +326,9 @@ fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
     h.handle_client_event(
         &ui_conn,
         Frame::Message(Message::Subscribe(Subscribe {
-            selectors: vec![EventSelector::Exact(tau_proto::EventName::AGENT_MESSAGE)],
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_MESSAGE_SENT,
+            )],
         })),
     )
     .expect("subscribe");
@@ -249,9 +343,9 @@ fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
         let (_log_id, inner) = frame.peel_log();
         got_message = matches!(
             inner,
-            Frame::Event(Event::AgentMessage(message))
+            Frame::Event(Event::AgentMessageSent(message))
                 if message.sender_id == "agent-1"
-                    && message.recipient_id == "user"
+                    && message.recipient == tau_proto::AgentMessageRecipient::User
                     && message.message == "persisted hello"
         );
     }
@@ -270,23 +364,21 @@ fn late_joining_ui_client_receives_replayed_session_events() {
     h.send_user_message("s1", "hello replay", None)
         .expect("send message");
 
-    let events = h.store.session_events("s1").expect("session events");
+    let events = loaded_agent_events(&h, "s1");
     assert!(
         events
             .iter()
-            .any(|entry| matches!(entry.event, Event::UiPromptSubmitted(_))),
-        "user prompt should be in durable session event log"
+            .any(|event| matches!(event, Event::AgentPromptSubmitted(_))),
+        "user prompt should be in a durable loaded-agent event log"
     );
     assert!(
         events
             .iter()
-            .any(|entry| matches!(entry.event, Event::ProviderResponseFinished(_))),
-        "final agent response should be in durable session event log"
+            .any(|event| matches!(event, Event::ProviderResponseFinished(_))),
+        "final agent response should be in a durable loaded-agent event log"
     );
     assert!(
-        events
-            .iter()
-            .all(|entry| !entry.event.defaults_to_transient()),
+        events.iter().all(|event| !event.defaults_to_transient()),
         "transient events must not be persisted"
     );
 
@@ -308,7 +400,7 @@ fn late_joining_ui_client_receives_replayed_session_events() {
         &ui_conn,
         Frame::Message(Message::Subscribe(Subscribe {
             selectors: vec![
-                EventSelector::Prefix("ui.".to_owned()),
+                EventSelector::Prefix("agent.".to_owned()),
                 EventSelector::Prefix("provider.".to_owned()),
             ],
         })),
@@ -325,7 +417,7 @@ fn late_joining_ui_client_receives_replayed_session_events() {
         };
         let (_log_id, inner) = frame.peel_log();
         match inner {
-            Frame::Event(Event::UiPromptSubmitted(prompt)) if prompt.text == "hello replay" => {
+            Frame::Event(Event::AgentPromptSubmitted(prompt)) if prompt.text == "hello replay" => {
                 got_prompt = true;
             }
             Frame::Event(Event::ProviderResponseFinished(finished))
@@ -363,10 +455,10 @@ fn extension_subscribe_receives_no_replayed_past_events() {
     h.send_user_message("s1", past_text, None)
         .expect("send past message");
 
-    let durable_events = h.store.session_events("s1").expect("session events");
+    let durable_events = loaded_agent_events(&h, "s1");
     assert!(
-        durable_events.iter().any(|entry| {
-            matches!(&entry.event, Event::ProviderResponseFinished(finished)
+        durable_events.iter().any(|event| {
+            matches!(event, Event::ProviderResponseFinished(finished)
                 if provider_response_contains_text(finished, past_text))
         }),
         "test setup: past provider response should be durable and eligible for UI replay",
@@ -430,22 +522,24 @@ fn queued_and_recalled_prompt_lifecycle_is_not_durable() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
+    let cid = h.default_agent_id.clone();
+    let agent_id = h
+        .ensure_agent_id_for_agent(&cid)
+        .expect("default conversation has an agent id");
 
     h.publish_event(
         None,
-        Event::SessionPromptQueued(SessionPromptQueued {
-            session_id: "s1".into(),
+        Event::AgentPromptQueued(AgentPromptQueued {
+            agent_id: agent_id.clone().into(),
             text: "edit me".to_owned(),
-            target_agent_id: Some("worker".to_owned()),
             message_class: tau_proto::PromptMessageClass::User,
         }),
     );
     h.publish_event(
         None,
-        Event::SessionPromptRecalled(SessionPromptRecalled {
-            session_id: "s1".into(),
+        Event::AgentPromptRecalled(AgentPromptRecalled {
+            agent_id: agent_id.clone().into(),
             text: "edit me".to_owned(),
-            target_agent_id: Some("worker".to_owned()),
         }),
     );
 
@@ -453,7 +547,7 @@ fn queued_and_recalled_prompt_lifecycle_is_not_durable() {
     assert!(
         events.iter().all(|entry| !matches!(
             entry.event,
-            Event::SessionPromptQueued(_) | Event::SessionPromptRecalled(_)
+            Event::AgentPromptQueued(_) | Event::AgentPromptRecalled(_)
         )),
         "cold replay must not resurrect transient queue lifecycle events: {events:?}"
     );
@@ -467,24 +561,25 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    let spid: SessionPromptId = "sp-replay".into();
-    h.prompt_conversations
-        .insert(spid.clone(), h.default_conversation_id.clone());
+    let spid: AgentPromptId = "sp-replay".into();
+    let cid = h.default_agent_id.clone();
+    let agent_id = h
+        .ensure_agent_id_for_agent(&cid)
+        .expect("default conversation has an agent id");
+    h.prompt_agents.insert(spid.clone(), cid.clone());
     h.publish_event(
         None,
-        Event::SessionPromptQueued(SessionPromptQueued {
-            session_id: "s1".into(),
+        Event::AgentPromptQueued(AgentPromptQueued {
+            agent_id: agent_id.clone().into(),
             text: "queued for reconnect".to_owned(),
-            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
         }),
     );
     h.publish_event(
         None,
-        Event::SessionPromptCreated(SessionPromptCreated {
-            session_prompt_id: spid.clone(),
-            session_id: "s1".into(),
-            target_agent_id: None,
+        Event::AgentPromptCreated(AgentPromptCreated {
+            agent_id: agent_id.clone().into(),
+            agent_prompt_id: spid.clone(),
             system_prompt: String::new(),
             context_items: Vec::new(),
             tools: Vec::new(),
@@ -501,7 +596,7 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
     h.publish_event(
         None,
         Event::ProviderResponseUpdated(ProviderResponseUpdated {
-            session_prompt_id: spid.clone(),
+            agent_prompt_id: spid.clone(),
             text: "partial".to_owned(),
             thinking: None,
             originator: Default::default(),
@@ -509,29 +604,27 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
     );
     h.publish_event(
         None,
-        Event::SessionCompactionStarted(tau_proto::SessionCompactionStarted {
-            session_id: "s1".into(),
-            target_agent_id: None,
+        Event::AgentCompactionStarted(tau_proto::AgentCompactionStarted {
+            agent_id: agent_id.clone().into(),
             originator: tau_proto::PromptOriginator::User,
             original_input_tokens: None,
         }),
     );
     h.publish_event(
         None,
-        Event::SessionCompacted(tau_proto::SessionCompacted {
-            session_id: "s1".into(),
-            target_agent_id: None,
+        Event::AgentCompacted(tau_proto::AgentCompacted {
+            agent_id: agent_id.clone().into(),
             originator: tau_proto::PromptOriginator::User,
             original_input_tokens: None,
             compacted_input_tokens: None,
-            replacement_window: assistant_output("Conversation compacted."),
+            replacement_window: assistant_output("Agent compacted."),
         }),
     );
     h.publish_event(
         None,
         Event::ProviderResponseFinished(ProviderResponseFinished {
-            session_prompt_id: spid,
-            target_agent_id: None,
+            agent_prompt_id: spid,
+            agent_id: agent_id.clone().into(),
             output_items: assistant_output("final"),
             stop_reason: tau_proto::ProviderStopReason::EndTurn,
             originator: Default::default(),
@@ -560,7 +653,7 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
         &ui_conn,
         Frame::Message(Message::Subscribe(Subscribe {
             selectors: vec![
-                EventSelector::Prefix("session.".to_owned()),
+                EventSelector::Prefix("agent.".to_owned()),
                 EventSelector::Prefix("provider.".to_owned()),
             ],
         })),
@@ -577,10 +670,10 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
     }
 
     assert!(replayed.contains(&tau_proto::EventName::PROVIDER_RESPONSE_FINISHED));
-    assert!(replayed.contains(&tau_proto::EventName::SESSION_COMPACTED));
-    assert!(!replayed.contains(&tau_proto::EventName::SESSION_COMPACTION_STARTED));
-    assert!(!replayed.contains(&tau_proto::EventName::SESSION_PROMPT_QUEUED));
-    assert!(!replayed.contains(&tau_proto::EventName::SESSION_PROMPT_CREATED));
+    assert!(replayed.contains(&tau_proto::EventName::AGENT_COMPACTED));
+    assert!(!replayed.contains(&tau_proto::EventName::AGENT_COMPACTION_STARTED));
+    assert!(!replayed.contains(&tau_proto::EventName::AGENT_PROMPT_QUEUED));
+    assert!(!replayed.contains(&tau_proto::EventName::AGENT_PROMPT_CREATED));
     assert!(!replayed.contains(&tau_proto::EventName::PROVIDER_RESPONSE_UPDATED));
 
     h.shutdown().expect("shutdown");
@@ -594,13 +687,15 @@ fn late_joining_ui_client_replays_only_current_active_queue() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    h.conversations
-        .get_mut(&h.default_conversation_id)
+    let cid = h.default_agent_id.clone();
+    let agent_id = h
+        .ensure_agent_id_for_agent(&cid)
+        .expect("default conversation has an agent id");
+    h.agents
+        .get_mut(&cid)
         .expect("default conversation")
         .pending_prompts
-        .push_back(crate::conversation::PendingPrompt::user(
-            "still queued".to_owned(),
-        ));
+        .push_back(crate::agent::PendingPrompt::user("still queued".to_owned()));
 
     let (server_end, client_end) = UnixStream::pair().expect("pair");
     client_end
@@ -619,7 +714,7 @@ fn late_joining_ui_client_replays_only_current_active_queue() {
     h.handle_client_event(
         &ui_conn,
         Frame::Message(Message::Subscribe(Subscribe {
-            selectors: vec![EventSelector::Prefix("session.".to_owned())],
+            selectors: vec![EventSelector::Prefix("agent.".to_owned())],
         })),
     )
     .expect("subscribe");
@@ -628,14 +723,14 @@ fn late_joining_ui_client_replays_only_current_active_queue() {
     let mut queued = Vec::new();
     while let Ok(Some(frame)) = reader.read_frame() {
         let (_log_id, inner) = frame.peel_log();
-        if let Frame::Event(Event::SessionPromptQueued(event)) = inner {
+        if let Frame::Event(Event::AgentPromptQueued(event)) = inner {
             queued.push(event);
         }
     }
 
     assert_eq!(queued.len(), 1);
     assert_eq!(queued[0].text, "still queued");
-    assert_eq!(queued[0].target_agent_id, None);
+    assert_eq!(queued[0].agent_id.as_str(), agent_id);
 
     h.shutdown().expect("shutdown");
 }
@@ -648,30 +743,55 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
+    let agent_id = h
+        .ensure_agent_id_for_agent(&cid)
+        .expect("default conversation has an agent id");
 
-    // Seed one open tool round so the session tree accepts the
-    // `ToolCancelled` terminal event as a durable transcript fact.
-    h.publish_for_conversation(
+    // Seed known tool calls in the agent transcript before recording terminal
+    // UI facts for them. Background completions are separate facts that arrive
+    // after the foreground round has already been closed with a placeholder.
+    let seed_tool_call = |h: &mut Harness, spid: &str, call_id: &str, tool_name: &str| {
+        h.publish_for_agent(
+            &cid,
+            Event::ProviderResponseFinished(ProviderResponseFinished {
+                agent_prompt_id: spid.into(),
+                agent_id: agent_id.clone().into(),
+                output_items: vec![ContextItem::ToolCall(ToolCallItem {
+                    call_id: call_id.into(),
+                    name: ToolName::new(tool_name),
+                    tool_type: tau_proto::ToolType::Function,
+                    arguments: CborValue::Map(Vec::new()),
+                })],
+                stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+                originator: Default::default(),
+                usage: None,
+                backend: None,
+                provider_response_id: None,
+                ws_pool_delta: None,
+            }),
+        );
+    };
+
+    seed_tool_call(
+        &mut h,
+        "sp-background-result",
+        "background-result-call",
+        "background_ok",
+    );
+    h.publish_for_agent(
         &cid,
-        Event::ProviderResponseFinished(ProviderResponseFinished {
-            session_prompt_id: "sp-terminal-tool-events".into(),
-            target_agent_id: None,
-            output_items: vec![ContextItem::ToolCall(ToolCallItem {
-                call_id: "cancelled-call".into(),
-                name: ToolName::new("cancel_me"),
-                tool_type: tau_proto::ToolType::Function,
-                arguments: CborValue::Map(Vec::new()),
-            })],
-            stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        Event::ProviderToolResult(ToolResult {
+            call_id: "background-result-call".into(),
+            tool_name: ToolName::new("background_ok"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("running".to_owned()),
+            kind: tau_proto::ToolResultKind::BackgroundPlaceholder,
+            display: None,
             originator: Default::default(),
-            usage: None,
-            backend: None,
-            provider_response_id: None,
-            ws_pool_delta: None,
         }),
     );
-    h.publish_for_conversation(
+    h.publish_for_agent(
         &cid,
         Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
             call_id: "background-result-call".into(),
@@ -682,7 +802,26 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
             originator: Default::default(),
         }),
     );
-    h.publish_for_conversation(
+
+    seed_tool_call(
+        &mut h,
+        "sp-background-error",
+        "background-error-call",
+        "background_err",
+    );
+    h.publish_for_agent(
+        &cid,
+        Event::ProviderToolResult(ToolResult {
+            call_id: "background-error-call".into(),
+            tool_name: ToolName::new("background_err"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("running".to_owned()),
+            kind: tau_proto::ToolResultKind::BackgroundPlaceholder,
+            display: None,
+            originator: Default::default(),
+        }),
+    );
+    h.publish_for_agent(
         &cid,
         Event::ToolBackgroundError(tau_proto::ToolBackgroundError {
             call_id: "background-error-call".into(),
@@ -694,7 +833,9 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
             originator: Default::default(),
         }),
     );
-    h.publish_for_conversation(
+
+    seed_tool_call(&mut h, "sp-cancelled", "cancelled-call", "cancel_me");
+    h.publish_for_agent(
         &cid,
         Event::ToolCancelled(tau_proto::ToolCancelled {
             call_id: "cancelled-call".into(),
@@ -703,27 +844,27 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
         }),
     );
 
-    let durable_events = h.store.session_events("s1").expect("session events");
+    let durable_events = loaded_agent_events(&h, "s1");
     assert!(
-        durable_events.iter().any(|entry| {
-            matches!(&entry.event, Event::ToolBackgroundResult(result)
+        durable_events.iter().any(|event| {
+            matches!(event, Event::ToolBackgroundResult(result)
                 if result.call_id.as_str() == "background-result-call")
         }),
-        "background result should be in durable session event log"
+        "background result should be in a durable loaded-agent event log"
     );
     assert!(
-        durable_events.iter().any(|entry| {
-            matches!(&entry.event, Event::ToolBackgroundError(error)
+        durable_events.iter().any(|event| {
+            matches!(event, Event::ToolBackgroundError(error)
                 if error.call_id.as_str() == "background-error-call")
         }),
-        "background error should be in durable session event log"
+        "background error should be in a durable loaded-agent event log"
     );
     assert!(
-        durable_events.iter().any(|entry| {
-            matches!(&entry.event, Event::ToolCancelled(cancelled)
+        durable_events.iter().any(|event| {
+            matches!(event, Event::ToolCancelled(cancelled)
                 if cancelled.call_id.as_str() == "cancelled-call")
         }),
-        "cancellation should be in durable session event log"
+        "cancellation should be in a durable loaded-agent event log"
     );
 
     let (server_end, client_end) = UnixStream::pair().expect("pair");
@@ -793,17 +934,11 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
 }
 
 #[test]
-fn late_joining_ui_client_receives_replayed_agents_md_and_context_ready() {
-    // The CLI connects after the daemon's eager init has already
-    // fired, so live subscription alone would miss
-    // `ExtAgentsMdAvailable` and `ExtensionContextReady`. The
-    // subscribe handler must replay them — currently via the
-    // durable per-session log (`replay_session_events`) — so the UI
-    // still renders the "loaded: …" / "session context ready" lines.
-    //
-    // Each event must arrive exactly once. They used to be replayed
-    // by both `replay_session_events` and `replay_harness_info`,
-    // which made the CLI render every line twice on startup.
+fn late_joining_ui_client_does_not_replay_runtime_extension_setup() {
+    // Extension discovery/context-ready events are runtime setup facts. The
+    // durable replay path now comes from session membership plus loaded-agent
+    // transcripts, so these extension events should neither land in the
+    // membership log nor be replayed from a transcript to late UI clients.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -813,9 +948,7 @@ fn late_joining_ui_client_receives_replayed_agents_md_and_context_ready() {
         .to_owned();
 
     // Inject synthetic discovery events as if ext-shell had reported
-    // them during eager init. publish_event appends to the durable
-    // session log because session_id_for_event maps these events to
-    // the current session.
+    // them during eager init. They should remain runtime-only events.
     h.publish_event(
         Some(&tools_conn),
         Event::ExtAgentsMdAvailable(tau_proto::ExtAgentsMdAvailable {
@@ -857,37 +990,16 @@ fn late_joining_ui_client_receives_replayed_agents_md_and_context_ready() {
     )
     .expect("subscribe");
 
-    // Compare what we receive on the wire against what the durable
-    // log holds. The fix collapses two replay paths into one, so each
-    // persisted event must arrive exactly once on the late-joining
-    // client — not zero, not twice.
-    let durable_agents_md = h
+    let session_events = h
         .store
         .session_events(h.current_session_id.as_str())
-        .expect("events")
-        .into_iter()
-        .filter(|e| {
-            matches!(
-                &e.event,
-                Event::ExtAgentsMdAvailable(a)
-                    if a.file_path == std::path::Path::new("/test/AGENTS.md")
-            )
-        })
-        .count();
-    let durable_context_ready = h
-        .store
-        .session_events(h.current_session_id.as_str())
-        .expect("events")
-        .into_iter()
-        .filter(|e| matches!(&e.event, Event::ExtensionContextReady(_)))
-        .count();
-    assert_eq!(
-        durable_agents_md, 1,
-        "test setup: synthetic agents_md should land in the durable log exactly once"
-    );
+        .expect("events");
     assert!(
-        durable_context_ready >= 1,
-        "test setup: at least one context_ready in durable log"
+        session_events.iter().all(|e| !matches!(
+            &e.event,
+            Event::ExtAgentsMdAvailable(_) | Event::ExtensionContextReady(_)
+        )),
+        "runtime extension setup must not be persisted in the session membership log"
     );
 
     let mut reader = FrameReader::new(BufReader::new(client_end));
@@ -913,18 +1025,12 @@ fn late_joining_ui_client_receives_replayed_agents_md_and_context_ready() {
         }
     }
     assert_eq!(
-        agents_md_count,
-        durable_agents_md,
-        "agents_md replayed count must equal durable log count; \
-         double replay would produce {} but got {agents_md_count}",
-        durable_agents_md * 2,
+        agents_md_count, 0,
+        "runtime agents_md setup should not replay to late UI clients"
     );
     assert_eq!(
-        context_ready_count,
-        durable_context_ready,
-        "context_ready replayed count must equal durable log count; \
-         double replay would produce {} but got {context_ready_count}",
-        durable_context_ready * 2,
+        context_ready_count, 0,
+        "runtime context-ready setup should not replay to late UI clients"
     );
 
     h.shutdown().expect("shutdown");
@@ -942,14 +1048,25 @@ fn resumed_harness_replays_persisted_session_history() {
         h.submit_user_prompt("s1".into(), "remember potato".to_owned())
             .expect("submit first prompt");
         let spid = h
-            .prompt_conversations
+            .prompt_agents
             .keys()
             .next()
             .expect("first session prompt id")
             .clone();
+        let cid = h
+            .prompt_agents
+            .get(&spid)
+            .expect("first prompt conversation")
+            .clone();
+        let agent_id = h
+            .agents
+            .get(&cid)
+            .and_then(|conv| conv.agent_id.as_ref())
+            .expect("first prompt agent id")
+            .clone();
         h.handle_provider_response_finished(ProviderResponseFinished {
-            session_prompt_id: spid,
-            target_agent_id: None,
+            agent_prompt_id: spid,
+            agent_id: agent_id.into(),
             output_items: assistant_output("remembered potato"),
             stop_reason: tau_proto::ProviderStopReason::EndTurn,
             originator: tau_proto::PromptOriginator::User,
@@ -965,14 +1082,16 @@ fn resumed_harness_replays_persisted_session_history() {
         wait_for_session_unlock(&sp, "s1");
     }
 
-    let mut resumed = echo_harness_for("s1", &sp).expect("resume");
+    let mut resumed =
+        echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
     resumed.selected_model = Some("test/model".into());
 
     resumed
         .submit_user_prompt("s1".into(), "what was it?".to_owned())
         .expect("submit resumed prompt");
     let spid = resumed
-        .prompt_conversations
+        .prompt_agents
         .keys()
         .next()
         .expect("resumed session prompt id")
@@ -1011,8 +1130,8 @@ fn thinking_is_persisted_but_excluded_from_prompt_replay() {
 
     let spid1 = h.send_prompt_to_agent("s1");
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid1,
-        target_agent_id: None,
+        agent_prompt_id: spid1,
+        agent_id: "main".into(),
         output_items: assistant_output("answer"),
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         originator: tau_proto::PromptOriginator::User,

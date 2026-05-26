@@ -103,13 +103,13 @@ Structural invariants:
 
 ## Durable Turn-Shaped Prompt
 
-`SessionPromptCreated` remains an operational prompt-delivery event rather than
+`AgentPromptCreated` remains an operational prompt-delivery event rather than
 durable transcript truth, but its shape is still central to the model.
 
 ```rust
-struct SessionPromptCreated {
-    session_prompt_id: SessionPromptId,
-    session_id: SessionId,
+struct AgentPromptCreated {
+    agent_prompt_id: AgentPromptId,
+    agent_id: AgentId,
     system_prompt: String,
     // Fully materialized history for this turn.
     context_items: Vec<ContextItem>,
@@ -143,16 +143,17 @@ These are the durable transcript inputs:
 
 ```rust
 enum PersistedTranscriptFact {
-    UiPromptSubmitted(UiPromptSubmitted),
-    SessionUserMessageInjected(SessionUserMessageInjected),
-    SessionPromptSteered(SessionPromptSteered),
+    AgentPromptSubmitted(AgentPromptSubmitted),
+    AgentUserMessageInjected(AgentUserMessageInjected),
+    AgentPromptSteered(AgentPromptSteered),
     ProviderResponseFinished(ProviderResponseFinished),
     ToolResult(ToolResultFact),
-    SessionCompacted(SessionCompacted),
+    AgentCompacted(AgentCompacted),
 }
 
 struct ProviderResponseFinished {
-    session_prompt_id: SessionPromptId,
+    agent_prompt_id: AgentPromptId,
+    agent_id: AgentId,
     originator: PromptOriginator,
     backend: Option<ProviderBackendRef>,
     provider_response_id: Option<String>,
@@ -167,15 +168,15 @@ struct ToolResultFact {
     output: CborValue,
 }
 
-struct SessionCompacted {
-    session_id: SessionId,
+struct AgentCompacted {
+    agent_id: AgentId,
     replacement_window: Vec<ContextItem>,
 }
 ```
 
-Operational-only events such as `ToolRequest`, `SessionPromptQueued`, and
+Operational-only events such as `ToolRequest`, `AgentPromptQueued`, and
 progress events stay out of the semantic transcript model. `ToolRequest`
-is durable routing intent, but still not assistant-output truth.
+is runtime routing intent, not assistant-output truth.
 
 The bus-level runtime `ToolResult` event may still carry extra operational
 fields such as `tool_name`, `result`, `display`, and `originator` for UI
@@ -209,7 +210,7 @@ Notes:
 - It is acceptable to rely on explicit buffering here.
 - `call_id` must be globally unique for tool calls.
 - If a durable `ToolResultFact` cannot be matched to the currently open call
-  set, replay should fail for that session.
+  set, replay should fail for that agent.
 
 ## Runtime-Only Conversation State
 
@@ -227,7 +228,7 @@ struct ConversationRuntimeState {
 enum ConversationTurnState {
     Idle,
     AgentThinking {
-        session_prompt_id: SessionPromptId,
+        agent_prompt_id: AgentPromptId,
     },
     ToolsRunning {
         remaining_calls: Vec<ToolCallId>,
@@ -239,7 +240,7 @@ enum ConversationTurnState {
 Rules:
 
 - A single conversation may have at most one unresolved tool round at a time.
-- A queued prompt may later become a durable `SessionPromptSteered`.
+- A queued prompt may later become a durable `AgentPromptSteered`.
 - Queued prompts remain runtime-only until that moment.
 - Queued prompts may be discarded on cancellation or restart.
 
@@ -269,7 +270,7 @@ struct CompactionBoundary {
 
 Only standalone compaction creates a boundary.
 
-- `SessionCompacted -> CompactionNode { replacement_window }`
+- `AgentCompacted -> CompactionNode { replacement_window }`
 - request assembly stops walking older history at that node
 - embedded `ContextItem::Compaction` remains plain opaque output
 

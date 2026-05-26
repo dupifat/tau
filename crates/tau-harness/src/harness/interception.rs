@@ -19,11 +19,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use tau_proto::{
-    Event, EventName, EventSelector, ExtensionName, Frame, InterceptAction, InterceptReply,
-    InterceptRequest, InterceptionPriority, Message, SessionId,
+    AgentId, Event, EventName, EventSelector, ExtensionName, Frame, InterceptAction,
+    InterceptReply, InterceptRequest, InterceptionPriority, Message,
 };
 
-use crate::conversation::ConversationId;
 use crate::harness::Harness;
 
 /// Condition that must become true before a parked prompt dispatch is safe.
@@ -53,10 +52,10 @@ pub(crate) struct PendingIntercept {
     /// If `true`, an interceptor returning `Drop` is overridden:
     /// `tracing::warn!` and continue with the original event.
     pub(crate) must_pass: bool,
-    /// Conversation that originated this publish, if any. When the
+    /// Agent that originated this publish, if any. When the
     /// event eventually commits, the harness syncs this
     /// conversation's `head` to the post-fold `tree.head()`. Set
-    /// only by `publish_for_conversation*`; `publish_event` leaves
+    /// only by `publish_for_agent*`; `publish_event` leaves
     /// it `None`.
     pub(crate) sync_head_for: Option<ConversationHeadSync>,
     /// Cursor for the next interceptor lookup *after* this reply
@@ -77,45 +76,46 @@ pub(crate) struct DeferredPublish {
 }
 
 /// Carried on a publish so that, once the event commits and the
-/// `SessionTree` fold advances `tree.head()`, the harness can sync
+/// `AgentTree` fold advances `tree.head()`, the harness can sync
 /// the originating conversation's cached `head` to the new node and
-/// persist the event to the originating session even if call-level
-/// tracking has been cleared while the publish was deferred.
+/// still attribute conversation-scoped events to the owning agent even
+/// if call-level tracking has been cleared while the publish was
+/// deferred.
 /// Replaces the old "publish then read `tree.head()`" idiom which
 /// breaks when an interceptor parks the publish.
 #[derive(Clone)]
 pub(crate) struct ConversationHeadSync {
-    pub(crate) cid: ConversationId,
-    pub(crate) session_id: SessionId,
+    pub(crate) cid: AgentId,
+    pub(crate) agent_id: Option<AgentId>,
 }
 
 /// Event types where a `Drop` reply from an interceptor is
 /// overridden into `Pass(None)` with a `tracing::warn!`.
 ///
 /// These events carry state changes the harness can't reasonably
-/// continue without — silently dropping a `UiPromptSubmitted`, for
-/// example, would leave the UI staring at a half-typed prompt while
-/// the harness believes nothing happened. Interceptors that try to
+/// continue without — silently dropping an `AgentPromptSubmitted`, for
+/// example, would make accepted user input vanish from the transcript.
+/// Interceptors that try to
 /// drop one of these are almost certainly buggy.
 const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     // User-message-bearing events: dropping any of these would
     // make the user's input vanish silently while the harness
     // believes the prompt was delivered.
-    EventName::UI_PROMPT_SUBMITTED,
-    EventName::SESSION_USER_MESSAGE_INJECTED,
-    EventName::SESSION_PROMPT_STEERED,
+    EventName::AGENT_PROMPT_SUBMITTED,
+    EventName::AGENT_USER_MESSAGE_INJECTED,
+    EventName::AGENT_PROMPT_STEERED,
     // Durable compaction state: once the harness has accepted a provider
     // compaction result, dropping this event would make the UI report
     // success while the next prompt still replays the un-compacted branch.
-    EventName::SESSION_COMPACTED,
+    EventName::AGENT_COMPACTED,
     // Agent request life-cycle: the agent extension consumes normal
-    // `SessionPromptCreated` turns and `SessionCompactionRequested`
+    // `AgentPromptCreated` turns and `AgentCompactionRequested`
     // requests to know when to talk to the LLM. Dropping either wedges
     // the conversation.
-    EventName::SESSION_COMPACTION_REQUESTED,
-    EventName::SESSION_PROMPT_CREATED,
+    EventName::AGENT_COMPACTION_REQUESTED,
+    EventName::AGENT_PROMPT_CREATED,
     // Agent response: dropping this would wedge `c.head` /
-    // `prompt_conversations` bookkeeping and the conversation
+    // `prompt_agents` bookkeeping and the conversation
     // would never advance.
     EventName::PROVIDER_RESPONSE_FINISHED,
     // Tool round-trip closure: a missing `tool.result`/`tool.error`
@@ -249,7 +249,7 @@ impl Harness {
 
     /// True when `cid` already has a prompt dispatch waiting for a
     /// publish/interception condition.
-    pub(crate) fn has_deferred_prompt_dispatch_for(&self, cid: &ConversationId) -> bool {
+    pub(crate) fn has_deferred_prompt_dispatch_for(&self, cid: &AgentId) -> bool {
         self.pending_user_prompt_dispatches
             .iter()
             .any(|queued| queued == cid)
@@ -261,17 +261,17 @@ impl Harness {
 
     /// Send `cid`'s prompt now if the just-published user-message event
     /// committed inline; otherwise park it until that event commits.
-    pub(crate) fn dispatch_prompt_after_user_message_publish(&mut self, cid: &ConversationId) {
+    pub(crate) fn dispatch_prompt_after_user_message_publish(&mut self, cid: &AgentId) {
         self.dispatch_or_defer_prompt(cid, PromptDispatchGate::UserMessageCommit);
     }
 
     /// Send `cid`'s prompt now if the publish chain is idle; otherwise
     /// park it until interception and deferred publishes fully drain.
-    pub(crate) fn dispatch_prompt_after_publish_idle(&mut self, cid: &ConversationId) {
+    pub(crate) fn dispatch_prompt_after_publish_idle(&mut self, cid: &AgentId) {
         self.dispatch_or_defer_prompt(cid, PromptDispatchGate::PublishIdle);
     }
 
-    fn dispatch_or_defer_prompt(&mut self, cid: &ConversationId, gate: PromptDispatchGate) {
+    fn dispatch_or_defer_prompt(&mut self, cid: &AgentId, gate: PromptDispatchGate) {
         if self.publish_chain_is_idle() {
             self.send_prompt_to_agent_for(cid);
             return;
@@ -279,7 +279,7 @@ impl Harness {
         self.defer_prompt_dispatch(cid.clone(), gate);
     }
 
-    fn defer_prompt_dispatch(&mut self, cid: ConversationId, gate: PromptDispatchGate) {
+    fn defer_prompt_dispatch(&mut self, cid: AgentId, gate: PromptDispatchGate) {
         if self.has_deferred_prompt_dispatch_for(&cid) {
             tracing::debug!(
                 target: "tau_harness::interception",
@@ -520,7 +520,7 @@ impl Harness {
             let Some(cid) = self.pending_publish_idle_dispatches.pop_front() else {
                 break;
             };
-            if self.conversations.contains_key(&cid) {
+            if self.agents.contains_key(&cid) {
                 self.send_prompt_to_agent_for(&cid);
             }
         }

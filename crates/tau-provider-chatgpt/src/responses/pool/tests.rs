@@ -931,7 +931,7 @@ fn run_shared_turn(
     pool: &SharedWsPool,
     config: &ResponsesConfig,
     session: &str,
-    session_prompt_id: &str,
+    agent_prompt_id: &str,
 ) {
     let session_id = tau_proto::SessionId::new(session);
     let originator = tau_proto::PromptOriginator::User;
@@ -950,7 +950,7 @@ fn run_shared_turn(
     run_turn_through_shared_pool(
         pool,
         config,
-        session_prompt_id,
+        agent_prompt_id,
         &request,
         &mut || false,
         &mut on_update,

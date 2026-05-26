@@ -4,7 +4,7 @@
 
 use std::{fmt, io};
 
-use tau_core::{RouteError, SessionStoreError, ToolRouteError};
+use tau_core::{AgentStoreError, RouteError, SessionStoreError, ToolRouteError};
 use tau_proto::DecodeError;
 use tau_socket::SocketTransportError;
 
@@ -15,6 +15,7 @@ pub enum HarnessError {
     ProtocolDecode(DecodeError),
     ProtocolEncode(tau_proto::EncodeError),
     SessionStore(SessionStoreError),
+    AgentStore(AgentStoreError),
     SocketTransport(SocketTransportError),
     Route(RouteError),
     ToolRoute(ToolRouteError),
@@ -31,6 +32,7 @@ impl fmt::Display for HarnessError {
             Self::ProtocolDecode(source) => write!(f, "protocol decode error: {source}"),
             Self::ProtocolEncode(source) => write!(f, "protocol encode error: {source}"),
             Self::SessionStore(source) => write!(f, "session store error: {source}"),
+            Self::AgentStore(source) => write!(f, "agent store error: {source}"),
             Self::SocketTransport(source) => write!(f, "socket transport error: {source}"),
             Self::Route(source) => write!(f, "routing error: {source}"),
             Self::ToolRoute(source) => write!(f, "tool routing error: {source}"),
@@ -49,6 +51,7 @@ impl std::error::Error for HarnessError {
             Self::ProtocolDecode(source) => Some(source),
             Self::ProtocolEncode(source) => Some(source),
             Self::SessionStore(source) => Some(source),
+            Self::AgentStore(source) => Some(source),
             Self::SocketTransport(source) => Some(source),
             Self::Route(source) => Some(source),
             Self::ToolRoute(source) => Some(source),
@@ -70,6 +73,11 @@ impl From<DecodeError> for HarnessError {
 impl From<SessionStoreError> for HarnessError {
     fn from(source: SessionStoreError) -> Self {
         Self::SessionStore(source)
+    }
+}
+impl From<AgentStoreError> for HarnessError {
+    fn from(source: AgentStoreError) -> Self {
+        Self::AgentStore(source)
     }
 }
 impl From<SocketTransportError> for HarnessError {

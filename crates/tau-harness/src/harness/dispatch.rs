@@ -1,26 +1,24 @@
-//! Conversation prompt-queue dispatch.
+//! Agent prompt-queue dispatch.
 //!
-//! Each conversation owns a per-conversation `pending_prompts` queue.
-//! The harness has no global agent slot — the agent extension serializes
-//! its own consumption of `SessionPromptCreated` from the event log —
-//! so the dispatch logic here just drains one prompt per *runnable*
-//! conversation (Idle turn state, non-empty queue) and lets the agent
-//! interleave them on its side.
+//! Each live agent owns a `pending_prompts` queue. The harness has no global
+//! agent slot — the agent extension serializes its own consumption of
+//! `AgentPromptCreated` from the event log — so the dispatch logic here just
+//! drains one prompt per *runnable* agent (Idle turn state, non-empty queue)
+//! and lets the agent interleave them on its side.
 //!
-//! [`Harness::dispatch_user_prompt`] is the direct entry point for
-//! interactive submission on the default conversation;
-//! [`Harness::dispatch_prompt_for_conversation`] is the shared
-//! per-conversation primitive (also used by side queries spawned via
-//! `StartAgentRequest`). [`Harness::try_advance_queue`] is the
-//! react-to-state-change drain that picks the next runnable
-//! conversation and dispatches one prompt from its queue.
+//! [`Harness::dispatch_user_prompt`] is the direct entry point for interactive
+//! submission on the default agent; [`Harness::dispatch_prompt_for_agent`] is
+//! the shared per-agent primitive (also used by side queries spawned via
+//! `StartAgentRequest`). [`Harness::try_advance_queue`] is the react-to-state-
+//! change drain that picks the next runnable agent and dispatches one prompt
+//! from its queue.
 //!
-//! [`Harness::dispatch_blocked_for`] is the predicate the rest of the
-//! harness uses to decide whether to dispatch immediately or queue.
+//! [`Harness::dispatch_blocked_for`] is the predicate the rest of the harness
+//! uses to decide whether to dispatch immediately or queue.
 
-use tau_proto::{Event, SessionId};
+use tau_proto::{AgentId, Event, SessionId};
 
-use crate::conversation::{ConversationId, ConversationTurnState, PendingPrompt};
+use crate::agent::{AgentTurnState, PendingPrompt};
 use crate::error::HarnessError;
 use crate::harness::Harness;
 
@@ -31,52 +29,53 @@ impl Harness {
         text: String,
     ) -> Result<(), HarnessError> {
         debug_assert_eq!(
-            self.conversations[&self.default_conversation_id].session_id, session_id,
-            "dispatch_user_prompt only valid for the default conversation",
+            self.agents[&self.default_agent_id].session_id, session_id,
+            "dispatch_user_prompt only valid for the default agent",
         );
-        let cid = self.default_conversation_id.clone();
-        self.ensure_agent_id_for_conversation(&cid);
-        if self.maybe_start_auto_compaction_for_user_prompt(&cid, &text) {
+        let agent_id = self.default_agent_id.clone();
+        self.ensure_agent_id_for_agent(&agent_id);
+        if self.maybe_start_auto_compaction_for_user_prompt(&agent_id, &text) {
             return Ok(());
         }
-        self.dispatch_prompt_for_conversation(&cid, PendingPrompt::user(text))
+        self.dispatch_prompt_for_agent(&agent_id, PendingPrompt::user(text))
     }
 
-    /// Publish one pending prompt as a `UiPromptSubmitted` event on `cid`'s
-    /// branch without dispatching an agent prompt yet.
+    /// Publish one pending prompt as an `AgentPromptSubmitted` event on one
+    /// agent's branch without dispatching an agent prompt yet.
     ///
     /// Callers that publish additional prompt-bearing events in the same batch
     /// can use this helper and then call
     /// [`Self::dispatch_prompt_after_publish_idle`] once the full batch has
     /// been queued. That keeps interception from sending the agent a prompt
     /// that only contains the first committed user-message event.
-    pub(crate) fn publish_pending_prompt_for_conversation(
+    pub(crate) fn publish_pending_prompt_for_agent(
         &mut self,
-        cid: &ConversationId,
+        agent_id: &AgentId,
         prompt: impl Into<PendingPrompt>,
     ) -> Result<(), HarnessError> {
         let prompt = prompt.into();
-        let (session_id, originator, target_agent_id) = match self.conversations.get(cid) {
-            Some(c) => (
-                c.session_id.clone(),
-                c.originator.clone(),
-                c.agent_id
-                    .as_ref()
-                    .filter(|agent_id| agent_id.as_str() != "main")
-                    .cloned(),
-            ),
-            None => {
-                return Err(HarnessError::Participant(format!(
-                    "publish_pending_prompt_for_conversation: unknown conversation `{cid}`"
-                )));
-            }
-        };
-        self.publish_for_conversation(
-            cid,
-            Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
-                session_id,
+        let target_agent_id: tau_proto::AgentId = self
+            .ensure_agent_id_for_agent(agent_id)
+            .ok_or_else(|| {
+                HarnessError::Participant(format!(
+                    "publish_pending_prompt_for_agent: unknown agent `{agent_id}`"
+                ))
+            })?
+            .into();
+        let originator = self
+            .agents
+            .get(agent_id)
+            .map(|c| c.originator.clone())
+            .ok_or_else(|| {
+                HarnessError::Participant(format!(
+                    "publish_pending_prompt_for_agent: unknown agent `{agent_id}`"
+                ))
+            })?;
+        self.publish_for_agent(
+            agent_id,
+            Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                agent_id: target_agent_id,
                 text: prompt.text,
-                target_agent_id,
                 message_class: prompt.message_class,
                 originator,
                 ctx_id: None,
@@ -85,49 +84,49 @@ impl Harness {
         Ok(())
     }
 
-    /// Dispatches one prompt for `cid`: publishes the
-    /// `UiPromptSubmitted` event (head-bounced via
-    /// `publish_for_conversation` so it lands on the conversation's
+    /// Dispatches one prompt for one agent: publishes the
+    /// `AgentPromptSubmitted` event (head-bounced via
+    /// `publish_for_agent` so it lands on the agent's
     /// branch), enters `AgentThinking`, and asks the agent for a
     /// completion.
     ///
-    /// Used for both interactive user prompts on the default
-    /// conversation and side-query prompts spawned by extensions.
-    pub(crate) fn dispatch_prompt_for_conversation(
+    /// Used for both interactive user prompts on the default agent and side-
+    /// query prompts spawned by extensions.
+    pub(crate) fn dispatch_prompt_for_agent(
         &mut self,
-        cid: &ConversationId,
+        agent_id: &AgentId,
         prompt: impl Into<PendingPrompt>,
     ) -> Result<(), HarnessError> {
         let prompt = prompt.into();
         if !prompt.is_internal() {
-            let restore_prompts = self.take_pending_restore_prompts_for_user_prompt(cid);
+            let restore_prompts = self.take_pending_restore_prompts_for_user_prompt(agent_id);
             if !restore_prompts.is_empty() {
                 for restore_prompt in restore_prompts {
-                    self.publish_pending_prompt_for_conversation(cid, restore_prompt)?;
+                    self.publish_pending_prompt_for_agent(agent_id, restore_prompt)?;
                 }
-                self.publish_pending_prompt_for_conversation(cid, prompt)?;
-                self.dispatch_prompt_after_publish_idle(cid);
+                self.publish_pending_prompt_for_agent(agent_id, prompt)?;
+                self.dispatch_prompt_after_publish_idle(agent_id);
                 return Ok(());
             }
         }
 
-        self.publish_pending_prompt_for_conversation(cid, prompt)?;
+        self.publish_pending_prompt_for_agent(agent_id, prompt)?;
         // If the publish parked in interception (or queued behind one
         // that is), defer the agent dispatch until this user-prompt
         // event actually commits. If it committed inline, the helper
-        // dispatches now: the SessionTree already reflects the new
+        // dispatches now: the AgentTree already reflects the new
         // user message, so the message list assembled inside
         // `send_prompt_to_agent_for` will include it.
-        self.dispatch_prompt_after_user_message_publish(cid);
+        self.dispatch_prompt_after_user_message_publish(agent_id);
         Ok(())
     }
 
-    /// Drains every runnable conversation's pending prompt queue.
+    /// Drains every runnable agent's pending prompt queue.
     ///
     /// There is no global agent slot — the agent extension serializes
-    /// its own consumption of `SessionPromptCreated`. The harness emits
-    /// one prompt per runnable conversation (Idle turn state, non-empty
-    /// queue) and routes responses back via `prompt_conversations`.
+    /// its own consumption of `AgentPromptCreated`. The harness emits
+    /// one prompt per runnable agent (Idle turn state, non-empty
+    /// queue) and routes responses back via `prompt_agents`.
     ///
     /// Session initialization still happens before prompt dispatch, so
     /// a fresh `chat-*` session can discover AGENTS.md and skills before
@@ -140,12 +139,12 @@ impl Harness {
             return;
         }
 
-        while let Some(cid) = self.next_runnable_conversation() {
+        while let Some(agent_id) = self.next_runnable_agent() {
             let session_id = self
-                .conversations
-                .get(&cid)
+                .agents
+                .get(&agent_id)
                 .map(|c| c.session_id.clone())
-                .expect("runnable conversation exists");
+                .expect("runnable agent exists");
 
             if !self.session_initialized(&session_id) {
                 // Reachable only if the bound session somehow lost its
@@ -156,51 +155,50 @@ impl Harness {
             }
 
             let prompt = self
-                .conversations
-                .get_mut(&cid)
+                .agents
+                .get_mut(&agent_id)
                 .and_then(|c| c.pending_prompts.pop_front())
-                .expect("runnable conversation has a prompt");
-            if let Err(error) = self.dispatch_prompt_for_conversation(&cid, prompt) {
+                .expect("runnable agent has a prompt");
+            if let Err(error) = self.dispatch_prompt_for_agent(&agent_id, prompt) {
                 self.emit_info(&format!("failed to dispatch queued prompt: {error}"));
-                // Reset the conversation so it doesn't wedge as
+                // Reset the agent so it doesn't wedge as
                 // AgentThinking with no in-flight prompt.
-                if let Some(conv) = self.conversations.get_mut(&cid) {
+                if let Some(conv) = self.agents.get_mut(&agent_id) {
                     conv.in_flight_prompt = None;
-                    conv.turn_state = ConversationTurnState::Idle;
+                    conv.turn_state = AgentTurnState::Idle;
                 }
             }
         }
     }
 
-    pub(crate) fn next_runnable_conversation(&self) -> Option<ConversationId> {
-        self.conversations
+    pub(crate) fn next_runnable_agent(&self) -> Option<AgentId> {
+        self.agents
             .iter()
-            .find(|(cid, conv)| {
+            .find(|(agent_id, conv)| {
                 !conv.pending_prompts.is_empty()
-                    && matches!(conv.turn_state, ConversationTurnState::Idle)
-                    && !self.has_deferred_prompt_dispatch_for(cid)
+                    && matches!(conv.turn_state, AgentTurnState::Idle)
+                    && !self.has_deferred_prompt_dispatch_for(agent_id)
             })
-            .map(|(cid, _)| cid.clone())
+            .map(|(agent_id, _)| agent_id.clone())
     }
 
-    /// True when a fresh prompt for `cid` should *not* be sent
+    /// True when a fresh prompt for one agent should *not* be sent
     /// immediately. Two layers of gating:
     /// - global: selected role has no resolved model, harness mid-init,
     ///   extensions not yet `Ready`;
-    /// - per-conversation: that conversation already has a prompt in flight, is
-    ///   waiting on tool results, or has a latent dispatch parked behind
-    ///   interception.
-    pub(crate) fn dispatch_blocked_for(&self, cid: &ConversationId) -> bool {
+    /// - per-agent: that agent already has a prompt in flight, is waiting on
+    ///   tool results, or has a latent dispatch parked behind interception.
+    pub(crate) fn dispatch_blocked_for(&self, agent_id: &AgentId) -> bool {
         if self.selected_model.is_none()
             || !self.turn_state.is_idle()
             || !self.extensions_all_ready()
         {
             return true;
         }
-        match self.conversations.get(cid) {
+        match self.agents.get(agent_id) {
             Some(conv) => {
-                !matches!(conv.turn_state, ConversationTurnState::Idle)
-                    || self.has_deferred_prompt_dispatch_for(cid)
+                !matches!(conv.turn_state, AgentTurnState::Idle)
+                    || self.has_deferred_prompt_dispatch_for(agent_id)
             }
             None => true,
         }

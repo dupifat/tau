@@ -18,7 +18,7 @@ The harness process:
 - manages session state and event flow,
 - starts and supervises extension processes,
 - routes tool calls to the right extension,
-- records session events/logs,
+- records session membership, agent transcript, and debug logs,
 - builds agent prompts and handles model responses.
 
 Extensions are separate processes connected to the harness. They register tools and capabilities, then handle requests from the harness and return results/events. This separation keeps tool/runtime concerns outside the core harness loop.

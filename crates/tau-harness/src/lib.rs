@@ -13,7 +13,7 @@ pub mod runtime_dir;
 
 pub(crate) const INTERNAL_MARKER: &str = "[tau-internal]";
 
-mod conversation;
+mod agent;
 mod daemon;
 mod debug_log;
 mod dedup;
@@ -42,9 +42,9 @@ pub fn dump_initial_prompt(
     harness::Harness::dump_initial_prompt(out_path, user_message)
 }
 
-pub use tau_core::{SessionEntry, SessionMeta, SessionTree, list_session_metas, session_is_locked};
+pub use tau_core::{AgentEntry, AgentTree, SessionMeta, list_session_metas, session_is_locked};
+pub use tau_proto::AgentId;
 
-pub use crate::conversation::ConversationId;
 pub use crate::daemon::{
     EmbeddedOptions, InteractionOutcome, ServeOptions, SessionLaunchStatus,
     get_daemon_rendered_system_prompt, get_daemon_rendered_tool_definitions, run_component,

@@ -1,6 +1,6 @@
 use tau_proto::{
-    Frame, ModelId, PromptOriginator, ProviderResponseFinished, ProviderResponseUpdated,
-    ProviderTokenUsage, SessionPromptId,
+    AgentPromptId, Frame, ModelId, PromptOriginator, ProviderResponseFinished,
+    ProviderResponseUpdated, ProviderTokenUsage,
 };
 
 use super::*;
@@ -20,8 +20,8 @@ fn published_line_preserves_enriched_token_usage() {
     let mut log = DebugEventLog::open(td.path()).expect("open");
     let model: ModelId = "openai/gpt-5".parse().expect("model id");
     let event = Event::ProviderResponseFinished(ProviderResponseFinished {
-        session_prompt_id: SessionPromptId::from("sp-0"),
-        target_agent_id: None,
+        agent_prompt_id: AgentPromptId::from("sp-0"),
+        agent_id: "main".into(),
         output_items: Vec::new(),
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         originator: PromptOriginator::User,
@@ -60,7 +60,7 @@ fn published_line_compacts_long_strings() {
     let td = tempfile::tempdir().expect("tempdir");
     let mut log = DebugEventLog::open(td.path()).expect("open");
     let event = Event::ProviderResponseUpdated(ProviderResponseUpdated {
-        session_prompt_id: SessionPromptId::from("sp-0"),
+        agent_prompt_id: AgentPromptId::from("sp-0"),
         text: "x".repeat(101),
         thinking: Some(format!("{}{}{}", "α".repeat(30), "middle", "ω".repeat(30))),
         originator: PromptOriginator::User,
@@ -88,7 +88,7 @@ fn transient_from_connection_events_are_not_logged_twice() {
     let td = tempfile::tempdir().expect("tempdir");
     let mut log = DebugEventLog::open(td.path()).expect("open");
     let event = Event::ProviderResponseUpdated(ProviderResponseUpdated {
-        session_prompt_id: SessionPromptId::from("sp-0"),
+        agent_prompt_id: AgentPromptId::from("sp-0"),
         text: "partial".to_owned(),
         thinking: None,
         originator: PromptOriginator::User,

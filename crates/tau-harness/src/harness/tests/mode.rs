@@ -17,8 +17,7 @@ fn embedded_mode_returns_provider_response_and_persists_history() {
         .response;
     assert!(!r.is_empty(), "response should not be empty: {r:?}");
     let sessions_dir = tau_config::settings::sessions_dir_of(&sp);
-    let store = open_session_store(&sessions_dir).expect("reopen");
-    let branch = store.session("s1").expect("session").current_branch();
+    let branch = persisted_agent_branch(&sp, "s1");
     assert!(
         branch.len() >= 2,
         "should have user msg + agent response, got {}",
@@ -84,14 +83,13 @@ fn daemon_mode_accepts_later_clients() {
     assert_eq!(r2, "again", "second cycle should echo our submission");
 
     server.join().expect("join").expect("daemon clean exit");
-    let store = open_session_store(tau_config::settings::sessions_dir_of(&sp)).expect("reopen");
-    let branch = store.session("s1").expect("session").current_branch();
+    let branch = persisted_agent_branch(&sp, "s1");
     // The sandbox may not have any AGENTS.md to inject, so assert the
     // two user-visible cycles rather than an environment-dependent total.
     let submitted_user_texts: Vec<&str> = branch
         .iter()
         .filter_map(|entry| match entry {
-            SessionEntry::UserInput { items } => items.iter().find_map(|item| match item {
+            AgentEntry::UserInput { items } => items.iter().find_map(|item| match item {
                 ContextItem::Message(message) if message.role == ContextRole::User => {
                     message.content.first().map(|part| match part {
                         ContentPart::Text { text } => text.as_str(),
@@ -111,7 +109,7 @@ fn daemon_mode_accepts_later_clients() {
     assert_eq!(
         branch
             .iter()
-            .filter(|entry| matches!(entry, SessionEntry::ToolResults { .. }))
+            .filter(|entry| matches!(entry, AgentEntry::ToolResults { .. }))
             .count(),
         2,
         "expected both tool result rounds to persist, got {branch:?}"

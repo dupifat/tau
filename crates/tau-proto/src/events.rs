@@ -10,9 +10,10 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ActionInvocationId, CborValue, ContextItem, DiffSummary, EventName, ExtensionInstanceId,
-    ExtensionName, ModelId, PromptFragment, ProviderTokenUsage, SessionContextKey, SessionId,
-    SessionPromptId, SkillName, ToolCallId, ToolDefinition, ToolName,
+    ActionInvocationId, AgentId, AgentMessageId, AgentPromptId, CborValue, ContextItem,
+    DiffSummary, EventName, ExtensionInstanceId, ExtensionName, ModelId, PromptFragment,
+    ProviderTokenUsage, SessionContextKey, SessionId, SkillName, ToolCallId, ToolDefinition,
+    ToolName,
 };
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -29,17 +30,17 @@ fn is_default_affinity_neutral(value: &i32) -> bool {
 // Event names
 // ---------------------------------------------------------------------------
 
-/// Identifier of a node in the per-session tree. Lives on the wire
+/// Identifier of a node in one agent transcript tree. Lives on the wire
 /// because tree-folding events stamp their `parent_node_id` so the
 /// fold doesn't have to consult a shared write cursor.
 ///
 /// Ids are valid only against the tree that produced them. The
-/// in-memory `SessionTree` uses the underlying `u64` as a positional
+/// in-memory agent tree uses the underlying `u64` as a positional
 /// index into its node vector and assigns ids by insertion order, so
 /// the same numeric id can refer to different nodes across different
-/// trees. Replaying the same persisted event log yields the same ids
+/// trees. Replaying the same persisted agent event log yields the same ids
 /// only because the fold is deterministic; an id that originated in
-/// one session (or in a sub-agent's tree) is meaningless in another.
+/// one agent is meaningless in another.
 #[derive(
     Clone, Copy, Debug, Default, Eq, PartialEq, Hash, PartialOrd, Ord, Serialize, Deserialize,
 )]
@@ -666,7 +667,7 @@ pub struct HarnessThinkingSummariesAvailable {
 }
 
 /// Per-prompt model knobs the harness selects, persists, and stamps
-/// onto every [`SessionPromptCreated`]. Bundling these together lets
+/// onto every [`AgentPromptCreated`]. Bundling these together lets
 /// providers and backends thread one struct through instead of a
 /// growing list of fields. Each component independently falls back to
 /// "omit the field" when its [`Verbosity::is_default`] / `is_default`
@@ -923,7 +924,7 @@ pub enum ActionOutput {
 
 /// Per-prompt knob telling the provider whether the model is allowed
 /// to call tools on this turn. Stamped onto every
-/// [`SessionPromptCreated`]; the harness sets [`Self::None`] for
+/// [`AgentPromptCreated`]; the harness sets [`Self::None`] for
 /// non-tool extension-side queries (e.g. `std-notifications`' idle
 /// summary) so the cache prefix (tools + system_prompt) stays
 /// byte-identical to the parent conv's while still preventing the
@@ -942,7 +943,7 @@ pub enum ToolChoice {
 
 impl ToolChoice {
     /// True for the default value. Used by `#[serde(skip_serializing_if)]`
-    /// on [`SessionPromptCreated`] so untouched values stay out of the
+    /// on [`AgentPromptCreated`] so untouched values stay out of the
     /// wire form.
     #[must_use]
     pub const fn is_default(&self) -> bool {
@@ -1292,7 +1293,7 @@ pub struct ToolProgress {
 /// or finishes, or the sub-agent reports new context-token usage. The
 /// CLI re-renders the running `delegate` tool block to surface this
 /// to the user without persisting per-update history. Transient — not
-/// folded into the durable session log.
+/// folded into any durable semantic log.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DelegateProgress {
     /// The original parent `delegate` call — the tool block under
@@ -1442,57 +1443,89 @@ pub struct ExtPromptFragmentPublish {
     pub fragment: PromptFragment,
 }
 
-/// A harness-authored message sent by one live agent to another agent or to the
-/// user.
+/// Recipient of a global agent-to-agent or agent-to-user message.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentMessageRecipient {
+    /// Deliver the message to another durable agent transcript.
+    Agent { agent_id: AgentId },
+    /// Deliver the message to the human user.
+    User,
+}
+
+/// A harness-authored durable sender-side projection of a message sent by one
+/// agent to another agent or to the user.
 ///
 /// External clients and extensions must not forge this event. The harness-owned
 /// `message` tool validates the sender and recipient, then publishes this
-/// durable transcript fact for UI display or internal agent delivery.
+/// durable transcript fact into the sender's transcript.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct AgentMessage {
-    /// Session that owns this message.
-    pub session_id: SessionId,
+pub struct AgentMessageSent {
+    /// Stable id for this logical message, shared by sender/recipient
+    /// projections.
+    pub message_id: AgentMessageId,
     /// Agent id of the sender.
-    pub sender_id: String,
-    /// Recipient agent id, or the special `user` recipient.
-    pub recipient_id: String,
+    pub sender_id: AgentId,
+    /// Recipient agent or the human user.
+    pub recipient: AgentMessageRecipient,
     /// Message body.
     pub message: String,
 }
 
-/// Harness-tracked lifecycle state for a session-scoped agent.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentState {
-    /// The agent can receive user prompts and appears in active-agent UI lists.
-    Active,
-    /// A tool-backed delegated agent is currently running. UIs treat this as
-    /// active for switching, but the harness may automatically suspend it when
-    /// the delegated reply completes if no user has interacted with it.
-    ActiveDelegated,
-    /// The agent is still resumable/addressable but hidden from active-agent
-    /// completions until explicitly resumed or otherwise interacted with.
-    Suspended,
-}
-
-impl AgentState {
-    /// Whether this state counts as an active prompt target in UIs.
-    #[must_use]
-    pub const fn is_active(self) -> bool {
-        matches!(self, Self::Active | Self::ActiveDelegated)
-    }
-}
-
-/// Durable, replayable session fact recording the harness-owned state of one
-/// agent.
+/// A harness-authored durable recipient-side projection of a message received
+/// from another agent.
+///
+/// External clients and extensions must not forge this event. The harness emits
+/// it only for agent recipients so the recipient transcript can represent the
+/// inbound side distinctly from the sender transcript.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SessionAgentStateChanged {
-    /// Session that owns the agent.
+pub struct AgentMessageReceived {
+    /// Stable id for this logical message, shared by sender/recipient
+    /// projections.
+    pub message_id: AgentMessageId,
+    /// Agent id of the sender.
+    pub sender_id: AgentId,
+    /// Recipient agent id that received the message.
+    pub recipient_id: AgentId,
+    /// Message body.
+    pub message: String,
+}
+
+/// Durable agent branch-state fact: the selected head moved to an existing
+/// transcript node, so the next append should branch from there.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentHeadMoved {
+    /// Agent whose selected branch head changed.
+    pub agent_id: AgentId,
+    /// Existing transcript node that is now the selected branch head.
+    pub node_id: NodeId,
+}
+
+/// Immutable agent creation fact recorded at the start of an agent log.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentStarted {
+    /// Durable agent this log belongs to.
+    pub agent_id: AgentId,
+    /// Agent role used to build prompts for this agent.
+    pub role: String,
+}
+
+/// Durable session membership fact: an agent is now loaded in a session.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionAgentLoaded {
+    /// Session membership container.
     pub session_id: SessionId,
-    /// Agent whose lifecycle state changed.
-    pub agent_id: String,
-    /// New harness-tracked lifecycle state.
-    pub state: AgentState,
+    /// Durable agent now available in the session.
+    pub agent_id: AgentId,
+}
+
+/// Durable session membership fact: an agent is no longer loaded in a session.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionAgentUnloaded {
+    /// Session membership container.
+    pub session_id: SessionId,
+    /// Durable agent removed from the session.
+    pub agent_id: AgentId,
 }
 
 /// Request to start a side-agent conversation.
@@ -1501,8 +1534,6 @@ pub struct StartAgentRequest {
     /// Requester-assigned correlation id, echoed back on accepted/result
     /// events.
     pub query_id: String,
-    /// Requester-assigned stable agent id for the side conversation.
-    pub agent_id: String,
     /// User-style instruction text. Appended to the current
     /// conversation's history as a `User` message before dispatch.
     pub instruction: String,
@@ -1550,8 +1581,8 @@ const fn default_start_agent_request_execution_mode() -> ToolExecutionMode {
 pub struct StartAgentAccepted {
     /// Request correlation id copied from [`StartAgentRequest::query_id`].
     pub query_id: String,
-    /// Accepted side-agent id copied from [`StartAgentRequest::agent_id`].
-    pub agent_id: String,
+    /// Harness-minted side-agent id for the accepted request.
+    pub agent_id: AgentId,
 }
 
 /// Final reply to a [`StartAgentRequest`]. `text` is the agent's final answer
@@ -1608,10 +1639,10 @@ pub struct ProviderModelsUpdated {
 /// Extension-defined event payload.
 ///
 /// `name` is the dotted event name used for routing and subscription
-/// matching. `payload` carries extension-owned CBOR data. When
-/// `session_id` is set, the harness may include the event in that
-/// session's durable event log according to the surrounding emit
-/// metadata.
+/// matching. `payload` carries extension-owned CBOR data. `session_id`, when
+/// set, is runtime routing/context metadata; custom events are not folded into
+/// durable semantic logs unless a typed durable event is added for that use
+/// case.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CustomEvent {
     pub name: EventName,
@@ -1649,9 +1680,9 @@ impl PromptMessageClass {
 ///
 /// `originator` is normally [`PromptOriginator::User`] — the field
 /// exists so the harness can re-use this event type when dispatching
-/// side queries spawned by extensions: the appended user-style
-/// instruction also flows as a `UiPromptSubmitted` (so it folds into
-/// the session tree), but UIs and other extensions filter on
+/// side queries spawned by extensions. The harness routes this UI request to a
+/// concrete agent and publishes an `AgentPromptSubmitted` transcript fact when
+/// the prompt is accepted; UIs and other extensions filter on
 /// `originator.is_user()` to avoid rendering side conversations as
 /// real user turns.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1662,7 +1693,7 @@ pub struct UiPromptSubmitted {
     /// target was supplied; the harness routes it to the selected/default
     /// conversation and stamps concrete routing on durable follow-up events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_agent_id: Option<String>,
+    pub target_agent_id: Option<AgentId>,
     /// Whether this prompt text is user-authored or hidden internal control
     /// text.
     #[serde(default)]
@@ -1670,7 +1701,7 @@ pub struct UiPromptSubmitted {
     #[serde(default)]
     pub originator: PromptOriginator,
     /// Free-form correlation tag chosen by the submitter and copied
-    /// forward onto the first [`SessionPromptCreated`] the harness
+    /// forward onto the first [`AgentPromptCreated`] the harness
     /// emits for this prompt. Lets a client (notably the test helper
     /// in `tau-harness::daemon`) match the response chain to the
     /// submission it made, without relying on event ordering or
@@ -1684,8 +1715,8 @@ pub struct UiPromptSubmitted {
 /// while the user is typing; carries the full current contents of
 /// the prompt buffer.
 ///
-/// Always transient — never persisted to the per-session event log,
-/// never folded into the session tree. Subscribers use it to detect
+/// Always transient — never persisted to a semantic event log and never folded
+/// into an agent transcript. Subscribers use it to detect
 /// "user is alive" without polling: e.g. std-notifications resets
 /// its idle deadline on every draft event so the desktop notification
 /// doesn't fire while the user is mid-sentence.
@@ -1802,63 +1833,48 @@ pub struct UiSwitchSession {
     pub reason: SessionStartReason,
 }
 
-/// The user typed `/agent new`: rotate the harness's default conversation
-/// within the current session so the next untargeted prompt mints a fresh agent
-/// id. Current-agent selection is UI-local; this request must not be replayed
-/// to make other UIs clear their selected agent.
+/// The user typed `/agent new`: create/load a fresh global agent in the current
+/// session and make it the default target for that UI. Current-agent selection
+/// is UI-local; this request must not be replayed to make other UIs clear their
+/// selected agent.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiNewAgent {
-    /// Session whose foreground conversation should be rotated.
+    /// Session in which the fresh agent should be loaded.
     pub session_id: SessionId,
 }
 
-/// User-requested lifecycle transition for an agent in the current session.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UiAgentStateAction {
-    /// Hide the agent from active-agent switch completions without deleting its
-    /// conversation.
-    Suspend,
-    /// Mark the agent active/resumable for prompt targeting again.
-    Resume,
-}
-
-/// The user typed `/agent suspend` or `/agent resume`: ask the harness to
-/// update the session-scoped agent state.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct UiAgentStateRequest {
-    /// Session whose agent state should change.
-    pub session_id: SessionId,
-    /// Agent to update.
-    pub agent_id: String,
-    /// Requested lifecycle transition.
-    pub action: UiAgentStateAction,
-}
-
-/// The user typed `/tree`: render the session's branching tree (one
+/// The user typed `/tree`: render an agent's branching tree (one
 /// `harness.info` line per node) to the chat output.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiTreeRequest {
     pub session_id: SessionId,
+    /// Target agent tree to render. `None` leaves selection to the harness's
+    /// current/default conversation state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_agent_id: Option<AgentId>,
 }
 
-/// The user typed `/tree <id>`: move the session's head pointer to the
-/// given node, so the next prompt branches off there.
+/// The user typed `/tree <id>`: move an agent's head pointer to the given node,
+/// so the next prompt branches off there.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiNavigateTree {
     pub session_id: SessionId,
+    /// Target agent tree to navigate. `None` leaves selection to the harness's
+    /// current/default conversation state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_agent_id: Option<AgentId>,
     pub node_id: u64,
 }
 
 /// The user typed `/compact`: force a provider-side compaction pass on
-/// the current session history before the next prompt.
+/// the target agent history before the next prompt.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiCompactRequest {
     pub session_id: SessionId,
     /// Target agent conversation to compact. `None` leaves selection to the
-    /// harness for compatibility with older clients.
+    /// harness's current/default conversation state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_agent_id: Option<String>,
+    pub target_agent_id: Option<AgentId>,
 }
 
 /// Stop advancing an in-flight prompt at the next harness boundary.
@@ -1866,7 +1882,7 @@ pub struct UiCompactRequest {
 /// Originally tied to the user typing `/cancel`, now also published
 /// by the harness itself to preempt non-tool extension side
 /// conversations when a user prompt arrives. The optional
-/// [`Self::session_prompt_id`] disambiguates the two cases:
+/// [`Self::agent_prompt_id`] disambiguates the two cases:
 ///
 /// - `None` — broadcast cancel for the selected target conversation. The
 ///   harness uses the current/default conversation when `target_agent_id` is
@@ -1884,10 +1900,10 @@ pub struct UiCancelPrompt {
     /// Target agent conversation to cancel. `None` leaves selection to the
     /// harness's current/default conversation state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_agent_id: Option<String>,
+    pub target_agent_id: Option<AgentId>,
     /// Optional target. See struct doc.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_prompt_id: Option<SessionPromptId>,
+    pub agent_prompt_id: Option<AgentPromptId>,
 }
 
 /// Request that the harness remove and return the most recently queued user
@@ -1899,7 +1915,7 @@ pub struct UiRecallQueuedPrompt {
     /// Target agent conversation to recall from. `None` leaves selection to the
     /// harness's current/default conversation state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_agent_id: Option<String>,
+    pub target_agent_id: Option<AgentId>,
 }
 
 /// Which stream a [`ShellCommandProgress`] chunk came from.
@@ -1914,8 +1930,8 @@ pub enum ShellStream {
 ///
 /// `include_in_context`: when `true` (from `!<cmd>`), the harness
 /// injects a tagged user message containing the command and its
-/// output into the session's conversation history on completion, so
-/// the agent sees it on its next turn. When `false` (from `!!<cmd>`),
+/// output into the target agent's transcript on completion, so the
+/// agent sees it on its next turn. When `false` (from `!!<cmd>`),
 /// the result is UI-only and never reaches the model.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiShellCommand {
@@ -1926,7 +1942,7 @@ pub struct UiShellCommand {
     /// Target agent for this user-authored shell command. `None` means no
     /// explicit target; the harness uses its default conversation state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_agent_id: Option<String>,
+    pub target_agent_id: Option<AgentId>,
 }
 
 /// A chunk of output from a running user-initiated shell command.
@@ -1939,7 +1955,7 @@ pub struct ShellCommandProgress {
     /// Target agent for this user-authored shell command. `None` means no
     /// explicit target; the harness uses its default conversation state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_agent_id: Option<String>,
+    pub target_agent_id: Option<AgentId>,
 }
 
 /// A user-initiated shell command completed (exited or was cancelled).
@@ -1957,7 +1973,7 @@ pub struct ShellCommandFinished {
     /// Target agent for this user-authored shell command. `None` means no
     /// explicit target; the harness uses its default conversation state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_agent_id: Option<String>,
+    pub target_agent_id: Option<AgentId>,
     /// Interleaved stdout + stderr (truncated), the same shape the
     /// `shell` tool returns.
     pub output: String,
@@ -1994,20 +2010,38 @@ pub struct Osc1337SetUserVar {
 }
 
 // ---------------------------------------------------------------------------
-// Session events — facts from the harness session tracker
+// Agent transcript/runtime events
 // ---------------------------------------------------------------------------
+
+/// A prompt was accepted into a concrete agent transcript.
+///
+/// This is the durable agent-owned counterpart to the transient
+/// [`UiPromptSubmitted`] request.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentPromptSubmitted {
+    /// Agent transcript receiving the prompt.
+    pub agent_id: AgentId,
+    /// Prompt text.
+    pub text: String,
+    /// Whether this prompt text is user-authored or hidden internal control
+    /// text.
+    #[serde(default)]
+    pub message_class: PromptMessageClass,
+    /// Who initiated the prompt.
+    #[serde(default)]
+    pub originator: PromptOriginator,
+    /// Echo of [`UiPromptSubmitted::ctx_id`] when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctx_id: Option<String>,
+}
 
 /// The harness queued a user prompt because the agent is busy.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SessionPromptQueued {
-    /// Session that owns the queued prompt.
-    pub session_id: SessionId,
+pub struct AgentPromptQueued {
+    /// Agent whose queue owns the prompt.
+    pub agent_id: AgentId,
     /// Queued prompt text.
     pub text: String,
-    /// Target agent for this queued prompt. `None` is only used for older
-    /// events without explicit routing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_agent_id: Option<String>,
     /// Whether this prompt text is user-authored or hidden internal control
     /// text.
     #[serde(default)]
@@ -2016,40 +2050,45 @@ pub struct SessionPromptQueued {
 
 /// The harness recalled a previously queued user prompt for editing.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SessionPromptRecalled {
-    /// Session that owns the recalled prompt.
-    pub session_id: SessionId,
+pub struct AgentPromptRecalled {
+    /// Agent whose queue the prompt was recalled from.
+    pub agent_id: AgentId,
     /// Recalled prompt text.
     pub text: String,
-    /// Target agent for this recalled prompt. `None` is only used for older
-    /// events without explicit routing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_agent_id: Option<String>,
 }
 
 /// A previously queued user prompt that the harness folded into the
 /// in-flight turn as a steering message — appended to the next
-/// `SessionPromptCreated` for this conversation alongside tool results,
-/// rather than waiting for the conversation to return to `Idle` and
-/// kicking off a fresh turn.
-///
-/// Folds into the `SessionTree` the same way as `UiPromptSubmitted`
-/// and `SessionUserMessageInjected`: appending one `UserMessage` entry
-/// at the current head. UIs typically react by promoting their
-/// "(queued)" rendering of this prompt to a regular user message.
+/// `AgentPromptCreated` for this agent alongside tool results, rather
+/// than waiting for the agent to return to `Idle` and kicking off a fresh turn.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SessionPromptSteered {
-    pub session_id: SessionId,
+pub struct AgentPromptSteered {
+    /// Agent whose in-flight turn received the prompt.
+    pub agent_id: AgentId,
     pub text: String,
-    /// Target agent for this steered prompt. `None` is only used for older
-    /// events without explicit routing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_agent_id: Option<String>,
     /// Whether this prompt text is user-authored or hidden internal control
     /// text.
     #[serde(default)]
     pub message_class: PromptMessageClass,
 }
+
+/// A synthetic user message injected into an agent transcript by the harness
+/// (not authored by the human user directly). Sources include shell command
+/// output and eager AGENTS.md context preambles.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentUserMessageInjected {
+    /// Agent transcript receiving the injected message.
+    pub agent_id: AgentId,
+    pub text: String,
+    /// Whether this prompt text is user-authored or hidden internal control
+    /// text.
+    #[serde(default)]
+    pub message_class: PromptMessageClass,
+}
+
+// ---------------------------------------------------------------------------
+// Session lifecycle/membership events
+// ---------------------------------------------------------------------------
 
 /// Why a `SessionStarted` was published. Lets extensions distinguish
 /// "first session of this harness's life" from "user switched to a new
@@ -2087,28 +2126,11 @@ pub struct SessionShutdown {
     pub session_id: SessionId,
 }
 
-/// A synthetic user message injected into the session by the harness
-/// (not authored by the human user directly). Sources include
-/// `!`-prefixed shell command output and the eager AGENTS.md context
-/// preamble. Carries the fully-rendered text so session replay does
-/// not need to re-run any harness-side formatter; the SessionTree
-/// folder treats this event the same as `UiPromptSubmitted` —
-/// appending one `UserMessage` entry at the current head.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SessionUserMessageInjected {
-    pub session_id: SessionId,
-    pub text: String,
-    /// Whether this prompt text is user-authored or hidden internal control
-    /// text.
-    #[serde(default)]
-    pub message_class: PromptMessageClass,
-}
-
 /// Who initiated the prompt — the human user via the UI, or a side query from
 /// an extension or harness-owned tool via [`StartAgentRequest`].
 ///
 /// The provider's only obligation is to copy the originator from the
-/// incoming [`SessionPromptCreated`] onto its outgoing
+/// incoming [`AgentPromptCreated`] onto its outgoing
 /// [`ProviderResponseFinished`]. The harness reads it on the way back
 /// to decide whether the response is a normal turn (route to UI,
 /// keep `default_conversation` advancing) or a side-query reply
@@ -2143,7 +2165,7 @@ impl PromptOriginator {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PromptToolsRef {
     /// Prompt whose materialized tools contain the full tool list.
-    pub base_session_prompt_id: SessionPromptId,
+    pub base_agent_prompt_id: AgentPromptId,
 }
 
 /// The harness persisted a normal assistant-generation prompt and
@@ -2152,15 +2174,10 @@ pub struct PromptToolsRef {
 /// Carries the assembled conversation context for the provider's normal
 /// response path.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct SessionPromptCreated {
-    pub session_prompt_id: SessionPromptId,
-    pub session_id: SessionId,
-    /// Agent conversation this prompt belongs to. `None` is preserved for
-    /// older events and non-agent-specific prompts, but new user-facing
-    /// prompts should carry the durable agent id so clients can route UI
-    /// state without guessing from originator metadata.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_agent_id: Option<String>,
+pub struct AgentPromptCreated {
+    pub agent_prompt_id: AgentPromptId,
+    /// Agent transcript this prompt belongs to.
+    pub agent_id: AgentId,
     /// System prompt sent alongside the item timeline.
     pub system_prompt: String,
     /// Fully materialized context items for this turn.
@@ -2202,9 +2219,9 @@ pub struct SessionPromptCreated {
     pub share_user_cache_key: bool,
     /// Echo of [`UiPromptSubmitted::ctx_id`] when this prompt was
     /// initiated by a UI submission. Tool-result follow-up
-    /// `SessionPromptCreated` events for the same chain do not
+    /// `AgentPromptCreated` events for the same chain do not
     /// inherit it — only the first one does — so a correlator should
-    /// capture the resulting [`Self::session_prompt_id`] and track
+    /// capture the resulting [`Self::agent_prompt_id`] and track
     /// the rest of the chain by spid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ctx_id: Option<String>,
@@ -2220,7 +2237,7 @@ pub struct SessionPromptCreated {
 /// Why a prompt ended without a provider response being accepted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SessionPromptTerminationReason {
+pub enum AgentPromptTerminationReason {
     /// A later prompt superseded this response before the harness accepted it.
     Stale,
     /// The harness cancelled or preempted the prompt.
@@ -2230,15 +2247,16 @@ pub enum SessionPromptTerminationReason {
 /// The harness ended a prompt without publishing `provider.response_finished`.
 ///
 /// This is a transient lifecycle fact for UIs and other observers that track
-/// in-flight prompts. It does not add assistant content to the session tree.
+/// in-flight prompts. It does not add assistant content to the agent
+/// transcript.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SessionPromptTerminated {
-    /// Session that owns the prompt.
-    pub session_id: SessionId,
+pub struct AgentPromptTerminated {
+    /// Agent whose prompt is no longer in flight.
+    pub agent_id: AgentId,
     /// Prompt that is no longer in flight.
-    pub session_prompt_id: SessionPromptId,
+    pub agent_prompt_id: AgentPromptId,
     /// Why no provider response will be published for this prompt.
-    pub reason: SessionPromptTerminationReason,
+    pub reason: AgentPromptTerminationReason,
     /// Who asked for this prompt.
     #[serde(default)]
     pub originator: PromptOriginator,
@@ -2248,25 +2266,26 @@ pub struct SessionPromptTerminated {
 /// assigned it an ID.
 ///
 /// Compaction reuses the same prompt-delivery and materialization
-/// scheme as [`SessionPromptCreated`], but it is a distinct provider
+/// scheme as [`AgentPromptCreated`], but it is a distinct provider
 /// operation with its own event name so consumers do not need to infer
 /// alternate semantics from a mode flag on a normal prompt event.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct SessionCompactionRequested {
+pub struct AgentCompactionRequested {
     #[serde(flatten)]
-    pub prompt: SessionPromptCreated,
+    pub prompt: AgentPromptCreated,
 }
 
 /// Best-effort provider-side prompt-cache prewarm request.
 ///
 /// Carries the same stable prefix fields as the first real
-/// [`SessionPromptCreated`] but intentionally has no
-/// [`SessionPromptId`], no user task prompt, and no
+/// [`AgentPromptCreated`] but intentionally has no
+/// [`AgentPromptId`], no user task prompt, and no
 /// `previous_response_id`. Providers that support a non-generating
 /// upstream call may send it; all others no-op.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct SessionPromptPrewarmRequested {
-    pub session_id: SessionId,
+pub struct AgentPromptPrewarmRequested {
+    /// Agent whose prompt prefix should be warmed.
+    pub agent_id: AgentId,
     pub system_prompt: String,
     pub context_items: Vec<ContextItem>,
     pub tools: Vec<ToolDefinition>,
@@ -2287,18 +2306,14 @@ pub struct SessionPromptPrewarmRequested {
     pub share_user_cache_key: bool,
 }
 
-/// A provider-side compaction pass has started for this session.
+/// A provider-side compaction pass has started for this agent.
 ///
 /// This is a transient lifecycle event for clients to render progress;
-/// successful compaction is recorded durably by [`SessionCompacted`].
+/// successful compaction is recorded durably by [`AgentCompacted`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SessionCompactionStarted {
-    pub session_id: SessionId,
-    /// Target agent conversation this compaction belongs to. New user-facing
-    /// compactions carry this so UIs can route lifecycle state without
-    /// inferring `main` from the originator.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_agent_id: Option<String>,
+pub struct AgentCompactionStarted {
+    /// Agent transcript being compacted.
+    pub agent_id: AgentId,
     /// Conversation that owns this compaction. UIs use this to hide
     /// sub-agent compaction lifecycle blocks from the main transcript.
     #[serde(default)]
@@ -2312,7 +2327,7 @@ pub struct SessionCompactionStarted {
 /// Final status of a provider-side compaction lifecycle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SessionCompactionOutcome {
+pub enum AgentCompactionOutcome {
     Succeeded,
     Failed,
 }
@@ -2320,13 +2335,11 @@ pub enum SessionCompactionOutcome {
 /// A provider-side compaction pass finished.
 ///
 /// This is transient UI/status metadata. On success, a separate
-/// [`SessionCompacted`] event carries the durable compacted input items.
+/// [`AgentCompacted`] event carries the durable compacted input items.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SessionCompactionFinished {
-    pub session_id: SessionId,
-    /// Target agent conversation this compaction belongs to.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_agent_id: Option<String>,
+pub struct AgentCompactionFinished {
+    /// Agent transcript whose compaction finished.
+    pub agent_id: AgentId,
     /// Conversation that owns this compaction. UIs use this to hide
     /// sub-agent compaction lifecycle blocks from the main transcript.
     #[serde(default)]
@@ -2343,7 +2356,7 @@ pub struct SessionCompactionFinished {
     /// not a billing counter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compacted_input_tokens: Option<u64>,
-    pub outcome: SessionCompactionOutcome,
+    pub outcome: AgentCompactionOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
@@ -2355,11 +2368,9 @@ pub struct SessionCompactionFinished {
 /// history reset point and replays only the summary plus the entries that
 /// follow it on the current branch.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct SessionCompacted {
-    pub session_id: SessionId,
-    /// Target agent conversation this durable compaction summary belongs to.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_agent_id: Option<String>,
+pub struct AgentCompacted {
+    /// Agent transcript whose earlier branch history was compacted.
+    pub agent_id: AgentId,
     /// Conversation that owns this durable compaction summary. UIs use
     /// this to hide sub-agent compaction results from the main transcript.
     #[serde(default)]
@@ -2383,13 +2394,13 @@ pub struct SessionCompacted {
 
 /// Reference to a prior turn's response, used to enable stateful
 /// chaining on backends that support it. See
-/// [`SessionPromptCreated::previous_response_candidate`].
+/// [`AgentPromptCreated::previous_response_candidate`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PreviousResponseCandidate {
     /// `response.id` returned by the provider on the most recent
     /// successful turn for this conversation.
     pub provider_response_id: String,
-    /// Index in [`SessionPromptCreated::context_items`] where items
+    /// Index in [`AgentPromptCreated::context_items`] where items
     /// added since the prior response begin. Backends slicing for a
     /// delta call use `context_items[next_item_index..]`.
     pub next_item_index: usize,
@@ -2405,8 +2416,8 @@ pub struct PreviousResponseCandidate {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProviderPromptSubmitted {
     /// Prompt id the provider accepted.
-    pub session_prompt_id: SessionPromptId,
-    /// Echo of [`SessionPromptCreated::originator`]. UIs and other
+    pub agent_prompt_id: AgentPromptId,
+    /// Echo of [`AgentPromptCreated::originator`]. UIs and other
     /// extensions filter on `originator.is_user()` so provider work for a side
     /// conversation doesn't trigger user-facing
     /// effects like clearing an idle deadline.
@@ -2419,7 +2430,7 @@ pub struct ProviderPromptSubmitted {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProviderResponseUpdated {
     /// Prompt id whose accumulated response changed.
-    pub session_prompt_id: SessionPromptId,
+    pub agent_prompt_id: AgentPromptId,
     /// Full response text accumulated so far.
     pub text: String,
     /// Accumulated provider-supplied reasoning summary so far, if the
@@ -2428,7 +2439,7 @@ pub struct ProviderResponseUpdated {
     /// prompts (see `assemble_conversation`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<String>,
-    /// Echo of [`SessionPromptCreated::originator`]. UIs filter on
+    /// Echo of [`AgentPromptCreated::originator`]. UIs filter on
     /// `originator.is_user()` so the streaming text from a side
     /// conversation doesn't paint into the user's chat window.
     #[serde(default)]
@@ -2460,19 +2471,16 @@ impl ProviderStopReason {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProviderResponseFinished {
     /// Prompt id the provider finished.
-    pub session_prompt_id: SessionPromptId,
-    /// Target agent conversation this response belongs to. The harness stamps
-    /// this before publishing so replay can rebuild prompt-id routing without
-    /// replaying transient prompt-created events.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_agent_id: Option<String>,
+    pub agent_prompt_id: AgentPromptId,
+    /// Agent transcript this response belongs to.
+    pub agent_id: AgentId,
     /// Final provider output, including assistant messages, reasoning,
     /// compaction payloads, and/or requested tool calls.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub output_items: Vec<ContextItem>,
     /// Why the provider stopped this turn.
     pub stop_reason: ProviderStopReason,
-    /// Echo of [`SessionPromptCreated::originator`]. The provider must
+    /// Echo of [`AgentPromptCreated::originator`]. The provider must
     /// copy this from the prompt; the harness routes the response
     /// based on it.
     #[serde(default)]
@@ -2495,9 +2503,9 @@ pub struct ProviderResponseFinished {
     pub provider_response_id: Option<String>,
     /// Per-turn delta of the provider's Codex WS pool counters. `Some(_)`
     /// only for Responses-backend turns where the WS path was
-    /// attempted (i.e. `cfg.supports_websocket` and the per-session
+    /// attempted (i.e. `cfg.supports_websocket` and the routing-key
     /// sticky-disable flag was off). `None` for Chat Completions and
-    /// for Responses sessions that have been permanently flipped to
+    /// for Responses routing keys that have been permanently flipped to
     /// HTTP+SSE. Lets offline analysis attribute a low
     /// `cached_tokens` to a chain-strip event (the Codex chain cache
     /// is connection-local; a fresh socket or a silent reconnect
@@ -2534,13 +2542,13 @@ pub struct WsPoolDelta {
 
 /// Diagnostic emitted when a chained prompt reports unexpectedly low
 /// provider cache reuse. The harness derives it from the original
-/// [`SessionPromptCreated`] plus final [`ProviderResponseFinished`]
+/// [`AgentPromptCreated`] plus final [`ProviderResponseFinished`]
 /// token usage so offline analysis can distinguish provider/cache-key
 /// misses from obvious WS chain-strip misses.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProviderCacheMissDiagnostic {
     /// Prompt id whose cache behavior looked unexpectedly low.
-    pub session_prompt_id: SessionPromptId,
+    pub agent_prompt_id: AgentPromptId,
     /// Currently selected model as `"provider/model_id"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelId>,
@@ -2703,8 +2711,10 @@ pub enum Event {
     StartAgentAccepted(StartAgentAccepted),
     #[serde(rename = "agent.start_result")]
     StartAgentResult(StartAgentResult),
-    #[serde(rename = "agent.message")]
-    AgentMessage(AgentMessage),
+    #[serde(rename = "agent.message_sent")]
+    AgentMessageSent(AgentMessageSent),
+    #[serde(rename = "agent.message_received")]
+    AgentMessageReceived(AgentMessageReceived),
     #[serde(rename = "extension.event")]
     ExtensionEvent(CustomEvent),
     #[serde(rename = "provider.models_updated")]
@@ -2753,8 +2763,6 @@ pub enum Event {
     UiSwitchSession(UiSwitchSession),
     #[serde(rename = "ui.new_agent")]
     UiNewAgent(UiNewAgent),
-    #[serde(rename = "ui.agent_state_request")]
-    UiAgentStateRequest(UiAgentStateRequest),
     #[serde(rename = "ui.tree_request")]
     UiTreeRequest(UiTreeRequest),
     #[serde(rename = "ui.navigate_tree")]
@@ -2776,35 +2784,45 @@ pub enum Event {
     #[serde(rename = "shell.command_finished")]
     ShellCommandFinished(ShellCommandFinished),
 
-    // Session
-    #[serde(rename = "session.prompt_queued")]
-    SessionPromptQueued(SessionPromptQueued),
-    #[serde(rename = "session.prompt_recalled")]
-    SessionPromptRecalled(SessionPromptRecalled),
-    #[serde(rename = "session.prompt_steered")]
-    SessionPromptSteered(SessionPromptSteered),
+    // Agent transcript/runtime
+    #[serde(rename = "agent.prompt_submitted")]
+    AgentPromptSubmitted(AgentPromptSubmitted),
+    #[serde(rename = "agent.prompt_queued")]
+    AgentPromptQueued(AgentPromptQueued),
+    #[serde(rename = "agent.prompt_recalled")]
+    AgentPromptRecalled(AgentPromptRecalled),
+    #[serde(rename = "agent.prompt_steered")]
+    AgentPromptSteered(AgentPromptSteered),
+    #[serde(rename = "agent.compaction_started")]
+    AgentCompactionStarted(AgentCompactionStarted),
+    #[serde(rename = "agent.compaction_finished")]
+    AgentCompactionFinished(AgentCompactionFinished),
+    #[serde(rename = "agent.compacted")]
+    AgentCompacted(AgentCompacted),
+    #[serde(rename = "agent.compaction_requested")]
+    AgentCompactionRequested(AgentCompactionRequested),
+    #[serde(rename = "agent.prompt_created")]
+    AgentPromptCreated(AgentPromptCreated),
+    #[serde(rename = "agent.prompt_terminated")]
+    AgentPromptTerminated(AgentPromptTerminated),
+    #[serde(rename = "agent.prompt_prewarm_requested")]
+    AgentPromptPrewarmRequested(AgentPromptPrewarmRequested),
+    #[serde(rename = "agent.user_message_injected")]
+    AgentUserMessageInjected(AgentUserMessageInjected),
+    #[serde(rename = "agent.head_moved")]
+    AgentHeadMoved(AgentHeadMoved),
+    #[serde(rename = "agent.started")]
+    AgentStarted(AgentStarted),
+
+    // Session lifecycle/membership
     #[serde(rename = "session.started")]
     SessionStarted(SessionStarted),
     #[serde(rename = "session.shutdown")]
     SessionShutdown(SessionShutdown),
-    #[serde(rename = "session.agent_state_changed")]
-    SessionAgentStateChanged(SessionAgentStateChanged),
-    #[serde(rename = "session.compaction_started")]
-    SessionCompactionStarted(SessionCompactionStarted),
-    #[serde(rename = "session.compaction_finished")]
-    SessionCompactionFinished(SessionCompactionFinished),
-    #[serde(rename = "session.compacted")]
-    SessionCompacted(SessionCompacted),
-    #[serde(rename = "session.compaction_requested")]
-    SessionCompactionRequested(SessionCompactionRequested),
-    #[serde(rename = "session.prompt_created")]
-    SessionPromptCreated(SessionPromptCreated),
-    #[serde(rename = "session.prompt_terminated")]
-    SessionPromptTerminated(SessionPromptTerminated),
-    #[serde(rename = "session.prompt_prewarm_requested")]
-    SessionPromptPrewarmRequested(SessionPromptPrewarmRequested),
-    #[serde(rename = "session.user_message_injected")]
-    SessionUserMessageInjected(SessionUserMessageInjected),
+    #[serde(rename = "session.agent_loaded")]
+    SessionAgentLoaded(SessionAgentLoaded),
+    #[serde(rename = "session.agent_unloaded")]
+    SessionAgentUnloaded(SessionAgentUnloaded),
 
     // Provider execution
     #[serde(rename = "provider.prompt_submitted")]
@@ -2851,7 +2869,8 @@ impl Event {
             Self::StartAgentRequest(_) => EventName::AGENT_START_REQUEST,
             Self::StartAgentAccepted(_) => EventName::AGENT_START_ACCEPTED,
             Self::StartAgentResult(_) => EventName::AGENT_START_RESULT,
-            Self::AgentMessage(_) => EventName::AGENT_MESSAGE,
+            Self::AgentMessageSent(_) => EventName::AGENT_MESSAGE_SENT,
+            Self::AgentMessageReceived(_) => EventName::AGENT_MESSAGE_RECEIVED,
             Self::ExtensionEvent(event) => event.name.clone(),
             Self::ProviderModelsUpdated(_) => EventName::PROVIDER_MODELS_UPDATED,
             Self::ProviderToolResult(_) => EventName::PROVIDER_TOOL_RESULT,
@@ -2876,7 +2895,6 @@ impl Event {
             Self::UiShellCommand(_) => EventName::UI_SHELL_COMMAND,
             Self::UiSwitchSession(_) => EventName::UI_SWITCH_SESSION,
             Self::UiNewAgent(_) => EventName::UI_NEW_AGENT,
-            Self::UiAgentStateRequest(_) => EventName::UI_AGENT_STATE_REQUEST,
             Self::UiTreeRequest(_) => EventName::UI_TREE_REQUEST,
             Self::UiNavigateTree(_) => EventName::UI_NAVIGATE_TREE,
             Self::UiCompactRequest(_) => EventName::UI_COMPACT_REQUEST,
@@ -2885,20 +2903,24 @@ impl Event {
             Self::Osc1337SetUserVar(_) => EventName::TERM_OSC1337_SET_USER_VAR,
             Self::ShellCommandProgress(_) => EventName::SHELL_COMMAND_PROGRESS,
             Self::ShellCommandFinished(_) => EventName::SHELL_COMMAND_FINISHED,
-            Self::SessionPromptQueued(_) => EventName::SESSION_PROMPT_QUEUED,
-            Self::SessionPromptRecalled(_) => EventName::SESSION_PROMPT_RECALLED,
-            Self::SessionPromptSteered(_) => EventName::SESSION_PROMPT_STEERED,
+            Self::AgentPromptSubmitted(_) => EventName::AGENT_PROMPT_SUBMITTED,
+            Self::AgentPromptQueued(_) => EventName::AGENT_PROMPT_QUEUED,
+            Self::AgentPromptRecalled(_) => EventName::AGENT_PROMPT_RECALLED,
+            Self::AgentPromptSteered(_) => EventName::AGENT_PROMPT_STEERED,
+            Self::AgentStarted(_) => EventName::AGENT_STARTED,
             Self::SessionStarted(_) => EventName::SESSION_STARTED,
             Self::SessionShutdown(_) => EventName::SESSION_SHUTDOWN,
-            Self::SessionAgentStateChanged(_) => EventName::SESSION_AGENT_STATE_CHANGED,
-            Self::SessionCompactionStarted(_) => EventName::SESSION_COMPACTION_STARTED,
-            Self::SessionCompactionFinished(_) => EventName::SESSION_COMPACTION_FINISHED,
-            Self::SessionCompacted(_) => EventName::SESSION_COMPACTED,
-            Self::SessionCompactionRequested(_) => EventName::SESSION_COMPACTION_REQUESTED,
-            Self::SessionPromptCreated(_) => EventName::SESSION_PROMPT_CREATED,
-            Self::SessionPromptTerminated(_) => EventName::SESSION_PROMPT_TERMINATED,
-            Self::SessionPromptPrewarmRequested(_) => EventName::SESSION_PROMPT_PREWARM_REQUESTED,
-            Self::SessionUserMessageInjected(_) => EventName::SESSION_USER_MESSAGE_INJECTED,
+            Self::SessionAgentLoaded(_) => EventName::SESSION_AGENT_LOADED,
+            Self::SessionAgentUnloaded(_) => EventName::SESSION_AGENT_UNLOADED,
+            Self::AgentCompactionStarted(_) => EventName::AGENT_COMPACTION_STARTED,
+            Self::AgentCompactionFinished(_) => EventName::AGENT_COMPACTION_FINISHED,
+            Self::AgentCompacted(_) => EventName::AGENT_COMPACTED,
+            Self::AgentCompactionRequested(_) => EventName::AGENT_COMPACTION_REQUESTED,
+            Self::AgentPromptCreated(_) => EventName::AGENT_PROMPT_CREATED,
+            Self::AgentPromptTerminated(_) => EventName::AGENT_PROMPT_TERMINATED,
+            Self::AgentPromptPrewarmRequested(_) => EventName::AGENT_PROMPT_PREWARM_REQUESTED,
+            Self::AgentUserMessageInjected(_) => EventName::AGENT_USER_MESSAGE_INJECTED,
+            Self::AgentHeadMoved(_) => EventName::AGENT_HEAD_MOVED,
             Self::ProviderPromptSubmitted(_) => EventName::PROVIDER_PROMPT_SUBMITTED,
             Self::ProviderResponseUpdated(_) => EventName::PROVIDER_RESPONSE_UPDATED,
             Self::ProviderResponseFinished(_) => EventName::PROVIDER_RESPONSE_FINISHED,
@@ -2906,8 +2928,8 @@ impl Event {
         }
     }
 
-    /// Returns true for protocol events that historically behaved as
-    /// transient when sent directly without an [`crate::Emit`] wrapper.
+    /// Returns true for protocol events that are runtime-only by default when
+    /// sent directly without an explicit [`crate::Emit`] durability override.
     #[must_use]
     pub const fn defaults_to_transient(&self) -> bool {
         matches!(
@@ -2923,15 +2945,15 @@ impl Event {
                 | Self::ActionResult(_)
                 | Self::ActionError(_)
                 | Self::ShellCommandProgress(_)
-                | Self::SessionCompactionStarted(_)
-                | Self::SessionCompactionFinished(_)
-                | Self::SessionCompactionRequested(_)
-                | Self::SessionPromptQueued(_)
-                | Self::SessionPromptRecalled(_)
-                | Self::SessionPromptCreated(_)
-                | Self::SessionPromptTerminated(_)
-                | Self::SessionPromptPrewarmRequested(_)
-                | Self::UiAgentStateRequest(_)
+                | Self::UiPromptSubmitted(_)
+                | Self::AgentCompactionStarted(_)
+                | Self::AgentCompactionFinished(_)
+                | Self::AgentCompactionRequested(_)
+                | Self::AgentPromptQueued(_)
+                | Self::AgentPromptRecalled(_)
+                | Self::AgentPromptCreated(_)
+                | Self::AgentPromptTerminated(_)
+                | Self::AgentPromptPrewarmRequested(_)
                 | Self::UiCompactRequest(_)
                 | Self::UiNewAgent(_)
                 | Self::UiPromptDraft(_)

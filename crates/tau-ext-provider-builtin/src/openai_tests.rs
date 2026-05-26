@@ -44,11 +44,10 @@ fn model_id(provider: &str, model: &str) -> ModelId {
     ModelId::new(ProviderName::new(provider), ModelName::new(model))
 }
 
-fn prompt() -> tau_proto::SessionPromptCreated {
-    tau_proto::SessionPromptCreated {
-        session_prompt_id: "sp-1".into(),
-        session_id: "s1".into(),
-        target_agent_id: None,
+fn prompt() -> tau_proto::AgentPromptCreated {
+    tau_proto::AgentPromptCreated {
+        agent_prompt_id: "sp-1".into(),
+        agent_id: "agent-1".into(),
         system_prompt: String::new(),
         context_items: vec![ContextItem::Message(tau_proto::MessageItem {
             role: tau_proto::ContextRole::User,
@@ -198,25 +197,25 @@ fn prompt_workers_start_concurrently() {
     // one finishes. A serial dispatcher would time out the first worker's
     // wait and never observe two active starts at once.
     let mut first = prompt();
-    first.session_prompt_id = "sp-par-1".into();
+    first.agent_prompt_id = "sp-par-1".into();
     let mut second = prompt();
-    second.session_prompt_id = "sp-par-2".into();
+    second.agent_prompt_id = "sp-par-2".into();
     let input = encode_frames(&[
         Frame::Message(Message::LogEvent(tau_proto::LogEvent {
             id: tau_proto::LogEventId::new(7),
             recorded_at: tau_proto::UnixMicros::new(11),
-            event: Box::new(Event::SessionPromptCreated(first)),
+            event: Box::new(Event::AgentPromptCreated(first)),
         })),
         Frame::Message(Message::LogEvent(tau_proto::LogEvent {
             id: tau_proto::LogEventId::new(8),
             recorded_at: tau_proto::UnixMicros::new(12),
-            event: Box::new(Event::SessionPromptCreated(second)),
+            event: Box::new(Event::AgentPromptCreated(second)),
         })),
     ]);
     let started = std::sync::Arc::new((Mutex::new((0_usize, 0_usize)), Condvar::new()));
     let executor_started = started.clone();
     let executor: PromptExecutor = std::sync::Arc::new(move |execution| {
-        let session_prompt_id = execution.job.session_prompt_id.clone();
+        let agent_prompt_id = execution.job.agent_prompt_id.clone();
         let originator = execution.job.prompt.originator.clone();
         let (lock, cv) = &*executor_started;
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -238,10 +237,15 @@ fn prompt_workers_start_concurrently() {
         drop(guard);
 
         let mut writer = execution.frame_writer();
-        write_prompt_submitted(&session_prompt_id, &originator, &mut writer).expect("submitted");
+        write_prompt_submitted(&agent_prompt_id, &originator, &mut writer).expect("submitted");
         writer
             .write_frame(&Frame::Event(Event::ProviderResponseFinished(
-                simple_finished(session_prompt_id.clone(), originator, "done"),
+                simple_finished(
+                    agent_prompt_id.clone(),
+                    "agent-1".into(),
+                    originator,
+                    "done",
+                ),
             )))
             .expect("finished");
         writer.flush().expect("flush fake response");
@@ -323,7 +327,7 @@ fn direct_prompt_request_with_missing_backend_is_acknowledged_and_closed() {
         Frame::Message(Message::LogEvent(tau_proto::LogEvent {
             id: tau_proto::LogEventId::new(7),
             recorded_at: tau_proto::UnixMicros::new(11),
-            event: Box::new(Event::SessionPromptCreated(prompt())),
+            event: Box::new(Event::AgentPromptCreated(prompt())),
         })),
         Frame::Message(Message::Disconnect(tau_proto::Disconnect {
             reason: Some("done".to_owned()),
@@ -338,14 +342,14 @@ fn direct_prompt_request_with_missing_backend_is_acknowledged_and_closed() {
         matches!(
             frame,
             Frame::Event(Event::ProviderPromptSubmitted(submitted))
-                if submitted.session_prompt_id.as_str() == "sp-1"
+                if submitted.agent_prompt_id.as_str() == "sp-1"
         )
     });
     let finished = frames.iter().position(|frame| {
         matches!(
             frame,
             Frame::Event(Event::ProviderResponseFinished(finished))
-                if finished.session_prompt_id.as_str() == "sp-1"
+                if finished.agent_prompt_id.as_str() == "sp-1"
                     && finished.stop_reason == ProviderStopReason::EndTurn
         )
     });

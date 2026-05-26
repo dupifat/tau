@@ -51,12 +51,13 @@ fn event_for_line(session_id: &str, text: &str) -> Option<Event> {
         return Some(Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
             session_id: session_id.into(),
             target_agent_id: None,
-            session_prompt_id: None,
+            agent_prompt_id: None,
         }));
     }
     if text == "/tree" {
         return Some(Event::UiTreeRequest(tau_proto::UiTreeRequest {
             session_id: session_id.into(),
+            target_agent_id: None,
         }));
     }
     if let Some(arg) = text.strip_prefix("/tree ")
@@ -64,6 +65,7 @@ fn event_for_line(session_id: &str, text: &str) -> Option<Event> {
     {
         return Some(Event::UiNavigateTree(tau_proto::UiNavigateTree {
             session_id: session_id.into(),
+            target_agent_id: None,
             node_id,
         }));
     }

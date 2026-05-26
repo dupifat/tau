@@ -8,7 +8,7 @@ For a Rust-shaped sketch of the same model, see
 
 ## Goals
 
-- Keep the durable per-session event log as the source of truth.
+- Keep the durable per-agent event log as the source of truth.
 - When building the next model request, preserve the order of assistant output
   and tool-result replies, rather than using the harness's
   execution/completion order.
@@ -20,7 +20,7 @@ For a Rust-shaped sketch of the same model, see
 
 - The transcript is an ordered item timeline.
 - `ProviderResponseFinished` is assistant-output truth.
-- `ToolRequest` is durable routing intent, not transcript truth.
+- `ToolRequest` is runtime routing intent, not transcript truth.
 - A single conversation may have at most one unresolved tool round at a time.
 - A tool round may contain multiple tool calls.
 
@@ -53,7 +53,7 @@ for one tool round, ordered by the original tool-call order.
 
 ## Durable Vs Runtime State
 
-Durable per-session state stores protocol facts needed to reconstruct the
+Durable per-agent state stores protocol facts needed to reconstruct the
 semantic transcript.
 
 Runtime-only state handles:
@@ -69,7 +69,7 @@ not conversation state.
 
 ## Prompt Delivery To The Agent
 
-The harness does not send the whole session log to the agent. It sends a
+The harness does not send the whole agent log to the agent. It sends a
 materialized prompt request for one turn.
 
 That prompt request must:
@@ -84,25 +84,25 @@ materializable prompt.
 
 These remain durable transcript inputs:
 
-- `UiPromptSubmitted`
-- `SessionUserMessageInjected`
-- `SessionPromptSteered`
+- `AgentPromptSubmitted`
+- `AgentUserMessageInjected`
+- `AgentPromptSteered`
 - `ProviderResponseFinished`
 - terminal tool-result facts
-- `SessionCompacted`
+- `AgentCompacted`
 
 The runtime bus `ToolResult` event may still include extra operational metadata
 such as `tool_name`, display descriptors, or originator echoes. The durable
-transcript input is the narrower completed tool-result fact needed to
-reconstruct `ToolResultsNode`, not necessarily the full renderer-facing event
+transcript input is the narrower provider-facing terminal tool-result fact needed
+to reconstruct `ToolResultsNode`, not necessarily the full renderer-facing event
 payload.
 
 These should be transient/non-durable:
 
-- `SessionPromptQueued`
-- `SessionPromptCreated`
-- `SessionPromptPrewarmRequested`
-- `SessionCompactionRequested`
+- `AgentPromptQueued`
+- `AgentPromptCreated`
+- `AgentPromptPrewarmRequested`
+- `AgentCompactionRequested`
 - `ProviderPromptSubmitted`
 - progress-style lifecycle events
 
@@ -112,11 +112,11 @@ The transcript tree is a deterministic projection over durable protocol facts.
 
 Direct folds:
 
-- `UiPromptSubmitted -> UserInputNode`
-- `SessionUserMessageInjected -> UserInputNode`
-- `SessionPromptSteered -> UserInputNode`
+- `AgentPromptSubmitted -> UserInputNode`
+- `AgentUserMessageInjected -> UserInputNode`
+- `AgentPromptSteered -> UserInputNode`
 - `ProviderResponseFinished -> AssistantResponseNode`
-- `SessionCompacted -> CompactionNode`
+- `AgentCompacted -> CompactionNode`
 
 Stateful folds:
 
@@ -128,8 +128,8 @@ The fold may keep explicit pending-round state per conversation. That is the
 right place to buffer non-folding tool-result facts.
 
 If replay encounters a durable `ToolResult` that does not match any open tool
-call in fold state, that session log is semantically invalid and replay should
-fail for that session rather than silently skipping the event.
+call in fold state, that agent log is semantically invalid and replay should
+fail for that agent rather than silently skipping the event.
 
 ## Tool Round Semantics
 
@@ -190,19 +190,19 @@ When a prompt arrives during an open tool round:
 
 When the round completes successfully:
 
-- the harness emits durable `SessionPromptSteered` event(s)
+- the harness emits durable `AgentPromptSteered` event(s)
 - each folds as a normal user-input node after the just-completed
   `ToolResultsNode`
 
 When the round is cancelled:
 
 - queued steering prompts are cancelled too
-- no `SessionPromptSteered` event is emitted
+- no `AgentPromptSteered` event is emitted
 
 Queued prompts are allowed to disappear on harness restart before they are
 steered. That is acceptable.
 
-`SessionPromptQueued` is therefore only operational information and should not
+`AgentPromptQueued` is therefore only operational information and should not
 be durable transcript state.
 
 ## Cancellation And Resume
@@ -224,7 +224,7 @@ treated as cancelled rather than resumed silently.
 
 Standalone compaction is the only transcript boundary.
 
-- `SessionCompacted` folds to `CompactionNode { replacement_window }`
+- `AgentCompacted` folds to `CompactionNode { replacement_window }`
 - request assembly stops walking older history at that boundary
 - previous-response chaining does not cross that boundary
 
@@ -274,7 +274,7 @@ Side conversations keep their own transcript branches.
 The architecture should continue to rely on:
 
 - tree parentage for folded nodes
-- `session_prompt_id` for prompt/response ownership
+- `agent_prompt_id` for prompt/response ownership
 - globally unique `call_id` for tool-call/result matching
 - runtime-local conversation routing in the harness
 
@@ -291,10 +291,10 @@ For now, existing behavior may be preserved there and improved later.
 
 ## Summary Invariants
 
-- Durable per-session protocol events are the source of truth.
+- Durable per-agent protocol events are the transcript source of truth.
 - Transcript projection is deterministic.
 - Assistant output order is preserved exactly.
-- `ToolRequest` is persisted but not used to reconstruct transcript tool calls.
+- Provider responses, not `ToolRequest`, reconstruct transcript tool calls.
 - One conversation has at most one unresolved tool round at a time.
 - `ToolResultsNode` is emitted only when that round is terminal.
 - `ToolResultsNode` is the direct child of the `AssistantResponseNode` it

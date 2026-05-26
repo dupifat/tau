@@ -130,46 +130,50 @@ fn representative_events() -> Vec<Event> {
         Event::UiNewAgent(UiNewAgent {
             session_id: "s1".into(),
         }),
-        Event::UiAgentStateRequest(UiAgentStateRequest {
-            session_id: "s1".into(),
-            agent_id: "engineer_abcd1234".to_owned(),
-            action: UiAgentStateAction::Suspend,
-        }),
-        Event::AgentMessage(AgentMessage {
-            session_id: "s1".into(),
-            sender_id: "engineer_abcd1234".to_owned(),
-            recipient_id: "user".to_owned(),
+        Event::AgentMessageSent(AgentMessageSent {
+            message_id: "msg-1".into(),
+            sender_id: "engineer_abcd1234".into(),
+            recipient: AgentMessageRecipient::User,
             message: "hello".to_owned(),
+        }),
+        Event::AgentMessageReceived(AgentMessageReceived {
+            message_id: "msg-2".into(),
+            sender_id: "engineer_abcd1234".into(),
+            recipient_id: "reviewer_efgh5678".into(),
+            message: "hello back".to_owned(),
         }),
         Event::SessionStarted(SessionStarted {
             session_id: "s1".into(),
             reason: SessionStartReason::Initial,
         }),
-        Event::SessionAgentStateChanged(SessionAgentStateChanged {
+        Event::SessionAgentLoaded(SessionAgentLoaded {
             session_id: "s1".into(),
-            agent_id: "engineer_abcd1234".to_owned(),
-            state: AgentState::ActiveDelegated,
+            agent_id: "engineer_abcd1234".into(),
         }),
-        Event::SessionCompactionStarted(SessionCompactionStarted {
-            session_id: "s1".into(),
-            target_agent_id: None,
+        Event::AgentPromptSubmitted(AgentPromptSubmitted {
+            agent_id: "engineer_abcd1234".into(),
+            text: "hello".to_owned(),
+            message_class: PromptMessageClass::User,
+            originator: PromptOriginator::User,
+            ctx_id: None,
+        }),
+        Event::AgentCompactionStarted(AgentCompactionStarted {
+            agent_id: "engineer_abcd1234".into(),
             originator: PromptOriginator::User,
             original_input_tokens: None,
         }),
-        Event::SessionCompactionFinished(SessionCompactionFinished {
-            session_id: "s1".into(),
-            target_agent_id: None,
+        Event::AgentCompactionFinished(AgentCompactionFinished {
+            agent_id: "engineer_abcd1234".into(),
             originator: PromptOriginator::User,
             original_input_tokens: None,
             compacted_input_tokens: None,
-            outcome: SessionCompactionOutcome::Succeeded,
+            outcome: AgentCompactionOutcome::Succeeded,
             message: None,
         }),
-        Event::SessionCompactionRequested(SessionCompactionRequested {
-            prompt: SessionPromptCreated {
-                session_prompt_id: "sp-compact-1".into(),
-                session_id: "s1".into(),
-                target_agent_id: None,
+        Event::AgentCompactionRequested(AgentCompactionRequested {
+            prompt: AgentPromptCreated {
+                agent_prompt_id: "sp-compact-1".into(),
+                agent_id: "engineer_abcd1234".into(),
                 system_prompt: "You are helpful.".to_owned(),
                 context_items: vec![user_text_item("compact this")],
                 tools: Vec::new(),
@@ -186,10 +190,9 @@ fn representative_events() -> Vec<Event> {
                 previous_response_candidate: None,
             },
         }),
-        Event::SessionPromptCreated(SessionPromptCreated {
-            session_prompt_id: "sp-1".into(),
-            session_id: "s1".into(),
-            target_agent_id: None,
+        Event::AgentPromptCreated(AgentPromptCreated {
+            agent_prompt_id: "sp-1".into(),
+            agent_id: "engineer_abcd1234".into(),
             system_prompt: "You are helpful.".to_owned(),
             context_items: vec![user_text_item("hello")],
             tools: vec![ToolDefinition {
@@ -209,15 +212,15 @@ fn representative_events() -> Vec<Event> {
             previous_response_candidate: None,
             share_user_cache_key: false,
         }),
-        Event::SessionPromptTerminated(SessionPromptTerminated {
-            session_id: "s1".into(),
-            session_prompt_id: "sp-stale".into(),
-            reason: SessionPromptTerminationReason::Stale,
+        Event::AgentPromptTerminated(AgentPromptTerminated {
+            agent_id: "engineer_abcd1234".into(),
+            agent_prompt_id: "sp-stale".into(),
+            reason: AgentPromptTerminationReason::Stale,
             originator: PromptOriginator::User,
         }),
         Event::ProviderResponseFinished(ProviderResponseFinished {
-            session_prompt_id: "sp-1".into(),
-            target_agent_id: None,
+            agent_prompt_id: "sp-1".into(),
+            agent_id: "engineer_abcd1234".into(),
             output_items: vec![ContextItem::Message(MessageItem {
                 role: ContextRole::Assistant,
                 content: vec![ContentPart::Text {
@@ -438,16 +441,26 @@ fn event_name_round_trips_from_string() {
 }
 
 #[test]
-fn agent_message_event_name_and_persistence_default() {
-    let event = Event::AgentMessage(AgentMessage {
-        session_id: "s1".into(),
-        sender_id: "engineer_abcd1234".to_owned(),
-        recipient_id: "user".to_owned(),
+fn agent_message_events_have_names_and_persistence_defaults() {
+    let sent = Event::AgentMessageSent(AgentMessageSent {
+        message_id: "msg-1".into(),
+        sender_id: "engineer_abcd1234".into(),
+        recipient: AgentMessageRecipient::User,
         message: "hello".to_owned(),
     });
-    assert_eq!(event.name(), EventName::AGENT_MESSAGE);
-    assert_eq!(event.name().to_string(), "agent.message");
-    assert!(!event.defaults_to_transient());
+    assert_eq!(sent.name(), EventName::AGENT_MESSAGE_SENT);
+    assert_eq!(sent.name().to_string(), "agent.message_sent");
+    assert!(!sent.defaults_to_transient());
+
+    let received = Event::AgentMessageReceived(AgentMessageReceived {
+        message_id: "msg-2".into(),
+        sender_id: "engineer_abcd1234".into(),
+        recipient_id: "reviewer_efgh5678".into(),
+        message: "hello back".to_owned(),
+    });
+    assert_eq!(received.name(), EventName::AGENT_MESSAGE_RECEIVED);
+    assert_eq!(received.name().to_string(), "agent.message_received");
+    assert!(!received.defaults_to_transient());
 }
 
 #[test]
@@ -587,20 +600,20 @@ fn provider_models_updated_name_matches_wire_family() {
 
 #[test]
 fn execution_events_use_provider_wire_family() {
-    // Provider extensions own execution in the new architecture. Keep the old
-    // payload structs during the transition, but hard-switch the public event
-    // names so subscribers stop depending on the legacy `agent.*` family.
+    // Provider extensions own execution status; agent transcript events use
+    // `agent.*`, but provider execution progress remains in the `provider.*`
+    // family so subscribers can route it separately.
     let cases = [
         (
             Event::ProviderPromptSubmitted(ProviderPromptSubmitted {
-                session_prompt_id: "sp-1".into(),
+                agent_prompt_id: "sp-1".into(),
                 originator: PromptOriginator::User,
             }),
             "provider.prompt_submitted",
         ),
         (
             Event::ProviderResponseUpdated(ProviderResponseUpdated {
-                session_prompt_id: "sp-1".into(),
+                agent_prompt_id: "sp-1".into(),
                 text: "hello".to_owned(),
                 thinking: None,
                 originator: PromptOriginator::User,
@@ -609,8 +622,8 @@ fn execution_events_use_provider_wire_family() {
         ),
         (
             Event::ProviderResponseFinished(ProviderResponseFinished {
-                session_prompt_id: "sp-1".into(),
-                target_agent_id: None,
+                agent_prompt_id: "sp-1".into(),
+                agent_id: "engineer_abcd1234".into(),
                 stop_reason: ProviderStopReason::EndTurn,
                 originator: PromptOriginator::User,
                 ..ProviderResponseFinished::default()
@@ -751,13 +764,13 @@ fn frame_peel_log_passes_non_log_frames_through_unchanged() {
 #[test]
 fn event_defaults_to_transient_marks_progress_kinds() {
     // The set named by `defaults_to_transient` is the contract the
-    // harness relies on to decide which events skip the durable
-    // session event log when an extension publishes them without
-    // explicit transient metadata. Lock it down here so any future
+    // harness relies on to decide which events skip durable semantic
+    // logs when a component publishes them without explicit transient
+    // metadata. Lock it down here so any future
     // edit to the matcher is intentional.
     let transient = [
         Event::ProviderResponseUpdated(ProviderResponseUpdated {
-            session_prompt_id: "sp-1".into(),
+            agent_prompt_id: "sp-1".into(),
             text: "partial".to_owned(),
             thinking: None,
             originator: PromptOriginator::User,
@@ -800,44 +813,43 @@ fn event_defaults_to_transient_marks_progress_kinds() {
             session_id: "s1".into(),
             text: "draft".to_owned(),
         }),
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "hi".to_owned(),
+            target_agent_id: None,
+            message_class: PromptMessageClass::User,
+            originator: PromptOriginator::User,
+            ctx_id: None,
+        }),
         Event::UiNewAgent(UiNewAgent {
             session_id: "s1".into(),
         }),
-        Event::UiAgentStateRequest(UiAgentStateRequest {
-            session_id: "s1".into(),
-            agent_id: "worker".to_owned(),
-            action: UiAgentStateAction::Suspend,
-        }),
-        Event::SessionCompactionStarted(SessionCompactionStarted {
-            session_id: "s1".into(),
-            target_agent_id: None,
+        Event::AgentCompactionStarted(AgentCompactionStarted {
+            agent_id: "worker".into(),
             originator: PromptOriginator::User,
             original_input_tokens: None,
         }),
-        Event::SessionCompactionFinished(SessionCompactionFinished {
-            session_id: "s1".into(),
-            target_agent_id: None,
+        Event::AgentCompactionFinished(AgentCompactionFinished {
+            agent_id: "worker".into(),
             originator: PromptOriginator::User,
             original_input_tokens: None,
             compacted_input_tokens: None,
-            outcome: SessionCompactionOutcome::Succeeded,
+            outcome: AgentCompactionOutcome::Succeeded,
             message: None,
         }),
-        Event::SessionPromptQueued(SessionPromptQueued {
-            session_id: "s1".into(),
+        Event::AgentPromptQueued(AgentPromptQueued {
+            agent_id: "worker".into(),
             text: "queued".to_owned(),
-            target_agent_id: Some("worker".to_owned()),
             message_class: PromptMessageClass::User,
         }),
-        Event::SessionPromptRecalled(SessionPromptRecalled {
-            session_id: "s1".into(),
+        Event::AgentPromptRecalled(AgentPromptRecalled {
+            agent_id: "worker".into(),
             text: "queued".to_owned(),
-            target_agent_id: Some("worker".to_owned()),
         }),
-        Event::SessionPromptTerminated(SessionPromptTerminated {
-            session_id: "s1".into(),
-            session_prompt_id: "sp-stale".into(),
-            reason: SessionPromptTerminationReason::Stale,
+        Event::AgentPromptTerminated(AgentPromptTerminated {
+            agent_id: "worker".into(),
+            agent_prompt_id: "sp-stale".into(),
+            reason: AgentPromptTerminationReason::Stale,
             originator: PromptOriginator::User,
         }),
     ];
@@ -854,18 +866,16 @@ fn event_defaults_to_transient_marks_progress_kinds() {
             session_id: "s1".into(),
             reason: SessionStartReason::Initial,
         }),
-        Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
+        Event::AgentPromptSubmitted(AgentPromptSubmitted {
+            agent_id: "worker".into(),
             text: "hi".to_owned(),
-            target_agent_id: None,
             message_class: PromptMessageClass::User,
             originator: PromptOriginator::User,
             ctx_id: None,
         }),
-        Event::SessionAgentStateChanged(SessionAgentStateChanged {
+        Event::SessionAgentLoaded(SessionAgentLoaded {
             session_id: "s1".into(),
-            agent_id: "worker".to_owned(),
-            state: AgentState::Suspended,
+            agent_id: "worker".into(),
         }),
     ];
     for event in &durable {
@@ -891,27 +901,34 @@ fn tool_result_kind_defaults_to_final_for_legacy_events() {
 }
 
 #[test]
-fn prompt_message_class_defaults_to_user_for_legacy_events() {
+fn prompt_message_class_defaults_to_user_when_omitted() {
     let prompt: UiPromptSubmitted = serde_json::from_value(serde_json::json!({
         "session_id": "s1",
         "text": "legacy",
         "originator": { "kind": "user" }
     }))
-    .expect("legacy ui prompt decodes");
+    .expect("ui prompt decodes");
     assert_eq!(prompt.message_class, PromptMessageClass::User);
     assert!(!prompt.message_class.is_internal());
 
-    let queued: SessionPromptQueued = serde_json::from_value(serde_json::json!({
-        "session_id": "s1",
-        "text": "legacy queued"
+    let submitted: AgentPromptSubmitted = serde_json::from_value(serde_json::json!({
+        "agent_id": "worker",
+        "text": "submitted"
     }))
-    .expect("legacy queued prompt decodes");
+    .expect("agent prompt decodes");
+    assert_eq!(submitted.message_class, PromptMessageClass::User);
+    assert_eq!(submitted.originator, PromptOriginator::User);
+
+    let queued: AgentPromptQueued = serde_json::from_value(serde_json::json!({
+        "agent_id": "worker",
+        "text": "queued"
+    }))
+    .expect("queued prompt decodes");
     assert_eq!(queued.message_class, PromptMessageClass::User);
 
-    let internal = serde_json::to_value(SessionPromptSteered {
-        session_id: "s1".into(),
+    let internal = serde_json::to_value(AgentPromptSteered {
+        agent_id: "worker".into(),
         text: "[tau-internal] Tool call `bg` is complete.".into(),
-        target_agent_id: None,
         message_class: PromptMessageClass::Internal,
     })
     .expect("serialize steered prompt");
@@ -1085,15 +1102,12 @@ fn tool_register_prompt_is_optional_and_round_trips_when_present() {
     assert_eq!(decoded, with_prompt);
 }
 
-/// Older extensions did not send `execution_mode` or `role` on
-/// `StartAgentRequest`. The harness-owned global sub-agent scheduler must treat
-/// the mode as Shared and leave role selection to the harness compatibility
-/// path.
+/// `StartAgentRequest` defaults execution mode to Shared and leaves role
+/// selection to the harness when omitted.
 #[test]
 fn start_agent_request_execution_mode_defaults_to_shared() {
     let parsed: StartAgentRequest = serde_json::from_value(serde_json::json!({
         "query_id": "q1",
-        "agent_id": "agent-q1",
         "instruction": "summarize"
     }))
     .expect("deserialize start-agent request");
@@ -1102,7 +1116,6 @@ fn start_agent_request_execution_mode_defaults_to_shared() {
 
     let exclusive: StartAgentRequest = serde_json::from_value(serde_json::json!({
         "query_id": "q2",
-        "agent_id": "agent-q2",
         "instruction": "mutate carefully",
         "execution_mode": "exclusive"
     }))
@@ -1111,7 +1124,6 @@ fn start_agent_request_execution_mode_defaults_to_shared() {
 
     let update: StartAgentRequest = serde_json::from_value(serde_json::json!({
         "query_id": "q3",
-        "agent_id": "agent-q3",
         "instruction": "edit carefully",
         "execution_mode": "update"
     }))

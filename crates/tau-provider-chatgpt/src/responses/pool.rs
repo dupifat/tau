@@ -392,7 +392,7 @@ pub fn run_turn_through_pool(
     pool: &mut WsPool,
     config: &ResponsesConfig,
     session_id: &str,
-    session_prompt_id: &str,
+    agent_prompt_id: &str,
     request: &crate::common::PromptPayload<'_>,
     on_update: &mut impl FnMut(&str, Option<&str>),
 ) -> Result<crate::common::StreamState, WsTurnError> {
@@ -401,7 +401,7 @@ pub fn run_turn_through_pool(
     // First attempt: prefer a warm cached connection so the
     // connection-local chain cache stays useful.
     if let Some(mut conn) = pool.checkout(&key, &config.api_key) {
-        match conn.run_turn(config, session_prompt_id, request, on_update) {
+        match conn.run_turn(config, agent_prompt_id, request, on_update) {
             Ok(state) => {
                 pool.release(key, conn);
                 return Ok(state);
@@ -444,7 +444,7 @@ pub fn run_turn_through_pool(
             "fresh Codex WS socket; stripping previous_response_id from outgoing request",
         );
     }
-    match conn.run_turn(config, session_prompt_id, &fresh_request, on_update) {
+    match conn.run_turn(config, agent_prompt_id, &fresh_request, on_update) {
         Ok(state) => {
             pool.release(key, conn);
             Ok(state)
@@ -464,7 +464,7 @@ pub fn run_turn_through_pool(
 pub fn run_turn_through_shared_pool(
     pool: &SharedWsPool,
     config: &ResponsesConfig,
-    session_prompt_id: &str,
+    agent_prompt_id: &str,
     request: &crate::common::PromptPayload<'_>,
     should_abort: &mut impl FnMut() -> bool,
     on_update: &mut impl FnMut(&str, Option<&str>),
@@ -477,7 +477,7 @@ pub fn run_turn_through_shared_pool(
             pool.release(key, conn)?;
             return Err(WsTurnError::Canceled);
         }
-        match conn.run_turn(config, session_prompt_id, request, on_update) {
+        match conn.run_turn(config, agent_prompt_id, request, on_update) {
             Ok(state) => {
                 pool.release(key, conn)?;
                 return Ok(state);
@@ -528,7 +528,7 @@ pub fn run_turn_through_shared_pool(
         );
     }
     let fresh_request = without_previous_response(request);
-    match conn.run_turn(config, session_prompt_id, &fresh_request, on_update) {
+    match conn.run_turn(config, agent_prompt_id, &fresh_request, on_update) {
         Ok(state) => {
             pool.release(key, conn)?;
             Ok(state)

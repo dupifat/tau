@@ -4,19 +4,18 @@
 //! events, two replay paths catch it up. Extension subscriptions do not
 //! enter these paths today; their `Subscribe` only changes live routing.
 //!
-//! - [`Harness::replay_session_events`] pulls durable transcript facts from the
-//!   per-session log via [`crate::SessionStore`], filtering on the new
-//!   subscriber's selectors and on
-//!   [`should_replay_session_event_to_late_subscriber`].
+//! - [`Harness::replay_session_events`] announces the current loaded-agent
+//!   snapshot, then replays each loaded agent's durable transcript facts from
+//!   the global agent store.
 //! - [`Harness::replay_harness_info`] re-emits harness/extension lifecycle
 //!   events from the in-memory [`crate::event_log::EventLog`], plus the current
 //!   model / effort / context-usage state, so a UI that just joined sees the
 //!   same banners and indicators as one that was here from the start.
 
 use tau_proto::{
-    ActionSchemaPublished, Event, EventSelector, Frame, HarnessContextUsageChanged,
-    HarnessModelsAvailable, HarnessRoleSelected, HarnessRolesAvailable, Message,
-    SessionPromptQueued,
+    ActionSchemaPublished, AgentPromptQueued, Event, EventSelector, Frame,
+    HarnessContextUsageChanged, HarnessModelsAvailable, HarnessRoleSelected, HarnessRolesAvailable,
+    Message,
 };
 
 use crate::harness::{Harness, selector_matches_event};
@@ -27,19 +26,38 @@ use crate::model::{
 
 impl Harness {
     pub(crate) fn replay_session_events(&mut self, client_id: &str, selectors: &[EventSelector]) {
-        let Ok(events) = self.store.session_events(self.current_session_id.as_str()) else {
-            return;
+        let loaded_agents: Vec<tau_proto::AgentId> = {
+            match self.store.load_session(self.current_session_id.as_str()) {
+                Ok(Some(membership)) => membership.loaded_agents().into_iter().cloned().collect(),
+                _ => Vec::new(),
+            }
         };
-        for entry in events {
-            if selector_matches_event(selectors, &entry.event)
-                && should_replay_session_event_to_late_subscriber(&entry.event)
-            {
-                let frame = Frame::Message(Message::LogEvent(tau_proto::LogEvent {
-                    id: entry.id,
-                    recorded_at: entry.recorded_at,
-                    event: Box::new(entry.event),
-                }));
-                let _ = self.bus.send_to(client_id, entry.source.as_deref(), frame);
+
+        for agent_id in &loaded_agents {
+            let event = Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                session_id: self.current_session_id.clone(),
+                agent_id: agent_id.clone(),
+            });
+            if selector_matches_event(selectors, &event) {
+                let _ = self.bus.send_to(client_id, None, Frame::Event(event));
+            }
+        }
+
+        for agent_id in loaded_agents {
+            let Ok(events) = self.agent_store.agent_events(agent_id.as_str()) else {
+                continue;
+            };
+            for entry in events {
+                if selector_matches_event(selectors, &entry.event)
+                    && should_replay_agent_event_to_late_subscriber(&entry.event)
+                {
+                    let frame = Frame::Message(Message::LogEvent(tau_proto::LogEvent {
+                        id: entry.id,
+                        recorded_at: entry.recorded_at,
+                        event: Box::new(entry.event),
+                    }));
+                    let _ = self.bus.send_to(client_id, entry.source.as_deref(), frame);
+                }
             }
         }
         self.replay_active_queued_prompts(client_id, selectors);
@@ -47,20 +65,22 @@ impl Harness {
 
     fn replay_active_queued_prompts(&mut self, client_id: &str, selectors: &[EventSelector]) {
         let mut agent_by_conversation = std::collections::HashMap::new();
-        for (agent_id, conversation_id) in &self.agent_conversations {
+        for (agent_id, conversation_id) in &self.agent_routes {
             agent_by_conversation.insert(conversation_id.clone(), agent_id.clone());
         }
 
-        for (conversation_id, conversation) in &self.conversations {
+        for (conversation_id, conversation) in &self.agents {
             if conversation.session_id != self.current_session_id {
                 continue;
             }
             let target_agent_id = agent_by_conversation.get(conversation_id).cloned();
             for prompt in &conversation.pending_prompts {
-                let event = Event::SessionPromptQueued(SessionPromptQueued {
-                    session_id: conversation.session_id.clone(),
+                let Some(agent_id) = target_agent_id.clone() else {
+                    continue;
+                };
+                let event = Event::AgentPromptQueued(AgentPromptQueued {
+                    agent_id: agent_id.into(),
                     text: prompt.text.clone(),
-                    target_agent_id: target_agent_id.clone(),
                     message_class: prompt.message_class,
                 });
                 if selector_matches_event(selectors, &event) {
@@ -73,12 +93,9 @@ impl Harness {
     /// Replays harness info and extension lifecycle events to a
     /// late-joining client.
     ///
-    /// Events that are persisted to the durable per-session log
-    /// (`ExtAgentsMdAvailable`, `ExtensionContextReady`, …) are
-    /// intentionally NOT replayed here — `replay_session_events`
-    /// already delivers them from the durable log on the same
-    /// subscribe. Including them here too caused the CLI to render
-    /// each "loaded: …" / "session context ready" line twice.
+    /// Runtime-only extension setup events are intentionally NOT replayed here.
+    /// The transcript catch-up path above comes from durable agent logs, while
+    /// this method only reconstructs current harness status snapshots.
     pub(crate) fn replay_harness_info(&mut self, client_id: &str, selectors: &[EventSelector]) {
         let mut cursor = 0;
         while let Some(entry) = self.event_log.get_next_from(cursor) {
@@ -233,33 +250,23 @@ impl Harness {
     }
 }
 
-fn should_replay_session_event_to_late_subscriber(event: &Event) -> bool {
-    // Replay final, durable transcript facts, not progress. In
-    // particular, skip `ProviderResponseUpdated` streaming chunks and
-    // `SessionPromptCreated` pending markers, but keep
-    // `UiPromptSubmitted`, `ProviderResponseFinished`, and completed
-    // compaction facts so a resumed UI can reconstruct completed turns.
+fn should_replay_agent_event_to_late_subscriber(event: &Event) -> bool {
+    // Replay final, durable transcript facts, not progress. In particular, skip
+    // provider streaming chunks and prompt-created pending markers, but keep the
+    // agent-owned user/assistant/tool facts needed to reconstruct transcript UI.
     matches!(
         event,
-        Event::UiPromptSubmitted(_)
-            | Event::SessionPromptSteered(_)
-            | Event::SessionUserMessageInjected(_)
-            | Event::AgentMessage(_)
-            | Event::ToolStarted(_)
-            | Event::ToolRejected(_)
-            | Event::ToolResult(_)
-            | Event::ToolError(_)
+        Event::AgentPromptSubmitted(_)
+            | Event::AgentPromptSteered(_)
+            | Event::AgentUserMessageInjected(_)
+            | Event::AgentMessageSent(_)
+            | Event::AgentMessageReceived(_)
+            | Event::ProviderToolResult(_)
+            | Event::ProviderToolError(_)
             | Event::ToolBackgroundResult(_)
             | Event::ToolBackgroundError(_)
             | Event::ToolCancelled(_)
-            | Event::ShellCommandFinished(_)
-            | Event::SessionStarted(_)
-            | Event::SessionAgentStateChanged(_)
-            | Event::SessionCompacted(_)
-            | Event::SessionShutdown(_)
-            | Event::ExtAgentsMdAvailable(_)
-            | Event::ExtensionContextReady(_)
-            | Event::ExtensionEvent(_)
+            | Event::AgentCompacted(_)
             | Event::ProviderResponseFinished(_)
     )
 }

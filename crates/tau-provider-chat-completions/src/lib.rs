@@ -5,10 +5,10 @@ use std::io::{BufRead, BufReader, Write};
 
 use serde::{Deserialize, Serialize};
 use tau_proto::{
-    ContentPart, ContextItem, ContextRole, Event, Frame, FrameWriter, ModelId, ModelName,
-    ProviderBackend, ProviderBackendKind, ProviderBackendTransport, ProviderModelInfo,
+    AgentPromptId, ContentPart, ContextItem, ContextRole, Event, Frame, FrameWriter, ModelId,
+    ModelName, ProviderBackend, ProviderBackendKind, ProviderBackendTransport, ProviderModelInfo,
     ProviderName, ProviderResponseFinished, ProviderResponseUpdated, ProviderStopReason,
-    ProviderTokenUsage, SessionPromptId, ThinkingSummary, ToolCallItem, ToolChoice, ToolDefinition,
+    ProviderTokenUsage, ThinkingSummary, ToolCallItem, ToolChoice, ToolDefinition,
     ToolResponseHeader, ToolResultStatus, ToolType,
 };
 
@@ -99,8 +99,8 @@ impl ChatCompletionsCompat {
 }
 
 fn run_prompt<W: Write>(
-    session_prompt_id: &SessionPromptId,
-    prompt: &tau_proto::SessionPromptCreated,
+    agent_prompt_id: &AgentPromptId,
+    prompt: &tau_proto::AgentPromptCreated,
     provider: ResolvedProvider,
     model: ChatCompletionsModel,
     writer: &mut FrameWriter<W>,
@@ -108,7 +108,7 @@ fn run_prompt<W: Write>(
     let mut on_update = |text: &str, thinking: Option<&str>| {
         let _ = writer.write_frame(&Frame::Event(Event::ProviderResponseUpdated(
             ProviderResponseUpdated {
-                session_prompt_id: session_prompt_id.clone(),
+                agent_prompt_id: agent_prompt_id.clone(),
                 text: text.to_owned(),
                 thinking: thinking.map(str::to_owned),
                 originator: prompt.originator.clone(),
@@ -117,22 +117,22 @@ fn run_prompt<W: Write>(
         let _ = writer.flush();
     };
     match chat_completions_stream(&provider, &model, prompt, &mut on_update) {
-        Ok(state) => finish_success(session_prompt_id, prompt, &provider, state),
-        Err(error) => finish_error(session_prompt_id, prompt, &provider, error),
+        Ok(state) => finish_success(agent_prompt_id, prompt, &provider, state),
+        Err(error) => finish_error(agent_prompt_id, prompt, &provider, error),
     }
 }
 
 /// Runs one prompt against a registered Chat Completions-compatible provider
 /// profile.
 pub fn run_prompt_for_provider<W: Write>(
-    session_prompt_id: &SessionPromptId,
-    prompt: &tau_proto::SessionPromptCreated,
+    agent_prompt_id: &AgentPromptId,
+    prompt: &tau_proto::AgentPromptCreated,
     provider: &ChatCompletionsProvider,
     model: &ChatCompletionsModel,
     writer: &mut FrameWriter<W>,
 ) -> ProviderResponseFinished {
     run_prompt(
-        session_prompt_id,
+        agent_prompt_id,
         prompt,
         ResolvedProvider {
             base_url: provider.base_url.clone(),
@@ -286,7 +286,7 @@ struct ToolCallAccumulator {
 fn chat_completions_stream(
     provider: &ResolvedProvider,
     model: &ChatCompletionsModel,
-    prompt: &tau_proto::SessionPromptCreated,
+    prompt: &tau_proto::AgentPromptCreated,
     on_update: &mut impl FnMut(&str, Option<&str>),
 ) -> Result<StreamState, LlmError> {
     let url = format!(
@@ -360,7 +360,7 @@ struct StreamOptions {
 fn build_request(
     provider: &ResolvedProvider,
     model: &ChatCompletionsModel,
-    prompt: &tau_proto::SessionPromptCreated,
+    prompt: &tau_proto::AgentPromptCreated,
 ) -> ChatRequest {
     let mut messages = Vec::new();
     if !prompt.system_prompt.trim().is_empty() {
@@ -394,7 +394,7 @@ fn build_request(
         prompt_cache_key: provider
             .compat
             .prompt_cache_key
-            .then(|| format!("tau:{}", prompt.session_id)),
+            .then(|| format!("tau:{}", prompt.agent_id)),
         reasoning_effort: provider
             .compat
             .reasoning_effort
@@ -642,14 +642,14 @@ fn capture_usage(state: &mut StreamState, usage: &serde_json::Value) {
 }
 
 fn finish_success(
-    session_prompt_id: &SessionPromptId,
-    prompt: &tau_proto::SessionPromptCreated,
+    agent_prompt_id: &AgentPromptId,
+    prompt: &tau_proto::AgentPromptCreated,
     provider: &ResolvedProvider,
     state: StreamState,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
-        session_prompt_id: session_prompt_id.clone(),
-        target_agent_id: None,
+        agent_prompt_id: agent_prompt_id.clone(),
+        agent_id: prompt.agent_id.clone(),
         output_items: state.output_items(),
         stop_reason: state.stop_reason,
         originator: prompt.originator.clone(),
@@ -661,14 +661,14 @@ fn finish_success(
 }
 
 fn finish_error(
-    session_prompt_id: &SessionPromptId,
-    prompt: &tau_proto::SessionPromptCreated,
+    agent_prompt_id: &AgentPromptId,
+    prompt: &tau_proto::AgentPromptCreated,
     provider: &ResolvedProvider,
     error: LlmError,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
-        session_prompt_id: session_prompt_id.clone(),
-        target_agent_id: None,
+        agent_prompt_id: agent_prompt_id.clone(),
+        agent_id: prompt.agent_id.clone(),
         output_items: vec![assistant_text_item(format!("LLM error: {error}"))],
         stop_reason: ProviderStopReason::Error,
         originator: prompt.originator.clone(),

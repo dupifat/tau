@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
-use tau_core::{PolicyStore, SessionEntry, SessionStore, SessionStoreError, SessionTree};
+use tau_core::{AgentEntry, PolicyStore, SessionMembership, SessionStore, SessionStoreError};
 use tau_proto::{
     CborValue, ContentPart, ContextItem, EventSelector, ToolCallItem, ToolResultStatus,
 };
@@ -90,10 +90,10 @@ pub fn session_lines(
         return Ok(vec![format!("session {session_id} not found")]);
     };
     Ok(tree
-        .current_branch()
+        .loaded_agents()
         .into_iter()
         .enumerate()
-        .map(|(i, e)| format!("{}: {}", i + 1, format_session_entry(e)))
+        .map(|(i, agent_id)| format!("{}: loaded agent {}", i + 1, agent_id))
         .collect())
 }
 
@@ -107,15 +107,8 @@ pub fn session_list_lines(path: impl AsRef<Path>) -> Result<Vec<String>, Inspect
     Ok(sessions
         .into_iter()
         .map(|s| {
-            let branch = s.current_branch();
-            format!(
-                "{} ({} entries){}",
-                s.session_id(),
-                branch.len(),
-                latest_agent_preview(s)
-                    .map(|p| format!(": {p}"))
-                    .unwrap_or_default()
-            )
+            let loaded = s.loaded_agents();
+            format!("{} ({} loaded agent(s))", s.session_id(), loaded.len())
         })
         .collect())
 }
@@ -150,20 +143,20 @@ pub fn policy_lines(path: impl AsRef<Path>) -> Result<Vec<String>, InspectError>
 /// Pretty-print one session entry for line-oriented inspection output
 /// (`tau session show`, `/tree`, debug log).
 #[must_use]
-pub fn format_session_entry(entry: &SessionEntry) -> String {
+pub fn format_session_entry(entry: &AgentEntry) -> String {
     match entry {
-        SessionEntry::UserInput { items } => {
+        AgentEntry::UserInput { items } => {
             format!("user: {}", first_message_text(items).unwrap_or_default())
         }
-        SessionEntry::Compaction { replacement_window } => {
+        AgentEntry::Compaction { replacement_window } => {
             format!("compacted: {} item(s)", replacement_window.len())
         }
-        SessionEntry::AssistantResponse { output_items, .. } => {
+        AgentEntry::AssistantResponse { output_items, .. } => {
             let body =
                 assistant_output_preview(output_items).unwrap_or_else(|| "(no text)".to_owned());
             format!("agent: {body}")
         }
-        SessionEntry::ToolResults { items } => {
+        AgentEntry::ToolResults { items } => {
             if items.is_empty() {
                 return "tool.result (empty)".to_owned();
             };
@@ -172,6 +165,15 @@ pub fn format_session_entry(entry: &SessionEntry) -> String {
                 .map(format_tool_result_item)
                 .collect::<Vec<_>>()
                 .join("; ")
+        }
+        AgentEntry::AgentMessage {
+            direction, message, ..
+        } => {
+            let event_name = match direction {
+                tau_core::AgentMessageDirection::Outbound => "agent.message_sent",
+                tau_core::AgentMessageDirection::Inbound => "agent.message_received",
+            };
+            format!("{event_name}: {message}")
         }
     }
 }
@@ -192,18 +194,8 @@ fn format_tool_result_item(item: &tau_proto::ToolResultItem) -> String {
 }
 
 #[must_use]
-pub fn latest_agent_preview(session: &SessionTree) -> Option<String> {
-    session
-        .current_branch()
-        .into_iter()
-        .rev()
-        .find_map(|e| match e {
-            SessionEntry::AssistantResponse { output_items, .. } => {
-                assistant_output_preview(output_items)
-            }
-            SessionEntry::Compaction { .. } => None,
-            _ => None,
-        })
+pub fn latest_agent_preview(_session: &SessionMembership) -> Option<String> {
+    None
 }
 
 fn assistant_output_preview(items: &[ContextItem]) -> Option<String> {

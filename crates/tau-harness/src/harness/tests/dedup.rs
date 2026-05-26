@@ -2,7 +2,7 @@
 //!
 //! Each test drives `Harness::handle_extension_event` with synthetic
 //! `ToolResult` / `ToolError` frames and inspects the persisted
-//! session tree to verify that the recorded entry is either the
+//! agent tree to verify that the recorded entry is either the
 //! original content or a `[tau-internal]` pointer back to the first
 //! occurrence on the conversation's branch.
 
@@ -12,23 +12,23 @@ use crate::dedup::DEFAULT_THRESHOLD_BYTES;
 use crate::harness::PendingTool;
 
 /// Drive a single `ToolResult` through the harness's normal intake
-/// path (registers the call_id with `tool_conversations`,
+/// path (registers the call_id with `tool_agents`,
 /// `pending_tools`, and a `ToolsRunning` turn state, then sends
 /// the result via `handle_extension_event`). Returns the recorded
-/// `ToolResultItem` for the call from the session tree.
+/// `ToolResultItem` for the call from the agent tree.
 fn run_tool_result(
     h: &mut Harness,
-    session_id: &str,
-    cid: &crate::conversation::ConversationId,
+    _session_id: &str,
+    cid: &crate::AgentId,
     call_id: &str,
     tool_name: &str,
     result: CborValue,
 ) -> ToolResultItem {
     let call_id_typed: ToolCallId = call_id.into();
+    let _ = h.ensure_agent_id_for_agent(cid);
     let name = ToolName::new(tool_name);
     seed_assistant_tool_round(h, cid, &[(call_id, tool_name)]);
-    h.tool_conversations
-        .insert(call_id_typed.clone(), cid.clone());
+    h.tool_agents.insert(call_id_typed.clone(), cid.clone());
     h.pending_tools.insert(
         call_id_typed.clone(),
         PendingTool {
@@ -51,12 +51,17 @@ fn run_tool_result(
     )
     .expect("tool result");
 
-    let tree = h.store.session(session_id).expect("session tree");
+    let agent_id = h
+        .agents
+        .get(cid)
+        .and_then(|conv| conv.agent_id.as_deref())
+        .expect("conversation agent id");
+    let tree = h.agent_store.agent(agent_id).expect("agent tree");
     tree.nodes()
         .iter()
         .rev()
         .find_map(|node| match &node.entry {
-            SessionEntry::ToolResults { items } => items
+            AgentEntry::ToolResults { items } => items
                 .iter()
                 .find(|item| item.call_id.as_str() == call_id)
                 .cloned(),
@@ -68,18 +73,18 @@ fn run_tool_result(
 /// Like [`run_tool_result`] but for `ToolError`.
 fn run_tool_error(
     h: &mut Harness,
-    session_id: &str,
-    cid: &crate::conversation::ConversationId,
+    _session_id: &str,
+    cid: &crate::AgentId,
     call_id: &str,
     tool_name: &str,
     message: String,
     details: Option<CborValue>,
 ) -> ToolResultItem {
     let call_id_typed: ToolCallId = call_id.into();
+    let _ = h.ensure_agent_id_for_agent(cid);
     let name = ToolName::new(tool_name);
     seed_assistant_tool_round(h, cid, &[(call_id, tool_name)]);
-    h.tool_conversations
-        .insert(call_id_typed.clone(), cid.clone());
+    h.tool_agents.insert(call_id_typed.clone(), cid.clone());
     h.pending_tools.insert(
         call_id_typed.clone(),
         PendingTool {
@@ -102,12 +107,17 @@ fn run_tool_error(
     )
     .expect("tool error");
 
-    let tree = h.store.session(session_id).expect("session tree");
+    let agent_id = h
+        .agents
+        .get(cid)
+        .and_then(|conv| conv.agent_id.as_deref())
+        .expect("conversation agent id");
+    let tree = h.agent_store.agent(agent_id).expect("agent tree");
     tree.nodes()
         .iter()
         .rev()
         .find_map(|node| match &node.entry {
-            SessionEntry::ToolResults { items } => items
+            AgentEntry::ToolResults { items } => items
                 .iter()
                 .find(|item| item.call_id.as_str() == call_id)
                 .cloned(),
@@ -125,7 +135,7 @@ fn cross_turn_identical_result_collapses_to_pointer() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     let big = CborValue::Text("a".repeat(2048));
 
     let first = run_tool_result(&mut h, "s1", &cid, "call_first", "read", big.clone());
@@ -172,7 +182,7 @@ fn small_results_below_threshold_are_not_deduped() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     // Stay well clear of the threshold even after CBOR framing
     // overhead — 50 raw bytes of text encodes to ~52 B of CBOR.
     let small = CborValue::Text("ok".repeat(25));
@@ -206,7 +216,7 @@ fn pointer_entries_are_not_themselves_dedup_anchors() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     let big = CborValue::Text("z".repeat(2048));
     let _ = run_tool_result(&mut h, "s1", &cid, "call_orig", "read", big.clone());
     let _ = run_tool_result(&mut h, "s1", &cid, "call_dup", "read", big.clone());
@@ -216,10 +226,8 @@ fn pointer_entries_are_not_themselves_dedup_anchors() {
     // now contains [Request_orig, Result_orig (real), Request_dup,
     // Result_dup (pointer)]) and we want to verify the pointer was
     // skipped.
-    h.conversations
-        .get_mut(&cid)
-        .expect("default conv")
-        .result_dedup = crate::dedup::ResultDedupMap::new();
+    h.agents.get_mut(&cid).expect("default conv").result_dedup =
+        crate::dedup::ResultDedupMap::new();
 
     let third = run_tool_result(&mut h, "s1", &cid, "call_third", "read", big.clone());
     assert_eq!(third.status, ToolResultStatus::Success);
@@ -246,7 +254,7 @@ fn identical_errors_collapse_but_distinct_details_stay() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     // Above the threshold: a 300-char "compile failed" message with
     // a long hex digest dump as details.
     let long_msg = "compile failed: ".to_owned() + &"E0277 ".repeat(50);
@@ -319,7 +327,7 @@ fn dedup_map_rebuilds_on_session_restore() {
 
     {
         let mut h = echo_harness(&sp).expect("start");
-        let cid = h.default_conversation_id.clone();
+        let cid = h.default_agent_id.clone();
         let _ = run_tool_result(&mut h, "s1", &cid, "call_pre_restore", "read", big.clone());
         h.shutdown().expect("shutdown");
         drop(h);
@@ -330,14 +338,11 @@ fn dedup_map_rebuilds_on_session_restore() {
     // simulates daemon restart / session resume. The default conv
     // starts with `result_dedup` empty and `head=Some(N)` from the
     // resumed tree; the first intake triggers a rebuild.
-    let mut h = echo_harness(&sp).expect("re-start");
-    let cid = h.default_conversation_id.clone();
+    let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
+        .expect("resume");
+    let cid = h.default_agent_id.clone();
     assert!(
-        h.conversations
-            .get(&cid)
-            .expect("default conv")
-            .head
-            .is_some(),
+        h.agents.get(&cid).expect("default conv").head.is_some(),
         "resumed default conversation must have a non-empty branch head",
     );
 
@@ -365,16 +370,16 @@ fn new_session_reset_does_not_dedup_against_previous_branch() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     let big = CborValue::Text("n".repeat(2048));
     let _ = run_tool_result(&mut h, "s1", &cid, "call_before_new", "ls", big.clone());
 
     h.switch_session("s1".into(), tau_proto::SessionStartReason::New)
         .expect("same-id /session new reset");
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     assert_eq!(
-        h.conversations.get(&cid).expect("default conv").head,
+        h.agents.get(&cid).expect("default conv").head,
         None,
         "a /session new reset must start from a fresh branch head",
     );
@@ -401,7 +406,7 @@ fn dedup_is_scoped_to_a_single_branch() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    let default_cid = h.default_conversation_id.clone();
+    let default_cid = h.default_agent_id.clone();
     let big = CborValue::Text("p".repeat(2048));
 
     // Land an entry on the default conversation's branch.
@@ -420,10 +425,10 @@ fn dedup_is_scoped_to_a_single_branch() {
     // dedup against the default conv's call_default entry, because
     // the side conv's model has no visibility into the default
     // conv's history.
-    let side_cid = crate::conversation::ConversationId::new("side-test");
-    h.conversations.insert(
+    let side_cid: crate::AgentId = "side-test".into();
+    h.agents.insert(
         side_cid.clone(),
-        crate::conversation::Conversation::new(
+        crate::agent::Agent::new(
             side_cid.clone(),
             "s1".into(),
             tau_proto::PromptOriginator::Extension {
@@ -458,7 +463,7 @@ fn dedup_refuses_to_self_point() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     let big = CborValue::Text("s".repeat(2048));
 
     let _first = run_tool_result(&mut h, "s1", &cid, "call_solo", "read", big.clone());

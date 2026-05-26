@@ -224,7 +224,7 @@ impl WsConn {
     pub fn run_turn(
         &mut self,
         config: &ResponsesConfig,
-        session_prompt_id: &str,
+        agent_prompt_id: &str,
         request: &PromptPayload<'_>,
         on_update: &mut impl FnMut(&str, Option<&str>),
     ) -> Result<StreamState, LlmError> {
@@ -258,7 +258,7 @@ impl WsConn {
                 request
             };
             super::maybe_debug_write_provider_request(
-                session_prompt_id,
+                agent_prompt_id,
                 config,
                 request,
                 tau_proto::ProviderBackendTransport::Websocket,
@@ -459,7 +459,7 @@ async fn write_loop(
                 match sink.send(Message::Ping(Vec::new().into())).await {
                     Ok(()) => {
                         // Pings are 25 s apart — info isn't spammy at
-                        // that cadence, and a session log that suddenly
+                        // that cadence, and a runtime log that suddenly
                         // *stops* showing them is the clearest signal
                         // that the writer task is stuck (and that the
                         // upstream's reap timer is therefore counting

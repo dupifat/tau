@@ -1,7 +1,8 @@
 use super::*;
-use crate::conversation::{Conversation, ConversationId, PendingPrompt};
+use crate::AgentId;
+use crate::agent::{Agent, PendingPrompt};
 use crate::harness::{
-    ActiveStartAgentRequest, ConversationHeadSync, DeferredPublish, PendingCompaction,
+    ActiveStartAgentRequest, AgentState, ConversationHeadSync, DeferredPublish, PendingCompaction,
     PendingCompactionResume, PendingIntercept, PendingStartAgentRequest, PendingTool,
     background_completion_prompt, extension_disconnected_background_tool_call_error_message,
     extension_disconnected_tool_call_error_message, is_restore_notice_prompt_text,
@@ -20,44 +21,41 @@ fn responses_backend() -> tau_proto::ProviderBackend {
 #[test]
 fn user_prompt_mints_first_agent_for_empty_startup() {
     // Regression: startup has no implicit `main` agent. The first interactive
-    // prompt claims the default conversation by minting a durable role-based
-    // agent id and publishes that id on `SessionPromptCreated` for UI routing.
+    // prompt claims the default conversation by minting a durable role-prefixed
+    // hex agent id and publishes that id on `AgentPromptCreated` for UI routing.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    assert!(h.agent_conversations.is_empty());
-    assert!(
-        h.conversations
-            .get(&h.default_conversation_id)
-            .expect("default conversation")
-            .agent_id
-            .is_none()
-    );
+    let existing_agent_id = h
+        .agents
+        .get(&h.default_agent_id)
+        .and_then(|conversation| conversation.agent_id.clone());
 
     h.submit_user_prompt("s1".into(), "hello".to_owned())
         .expect("submit first user prompt");
 
     let agent_id = h
-        .conversations
-        .get(&h.default_conversation_id)
+        .agents
+        .get(&h.default_agent_id)
         .and_then(|conversation| conversation.agent_id.as_deref())
         .expect("first prompt minted agent id");
-    assert!(agent_id.contains('_'));
-    assert_eq!(
-        h.agent_conversations.get(agent_id),
-        Some(&h.default_conversation_id)
-    );
+    if let Some(existing_agent_id) = existing_agent_id {
+        assert_eq!(agent_id, existing_agent_id);
+    } else {
+        assert_role_hex_agent_id(agent_id, "senior-engineer");
+    }
+    assert_eq!(h.agent_routes.get(agent_id), Some(&h.default_agent_id));
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
-        Event::UiPromptSubmitted(prompt)
-            if prompt.target_agent_id.as_deref() == Some(agent_id)
+        Event::AgentPromptSubmitted(prompt)
+            if prompt.agent_id.as_str() == agent_id
     )));
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
-        Event::SessionPromptCreated(created)
-            if created.target_agent_id.as_deref() == Some(agent_id)
+        Event::AgentPromptCreated(created)
+            if created.agent_id.as_str() == agent_id
     )));
 
     h.shutdown().expect("shutdown");
@@ -84,8 +82,8 @@ fn ui_new_agent_rotates_default_conversation_without_switching_sessions() {
     })
     .expect("submit first prompt");
     let first_agent = h
-        .conversations
-        .get(&h.default_conversation_id)
+        .agents
+        .get(&h.default_agent_id)
         .and_then(|conversation| conversation.agent_id.clone())
         .expect("first prompt minted an agent");
     let session_before = h.current_session_id.clone();
@@ -97,21 +95,21 @@ fn ui_new_agent_rotates_default_conversation_without_switching_sessions() {
     .expect("handle /agent new");
     assert_eq!(h.current_session_id, session_before);
     assert!(
-        h.conversations
-            .get(&h.default_conversation_id)
+        h.agents
+            .get(&h.default_agent_id)
             .expect("default conversation")
             .agent_id
             .is_none(),
         "/agent new clears the default agent binding before the next prompt"
     );
     let archived_first_agent_cid = h
-        .agent_conversations
+        .agent_routes
         .get(&first_agent)
         .cloned()
         .expect("old foreground agent remains targetable");
-    assert_ne!(archived_first_agent_cid, h.default_conversation_id);
+    assert_ne!(archived_first_agent_cid, h.default_agent_id);
     assert_eq!(
-        h.conversation_id_for_target_agent(Some(first_agent.as_str())),
+        h.runtime_agent_id_for_target_agent(Some(first_agent.as_str())),
         Some(archived_first_agent_cid.clone())
     );
     assert!(!h.stopped_agent_ids.contains(&first_agent));
@@ -126,8 +124,8 @@ fn ui_new_agent_rotates_default_conversation_without_switching_sessions() {
     })
     .expect("submit second prompt");
     let second_agent = h
-        .conversations
-        .get(&h.default_conversation_id)
+        .agents
+        .get(&h.default_agent_id)
         .and_then(|conversation| conversation.agent_id.clone())
         .expect("second prompt minted an agent");
 
@@ -160,25 +158,23 @@ fn ui_new_agent_rewrites_runtime_conversation_references_to_archive() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    let old = h.default_conversation_id.clone();
-    let archived = ConversationId::new("archived-default-0");
+    let old = h.default_agent_id.clone();
+    let archived = ("archived-default-0").into();
     let session_id = h.current_session_id.clone();
 
-    let child_cid = ConversationId::new("child-conversation");
-    let mut child = Conversation::new(
+    let child_cid: AgentId = "child-conversation".into();
+    let mut child = Agent::new(
         child_cid.clone(),
         session_id.clone(),
         tau_proto::PromptOriginator::User,
         None,
         None,
     );
-    child.parent_conversation_id = Some(old.clone());
-    h.conversations.insert(child_cid.clone(), child);
+    child.parent_agent_id = Some(old.clone());
+    h.agents.insert(child_cid.clone(), child);
 
-    h.tool_conversations
-        .insert("tool-owner".into(), old.clone());
-    h.prompt_conversations
-        .insert("prompt-owner".into(), old.clone());
+    h.tool_agents.insert("tool-owner".into(), old.clone());
+    h.prompt_agents.insert("prompt-owner".into(), old.clone());
     h.pending_user_prompt_dispatches.push_back(old.clone());
     h.pending_publish_idle_dispatches.push_back(old.clone());
     h.background_completion_targets
@@ -201,17 +197,16 @@ fn ui_new_agent_rewrites_runtime_conversation_references_to_archive() {
             source_id: "source".to_owned(),
             extension_name: "source".to_owned(),
             role: "engineer".to_owned(),
-            cid: ConversationId::new("queued-start-agent"),
+            cid: ("queued-start-agent").into(),
             parent_cid: old.clone(),
-            agent_id: pending_query.agent_id.clone(),
+            agent_id: "queued-agent".to_owned(),
             query: pending_query,
             pending_agent_messages: std::collections::VecDeque::new(),
         });
     h.pending_compactions.insert(
-        ConversationId::new("compact-summary"),
+        ("compact-summary").into(),
         PendingCompaction {
             target_cid: old.clone(),
-            session_id: session_id.clone(),
             target_agent_id: None,
             originator: tau_proto::PromptOriginator::User,
             original_input_tokens: None,
@@ -222,7 +217,6 @@ fn ui_new_agent_rewrites_runtime_conversation_references_to_archive() {
         old.clone(),
         PendingCompaction {
             target_cid: old.clone(),
-            session_id: session_id.clone(),
             target_agent_id: None,
             originator: tau_proto::PromptOriginator::User,
             original_input_tokens: None,
@@ -246,7 +240,7 @@ fn ui_new_agent_rewrites_runtime_conversation_references_to_archive() {
         must_pass: false,
         sync_head_for: Some(ConversationHeadSync {
             cid: old.clone(),
-            session_id: session_id.clone(),
+            agent_id: None,
         }),
         cursor: (
             tau_proto::InterceptionPriority::default(),
@@ -263,26 +257,26 @@ fn ui_new_agent_rewrites_runtime_conversation_references_to_archive() {
         must_pass: false,
         sync_head_for: Some(ConversationHeadSync {
             cid: old.clone(),
-            session_id: session_id.clone(),
+            agent_id: None,
         }),
     });
 
     h.handle_ui_new_agent(tau_proto::UiNewAgent { session_id })
         .expect("handle /agent new");
 
-    assert!(h.conversations.contains_key(&archived));
-    assert!(h.conversations.contains_key(&h.default_conversation_id));
-    assert_eq!(h.tool_conversations.get("tool-owner"), Some(&archived));
-    assert_eq!(h.prompt_conversations.get("prompt-owner"), Some(&archived));
+    assert!(h.agents.contains_key(&archived));
+    assert!(h.agents.contains_key(&h.default_agent_id));
+    assert_eq!(h.tool_agents.get("tool-owner"), Some(&archived));
+    assert_eq!(h.prompt_agents.get("prompt-owner"), Some(&archived));
     assert!(h.tool_turn.any_pending_for(&archived));
     assert!(h.tool_turn.any_in_flight_for(&archived));
     assert!(!h.tool_turn.any_pending_for(&old));
     assert!(!h.tool_turn.any_in_flight_for(&old));
     assert_eq!(
-        h.conversations
+        h.agents
             .get(&child_cid)
             .expect("child conversation")
-            .parent_conversation_id
+            .parent_agent_id
             .as_ref(),
         Some(&archived)
     );
@@ -334,10 +328,8 @@ fn ui_new_agent_does_not_replay_to_late_ui_subscribers() {
     let mut h = echo_harness(&sp).expect("start");
     let session_id = h.current_session_id.clone();
 
-    h.handle_ui_new_agent(tau_proto::UiNewAgent {
-        session_id: session_id.clone(),
-    })
-    .expect("handle /agent new");
+    h.handle_ui_new_agent(tau_proto::UiNewAgent { session_id })
+        .expect("handle /agent new");
 
     let (server_end, client_end) = UnixStream::pair().expect("pair");
     client_end
@@ -377,133 +369,6 @@ fn ui_new_agent_does_not_replay_to_late_ui_subscribers() {
 }
 
 #[test]
-fn ui_agent_state_request_updates_harness_state_and_replays() {
-    // Agent active/suspended state is harness-owned session state, not a
-    // renderer-local set. Explicit UI suspend/resume requests publish replayable
-    // session facts for late subscribers and prompt-completion state.
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    h.selected_model = Some("test/model".into());
-
-    h.submit_user_prompt("s1".into(), "hello".to_owned())
-        .expect("submit prompt");
-    let agent_id = h
-        .conversations
-        .get(&h.default_conversation_id)
-        .and_then(|conversation| conversation.agent_id.clone())
-        .expect("prompt minted an agent");
-    assert_eq!(
-        h.agent_states.get(&agent_id),
-        Some(&tau_proto::AgentState::Active)
-    );
-
-    h.handle_ui_agent_state_request(tau_proto::UiAgentStateRequest {
-        session_id: h.current_session_id.clone(),
-        agent_id: agent_id.clone(),
-        action: tau_proto::UiAgentStateAction::Suspend,
-    })
-    .expect("suspend");
-    assert_eq!(
-        h.agent_states.get(&agent_id),
-        Some(&tau_proto::AgentState::Suspended)
-    );
-
-    h.handle_ui_agent_state_request(tau_proto::UiAgentStateRequest {
-        session_id: h.current_session_id.clone(),
-        agent_id: agent_id.clone(),
-        action: tau_proto::UiAgentStateAction::Resume,
-    })
-    .expect("resume");
-    assert_eq!(
-        h.agent_states.get(&agent_id),
-        Some(&tau_proto::AgentState::Active)
-    );
-
-    let (server_end, client_end) = UnixStream::pair().expect("pair");
-    client_end
-        .set_read_timeout(Some(Duration::from_millis(200)))
-        .expect("read timeout");
-    h.accept_client(server_end).expect("accept");
-    let ui_conn = h
-        .bus
-        .connections()
-        .into_iter()
-        .find(|c| c.name == "socket-ui")
-        .expect("ui connection")
-        .id
-        .to_string();
-    h.handle_client_event(
-        &ui_conn,
-        Frame::Message(Message::Subscribe(Subscribe {
-            selectors: vec![EventSelector::Exact(
-                tau_proto::EventName::SESSION_AGENT_STATE_CHANGED,
-            )],
-        })),
-    )
-    .expect("subscribe");
-
-    let mut reader = FrameReader::new(BufReader::new(client_end));
-    let mut replayed_states = Vec::new();
-    while let Ok(Some(frame)) = reader.read_frame() {
-        let (_log_id, inner) = frame.peel_log();
-        if let Frame::Event(Event::SessionAgentStateChanged(changed)) = inner
-            && changed.agent_id == agent_id
-        {
-            replayed_states.push(changed.state);
-        }
-    }
-    assert_eq!(
-        replayed_states,
-        vec![
-            tau_proto::AgentState::Active,
-            tau_proto::AgentState::Suspended,
-            tau_proto::AgentState::Active,
-        ]
-    );
-
-    h.shutdown().expect("shutdown");
-}
-
-#[test]
-fn resumed_session_rehydrates_agent_state_from_event_log() {
-    // Session agent state is part of the harness session, so a cold resume must
-    // rebuild the harness-owned active/suspended map from durable events.
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let agent_id = {
-        let mut h = echo_harness(&sp).expect("start");
-        h.selected_model = Some("test/model".into());
-        h.submit_user_prompt("s1".into(), "hello".to_owned())
-            .expect("submit prompt");
-        let agent_id = h
-            .conversations
-            .get(&h.default_conversation_id)
-            .and_then(|conversation| conversation.agent_id.clone())
-            .expect("prompt minted an agent");
-        h.handle_ui_agent_state_request(tau_proto::UiAgentStateRequest {
-            session_id: h.current_session_id.clone(),
-            agent_id: agent_id.clone(),
-            action: tau_proto::UiAgentStateAction::Suspend,
-        })
-        .expect("suspend");
-        h.shutdown().expect("shutdown");
-        agent_id
-    };
-    wait_for_session_unlock(&sp, "s1");
-
-    let mut resumed =
-        quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
-            .expect("resume");
-    assert_eq!(
-        resumed.agent_states.get(&agent_id),
-        Some(&tau_proto::AgentState::Suspended)
-    );
-
-    resumed.shutdown().expect("shutdown");
-}
-
-#[test]
 fn queued_first_user_prompt_publishes_replayable_agent_target() {
     // Regression: if the first prompt queues before the provider/model is ready,
     // the agent id must already exist and be carried on the transient queued
@@ -526,19 +391,19 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
     .expect("submit queued first prompt");
 
     let agent_id = h
-        .conversations
-        .get(&h.default_conversation_id)
+        .agents
+        .get(&h.default_agent_id)
         .and_then(|conversation| conversation.agent_id.as_deref())
         .expect("queued first prompt minted agent id")
         .to_owned();
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
-        Event::SessionPromptQueued(queued)
-            if queued.target_agent_id.as_deref() == Some(agent_id.as_str())
+        Event::AgentPromptQueued(queued)
+            if queued.agent_id.as_str() == agent_id.as_str()
     )));
     let default_conversation = h
-        .conversations
-        .get(&h.default_conversation_id)
+        .agents
+        .get(&h.default_agent_id)
         .expect("default conversation");
     assert_eq!(default_conversation.pending_prompts.len(), 1);
     assert_eq!(
@@ -546,11 +411,9 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
         "hello while cold"
     );
     assert!(
-        h.store
-            .session_events("s1")
-            .expect("session events")
+        loaded_agent_events(&h, "s1")
             .iter()
-            .all(|entry| !matches!(entry.event, Event::SessionPromptQueued(_))),
+            .all(|event| !matches!(event, Event::AgentPromptQueued(_))),
         "queued prompts are transient and must not be persisted"
     );
 
@@ -570,7 +433,7 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
     h.handle_client_event(
         &ui_conn,
         Frame::Message(Message::Subscribe(Subscribe {
-            selectors: vec![EventSelector::Prefix("session.".to_owned())],
+            selectors: vec![EventSelector::Prefix("agent.".to_owned())],
         })),
     )
     .expect("subscribe");
@@ -579,16 +442,13 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
     let mut queued = Vec::new();
     while let Ok(Some(frame)) = reader.read_frame() {
         let (_log_id, inner) = frame.peel_log();
-        if let Frame::Event(Event::SessionPromptQueued(event)) = inner {
+        if let Frame::Event(Event::AgentPromptQueued(event)) = inner {
             queued.push(event);
         }
     }
     assert_eq!(queued.len(), 1);
     assert_eq!(queued[0].text, "hello while cold");
-    assert_eq!(
-        queued[0].target_agent_id.as_deref(),
-        Some(agent_id.as_str())
-    );
+    assert_eq!(queued[0].agent_id.as_str(), agent_id.as_str());
 
     h.shutdown().expect("shutdown");
 }
@@ -601,53 +461,115 @@ fn resume_ignores_later_side_queued_or_steered_default_agent_candidates() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     {
-        let mut h = echo_harness(&sp).expect("start");
-        h.publish_event(
-            None,
-            Event::UiPromptSubmitted(UiPromptSubmitted {
-                session_id: "s1".into(),
-                text: "default prompt".to_owned(),
-                target_agent_id: Some("engineer_default".to_owned()),
-                message_class: tau_proto::PromptMessageClass::User,
-                originator: tau_proto::PromptOriginator::User,
-                ctx_id: None,
-            }),
-        );
-        h.publish_event(
-            None,
-            Event::SessionPromptQueued(SessionPromptQueued {
-                session_id: "s1".into(),
-                text: "side queued".to_owned(),
-                target_agent_id: Some("worker_queued".to_owned()),
-                message_class: tau_proto::PromptMessageClass::User,
-            }),
-        );
-        h.publish_event(
-            None,
-            Event::SessionPromptSteered(SessionPromptSteered {
-                session_id: "s1".into(),
-                text: "side steered".to_owned(),
-                target_agent_id: Some("worker_steered".to_owned()),
-                message_class: tau_proto::PromptMessageClass::User,
-            }),
-        );
-        h.shutdown().expect("shutdown");
+        let sessions_dir = tau_config::settings::sessions_dir_of(&sp);
+        let mut sessions = tau_core::SessionStore::open(&sessions_dir).expect("session store");
+        for agent_id in ["engineer_default", "worker_steered"] {
+            sessions
+                .append_session_event(
+                    "s1",
+                    None,
+                    Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                        session_id: "s1".into(),
+                        agent_id: agent_id.into(),
+                    }),
+                )
+                .expect("seed session membership");
+        }
+        drop(sessions);
+
+        let mut agents = tau_core::AgentStore::open(sp.join("agents")).expect("agent store");
+        agents
+            .append_agent_event(
+                "engineer_default",
+                None,
+                Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                    agent_id: "engineer_default".into(),
+                    text: "default prompt".to_owned(),
+                    message_class: tau_proto::PromptMessageClass::User,
+                    originator: tau_proto::PromptOriginator::User,
+                    ctx_id: None,
+                }),
+            )
+            .expect("seed default prompt");
+        agents
+            .append_agent_event(
+                "worker_steered",
+                None,
+                Event::AgentPromptSteered(AgentPromptSteered {
+                    agent_id: "worker_steered".into(),
+                    text: "side steered".to_owned(),
+                    message_class: tau_proto::PromptMessageClass::User,
+                }),
+            )
+            .expect("seed side steered prompt");
     }
 
     let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
         .expect("resume");
     assert_eq!(
-        h.conversations
-            .get(&h.default_conversation_id)
+        h.agents
+            .get(&h.default_agent_id)
             .and_then(|conversation| conversation.agent_id.as_deref()),
         Some("engineer_default")
     );
     assert_eq!(
-        h.agent_conversations.get("engineer_default"),
-        Some(&h.default_conversation_id)
+        h.agent_routes.get("engineer_default"),
+        Some(&h.default_agent_id)
     );
-    assert!(!h.agent_conversations.contains_key("worker_queued"));
-    assert!(!h.agent_conversations.contains_key("worker_steered"));
+    assert_ne!(
+        h.agent_routes.get("worker_steered"),
+        Some(&h.default_agent_id)
+    );
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn resume_rehydrates_delegated_agent_role_from_agent_log() {
+    // Regression: resumed delegated agents must keep the role selected when the
+    // delegate was created. Otherwise a targeted follow-up after cold resume
+    // falls back to the harness's currently selected interactive role.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let agent_id = {
+        let mut h = echo_harness(&sp).expect("start");
+        h.selected_model = Some("test/model".into());
+        h.handle_start_agent_request(
+            "conn-delegate",
+            StartAgentRequest {
+                query_id: "q-role".to_owned(),
+                instruction: "side task".to_owned(),
+                role: Some("staff-engineer".to_owned()),
+                execution_mode: ToolExecutionMode::Shared,
+                input_stats: tau_proto::ToolDisplayStats::default(),
+                tool_call_id: Some("delegate-call".into()),
+                task_name: None,
+            },
+        )
+        .expect("start delegate");
+        let cid = ext_query_cid(&h, "q-role").expect("delegated conversation");
+        let agent_id = h
+            .agents
+            .get(&cid)
+            .and_then(|conversation| conversation.agent_id.clone())
+            .expect("delegated agent id");
+        h.shutdown().expect("shutdown");
+        agent_id
+    };
+
+    let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
+        .expect("resume");
+    h.selected_role = "junior-engineer".to_owned();
+    let cid = h
+        .agent_routes
+        .get(&agent_id)
+        .cloned()
+        .expect("resumed delegated conversation");
+    assert_eq!(
+        h.agents
+            .get(&cid)
+            .and_then(|conversation| conversation.role.as_deref()),
+        Some("staff-engineer")
+    );
     h.shutdown().expect("shutdown");
 }
 
@@ -664,8 +586,8 @@ fn resume_rehydrates_default_agent_conversation_from_durable_routing() {
         h.submit_user_prompt("s1".into(), "hello".to_owned())
             .expect("submit first prompt");
         let agent_id = h
-            .conversations
-            .get(&h.default_conversation_id)
+            .agents
+            .get(&h.default_agent_id)
             .and_then(|conversation| conversation.agent_id.clone())
             .expect("first prompt minted agent id");
         h.shutdown().expect("shutdown");
@@ -674,10 +596,7 @@ fn resume_rehydrates_default_agent_conversation_from_durable_routing() {
 
     let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
         .expect("resume");
-    assert_eq!(
-        h.agent_conversations.get(&agent_id),
-        Some(&h.default_conversation_id)
-    );
+    assert_eq!(h.agent_routes.get(&agent_id), Some(&h.default_agent_id));
     h.shutdown().expect("shutdown");
 }
 
@@ -809,10 +728,10 @@ fn cbor_map_text<'a>(value: &'a CborValue, key: &str) -> Option<&'a str> {
     })
 }
 
-fn provider_text_response(spid: &SessionPromptId, text: &str) -> ProviderResponseFinished {
+fn provider_text_response(spid: &AgentPromptId, text: &str) -> ProviderResponseFinished {
     ProviderResponseFinished {
-        session_prompt_id: spid.clone(),
-        target_agent_id: None,
+        agent_prompt_id: spid.clone(),
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
             content: vec![ContentPart::Text {
@@ -834,17 +753,17 @@ fn seed_prior_user_message(state_dir: &Path, text: &str) {
 }
 
 fn seed_prior_user_message_at(state_dir: &Path, text: &str, recorded_at: tau_proto::UnixMicros) {
-    let sessions_dir = tau_config::settings::sessions_dir_of(state_dir);
-    let mut store = tau_core::SessionStore::open(&sessions_dir).expect("session store");
-    store
-        .append_session_event_at(
-            "s1",
+    seed_main_agent_loaded(state_dir);
+    let mut agent_store =
+        tau_core::AgentStore::open(state_dir.join("agents")).expect("agent store");
+    agent_store
+        .append_agent_event_at(
+            "main",
             None,
-            None,
-            Event::UiPromptSubmitted(UiPromptSubmitted {
-                session_id: "s1".into(),
+            tau_core::AgentEventParent::InheritHead,
+            Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                agent_id: "main".into(),
                 text: text.to_owned(),
-                target_agent_id: None,
                 message_class: tau_proto::PromptMessageClass::User,
                 originator: tau_proto::PromptOriginator::User,
                 ctx_id: None,
@@ -854,7 +773,22 @@ fn seed_prior_user_message_at(state_dir: &Path, text: &str, recorded_at: tau_pro
         .expect("seed prior user message");
 }
 
-fn context_text_count(prompt: &SessionPromptCreated, text: &str) -> usize {
+fn seed_main_agent_loaded(state_dir: &Path) {
+    let sessions_dir = tau_config::settings::sessions_dir_of(state_dir);
+    let mut store = tau_core::SessionStore::open(&sessions_dir).expect("session store");
+    store
+        .append_session_event(
+            "s1",
+            None,
+            Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                session_id: "s1".into(),
+                agent_id: "main".into(),
+            }),
+        )
+        .expect("seed session membership");
+}
+
+fn context_text_count(prompt: &AgentPromptCreated, text: &str) -> usize {
     prompt
         .context_items
         .iter()
@@ -862,7 +796,7 @@ fn context_text_count(prompt: &SessionPromptCreated, text: &str) -> usize {
         .count()
 }
 
-fn restore_notice_context_text(prompt: &SessionPromptCreated) -> Option<&str> {
+fn restore_notice_context_text(prompt: &AgentPromptCreated) -> Option<&str> {
     prompt
         .context_items
         .iter()
@@ -870,7 +804,7 @@ fn restore_notice_context_text(prompt: &SessionPromptCreated) -> Option<&str> {
         .find(|text| is_restore_notice_prompt_text(text))
 }
 
-fn restore_notice_context_count(prompt: &SessionPromptCreated) -> usize {
+fn restore_notice_context_count(prompt: &AgentPromptCreated) -> usize {
     prompt
         .context_items
         .iter()
@@ -880,14 +814,12 @@ fn restore_notice_context_count(prompt: &SessionPromptCreated) -> usize {
 }
 
 fn restore_notice_event_count(h: &Harness) -> usize {
-    h.store
-        .session_events("s1")
-        .expect("session events")
+    loaded_agent_events(h, "s1")
         .iter()
-        .filter(|entry| {
+        .filter(|event| {
             matches!(
-                &entry.event,
-                Event::UiPromptSubmitted(prompt)
+                event,
+                Event::AgentPromptSubmitted(prompt)
                     if prompt.message_class.is_internal()
                         && is_restore_notice_prompt_text(&prompt.text)
             )
@@ -903,29 +835,29 @@ fn restored_background_notice(call_id: &str) -> String {
 }
 
 fn seed_background_placeholder(state_dir: &Path, call_id: &str, tool_name: &str) {
-    let sessions_dir = tau_config::settings::sessions_dir_of(state_dir);
-    let mut store = tau_core::SessionStore::open(&sessions_dir).expect("session store");
-    store
-        .append_session_event(
-            "s1",
+    seed_main_agent_loaded(state_dir);
+    let mut agent_store =
+        tau_core::AgentStore::open(state_dir.join("agents")).expect("agent store");
+    agent_store
+        .append_agent_event(
+            "main",
             None,
-            Event::UiPromptSubmitted(UiPromptSubmitted {
-                session_id: "s1".into(),
+            Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                agent_id: "main".into(),
                 text: format!("run {tool_name}"),
-                target_agent_id: None,
                 message_class: tau_proto::PromptMessageClass::User,
                 originator: tau_proto::PromptOriginator::User,
                 ctx_id: None,
             }),
         )
         .expect("seed prior user message");
-    store
-        .append_session_event(
-            "s1",
+    agent_store
+        .append_agent_event(
+            "main",
             None,
             Event::ProviderResponseFinished(ProviderResponseFinished {
-                session_prompt_id: format!("sp-{call_id}").into(),
-                target_agent_id: None,
+                agent_prompt_id: format!("sp-{call_id}").into(),
+                agent_id: "main".into(),
                 output_items: vec![ContextItem::ToolCall(ToolCallItem {
                     call_id: call_id.into(),
                     name: ToolName::new(tool_name),
@@ -941,9 +873,9 @@ fn seed_background_placeholder(state_dir: &Path, call_id: &str, tool_name: &str)
             }),
         )
         .expect("seed background tool call");
-    store
-        .append_session_event(
-            "s1",
+    agent_store
+        .append_agent_event(
+            "main",
             None,
             Event::ProviderToolResult(ToolResult {
                 call_id: call_id.into(),
@@ -961,42 +893,77 @@ fn seed_background_placeholder(state_dir: &Path, call_id: &str, tool_name: &str)
         .expect("seed background placeholder");
 }
 
-fn background_error_count(h: &Harness, call_id: &str) -> usize {
-    h.store
-        .session_events("s1")
-        .expect("session events")
-        .iter()
-        .filter(|entry| {
-            matches!(&entry.event, Event::ToolBackgroundError(error) if error.call_id.as_str() == call_id)
-        })
+fn seed_background_result(state_dir: &Path, call_id: &str, tool_name: &str, output: &str) {
+    let mut agent_store =
+        tau_core::AgentStore::open(state_dir.join("agents")).expect("agent store");
+    agent_store
+        .append_agent_event(
+            "main",
+            None,
+            Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
+                call_id: call_id.into(),
+                tool_name: ToolName::new(tool_name),
+                tool_type: tau_proto::ToolType::Function,
+                result: CborValue::Text(output.to_owned()),
+                display: None,
+                originator: tau_proto::PromptOriginator::User,
+            }),
+        )
+        .expect("seed background result");
+}
+
+fn seed_background_error(state_dir: &Path, call_id: &str, tool_name: &str, message: &str) {
+    let mut agent_store =
+        tau_core::AgentStore::open(state_dir.join("agents")).expect("agent store");
+    agent_store
+        .append_agent_event(
+            "main",
+            None,
+            Event::ToolBackgroundError(tau_proto::ToolBackgroundError {
+                call_id: call_id.into(),
+                tool_name: ToolName::new(tool_name),
+                tool_type: tau_proto::ToolType::Function,
+                message: message.to_owned(),
+                details: None,
+                display: None,
+                originator: tau_proto::PromptOriginator::User,
+            }),
+        )
+        .expect("seed background error");
+}
+
+fn agent_event_count(h: &Harness, matches_event: impl Fn(&Event) -> bool) -> usize {
+    h.agent_routes
+        .keys()
+        .filter_map(|agent_id| h.agent_store.agent_events(agent_id).ok())
+        .flatten()
+        .filter(|entry| matches_event(&entry.event))
         .count()
+}
+
+fn background_error_count(h: &Harness, call_id: &str) -> usize {
+    agent_event_count(
+        h,
+        |event| matches!(event, Event::ToolBackgroundError(error) if error.call_id.as_str() == call_id),
+    )
 }
 
 fn background_result_count(h: &Harness, call_id: &str) -> usize {
-    h.store
-        .session_events("s1")
-        .expect("session events")
-        .iter()
-        .filter(|entry| {
-            matches!(&entry.event, Event::ToolBackgroundResult(result) if result.call_id.as_str() == call_id)
-        })
-        .count()
+    agent_event_count(
+        h,
+        |event| matches!(event, Event::ToolBackgroundResult(result) if result.call_id.as_str() == call_id),
+    )
 }
 
 fn background_placeholder_count(h: &Harness, call_id: &str) -> usize {
-    h.store
-        .session_events("s1")
-        .expect("session events")
-        .iter()
-        .filter(|entry| {
-            matches!(
-                &entry.event,
-                Event::ProviderToolResult(result)
-                    if result.call_id.as_str() == call_id
-                        && result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder
-            )
-        })
-        .count()
+    agent_event_count(h, |event| {
+        matches!(
+            event,
+            Event::ProviderToolResult(result)
+                if result.call_id.as_str() == call_id
+                    && result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder
+        )
+    })
 }
 
 fn event_log_contains(h: &Harness, source: &str, matches_event: impl Fn(&Event) -> bool) -> bool {
@@ -1101,14 +1068,14 @@ fn setup_routed_test_tool_call(call_id: &str, tool_name: &str) -> (TempDir, Harn
     h.registry
         .register("conn-owner", shared_test_tool_spec(tool_name));
 
-    let cid = h.default_conversation_id.clone();
-    let spid: SessionPromptId = format!("sp-{call_id}").into();
+    let cid = h.default_agent_id.clone();
+    let spid: AgentPromptId = format!("sp-{call_id}").into();
     seed_agent_thinking(&mut h, &cid, spid.as_str());
-    h.prompt_conversations.insert(spid.clone(), cid);
+    h.prompt_agents.insert(spid.clone(), cid);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid,
-        target_agent_id: None,
+        agent_prompt_id: spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: call_id.into(),
             name: ToolName::new(tool_name),
@@ -1168,14 +1135,14 @@ fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
     }));
     h.registry.register("conn-strict-tool", spec);
 
-    let cid = h.default_conversation_id.clone();
-    let spid: SessionPromptId = "sp-invalid-tool-args".into();
+    let cid = h.default_agent_id.clone();
+    let spid: AgentPromptId = "sp-invalid-tool-args".into();
     seed_agent_thinking(&mut h, &cid, spid.as_str());
-    h.prompt_conversations.insert(spid.clone(), cid.clone());
+    h.prompt_agents.insert(spid.clone(), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid,
-        target_agent_id: None,
+        agent_prompt_id: spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "bad-args".into(),
             name: ToolName::new("strict_tool"),
@@ -1248,11 +1215,11 @@ fn disconnect_with_inflight_and_queued_tool_does_not_invoke_queued_on_dead_conne
     h.registry
         .register("conn-dead-tool", exclusive_test_tool_spec("dead_slow"));
 
-    let cid = h.default_conversation_id.clone();
-    let spid: SessionPromptId = "sp-dead-tool".into();
+    let cid = h.default_agent_id.clone();
+    let spid: AgentPromptId = "sp-dead-tool".into();
     seed_agent_thinking(&mut h, &cid, spid.as_str());
-    h.prompt_conversations.insert(spid.clone(), cid.clone());
-    h.publish_for_conversation(
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+    h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -1265,8 +1232,8 @@ fn disconnect_with_inflight_and_queued_tool_does_not_invoke_queued_on_dead_conne
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid,
-        target_agent_id: None,
+        agent_prompt_id: spid,
+        agent_id: "main".into(),
         output_items: vec![
             ContextItem::ToolCall(ToolCallItem {
                 call_id: "running-call".into(),
@@ -1372,7 +1339,6 @@ fn tool_progress(call_id: &str, tool_name: &str, message: &str) -> tau_proto::To
 fn ext_query(query_id: &str, execution_mode: ToolExecutionMode) -> StartAgentRequest {
     StartAgentRequest {
         query_id: query_id.to_owned(),
-        agent_id: format!("test-agent-{}", query_id),
         instruction: format!("instruction {query_id}"),
         role: None,
         execution_mode,
@@ -1413,8 +1379,8 @@ fn set_available_provider_models(
         .collect();
 }
 
-fn ext_query_cid(h: &Harness, query_id: &str) -> Option<ConversationId> {
-    h.conversations.iter().find_map(|(cid, conv)| {
+fn ext_query_cid(h: &Harness, query_id: &str) -> Option<AgentId> {
+    h.agents.iter().find_map(|(cid, conv)| {
         matches!(
             &conv.originator,
             tau_proto::PromptOriginator::Extension { query_id: id, .. } if id == query_id
@@ -1423,15 +1389,15 @@ fn ext_query_cid(h: &Harness, query_id: &str) -> Option<ConversationId> {
     })
 }
 
-fn finish_ext_query(h: &mut Harness, cid: &ConversationId, query_id: &str) {
+fn finish_ext_query(h: &mut Harness, cid: &AgentId, query_id: &str) {
     let spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| (prompt_cid == cid).then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid,
-        target_agent_id: None,
+        agent_prompt_id: spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
             content: vec![ContentPart::Text {
@@ -1481,13 +1447,13 @@ fn background_result_drains_queued_update_tool_call() {
         ),
     );
 
-    let cid = h.default_conversation_id.clone();
-    let spid: SessionPromptId = "sp-bg-result-drain".into();
+    let cid = h.default_agent_id.clone();
+    let spid: AgentPromptId = "sp-bg-result-drain".into();
     seed_agent_thinking(&mut h, &cid, spid.as_str());
-    h.prompt_conversations.insert(spid.clone(), cid);
+    h.prompt_agents.insert(spid.clone(), cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid,
-        target_agent_id: None,
+        agent_prompt_id: spid,
+        agent_id: "main".into(),
         output_items: vec![
             ContextItem::ToolCall(ToolCallItem {
                 call_id: "bg-update-running".into(),
@@ -1570,13 +1536,13 @@ fn background_error_drains_update_queued_behind_exclusive() {
         ),
     );
 
-    let cid = h.default_conversation_id.clone();
-    let spid: SessionPromptId = "sp-bg-error-drain".into();
+    let cid = h.default_agent_id.clone();
+    let spid: AgentPromptId = "sp-bg-error-drain".into();
     seed_agent_thinking(&mut h, &cid, spid.as_str());
-    h.prompt_conversations.insert(spid.clone(), cid);
+    h.prompt_agents.insert(spid.clone(), cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid,
-        target_agent_id: None,
+        agent_prompt_id: spid,
+        agent_id: "main".into(),
         output_items: vec![
             ContextItem::ToolCall(ToolCallItem {
                 call_id: "bg-exclusive-running".into(),
@@ -1669,13 +1635,13 @@ fn background_cancel_drains_update_queued_behind_exclusive() {
         ),
     );
 
-    let cid = h.default_conversation_id.clone();
-    let spid: SessionPromptId = "sp-bg-cancel-drain".into();
+    let cid = h.default_agent_id.clone();
+    let spid: AgentPromptId = "sp-bg-cancel-drain".into();
     seed_agent_thinking(&mut h, &cid, spid.as_str());
-    h.prompt_conversations.insert(spid.clone(), cid);
+    h.prompt_agents.insert(spid.clone(), cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid,
-        target_agent_id: None,
+        agent_prompt_id: spid,
+        agent_id: "main".into(),
         output_items: vec![
             ContextItem::ToolCall(ToolCallItem {
                 call_id: "bg-exclusive-cancel-running".into(),
@@ -1795,13 +1761,13 @@ fn disconnect_background_errors_drain_queued_tools_after_batch() {
         ),
     );
 
-    let cid = h.default_conversation_id.clone();
-    let spid: SessionPromptId = "sp-bg-disconnect-batch".into();
+    let cid = h.default_agent_id.clone();
+    let spid: AgentPromptId = "sp-bg-disconnect-batch".into();
     seed_agent_thinking(&mut h, &cid, spid.as_str());
-    h.prompt_conversations.insert(spid.clone(), cid);
+    h.prompt_agents.insert(spid.clone(), cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid,
-        target_agent_id: None,
+        agent_prompt_id: spid,
+        agent_id: "main".into(),
         output_items: vec![
             ContextItem::ToolCall(ToolCallItem {
                 call_id: "b-bg-shared".into(),
@@ -1914,13 +1880,13 @@ fn disconnect_idle_multi_background_errors_dispatch_prompt_after_batch() {
         ),
     );
 
-    let cid = h.default_conversation_id.clone();
-    let spid: SessionPromptId = "sp-bg-idle-disconnect".into();
+    let cid = h.default_agent_id.clone();
+    let spid: AgentPromptId = "sp-bg-idle-disconnect".into();
     seed_agent_thinking(&mut h, &cid, spid.as_str());
-    h.prompt_conversations.insert(spid.clone(), cid.clone());
+    h.prompt_agents.insert(spid.clone(), cid.clone());
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid,
-        target_agent_id: None,
+        agent_prompt_id: spid,
+        agent_id: "main".into(),
         output_items: vec![
             ContextItem::ToolCall(ToolCallItem {
                 call_id: "a-bg-idle".into(),
@@ -1945,12 +1911,12 @@ fn disconnect_idle_multi_background_errors_dispatch_prompt_after_batch() {
     .expect("background tool response");
 
     let followup_spid = match &h
-        .conversations
+        .agents
         .get(&cid)
         .expect("conversation remains live")
         .turn_state
     {
-        ConversationTurnState::AgentThinking { session_prompt_id } => session_prompt_id.clone(),
+        AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
         state => panic!("expected placeholder follow-up prompt, got {state:?}"),
     };
     h.handle_provider_response_finished(provider_text_response(
@@ -1959,11 +1925,11 @@ fn disconnect_idle_multi_background_errors_dispatch_prompt_after_batch() {
     ))
     .expect("finish placeholder follow-up");
     assert!(matches!(
-        h.conversations
+        h.agents
             .get(&cid)
             .expect("conversation remains live")
             .turn_state,
-        ConversationTurnState::Idle
+        AgentTurnState::Idle
     ));
 
     h.handle_disconnect("conn-bg-idle-disconnect");
@@ -1983,7 +1949,7 @@ fn disconnect_idle_multi_background_errors_dispatch_prompt_after_batch() {
     })
     .expect("second background error");
     let prompt_after_first_error_seq = event_log_position_after(&h, first_error_seq, |event| {
-        matches!(event, Event::SessionPromptCreated(_))
+        matches!(event, Event::AgentPromptCreated(_))
     })
     .expect("background completion follow-up prompt");
     assert!(second_error_seq < prompt_after_first_error_seq);
@@ -2020,13 +1986,13 @@ fn disconnect_mixed_foreground_and_background_errors_dispatch_prompt_after_batch
         ),
     );
 
-    let cid = h.default_conversation_id.clone();
-    let spid: SessionPromptId = "sp-mixed-disconnect".into();
+    let cid = h.default_agent_id.clone();
+    let spid: AgentPromptId = "sp-mixed-disconnect".into();
     seed_agent_thinking(&mut h, &cid, spid.as_str());
-    h.prompt_conversations.insert(spid.clone(), cid.clone());
+    h.prompt_agents.insert(spid.clone(), cid.clone());
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid,
-        target_agent_id: None,
+        agent_prompt_id: spid,
+        agent_id: "main".into(),
         output_items: vec![
             ContextItem::ToolCall(ToolCallItem {
                 call_id: "a-foreground-disconnect".into(),
@@ -2062,11 +2028,11 @@ fn disconnect_mixed_foreground_and_background_errors_dispatch_prompt_after_batch
             .is_backgrounded(&"b-background-disconnect".into())
     );
     assert!(matches!(
-        h.conversations
+        h.agents
             .get(&cid)
             .expect("conversation remains live")
             .turn_state,
-        ConversationTurnState::ToolsRunning { .. }
+        AgentTurnState::ToolsRunning { .. }
     ));
 
     h.handle_disconnect("conn-mixed-disconnect");
@@ -2088,7 +2054,7 @@ fn disconnect_mixed_foreground_and_background_errors_dispatch_prompt_after_batch
     .expect("background synthetic error");
     let prompt_after_foreground_error_seq =
         event_log_position_after(&h, foreground_error_seq, |event| {
-            matches!(event, Event::SessionPromptCreated(_))
+            matches!(event, Event::AgentPromptCreated(_))
         })
         .expect("post-disconnect follow-up prompt");
     assert!(background_error_seq < prompt_after_foreground_error_seq);
@@ -2113,7 +2079,7 @@ fn provider_owner_validation_rejects_wrong_tool_result() {
     )
     .expect("wrong result ignored");
 
-    assert!(h.tool_conversations.contains_key("owner-result-call"));
+    assert!(h.tool_agents.contains_key("owner-result-call"));
     assert_eq!(
         h.pending_tool_providers
             .get("owner-result-call")
@@ -2135,7 +2101,7 @@ fn provider_owner_validation_rejects_wrong_tool_result() {
     )
     .expect("owner result accepted");
 
-    assert!(!h.tool_conversations.contains_key("owner-result-call"));
+    assert!(!h.tool_agents.contains_key("owner-result-call"));
     assert!(!h.pending_tool_providers.contains_key("owner-result-call"));
     assert!(event_log_contains(&h, "conn-owner", |event| matches!(
         event,
@@ -2163,7 +2129,7 @@ fn provider_owner_validation_rejects_wrong_tool_error() {
     )
     .expect("wrong error ignored");
 
-    assert!(h.tool_conversations.contains_key("owner-error-call"));
+    assert!(h.tool_agents.contains_key("owner-error-call"));
     assert_eq!(
         h.pending_tool_providers
             .get("owner-error-call")
@@ -2181,7 +2147,7 @@ fn provider_owner_validation_rejects_wrong_tool_error() {
     )
     .expect("owner error accepted");
 
-    assert!(!h.tool_conversations.contains_key("owner-error-call"));
+    assert!(!h.tool_agents.contains_key("owner-error-call"));
     assert!(!h.pending_tool_providers.contains_key("owner-error-call"));
     assert!(event_log_contains(&h, "conn-owner", |event| matches!(
         event,
@@ -2212,7 +2178,7 @@ fn provider_owner_validation_rejects_wrong_tool_progress() {
         event,
         Event::ToolProgress(progress) if progress.call_id.as_str() == "owner-progress-call"
     )));
-    assert!(h.tool_conversations.contains_key("owner-progress-call"));
+    assert!(h.tool_agents.contains_key("owner-progress-call"));
 
     h.handle_extension_event_inner(
         "conn-owner",
@@ -2250,7 +2216,7 @@ fn provider_owner_validation_rejects_wrong_tool_cancelled() {
     )
     .expect("wrong cancellation ignored");
 
-    assert!(h.tool_conversations.contains_key("owner-cancelled-call"));
+    assert!(h.tool_agents.contains_key("owner-cancelled-call"));
     assert!(!event_log_contains(&h, "conn-wrong", |event| matches!(
         event,
         Event::ToolCancelled(cancelled) if cancelled.call_id.as_str() == "owner-cancelled-call"
@@ -2266,7 +2232,7 @@ fn provider_owner_validation_rejects_wrong_tool_cancelled() {
     )
     .expect("owner result accepted");
 
-    assert!(!h.tool_conversations.contains_key("owner-cancelled-call"));
+    assert!(!h.tool_agents.contains_key("owner-cancelled-call"));
     assert!(event_log_contains(&h, "conn-owner", |event| matches!(
         event,
         Event::ToolResult(result)
@@ -2278,7 +2244,7 @@ fn provider_owner_validation_rejects_wrong_tool_cancelled() {
 }
 
 /// Background terminal events are harness-derived records. Extensions must not
-/// be able to inject them directly into the session log.
+/// be able to inject them directly into an agent log.
 #[test]
 fn provider_owner_validation_rejects_external_background_result() {
     let (_td, mut h) = setup_routed_test_tool_call("owner-background-call", "owned_tool");
@@ -2296,7 +2262,7 @@ fn provider_owner_validation_rejects_external_background_result() {
     )
     .expect("wrong background result ignored");
 
-    assert!(h.tool_conversations.contains_key("owner-background-call"));
+    assert!(h.tool_agents.contains_key("owner-background-call"));
     assert!(!event_log_contains(&h, "conn-wrong", |event| matches!(
         event,
         Event::ToolBackgroundResult(result) if result.call_id.as_str() == "owner-background-call"
@@ -2323,10 +2289,7 @@ fn provider_owner_validation_rejects_external_background_error() {
     )
     .expect("wrong background error ignored");
 
-    assert!(
-        h.tool_conversations
-            .contains_key("owner-background-error-call")
-    );
+    assert!(h.tool_agents.contains_key("owner-background-error-call"));
     assert!(!event_log_contains(&h, "conn-wrong", |event| matches!(
         event,
         Event::ToolBackgroundError(error)
@@ -2378,7 +2341,7 @@ fn provider_owner_validation_rejects_tool_event_message_emit() {
     )
     .expect("emitted cancellation ignored");
 
-    assert!(h.tool_conversations.contains_key("emit-cancelled-call"));
+    assert!(h.tool_agents.contains_key("emit-cancelled-call"));
     assert!(!event_log_contains(&h, "conn-wrong", |event| matches!(
         event,
         Event::ToolCancelled(cancelled) if cancelled.call_id.as_str() == "emit-cancelled-call"
@@ -2397,8 +2360,8 @@ fn provider_owner_validation_rejects_provider_event_message_emit() {
         "conn-wrong",
         Frame::Message(Message::Emit(tau_proto::Emit {
             event: Box::new(Event::ProviderResponseFinished(ProviderResponseFinished {
-                session_prompt_id: "spoofed-prompt".into(),
-                target_agent_id: None,
+                agent_prompt_id: "spoofed-prompt".into(),
+                agent_id: "main".into(),
                 output_items: Vec::new(),
                 stop_reason: tau_proto::ProviderStopReason::EndTurn,
                 usage: None,
@@ -2415,7 +2378,7 @@ fn provider_owner_validation_rejects_provider_event_message_emit() {
     assert!(!event_log_contains(&h, "conn-wrong", |event| matches!(
         event,
         Event::ProviderResponseFinished(response)
-            if response.session_prompt_id.as_str() == "spoofed-prompt"
+            if response.agent_prompt_id.as_str() == "spoofed-prompt"
     )));
 
     h.shutdown().expect("shutdown");
@@ -2434,7 +2397,7 @@ fn provider_owner_validation_rejects_late_tool_progress_after_completion() {
         )),
     )
     .expect("owner result accepted");
-    assert!(!h.tool_conversations.contains_key("late-progress-call"));
+    assert!(!h.tool_agents.contains_key("late-progress-call"));
 
     h.handle_extension_event_inner(
         "conn-owner",
@@ -2470,13 +2433,13 @@ fn cancel_publishes_tool_cancel_request() {
     h.registry
         .register("conn-cancel-owner", shared_test_tool_spec("cancel_tool"));
 
-    let cid = h.default_conversation_id.clone();
-    let spid: SessionPromptId = "sp-cancel-tool".into();
+    let cid = h.default_agent_id.clone();
+    let spid: AgentPromptId = "sp-cancel-tool".into();
     seed_agent_thinking(&mut h, &cid, spid.as_str());
-    h.prompt_conversations.insert(spid.clone(), cid);
+    h.prompt_agents.insert(spid.clone(), cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid,
-        target_agent_id: None,
+        agent_prompt_id: spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "cancel-call".into(),
             name: ToolName::new("cancel_tool"),
@@ -2495,7 +2458,7 @@ fn cancel_publishes_tool_cancel_request() {
     h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
         session_id: "s1".into(),
         target_agent_id: None,
-        session_prompt_id: None,
+        agent_prompt_id: None,
     });
 
     assert!(event_log_contains_any_source(&h, |event| matches!(
@@ -2518,12 +2481,11 @@ fn cancel_clears_active_wait_state() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     let target_call_id: ToolCallId = "wait-target".into();
     let wait_call_id: ToolCallId = "wait-call".into();
 
-    h.tool_conversations
-        .insert(target_call_id.clone(), cid.clone());
+    h.tool_agents.insert(target_call_id.clone(), cid.clone());
     h.pending_tools.insert(
         target_call_id.clone(),
         PendingTool {
@@ -2555,7 +2517,7 @@ fn cancel_clears_active_wait_state() {
     h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
         session_id: "s1".into(),
         target_agent_id: None,
-        session_prompt_id: None,
+        agent_prompt_id: None,
     });
 
     let second_wait_call = AgentToolCall {
@@ -2582,7 +2544,72 @@ fn cancel_clears_active_wait_state() {
 }
 
 #[test]
-fn cross_session_prompt_is_rejected() {
+fn cancel_while_thinking_terminates_prompt_and_drops_late_response() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    let cid = h.default_agent_id.clone();
+    let spid: AgentPromptId = "sp-cancel-thinking".into();
+    seed_agent_thinking(&mut h, &cid, spid.as_str());
+    h.agents
+        .get_mut(&cid)
+        .expect("conversation")
+        .in_flight_prompt = Some(spid.clone());
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+
+    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
+        session_id: "s1".into(),
+        target_agent_id: None,
+        agent_prompt_id: None,
+    });
+
+    assert!(matches!(h.agents[&cid].turn_state, AgentTurnState::Idle));
+    assert!(h.agents[&cid].in_flight_prompt.is_none());
+    assert!(h.agents[&cid].pending_cancel.is_none());
+    assert!(h.canceled_prompts.contains(&spid));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptTerminated(terminated)
+            if terminated.agent_prompt_id == spid
+                && terminated.reason == tau_proto::AgentPromptTerminationReason::Canceled
+    )));
+    let response_count_before = event_log_events(&h)
+        .into_iter()
+        .filter(|event| matches!(event, Event::ProviderResponseFinished(_)))
+        .count();
+
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: spid.clone(),
+        agent_id: "main".into(),
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+            content: vec![ContentPart::Text {
+                text: "(cancelled by harness)".to_owned(),
+            }],
+            phase: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::EndTurn,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("late canceled response should be ignored");
+
+    let response_count_after = event_log_events(&h)
+        .into_iter()
+        .filter(|event| matches!(event, Event::ProviderResponseFinished(_)))
+        .count();
+    assert_eq!(response_count_after, response_count_before);
+    assert!(!h.canceled_prompts.contains(&spid));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn cross_session_submission_is_rejected() {
     // The harness owns one session at a time. A UserMessage with
     // a different session id must not silently spin up a second
     // session — it gets rejected with a clear reason.
@@ -2602,8 +2629,8 @@ fn cross_session_prompt_is_rejected() {
         other => panic!("expected Rejected, got {other:?}"),
     }
     assert!(
-        h.conversations
-            .get(&h.default_conversation_id)
+        h.agents
+            .get(&h.default_agent_id)
             .expect("default conversation")
             .pending_prompts
             .is_empty(),
@@ -2621,7 +2648,7 @@ fn cross_session_prompt_is_rejected() {
 fn provider_model_prompt_routes_directly_to_provider_owner() {
     // Provider-published models should not wake every provider subscriber.
     // The committed prompt remains visible to observers, while the owner gets a
-    // direct LogEvent even without subscribing to session.prompt_created.
+    // direct LogEvent even without subscribing to agent.prompt_created.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -2632,7 +2659,7 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
         connect_test_client(&mut h, "provider-observer", tau_proto::ClientKind::Provider);
     let ui_frames = connect_test_client(&mut h, "ui-observer", tau_proto::ClientKind::Ui);
     let prompt_selector = vec![EventSelector::Exact(
-        tau_proto::EventName::SESSION_PROMPT_CREATED,
+        tau_proto::EventName::AGENT_PROMPT_CREATED,
     )];
     h.bus
         .set_subscriptions("provider-observer", prompt_selector.clone())
@@ -2665,12 +2692,12 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
     append_user_message_via_event(&mut h, "s1", "hello");
     let spid = h.send_prompt_to_agent("s1");
 
-    let frame_is_prompt = |routed: &RoutedFrame, spid: &SessionPromptId| {
+    let frame_is_prompt = |routed: &RoutedFrame, spid: &AgentPromptId| {
         let (_, inner) = routed.frame.clone().peel_log();
         matches!(
             inner,
-            Frame::Event(Event::SessionPromptCreated(prompt))
-                if prompt.session_prompt_id.as_str() == spid.as_str()
+            Frame::Event(Event::AgentPromptCreated(prompt))
+                if prompt.agent_prompt_id.as_str() == spid.as_str()
         )
     };
     assert!(
@@ -2750,7 +2777,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
     h.handle_extension_event(
         "provider-other",
         Frame::Event(Event::ProviderResponseUpdated(ProviderResponseUpdated {
-            session_prompt_id: spid.clone(),
+            agent_prompt_id: spid.clone(),
             text: "spoofed stream".to_owned(),
             thinking: None,
             originator: tau_proto::PromptOriginator::User,
@@ -2760,7 +2787,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
     h.handle_extension_event(
         "tool-impersonator",
         Frame::Event(Event::ProviderResponseUpdated(ProviderResponseUpdated {
-            session_prompt_id: spid.clone(),
+            agent_prompt_id: spid.clone(),
             text: "tool stream".to_owned(),
             thinking: None,
             originator: tau_proto::PromptOriginator::User,
@@ -2782,8 +2809,8 @@ fn provider_execution_events_must_come_from_prompt_owner() {
         "wrong-source events must not consume the pending owner"
     );
     assert!(matches!(
-        h.conversations[&h.default_conversation_id].turn_state,
-        ConversationTurnState::AgentThinking { .. }
+        h.agents[&h.default_agent_id].turn_state,
+        AgentTurnState::AgentThinking { .. }
     ));
     assert!(!event_log_contains(&h, "provider-other", |event| matches!(
         event,
@@ -2801,7 +2828,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
     h.handle_extension_event(
         "provider-owner",
         Frame::Event(Event::ProviderResponseUpdated(ProviderResponseUpdated {
-            session_prompt_id: spid.clone(),
+            agent_prompt_id: spid.clone(),
             text: "real stream".to_owned(),
             thinking: None,
             originator: tau_proto::PromptOriginator::User,
@@ -2819,8 +2846,8 @@ fn provider_execution_events_must_come_from_prompt_owner() {
 
     assert!(!h.pending_provider_prompts.contains_key(&spid));
     assert!(matches!(
-        h.conversations[&h.default_conversation_id].turn_state,
-        ConversationTurnState::Idle
+        h.agents[&h.default_agent_id].turn_state,
+        AgentTurnState::Idle
     ));
     assert!(event_log_contains(&h, "provider-owner", |event| matches!(
         event,
@@ -2845,9 +2872,9 @@ fn shared_exclusive_shared_serializes_through_dispatch_state_machine() {
     // Pre-seed turn state as if the agent had just been prompted
     // and is about to respond with tool calls.
     h.selected_model = Some("test/model".into());
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_conversations.insert("sp-x".into(), cid);
+    h.prompt_agents.insert("sp-x".into(), cid);
 
     // A `read` of a nonexistent path returns a ToolError (Shared);
     // `write` of a valid path creates the file and returns
@@ -2868,8 +2895,8 @@ fn shared_exclusive_shared_serializes_through_dispatch_state_machine() {
         ),
     ]);
     let response = ProviderResponseFinished {
-        session_prompt_id: "sp-x".into(),
-        target_agent_id: None,
+        agent_prompt_id: "sp-x".into(),
+        agent_id: "main".into(),
         output_items: vec![
             ContextItem::ToolCall(ToolCallItem {
                 call_id: "c1".into(),
@@ -2972,7 +2999,7 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
     // prompt sees a balanced tool_use ↔ tool_result set. A previous
     // bug let `publish_event` (used by the ToolResult/ToolError path)
     // leave the conversation's local head stale, so the next
-    // ToolRequest's `publish_for_conversation` emitted a
+    // ToolRequest's `publish_for_agent` emitted a
     // `UiNavigateTree` that bounced the tree head backward — orphaning
     // the just-published ToolResult onto a dead branch and triggering
     // OpenAI's "No tool output found for function call ..." 400.
@@ -2982,9 +3009,9 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
     h.selected_model = Some("test/model".into());
 
     append_user_message_via_event(&mut h, "s1", "go");
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_conversations.insert("sp-x".into(), cid);
+    h.prompt_agents.insert("sp-x".into(), cid);
 
     let write_args = |name: &str| {
         CborValue::Map(vec![
@@ -2999,8 +3026,8 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
         ])
     };
     let response = ProviderResponseFinished {
-        session_prompt_id: "sp-x".into(),
-        target_agent_id: None,
+        agent_prompt_id: "sp-x".into(),
+        agent_id: "main".into(),
         output_items: vec![
             ContextItem::ToolCall(ToolCallItem {
                 call_id: "c1".into(),
@@ -3060,7 +3087,7 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
     // After all three tools complete, the harness has auto-dispatched
     // a follow-up prompt. Read its context items and check that every
     // tool call has a matching tool result on the same branch.
-    let spid: SessionPromptId = "sp-0".into();
+    let spid: AgentPromptId = "sp-0".into();
     let prompt = read_prompt_created(&h, &spid);
     let tool_use_ids: Vec<String> = prompt
         .context_items
@@ -3090,22 +3117,89 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
 }
 
 #[test]
+fn ui_navigate_tree_persists_selected_head_for_resume() {
+    // Regression: navigating to an earlier node used to mutate only the live
+    // conversation cursor. After restart the harness replayed the agent log,
+    // lost that branch selection, and resumed from the last appended node.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let first_user_head;
+    let agent_id: tau_proto::AgentId;
+
+    {
+        let mut h = echo_harness(&sp).expect("start");
+
+        append_user_message_via_event(&mut h, "s1", "first branch point");
+        let cid = h.default_agent_id.clone();
+        first_user_head = h.agents[&cid].head.expect("first user head");
+        append_user_message_via_event(&mut h, "s1", "second branch point");
+        agent_id = h.agents[&cid]
+            .agent_id
+            .clone()
+            .expect("default conversation agent id")
+            .into();
+
+        h.handle_ui_navigate_tree(
+            "ui",
+            tau_proto::UiNavigateTree {
+                session_id: "s1".into(),
+                target_agent_id: None,
+                node_id: first_user_head.get(),
+            },
+        )
+        .expect("navigate tree");
+
+        assert_eq!(h.agents[&cid].head, Some(first_user_head));
+        assert!(loaded_agent_events(&h, "s1").into_iter().any(|event| {
+            matches!(
+                event,
+                Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+                    agent_id: ref moved_agent_id,
+                    node_id,
+                }) if moved_agent_id == &agent_id && node_id == first_user_head
+            )
+        }));
+
+        h.shutdown().expect("shutdown");
+    }
+    wait_for_session_unlock(&sp, "s1");
+
+    {
+        let mut h =
+            echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
+                .expect("resume");
+        let cid = h.default_agent_id.clone();
+
+        assert_eq!(h.agents[&cid].head, Some(first_user_head));
+
+        append_user_message_via_event(&mut h, "s1", "branched after resume");
+        let branched = default_agent_tree(&h)
+            .nodes()
+            .last()
+            .expect("branched node after resume");
+        assert_eq!(branched.parent_id, Some(first_user_head));
+
+        h.shutdown().expect("shutdown");
+    }
+}
+
+#[test]
 fn queued_prompt_is_steered_into_next_round_after_tool_result() {
     // While the agent is mid-turn (a tool is in flight), a fresh user
     // prompt must queue rather than dispatch. When the tool result
     // arrives and the harness is about to issue the next-round prompt,
     // it should drain the queued prompt onto this conversation's
-    // branch as a `SessionPromptSteered` event so it rides the same
-    // `SessionPromptCreated` as the tool results — instead of waiting
+    // branch as a `AgentPromptSteered` event so it rides the same
+    // `AgentPromptCreated` as the tool results — instead of waiting
     // for full `Idle` and starting a separate turn.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_conversations.insert("sp-x".into(), cid.clone());
+    h.prompt_agents.insert("sp-x".into(), cid.clone());
 
     let write_args = CborValue::Map(vec![
         (
@@ -3118,8 +3212,8 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
         ),
     ]);
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: "sp-x".into(),
-        target_agent_id: None,
+        agent_prompt_id: "sp-x".into(),
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "c1".into(),
             name: tau_proto::ToolName::new("write"),
@@ -3148,8 +3242,8 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
     // The conversation must be in `ToolsRunning` so `submit_user_prompt`
     // takes the queued path rather than dispatching.
     assert!(matches!(
-        h.conversations.get(&cid).expect("default").turn_state,
-        ConversationTurnState::ToolsRunning { .. }
+        h.agents.get(&cid).expect("default").turn_state,
+        AgentTurnState::ToolsRunning { .. }
     ));
 
     let submission = h
@@ -3160,11 +3254,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
         "in-flight turn should force queueing, got {submission:?}"
     );
     assert_eq!(
-        h.conversations
-            .get(&cid)
-            .expect("default")
-            .pending_prompts
-            .len(),
+        h.agents.get(&cid).expect("default").pending_prompts.len(),
         1,
         "the steering message should sit in pending_prompts until the next-round seam",
     );
@@ -3172,7 +3262,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
     drive_harness_until_call_completes(&mut h, "c1");
 
     assert!(
-        h.conversations
+        h.agents
             .get(&cid)
             .expect("default")
             .pending_prompts
@@ -3180,18 +3270,18 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
         "queued prompt must be drained when folded as a steer",
     );
 
-    // Walk the event log and verify ordering: the SessionPromptSteered
-    // is published before the next-round SessionPromptCreated, and the
+    // Walk the event log and verify ordering: the AgentPromptSteered
+    // is published before the next-round AgentPromptCreated, and the
     // latter's `context_items` includes the steered text alongside the
     // original user prompt.
-    let next_round_spid: SessionPromptId = "sp-0".into();
+    let next_round_spid: AgentPromptId = "sp-0".into();
     let mut cursor = 0;
     let mut saw_steered = false;
     let mut saw_next_round = false;
     while let Some(entry) = h.event_log.get_next_from(cursor) {
         cursor = entry.seq + 1;
         match &entry.event {
-            Event::SessionPromptSteered(steered) => {
+            Event::AgentPromptSteered(steered) => {
                 assert_eq!(steered.text, "redirect");
                 assert!(
                     !saw_next_round,
@@ -3199,10 +3289,10 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
                 );
                 saw_steered = true;
             }
-            Event::SessionPromptCreated(p) if p.session_prompt_id == next_round_spid => {
+            Event::AgentPromptCreated(p) if p.agent_prompt_id == next_round_spid => {
                 assert!(
                     saw_steered,
-                    "next-round prompt must follow the SessionPromptSteered",
+                    "next-round prompt must follow the AgentPromptSteered",
                 );
                 saw_next_round = true;
 
@@ -3253,11 +3343,8 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
             _ => {}
         }
     }
-    assert!(saw_steered, "expected a SessionPromptSteered event");
-    assert!(
-        saw_next_round,
-        "expected the next-round SessionPromptCreated"
-    );
+    assert!(saw_steered, "expected a AgentPromptSteered event");
+    assert!(saw_next_round, "expected the next-round AgentPromptCreated");
 
     h.shutdown().expect("shutdown");
 }
@@ -3276,8 +3363,8 @@ fn tool_calls_stop_reason_without_tool_items_does_not_wedge_turn() {
     h.submit_user_prompt("s1".into(), "hello".to_owned())
         .expect("submit");
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: "sp-0".into(),
-        target_agent_id: None,
+        agent_prompt_id: "sp-0".into(),
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
             content: vec![ContentPart::Text {
@@ -3294,25 +3381,25 @@ fn tool_calls_stop_reason_without_tool_items_does_not_wedge_turn() {
     })
     .expect("finish");
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     assert!(matches!(
-        h.conversations.get(&cid).expect("default").turn_state,
-        ConversationTurnState::Idle
+        h.agents.get(&cid).expect("default").turn_state,
+        AgentTurnState::Idle
     ));
     assert_eq!(h.tool_turn.pending_len(), 0);
 
     h.submit_user_prompt("s1".into(), "again".to_owned())
         .expect("submit again");
     assert!(matches!(
-        h.conversations.get(&cid).expect("default").turn_state,
-        ConversationTurnState::AgentThinking { .. }
+        h.agents.get(&cid).expect("default").turn_state,
+        AgentTurnState::AgentThinking { .. }
     ));
 
     h.shutdown().expect("shutdown");
 }
 
 #[test]
-fn session_prompt_created_uses_refs_for_linear_extension() {
+fn agent_prompt_created_uses_refs_for_linear_extension() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -3323,8 +3410,8 @@ fn session_prompt_created_uses_refs_for_linear_extension() {
     let prompt1 = read_prompt_created(&h, &spid1);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid1.clone(),
-        target_agent_id: None,
+        agent_prompt_id: spid1.clone(),
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
 
@@ -3367,7 +3454,7 @@ fn session_prompt_created_uses_refs_for_linear_extension() {
 }
 
 #[test]
-fn linear_session_prompts_strictly_extend_previous_messages() {
+fn linear_agent_prompts_strictly_extend_previous_messages() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -3379,8 +3466,8 @@ fn linear_session_prompts_strictly_extend_previous_messages() {
     let prompt1 = read_prompt_created(&h, &spid1);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid1,
-        target_agent_id: None,
+        agent_prompt_id: spid1,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
 
@@ -3435,7 +3522,7 @@ fn linear_session_prompts_strictly_extend_previous_messages() {
 }
 
 /// When the agent reports a `response_id` on a finished turn, the
-/// next `SessionPromptCreated` for that conversation must carry a
+/// next `AgentPromptCreated` for that conversation must carry a
 /// `previous_response_candidate` pointing back at it — that's the hook the
 /// Responses backend uses to switch into stateful-chain mode and
 /// send just the delta upstream. `next_item_index` must equal the
@@ -3450,12 +3537,12 @@ fn response_id_anchors_next_prompt_with_previous_response() {
 
     h.submit_user_prompt("s1".into(), "first".to_owned())
         .expect("submit first");
-    let spid1: SessionPromptId = "sp-0".into();
+    let spid1: AgentPromptId = "sp-0".into();
     let prompt1 = read_prompt_created(&h, &spid1);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid1,
-        target_agent_id: None,
+        agent_prompt_id: spid1,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
 
@@ -3486,7 +3573,7 @@ fn response_id_anchors_next_prompt_with_previous_response() {
 
     h.submit_user_prompt("s1".into(), "second".to_owned())
         .expect("submit second");
-    let spid2: SessionPromptId = "sp-1".into();
+    let spid2: AgentPromptId = "sp-1".into();
     let prompt2 = read_prompt_created(&h, &spid2);
 
     let prev = prompt2
@@ -3512,10 +3599,10 @@ fn chained_low_corrected_cache_hit_emits_diagnostic() {
 
     h.submit_user_prompt("s1".into(), "first".to_owned())
         .expect("submit first");
-    let spid1: SessionPromptId = "sp-0".into();
+    let spid1: AgentPromptId = "sp-0".into();
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid1,
-        target_agent_id: None,
+        agent_prompt_id: spid1,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
 
@@ -3546,10 +3633,10 @@ fn chained_low_corrected_cache_hit_emits_diagnostic() {
 
     h.submit_user_prompt("s1".into(), "second".to_owned())
         .expect("submit second");
-    let spid2: SessionPromptId = "sp-1".into();
+    let spid2: AgentPromptId = "sp-1".into();
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid2.clone(),
-        target_agent_id: None,
+        agent_prompt_id: spid2.clone(),
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
 
@@ -3591,7 +3678,7 @@ fn chained_low_corrected_cache_hit_emits_diagnostic() {
         }
     }
     let diagnostic = diagnostic.expect("cache miss diagnostic");
-    assert_eq!(diagnostic.session_prompt_id, spid2);
+    assert_eq!(diagnostic.agent_prompt_id, spid2);
     assert_eq!(diagnostic.model, Some("test/model".into()));
     assert_eq!(diagnostic.previous_response_id, "resp_abc");
     assert_eq!(diagnostic.input_tokens, 1_100);
@@ -3613,10 +3700,10 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
 
     h.submit_user_prompt("s1".into(), "first".to_owned())
         .expect("submit first");
-    let spid1: SessionPromptId = "sp-0".into();
+    let spid1: AgentPromptId = "sp-0".into();
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid1,
-        target_agent_id: None,
+        agent_prompt_id: spid1,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
 
@@ -3647,10 +3734,10 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
 
     h.submit_user_prompt("s1".into(), "second".to_owned())
         .expect("submit second");
-    let spid2: SessionPromptId = "sp-1".into();
+    let spid2: AgentPromptId = "sp-1".into();
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid2,
-        target_agent_id: None,
+        agent_prompt_id: spid2,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
 
@@ -3705,10 +3792,10 @@ fn model_switch_invalidates_chain_anchor() {
 
     h.submit_user_prompt("s1".into(), "first".to_owned())
         .expect("submit first");
-    let spid1: SessionPromptId = "sp-0".into();
+    let spid1: AgentPromptId = "sp-0".into();
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid1,
-        target_agent_id: None,
+        agent_prompt_id: spid1,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
 
@@ -3742,7 +3829,7 @@ fn model_switch_invalidates_chain_anchor() {
 
     h.submit_user_prompt("s1".into(), "second".to_owned())
         .expect("submit second");
-    let spid2: SessionPromptId = "sp-1".into();
+    let spid2: AgentPromptId = "sp-1".into();
     let prompt2 = read_prompt_created(&h, &spid2);
 
     assert!(
@@ -3773,10 +3860,10 @@ fn params_drift_invalidates_chain_anchor() {
 
     h.submit_user_prompt("s1".into(), "first".to_owned())
         .expect("submit first");
-    let spid1: SessionPromptId = "sp-0".into();
+    let spid1: AgentPromptId = "sp-0".into();
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid1,
-        target_agent_id: None,
+        agent_prompt_id: spid1,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
 
@@ -3813,7 +3900,7 @@ fn params_drift_invalidates_chain_anchor() {
 
     h.submit_user_prompt("s1".into(), "second".to_owned())
         .expect("submit second");
-    let spid2: SessionPromptId = "sp-1".into();
+    let spid2: AgentPromptId = "sp-1".into();
     let prompt2 = read_prompt_created(&h, &spid2);
 
     assert!(
@@ -3839,10 +3926,10 @@ fn system_prompt_drift_invalidates_chain_anchor() {
 
     h.submit_user_prompt("s1".into(), "first".to_owned())
         .expect("submit first");
-    let spid1: SessionPromptId = "sp-0".into();
+    let spid1: AgentPromptId = "sp-0".into();
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid1,
-        target_agent_id: None,
+        agent_prompt_id: spid1,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
 
@@ -3890,7 +3977,7 @@ fn system_prompt_drift_invalidates_chain_anchor() {
 
     h.submit_user_prompt("s1".into(), "second".to_owned())
         .expect("submit second");
-    let spid2: SessionPromptId = "sp-1".into();
+    let spid2: AgentPromptId = "sp-1".into();
     let prompt2 = read_prompt_created(&h, &spid2);
 
     assert!(
@@ -3914,10 +4001,10 @@ fn tools_drift_invalidates_chain_anchor() {
 
     h.submit_user_prompt("s1".into(), "first".to_owned())
         .expect("submit first");
-    let spid1: SessionPromptId = "sp-0".into();
+    let spid1: AgentPromptId = "sp-0".into();
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid1,
-        target_agent_id: None,
+        agent_prompt_id: spid1,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
 
@@ -3967,7 +4054,7 @@ fn tools_drift_invalidates_chain_anchor() {
 
     h.submit_user_prompt("s1".into(), "second".to_owned())
         .expect("submit second");
-    let spid2: SessionPromptId = "sp-1".into();
+    let spid2: AgentPromptId = "sp-1".into();
     let prompt2 = read_prompt_created(&h, &spid2);
 
     assert!(
@@ -3991,10 +4078,10 @@ fn stable_params_preserve_chain_anchor() {
 
     h.submit_user_prompt("s1".into(), "first".to_owned())
         .expect("submit first");
-    let spid1: SessionPromptId = "sp-0".into();
+    let spid1: AgentPromptId = "sp-0".into();
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid1,
-        target_agent_id: None,
+        agent_prompt_id: spid1,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
 
@@ -4025,7 +4112,7 @@ fn stable_params_preserve_chain_anchor() {
 
     h.submit_user_prompt("s1".into(), "second".to_owned())
         .expect("submit second");
-    let spid2: SessionPromptId = "sp-1".into();
+    let spid2: AgentPromptId = "sp-1".into();
     let prompt2 = read_prompt_created(&h, &spid2);
 
     let prev = prompt2
@@ -4048,11 +4135,11 @@ fn missing_response_id_leaves_chain_unset() {
 
     h.submit_user_prompt("s1".into(), "first".to_owned())
         .expect("submit first");
-    let spid1: SessionPromptId = "sp-0".into();
+    let spid1: AgentPromptId = "sp-0".into();
 
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid1,
-        target_agent_id: None,
+        agent_prompt_id: spid1,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
 
@@ -4083,7 +4170,7 @@ fn missing_response_id_leaves_chain_unset() {
 
     h.submit_user_prompt("s1".into(), "second".to_owned())
         .expect("submit second");
-    let spid2: SessionPromptId = "sp-1".into();
+    let spid2: AgentPromptId = "sp-1".into();
     let prompt2 = read_prompt_created(&h, &spid2);
 
     assert!(
@@ -4105,7 +4192,7 @@ fn queued_prompt_extends_completed_first_prompt() {
         .submit_user_prompt("s1".into(), "first".to_owned())
         .expect("submit first");
     assert_eq!(first, PromptSubmission::Dispatched);
-    let spid1: SessionPromptId = "sp-0".into();
+    let spid1: AgentPromptId = "sp-0".into();
     let prompt1 = read_prompt_created(&h, &spid1);
 
     let second = h
@@ -4114,8 +4201,8 @@ fn queued_prompt_extends_completed_first_prompt() {
     assert_eq!(second, PromptSubmission::Queued);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid1,
-        target_agent_id: None,
+        agent_prompt_id: spid1,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
 
@@ -4145,7 +4232,7 @@ fn queued_prompt_extends_completed_first_prompt() {
     })
     .expect("finish first");
 
-    let spid2: SessionPromptId = "sp-1".into();
+    let spid2: AgentPromptId = "sp-1".into();
     let prompt2 = read_prompt_created(&h, &spid2);
     assert!(
         prompt1.context_items.len() < prompt2.context_items.len(),
@@ -4213,14 +4300,14 @@ fn resumed_startup_folds_restore_notice_before_first_user_prompt() {
         quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
             .expect("resume");
 
-    assert!(h.prompt_conversations.is_empty());
+    assert!(h.prompt_agents.is_empty());
     assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,
-        Event::SessionPromptCreated(_)
+        Event::AgentPromptCreated(_)
     )));
     assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,
-        Event::SessionPromptPrewarmRequested(prewarm)
+        Event::AgentPromptPrewarmRequested(prewarm)
             if prewarm
                 .context_items
                 .iter()
@@ -4230,7 +4317,7 @@ fn resumed_startup_folds_restore_notice_before_first_user_prompt() {
 
     h.submit_user_prompt("s1".into(), "after restore".to_owned())
         .expect("submit first resumed prompt");
-    let spid: SessionPromptId = "sp-0".into();
+    let spid: AgentPromptId = "sp-0".into();
     let prompt = read_prompt_created(&h, &spid);
     let notice_pos = prompt
         .context_items
@@ -4270,7 +4357,7 @@ fn restore_notice_is_not_duplicated_by_followups_or_later_resumes() {
 
         h.submit_user_prompt("s1".into(), "first after restore".to_owned())
             .expect("submit first resumed prompt");
-        let first_spid: SessionPromptId = "sp-0".into();
+        let first_spid: AgentPromptId = "sp-0".into();
         let first_prompt = read_prompt_created(&h, &first_spid);
         let notice = restore_notice_context_text(&first_prompt)
             .expect("restore notice")
@@ -4281,7 +4368,7 @@ fn restore_notice_is_not_duplicated_by_followups_or_later_resumes() {
             .expect("finish first prompt");
         h.submit_user_prompt("s1".into(), "second after restore".to_owned())
             .expect("submit second prompt");
-        let second_spid: SessionPromptId = "sp-1".into();
+        let second_spid: AgentPromptId = "sp-1".into();
         let second_prompt = read_prompt_created(&h, &second_spid);
         assert_eq!(context_text_count(&second_prompt, notice.as_str()), 1);
         assert_eq!(restore_notice_context_count(&second_prompt), 1);
@@ -4299,7 +4386,7 @@ fn restore_notice_is_not_duplicated_by_followups_or_later_resumes() {
 
         h.submit_user_prompt("s1".into(), "third after restore".to_owned())
             .expect("submit after second resume");
-        let spid: SessionPromptId = "sp-0".into();
+        let spid: AgentPromptId = "sp-0".into();
         let prompt = read_prompt_created(&h, &spid);
         assert_eq!(context_text_count(&prompt, notice.as_str()), 1);
         assert_eq!(restore_notice_context_count(&prompt), 1);
@@ -4336,12 +4423,12 @@ fn resumed_lost_background_tool_gets_error_and_wait_returns() {
     ));
     assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,
-        Event::SessionPromptCreated(_)
+        Event::AgentPromptCreated(_)
     )));
 
     h.submit_user_prompt("s1".into(), "after restore".to_owned())
         .expect("submit first resumed prompt");
-    let first_spid: SessionPromptId = "sp-0".into();
+    let first_spid: AgentPromptId = "sp-0".into();
     let first_prompt = read_prompt_created(&h, &first_spid);
     let notice_pos = first_prompt
         .context_items
@@ -4356,8 +4443,8 @@ fn resumed_lost_background_tool_gets_error_and_wait_returns() {
     assert!(notice_pos < user_pos);
 
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: first_spid,
-        target_agent_id: None,
+        agent_prompt_id: first_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "wait-lost-bg".into(),
             name: ToolName::new("wait"),
@@ -4394,38 +4481,8 @@ fn resume_keeps_existing_background_completions() {
     let sp = td.path().join("state");
     seed_background_placeholder(&sp, "finished-bg", "slow_bg");
     seed_background_placeholder(&sp, "failed-bg", "slow_bg");
-    let sessions_dir = tau_config::settings::sessions_dir_of(&sp);
-    let mut store = tau_core::SessionStore::open(&sessions_dir).expect("session store");
-    store
-        .append_session_event(
-            "s1",
-            None,
-            Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
-                call_id: "finished-bg".into(),
-                tool_name: ToolName::new("slow_bg"),
-                tool_type: tau_proto::ToolType::Function,
-                result: CborValue::Text("finished".to_owned()),
-                display: None,
-                originator: tau_proto::PromptOriginator::User,
-            }),
-        )
-        .expect("seed background result");
-    store
-        .append_session_event(
-            "s1",
-            None,
-            Event::ToolBackgroundError(tau_proto::ToolBackgroundError {
-                call_id: "failed-bg".into(),
-                tool_name: ToolName::new("slow_bg"),
-                tool_type: tau_proto::ToolType::Function,
-                message: "real failure".to_owned(),
-                details: None,
-                display: None,
-                originator: tau_proto::PromptOriginator::User,
-            }),
-        )
-        .expect("seed background error");
-    drop(store);
+    seed_background_result(&sp, "finished-bg", "slow_bg", "finished");
+    seed_background_error(&sp, "failed-bg", "slow_bg", "real failure");
 
     let mut h =
         quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
@@ -4443,40 +4500,24 @@ fn resume_keeps_existing_background_completions() {
     h.shutdown().expect("shutdown");
 }
 
-/// Completed background results restored from the session log should be
+/// Completed background results restored from the agent log should be
 /// available to `wait({})`, not only to exact-id waits.
 #[test]
 fn resumed_completed_background_result_can_be_consumed_by_no_arg_wait() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     seed_background_placeholder(&sp, "restored-any", "slow_bg");
-    let sessions_dir = tau_config::settings::sessions_dir_of(&sp);
-    let mut store = tau_core::SessionStore::open(&sessions_dir).expect("session store");
-    store
-        .append_session_event(
-            "s1",
-            None,
-            Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
-                call_id: "restored-any".into(),
-                tool_name: ToolName::new("slow_bg"),
-                tool_type: tau_proto::ToolType::Function,
-                result: CborValue::Text("restored output".to_owned()),
-                display: None,
-                originator: tau_proto::PromptOriginator::User,
-            }),
-        )
-        .expect("seed background result");
-    drop(store);
+    seed_background_result(&sp, "restored-any", "slow_bg", "restored output");
 
     let mut h =
         quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
             .expect("resume");
     h.submit_user_prompt("s1".into(), "collect restored background".to_owned())
         .expect("submit first resumed prompt");
-    let spid: SessionPromptId = "sp-0".into();
+    let spid: AgentPromptId = "sp-0".into();
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid,
-        target_agent_id: None,
+        agent_prompt_id: spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "wait-restored-any".into(),
             name: ToolName::new("wait"),
@@ -4511,33 +4552,17 @@ fn resumed_no_arg_wait_uses_restored_completion_event_order() {
     let sp = td.path().join("state");
     seed_background_placeholder(&sp, "restored-a", "slow_bg");
     seed_background_placeholder(&sp, "restored-b", "slow_bg");
-    let sessions_dir = tau_config::settings::sessions_dir_of(&sp);
-    let mut store = tau_core::SessionStore::open(&sessions_dir).expect("session store");
     for (call_id, text) in [
         ("restored-b", "first restored output"),
         ("restored-a", "second restored output"),
     ] {
-        store
-            .append_session_event(
-                "s1",
-                None,
-                Event::ToolBackgroundResult(tau_proto::ToolBackgroundResult {
-                    call_id: call_id.into(),
-                    tool_name: ToolName::new("slow_bg"),
-                    tool_type: tau_proto::ToolType::Function,
-                    result: CborValue::Text(text.to_owned()),
-                    display: None,
-                    originator: tau_proto::PromptOriginator::User,
-                }),
-            )
-            .expect("seed background result");
+        seed_background_result(&sp, call_id, "slow_bg", text);
     }
-    drop(store);
 
     let mut h =
         quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
             .expect("resume");
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     h.handle_wait_tool_call(
         &cid,
         &wait_no_args_call("wait-restored-first"),
@@ -4617,16 +4642,15 @@ fn switch_session_rebinds_default_conversation() {
         .token_usage
         .add_received(&model, 34_000);
 
-    let cid = h.default_conversation_id.clone();
-    assert_eq!(h.conversations[&cid].session_id.as_str(), "s1");
-    h.conversations
+    let cid = h.default_agent_id.clone();
+    assert_eq!(h.agents[&cid].session_id.as_str(), "s1");
+    h.agents
         .get_mut(&cid)
         .expect("default conversation")
         .agent_id = Some("old-agent".to_owned());
-    h.agent_conversations
-        .insert("old-agent".to_owned(), cid.clone());
+    h.agent_routes.insert("old-agent".to_owned(), cid.clone());
     h.agent_states
-        .insert("old-agent".to_owned(), tau_proto::AgentState::Suspended);
+        .insert("old-agent".to_owned(), AgentState::Suspended);
 
     let shell_conn = h
         .extension_connection_id("shell")
@@ -4659,12 +4683,12 @@ fn switch_session_rebinds_default_conversation() {
         tau_proto::TokenUsageStats::default()
     );
     assert_eq!(
-        h.conversations[&cid].session_id.as_str(),
+        h.agents[&cid].session_id.as_str(),
         "s2",
         "default conversation must follow the bound session id",
     );
-    assert!(h.conversations[&cid].agent_id.is_none());
-    assert!(h.agent_conversations.is_empty());
+    assert!(h.agents[&cid].agent_id.is_none());
+    assert!(h.agent_routes.is_empty());
     assert!(h.agent_states.is_empty());
 
     // Drive the new session through init so submit_user_prompt
@@ -4696,12 +4720,12 @@ fn user_prompt_auto_compacts_before_submission() {
     enable_remote_compaction_for_test_model(&mut h);
 
     append_user_message_via_event(&mut h, "s1", "earlier question");
-    let cid = h.default_conversation_id.clone();
-    h.publish_for_conversation(
+    let cid = h.default_agent_id.clone();
+    h.publish_for_agent(
         &cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
-            session_prompt_id: "sp-old".into(),
-            target_agent_id: None,
+            agent_prompt_id: "sp-old".into(),
+            agent_id: "main".into(),
             output_items: vec![ContextItem::Message(MessageItem {
                 role: ContextRole::Assistant,
 
@@ -4744,27 +4768,22 @@ fn user_prompt_auto_compacts_before_submission() {
         "compaction should start first"
     );
     assert!(matches!(
-        h.conversations[&cid].turn_state,
-        ConversationTurnState::Compacting
+        h.agents[&cid].turn_state,
+        AgentTurnState::Compacting
     ));
     assert!(
-        h.store
-            .session("s1")
-            .expect("session")
-            .current_branch()
-            .iter()
-            .all(|entry| {
-                !matches!(
-                    entry,
-                    SessionEntry::UserInput { items }
-                        if items.iter().any(|item| text_part(item) == Some("new question"))
-                )
-            }),
+        default_agent_branch(&h).iter().all(|entry| {
+            !matches!(
+                entry,
+                AgentEntry::UserInput { items }
+                    if items.iter().any(|item| text_part(item) == Some("new question"))
+            )
+        }),
         "user prompt must not be persisted until compaction finishes"
     );
 
     let (summary_cid, summary_spid) = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| {
             (prompt_cid != &cid).then_some((prompt_cid.clone(), spid.clone()))
@@ -4772,13 +4791,17 @@ fn user_prompt_auto_compacts_before_submission() {
         .expect("compaction prompt");
     let summary_prompt = read_compaction_requested(&h, &summary_spid);
     assert!(
+        !summary_prompt.context_items.is_empty(),
+        "compaction requests must replay the target agent transcript"
+    );
+    assert!(
         summary_prompt.previous_response_candidate.is_none(),
         "compaction requests should not reuse previous_response_id chaining"
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: summary_spid,
-        target_agent_id: None,
+        agent_prompt_id: summary_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Compaction(tau_proto::OpaqueProviderItem(
             CborValue::Map(vec![(
                 CborValue::Text("type".to_owned()),
@@ -4807,11 +4830,11 @@ fn user_prompt_auto_compacts_before_submission() {
     })
     .expect("summary finished");
 
-    assert!(!h.conversations.contains_key(&summary_cid));
+    assert!(!h.agents.contains_key(&summary_cid));
     assert!(h.pending_compactions.is_empty());
     assert!(matches!(
-        h.conversations[&cid].turn_state,
-        ConversationTurnState::AgentThinking { .. }
+        h.agents[&cid].turn_state,
+        AgentTurnState::AgentThinking { .. }
     ));
     assert_eq!(h.current_session_state.context_input_tokens, None);
     assert_eq!(h.current_session_state.context_percent_used, None);
@@ -4823,16 +4846,16 @@ fn user_prompt_auto_compacts_before_submission() {
     while let Some(entry) = h.event_log.get_next_from(cursor) {
         cursor = entry.seq + 1;
         match entry.event {
-            Event::SessionCompactionStarted(started) => {
+            Event::AgentCompactionStarted(started) => {
                 started_original_tokens = Some(started.original_input_tokens);
             }
-            Event::SessionCompacted(compacted) => {
+            Event::AgentCompacted(compacted) => {
                 compacted_tokens = Some((
                     compacted.original_input_tokens,
                     compacted.compacted_input_tokens,
                 ));
             }
-            Event::SessionCompactionFinished(finished) => {
+            Event::AgentCompactionFinished(finished) => {
                 finished_tokens = Some((
                     finished.original_input_tokens,
                     finished.compacted_input_tokens,
@@ -4845,14 +4868,14 @@ fn user_prompt_auto_compacts_before_submission() {
     assert_eq!(compacted_tokens, Some((Some(950), Some(40))));
     assert_eq!(finished_tokens, Some((Some(950), Some(40))));
 
-    let branch = h.store.session("s1").expect("session").current_branch();
+    let branch = default_agent_branch(&h);
     assert!(matches!(
         branch.get(branch.len().saturating_sub(2)),
-        Some(SessionEntry::Compaction { replacement_window }) if !replacement_window.is_empty()
+        Some(AgentEntry::Compaction { replacement_window }) if !replacement_window.is_empty()
     ));
     assert!(matches!(
         branch.last(),
-        Some(SessionEntry::UserInput { items })
+        Some(AgentEntry::UserInput { items })
             if items.iter().any(|item| text_part(item) == Some("new question"))
     ));
 
@@ -4869,20 +4892,10 @@ fn compaction_without_provider_usage_estimates_compacted_tokens_from_replacement
 
     enable_remote_compaction_for_test_model(&mut h);
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     // Manual compaction reads from the conversation head. Seed via the
     // conversation-aware publisher rather than only folding a durable event.
-    h.publish_for_conversation(
-        &cid,
-        Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
-            text: "earlier question".to_owned(),
-            target_agent_id: None,
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        }),
-    );
+    append_user_message_via_event(&mut h, "s1", "earlier question");
     h.current_session_state.context_input_tokens = Some(950);
     h.current_session_state.context_percent_used = Some(95);
     let baseline_seq = h.event_log.next_seq();
@@ -4890,7 +4903,7 @@ fn compaction_without_provider_usage_estimates_compacted_tokens_from_replacement
     h.handle_compact_request("s1".into(), None);
 
     let (_summary_cid, summary_spid) = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| {
             (prompt_cid != &cid).then_some((prompt_cid.clone(), spid.clone()))
@@ -4903,8 +4916,8 @@ fn compaction_without_provider_usage_estimates_compacted_tokens_from_replacement
     // will replay as the new prompt prefix.
     let summary_text = "compacted summary sentence. ".repeat(160);
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: summary_spid,
-        target_agent_id: None,
+        agent_prompt_id: summary_spid,
+        agent_id: "main".into(),
         output_items: vec![openai_compaction_summary_item(&summary_text)],
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         usage: None,
@@ -4924,10 +4937,10 @@ fn compaction_without_provider_usage_estimates_compacted_tokens_from_replacement
     while let Some(entry) = h.event_log.get_next_from(cursor) {
         cursor = entry.seq + 1;
         match entry.event {
-            Event::SessionCompacted(compacted) => {
+            Event::AgentCompacted(compacted) => {
                 compacted_tokens = compacted.compacted_input_tokens;
             }
-            Event::SessionCompactionFinished(finished) => {
+            Event::AgentCompactionFinished(finished) => {
                 finished_tokens = finished.compacted_input_tokens;
             }
             _ => {}
@@ -4952,20 +4965,10 @@ fn failed_compaction_does_not_report_compacted_tokens_from_provider_usage() {
 
     enable_remote_compaction_for_test_model(&mut h);
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     // Manual compaction reads from the conversation head. Seed via the
     // conversation-aware publisher rather than only folding a durable event.
-    h.publish_for_conversation(
-        &cid,
-        Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
-            text: "earlier question".to_owned(),
-            target_agent_id: None,
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        }),
-    );
+    append_user_message_via_event(&mut h, "s1", "earlier question");
     h.current_session_state.context_input_tokens = Some(950);
     h.current_session_state.context_percent_used = Some(95);
     let baseline_seq = h.event_log.next_seq();
@@ -4973,7 +4976,7 @@ fn failed_compaction_does_not_report_compacted_tokens_from_provider_usage() {
     h.handle_compact_request("s1".into(), None);
 
     let (_summary_cid, summary_spid) = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| {
             (prompt_cid != &cid).then_some((prompt_cid.clone(), spid.clone()))
@@ -4981,8 +4984,8 @@ fn failed_compaction_does_not_report_compacted_tokens_from_provider_usage() {
         .expect("compaction prompt");
 
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: summary_spid,
-        target_agent_id: None,
+        agent_prompt_id: summary_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
             content: vec![ContentPart::Text {
@@ -5015,8 +5018,8 @@ fn failed_compaction_does_not_report_compacted_tokens_from_provider_usage() {
     while let Some(entry) = h.event_log.get_next_from(cursor) {
         cursor = entry.seq + 1;
         match entry.event {
-            Event::SessionCompacted(_) => saw_compacted = true,
-            Event::SessionCompactionFinished(finished) => {
+            Event::AgentCompacted(_) => saw_compacted = true,
+            Event::AgentCompactionFinished(finished) => {
                 finished_tokens = finished.compacted_input_tokens;
                 finished_outcome = Some(finished.outcome);
             }
@@ -5026,12 +5029,12 @@ fn failed_compaction_does_not_report_compacted_tokens_from_provider_usage() {
 
     assert!(
         !saw_compacted,
-        "failed compaction must not emit SessionCompacted"
+        "failed compaction must not emit AgentCompacted"
     );
     assert_eq!(finished_tokens, None);
     assert_eq!(
         finished_outcome,
-        Some(tau_proto::SessionCompactionOutcome::Failed)
+        Some(tau_proto::AgentCompactionOutcome::Failed)
     );
 
     h.shutdown().expect("shutdown");
@@ -5047,12 +5050,12 @@ fn user_prompt_does_not_auto_compact_without_context_percent_signal() {
 
     let large_text = "earlier context ".repeat(40);
     append_user_message_via_event(&mut h, "s1", &large_text);
-    let cid = h.default_conversation_id.clone();
-    h.publish_for_conversation(
+    let cid = h.default_agent_id.clone();
+    h.publish_for_agent(
         &cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
-            session_prompt_id: "sp-old".into(),
-            target_agent_id: None,
+            agent_prompt_id: "sp-old".into(),
+            agent_id: "main".into(),
             output_items: vec![ContextItem::Message(MessageItem {
                 role: ContextRole::Assistant,
 
@@ -5089,10 +5092,10 @@ fn user_prompt_does_not_auto_compact_without_context_percent_signal() {
 
     assert!(h.pending_compactions.is_empty());
     assert!(matches!(
-        h.conversations[&cid].turn_state,
-        ConversationTurnState::AgentThinking { .. }
+        h.agents[&cid].turn_state,
+        AgentTurnState::AgentThinking { .. }
     ));
-    let spid = h.conversations[&cid]
+    let spid = h.agents[&cid]
         .in_flight_prompt
         .clone()
         .expect("in-flight prompt");
@@ -5114,15 +5117,13 @@ fn manual_compact_forces_compaction_without_followup_turn() {
     enable_remote_compaction_for_test_model(&mut h);
 
     append_user_message_via_event(&mut h, "s1", "earlier question");
-    let cid = h.default_conversation_id.clone();
-    let target_agent_id = h
-        .ensure_agent_id_for_conversation(&cid)
-        .expect("default agent id");
-    h.publish_for_conversation(
+    let cid = h.default_agent_id.clone();
+    let target_agent_id = h.ensure_agent_id_for_agent(&cid).expect("default agent id");
+    h.publish_for_agent(
         &cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
-            session_prompt_id: "sp-old".into(),
-            target_agent_id: None,
+            agent_prompt_id: "sp-old".into(),
+            agent_id: "main".into(),
             output_items: vec![ContextItem::Message(MessageItem {
                 role: ContextRole::Assistant,
 
@@ -5157,22 +5158,19 @@ fn manual_compact_forces_compaction_without_followup_turn() {
 
     assert_eq!(h.pending_compactions.len(), 1);
     let (summary_cid, summary_spid) = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| {
             (prompt_cid != &cid).then_some((prompt_cid.clone(), spid.clone()))
         })
         .expect("compaction prompt");
     let summary_prompt = read_compaction_requested(&h, &summary_spid);
-    assert_eq!(
-        summary_prompt.target_agent_id.as_deref(),
-        Some(target_agent_id.as_str())
-    );
+    assert_eq!(summary_prompt.agent_id.as_str(), target_agent_id.as_str());
     assert!(summary_prompt.previous_response_candidate.is_none());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: summary_spid.clone(),
-        target_agent_id: None,
+        agent_prompt_id: summary_spid.clone(),
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Compaction(tau_proto::OpaqueProviderItem(
             CborValue::Map(vec![(
                 CborValue::Text("type".to_owned()),
@@ -5201,30 +5199,27 @@ fn manual_compact_forces_compaction_without_followup_turn() {
     })
     .expect("summary finished");
 
-    assert!(!h.conversations.contains_key(&summary_cid));
+    assert!(!h.agents.contains_key(&summary_cid));
     assert!(h.pending_compactions.is_empty());
-    assert!(matches!(
-        h.conversations[&cid].turn_state,
-        ConversationTurnState::Idle
-    ));
-    assert!(h.conversations[&cid].in_flight_prompt.is_none());
+    assert!(matches!(h.agents[&cid].turn_state, AgentTurnState::Idle));
+    assert!(h.agents[&cid].in_flight_prompt.is_none());
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
         Event::ProviderResponseFinished(finished)
-            if finished.session_prompt_id == summary_spid
-                && finished.target_agent_id.as_deref() == Some(target_agent_id.as_str())
+            if finished.agent_prompt_id == summary_spid
+                && finished.agent_id.as_str() == target_agent_id.as_str()
     )));
 
-    let branch = h.store.session("s1").expect("session").current_branch();
+    let branch = default_agent_branch(&h);
     assert!(matches!(
         branch.last(),
-        Some(SessionEntry::Compaction { replacement_window }) if !replacement_window.is_empty()
+        Some(AgentEntry::Compaction { replacement_window }) if !replacement_window.is_empty()
     ));
 
     h.shutdown().expect("shutdown");
 }
 
-/// Regression for the deferred-dispatch gate: `SessionCompactionStarted`
+/// Regression for the deferred-dispatch gate: `AgentCompactionStarted`
 /// is not a user-message event, so a compaction summary prompt parked
 /// behind interception must wait for publish-idle, not for the next
 /// user-message fold that may never come.
@@ -5240,13 +5235,13 @@ fn intercepted_compaction_started_dispatches_summary_after_publish_idle() {
         "conn-interceptor",
         tau_proto::ExtensionName::from("test-interceptor"),
         vec![EventSelector::Exact(
-            tau_proto::EventName::SESSION_COMPACTION_STARTED,
+            tau_proto::EventName::AGENT_COMPACTION_STARTED,
         )],
         InterceptionPriority::new(0),
     );
 
-    let cid = h.default_conversation_id.clone();
-    h.publish_for_conversation(
+    let cid = h.default_agent_id.clone();
+    h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -5266,7 +5261,7 @@ fn intercepted_compaction_started_dispatches_summary_after_publish_idle() {
     assert_eq!(h.pending_compactions.len(), 1);
     assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
     assert!(
-        h.prompt_conversations.is_empty(),
+        h.prompt_agents.is_empty(),
         "summary prompt must not dispatch until the intercepted start event commits",
     );
 
@@ -5280,7 +5275,7 @@ fn intercepted_compaction_started_dispatches_summary_after_publish_idle() {
     assert!(h.pending_user_prompt_dispatches.is_empty());
     assert!(h.pending_publish_idle_dispatches.is_empty());
     let (summary_cid, summary_spid) = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| {
             (prompt_cid != &cid).then_some((prompt_cid.clone(), spid.clone()))
@@ -5327,12 +5322,9 @@ fn instant_background_test_tool_spec(name: &str) -> ToolSpec {
     }
 }
 
-fn start_manual_compaction_for_test(
-    h: &mut Harness,
-    cid: &ConversationId,
-) -> (ConversationId, SessionPromptId) {
+fn start_manual_compaction_for_test(h: &mut Harness, cid: &AgentId) -> (AgentId, AgentPromptId) {
     h.handle_compact_request("s1".into(), None);
-    h.prompt_conversations
+    h.prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| {
             h.pending_compactions
@@ -5343,14 +5335,10 @@ fn start_manual_compaction_for_test(
         .expect("compaction prompt")
 }
 
-fn finish_compaction_for_test(
-    h: &mut Harness,
-    summary_spid: SessionPromptId,
-    cid: &ConversationId,
-) {
+fn finish_compaction_for_test(h: &mut Harness, summary_spid: AgentPromptId, cid: &AgentId) {
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: summary_spid,
-        target_agent_id: None,
+        agent_prompt_id: summary_spid,
+        agent_id: "main".into(),
         output_items: vec![openai_compaction_summary_item("compacted branch")],
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         usage: None,
@@ -5365,8 +5353,8 @@ fn finish_compaction_for_test(
     .expect("summary finished");
 }
 
-fn active_prompt_for(h: &Harness, cid: &ConversationId) -> SessionPromptId {
-    h.conversations
+fn active_prompt_for(h: &Harness, cid: &AgentId) -> AgentPromptId {
+    h.agents
         .get(cid)
         .expect("conversation exists")
         .in_flight_prompt
@@ -5376,27 +5364,29 @@ fn active_prompt_for(h: &Harness, cid: &ConversationId) -> SessionPromptId {
 
 fn start_background_tool_and_finish_placeholder_turn(
     h: &mut Harness,
-    cid: &ConversationId,
+    cid: &AgentId,
     call_id: &str,
     tool_name: &str,
 ) {
-    h.publish_for_conversation(
+    let agent_id = h
+        .ensure_agent_id_for_agent(cid)
+        .unwrap_or_else(|| "main".to_owned());
+    h.publish_for_agent(
         cid,
-        Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            agent_id: agent_id.clone().into(),
             text: format!("run {tool_name}"),
-            target_agent_id: None,
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: None,
         }),
     );
-    let spid: SessionPromptId = format!("sp-{call_id}").into();
+    let spid: AgentPromptId = format!("sp-{call_id}").into();
     seed_agent_thinking(h, cid, spid.as_str());
-    h.prompt_conversations.insert(spid.clone(), cid.clone());
+    h.prompt_agents.insert(spid.clone(), cid.clone());
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid,
-        target_agent_id: None,
+        agent_prompt_id: spid,
+        agent_id: agent_id.into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: call_id.into(),
             name: ToolName::new(tool_name),
@@ -5420,11 +5410,8 @@ fn start_background_tool_and_finish_placeholder_turn(
     ))
     .expect("finish placeholder followup");
     assert!(matches!(
-        h.conversations
-            .get(cid)
-            .expect("conversation exists")
-            .turn_state,
-        ConversationTurnState::Idle
+        h.agents.get(cid).expect("conversation exists").turn_state,
+        AgentTurnState::Idle
     ));
 }
 
@@ -5444,7 +5431,7 @@ fn wait_returns_internal_background_error_after_extension_disconnect() {
         instant_background_test_tool_spec("slow_disconnect"),
     );
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     let call_id: ToolCallId = "bg-disconnect".into();
     start_background_tool_and_finish_placeholder_turn(
         &mut h,
@@ -5513,7 +5500,7 @@ fn no_arg_wait_before_background_completion_suppresses_completion_prompt() {
         instant_background_test_tool_spec("slow_any_before"),
     );
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     let call_id: ToolCallId = "bg-any-before".into();
     start_background_tool_and_finish_placeholder_turn(
         &mut h,
@@ -5545,10 +5532,10 @@ fn no_arg_wait_before_background_completion_suppresses_completion_prompt() {
     let completion_prompt = background_completion_prompt(&call_id);
     assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,
-        Event::SessionPromptSteered(steered) if steered.text == completion_prompt
+        Event::AgentPromptSteered(steered) if steered.text == completion_prompt
     )));
     assert!(
-        h.conversations[&cid]
+        h.agents[&cid]
             .pending_prompts
             .iter()
             .all(|prompt| prompt.text != completion_prompt)
@@ -5564,7 +5551,7 @@ fn no_arg_wait_after_background_completion_removes_queued_completion_prompt() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     let call_id: ToolCallId = "bg-any-after".into();
 
     h.background_completion_targets
@@ -5581,7 +5568,7 @@ fn no_arg_wait_after_background_completion_removes_queued_completion_prompt() {
     h.queue_background_completion_prompt(&cid, &call_id);
     let completion_prompt = background_completion_prompt(&call_id);
     assert!(
-        h.conversations[&cid]
+        h.agents[&cid]
             .pending_prompts
             .iter()
             .any(|prompt| prompt.text == completion_prompt && prompt.is_internal())
@@ -5603,7 +5590,7 @@ fn no_arg_wait_after_background_completion_removes_queued_completion_prompt() {
             .contains(&call_id)
     );
     assert!(
-        h.conversations[&cid]
+        h.agents[&cid]
             .pending_prompts
             .iter()
             .all(|prompt| prompt.text != completion_prompt)
@@ -5622,18 +5609,8 @@ fn manual_compaction_drains_user_prompt_queued_while_compacting() {
     let mut h = quiet_provider_harness(&sp).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
 
-    let cid = h.default_conversation_id.clone();
-    h.publish_for_conversation(
-        &cid,
-        Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
-            text: "earlier question".to_owned(),
-            target_agent_id: None,
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        }),
-    );
+    let cid = h.default_agent_id.clone();
+    append_user_message_via_event(&mut h, "s1", "earlier question");
     let (_summary_cid, summary_spid) = start_manual_compaction_for_test(&mut h, &cid);
 
     let submission = h
@@ -5648,7 +5625,7 @@ fn manual_compaction_drains_user_prompt_queued_while_compacting() {
         prompt.context_items.last().and_then(text_part),
         Some("queued after compact")
     );
-    assert!(h.conversations[&cid].pending_prompts.is_empty());
+    assert!(h.agents[&cid].pending_prompts.is_empty());
 
     h.shutdown().expect("shutdown");
 }
@@ -5666,7 +5643,7 @@ fn background_completion_during_manual_compaction_is_dispatched_after_finish() {
     h.registry
         .register("conn-bg", instant_background_test_tool_spec("slow_bg"));
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     let call_id: ToolCallId = "bg-during-compact".into();
     start_background_tool_and_finish_placeholder_turn(&mut h, &cid, call_id.as_str(), "slow_bg");
     let (_summary_cid, summary_spid) = start_manual_compaction_for_test(&mut h, &cid);
@@ -5680,7 +5657,7 @@ fn background_completion_during_manual_compaction_is_dispatched_after_finish() {
         )),
     )
     .expect("background result during compaction");
-    assert!(h.conversations[&cid].pending_prompts.iter().any(|prompt| {
+    assert!(h.agents[&cid].pending_prompts.iter().any(|prompt| {
         prompt.is_internal() && prompt.text == background_completion_prompt(&call_id)
     }));
 
@@ -5693,7 +5670,7 @@ fn background_completion_during_manual_compaction_is_dispatched_after_finish() {
             text_part(item) == Some(background_completion_prompt(&call_id).as_str())
         })
     );
-    assert!(h.conversations[&cid].pending_prompts.is_empty());
+    assert!(h.agents[&cid].pending_prompts.is_empty());
 
     h.shutdown().expect("shutdown");
 }
@@ -5714,7 +5691,7 @@ fn background_completion_during_user_prompt_compaction_precedes_held_prompt() {
         instant_background_test_tool_spec("slow_held"),
     );
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     let call_id: ToolCallId = "bg-held".into();
     start_background_tool_and_finish_placeholder_turn(&mut h, &cid, call_id.as_str(), "slow_held");
     h.current_session_state.context_input_tokens = Some(950);
@@ -5723,7 +5700,7 @@ fn background_completion_during_user_prompt_compaction_precedes_held_prompt() {
     h.dispatch_user_prompt("s1".into(), "new question".to_owned())
         .expect("dispatch starts compaction");
     let (_summary_cid, summary_spid) = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| {
             h.pending_compactions
@@ -5756,7 +5733,7 @@ fn background_completion_during_user_prompt_compaction_precedes_held_prompt() {
         .position(|item| text_part(item) == Some("new question"))
         .expect("held user prompt in resumed prompt");
     assert!(completion_pos < user_pos);
-    assert!(h.conversations[&cid].pending_prompts.is_empty());
+    assert!(h.agents[&cid].pending_prompts.is_empty());
 
     h.shutdown().expect("shutdown");
 }
@@ -5777,7 +5754,7 @@ fn wait_after_compaction_returns_background_result_completed_during_compaction()
         instant_background_test_tool_spec("slow_wait"),
     );
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     let call_id: ToolCallId = "bg-wait".into();
     start_background_tool_and_finish_placeholder_turn(&mut h, &cid, call_id.as_str(), "slow_wait");
     let (_summary_cid, summary_spid) = start_manual_compaction_for_test(&mut h, &cid);
@@ -5794,8 +5771,8 @@ fn wait_after_compaction_returns_background_result_completed_during_compaction()
 
     let notification_spid = active_prompt_for(&h, &cid);
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: notification_spid,
-        target_agent_id: None,
+        agent_prompt_id: notification_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "wait-call-after-compact".into(),
             name: ToolName::new("wait"),
@@ -5852,7 +5829,7 @@ fn wait_after_compaction_returns_background_result_completed_during_compaction()
 
 #[test]
 fn delegate_followup_auto_compacts_from_own_context_signal() {
-    // Sub-agent sessions are normal conversations: if their own
+    // Sub-agent sessions are normal agents: if their own
     // context signal crosses the threshold, they must get a compaction
     // pass instead of being handicapped behind the main agent.
     let td = TempDir::new().expect("tempdir");
@@ -5860,12 +5837,12 @@ fn delegate_followup_auto_compacts_from_own_context_signal() {
     let mut h = echo_harness(&sp).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
 
-    let side_cid = ConversationId::new("start-agent-__harness__-delegate-1");
+    let side_cid: AgentId = "start-agent-__harness__-delegate-1".into();
     let originator = tau_proto::PromptOriginator::Extension {
         name: HARNESS_CONNECTION_ID.into(),
         query_id: "delegate-1".to_owned(),
     };
-    let mut side_conv = Conversation::new(
+    let mut side_conv = Agent::new(
         side_cid.clone(),
         "s1".into(),
         originator.clone(),
@@ -5875,19 +5852,19 @@ fn delegate_followup_auto_compacts_from_own_context_signal() {
     side_conv.parent_tool_call_id = Some("call-delegate".into());
     side_conv.context_input_tokens = Some(950);
     side_conv.context_percent_used = Some(95);
-    h.conversations.insert(side_cid.clone(), side_conv);
+    h.agents.insert(side_cid.clone(), side_conv);
 
     let baseline_seq = h.event_log.next_seq();
-    assert!(h.should_auto_compact_for_conversation(&side_cid));
+    assert!(h.should_auto_compact_for_agent(&side_cid));
     assert!(h.maybe_start_auto_compaction_for_followup(&side_cid));
     assert_eq!(h.pending_compactions.len(), 1);
     assert!(matches!(
-        h.conversations[&side_cid].turn_state,
-        ConversationTurnState::Compacting
+        h.agents[&side_cid].turn_state,
+        AgentTurnState::Compacting
     ));
 
     let (summary_cid, summary_spid) = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| {
             (prompt_cid != &side_cid).then_some((prompt_cid.clone(), spid.clone()))
@@ -5905,7 +5882,7 @@ fn delegate_followup_auto_compacts_from_own_context_signal() {
     let mut started = None;
     while let Some(entry) = h.event_log.get_next_from(cursor) {
         cursor = entry.seq + 1;
-        if let Event::SessionCompactionStarted(event) = entry.event {
+        if let Event::AgentCompactionStarted(event) = entry.event {
             started = Some((event.originator, event.original_input_tokens));
             break;
         }
@@ -5919,7 +5896,7 @@ fn delegate_followup_auto_compacts_from_own_context_signal() {
 fn auto_compaction_uses_conversation_role_threshold() {
     // Roles can opt into earlier compaction than Tau's default threshold. The
     // decision must use the role bound to the active conversation, including
-    // delegate side conversations, rather than only the global selected role.
+    // delegate side agents, rather than only the global selected role.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -5932,8 +5909,8 @@ fn auto_compaction_uses_conversation_role_threshold() {
         },
     );
 
-    let side_cid = ConversationId::new("start-agent-__harness__-delegate-early");
-    let mut side_conv = Conversation::new(
+    let side_cid: AgentId = "start-agent-__harness__-delegate-early".into();
+    let mut side_conv = Agent::new(
         side_cid.clone(),
         "s1".into(),
         tau_proto::PromptOriginator::Extension {
@@ -5946,9 +5923,9 @@ fn auto_compaction_uses_conversation_role_threshold() {
     side_conv.parent_tool_call_id = Some("call-delegate".into());
     side_conv.role = Some("early-compact".to_owned());
     side_conv.context_percent_used = Some(75);
-    h.conversations.insert(side_cid.clone(), side_conv);
+    h.agents.insert(side_cid.clone(), side_conv);
 
-    assert!(h.should_auto_compact_for_conversation(&side_cid));
+    assert!(h.should_auto_compact_for_agent(&side_cid));
 
     h.shutdown().expect("shutdown");
 }
@@ -5964,8 +5941,8 @@ fn side_conversation_auto_compaction_ignores_default_context_signal() {
     let mut h = echo_harness(&sp).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
 
-    let side_cid = ConversationId::new("start-agent-__harness__-delegate-1");
-    let mut side_conv = Conversation::new(
+    let side_cid: AgentId = "start-agent-__harness__-delegate-1".into();
+    let mut side_conv = Agent::new(
         side_cid.clone(),
         "s1".into(),
         tau_proto::PromptOriginator::Extension {
@@ -5976,15 +5953,15 @@ fn side_conversation_auto_compaction_ignores_default_context_signal() {
         Some(HARNESS_CONNECTION_ID.into()),
     );
     side_conv.parent_tool_call_id = Some("call-delegate".into());
-    h.conversations.insert(side_cid.clone(), side_conv);
+    h.agents.insert(side_cid.clone(), side_conv);
     h.current_session_state.context_percent_used = Some(95);
 
-    assert!(!h.should_auto_compact_for_conversation(&side_cid));
+    assert!(!h.should_auto_compact_for_agent(&side_cid));
     assert!(!h.maybe_start_auto_compaction_for_followup(&side_cid));
     assert!(h.pending_compactions.is_empty());
     assert!(matches!(
-        h.conversations[&side_cid].turn_state,
-        ConversationTurnState::Idle
+        h.agents[&side_cid].turn_state,
+        AgentTurnState::Idle
     ));
 
     h.shutdown().expect("shutdown");
@@ -6005,12 +5982,12 @@ fn incoming_user_prompt_does_not_preempt_compaction_summary() {
     append_user_message_via_event(&mut h, "s1", "earlier question");
     h.current_session_state.context_input_tokens = Some(950);
     h.current_session_state.context_percent_used = Some(95);
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     h.dispatch_user_prompt("s1".into(), "new question".to_owned())
         .expect("dispatch");
 
     let (summary_spid, summary_cid) = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| {
             (prompt_cid != &cid).then_some((spid.clone(), prompt_cid.clone()))
@@ -6022,17 +5999,14 @@ fn incoming_user_prompt_does_not_preempt_compaction_summary() {
         .expect("submit");
     assert_eq!(submission, PromptSubmission::Queued);
     assert_eq!(h.pending_compactions.len(), 1);
-    assert_eq!(
-        h.prompt_conversations.get(&summary_spid),
-        Some(&summary_cid)
-    );
+    assert_eq!(h.prompt_agents.get(&summary_spid), Some(&summary_cid));
     assert!(!h.canceled_prompts.contains(&summary_spid));
     assert!(matches!(
-        h.conversations[&summary_cid].turn_state,
-        ConversationTurnState::AgentThinking { .. }
+        h.agents[&summary_cid].turn_state,
+        AgentTurnState::AgentThinking { .. }
     ));
     assert!(
-        h.conversations[&cid]
+        h.agents[&cid]
             .pending_prompts
             .iter()
             .any(|prompt| prompt == "queued behind compaction")
@@ -6072,10 +6046,10 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
             background_support: None,
         },
     );
-    let cid = h.default_conversation_id.clone();
-    let spid: SessionPromptId = "sp-main".into();
-    h.prompt_conversations.insert(spid.clone(), cid.clone());
-    h.publish_for_conversation(
+    let cid = h.default_agent_id.clone();
+    let spid: AgentPromptId = "sp-main".into();
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+    h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -6088,8 +6062,8 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid,
-        target_agent_id: None,
+        agent_prompt_id: spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "delegate-call".into(),
             name: tau_proto::ToolName::new("side_source"),
@@ -6117,19 +6091,15 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
 
     assert!(matches!(h.turn_state, TurnState::Idle));
     let default_turn = &h
-        .conversations
-        .get(&h.default_conversation_id)
+        .agents
+        .get(&h.default_agent_id)
         .expect("default conversation")
         .turn_state;
-    assert!(matches!(
-        default_turn,
-        ConversationTurnState::ToolsRunning { .. }
-    ));
+    assert!(matches!(default_turn, AgentTurnState::ToolsRunning { .. }));
     h.handle_start_agent_request(
         "conn-delegate",
         StartAgentRequest {
             query_id: "q1".to_owned(),
-            agent_id: "test-agent-q1".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -6140,33 +6110,39 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
     )
     .expect("query");
 
+    let side_cid = ext_query_cid(&h, "q1").expect("side conversation");
+    let side_agent_id = h
+        .agents
+        .get(&side_cid)
+        .and_then(|conv| conv.agent_id.clone())
+        .expect("side agent id");
     assert_eq!(
-        h.agent_states.get("test-agent-q1"),
-        Some(&tau_proto::AgentState::ActiveDelegated),
+        h.agent_states.get(&side_agent_id),
+        Some(&AgentState::ActiveDelegated),
         "tool-backed delegate is active while its initial turn is running"
     );
     assert!(
-        h.conversations
+        h.agents
             .values()
             .all(|conv| conv.pending_prompts.is_empty()),
         "side prompt must dispatch immediately"
     );
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
-        Event::UiPromptSubmitted(prompt)
+        Event::AgentPromptSubmitted(prompt)
             if prompt.text == "side task"
-                && prompt.target_agent_id.as_deref() == Some("test-agent-q1")
+                && prompt.agent_id.as_str() == side_agent_id.as_str()
     )));
     assert!(matches!(h.turn_state, TurnState::Idle));
 
     let side_spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: side_spid,
-        target_agent_id: None,
+        agent_prompt_id: side_spid,
+        agent_id: side_agent_id.clone().into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
 
@@ -6201,14 +6177,11 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
 
     assert!(matches!(h.turn_state, TurnState::Idle));
     let default_turn = &h
-        .conversations
-        .get(&h.default_conversation_id)
+        .agents
+        .get(&h.default_agent_id)
         .expect("default conversation")
         .turn_state;
-    assert!(matches!(
-        default_turn,
-        ConversationTurnState::ToolsRunning { .. }
-    ));
+    assert!(matches!(default_turn, AgentTurnState::ToolsRunning { .. }));
     let events = delegate_events.lock().expect("delegate events");
     let result = events
         .iter()
@@ -6221,18 +6194,18 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
         .expect("query result routed");
     assert_eq!(result.text, "delegated answer");
     assert_eq!(
-        h.agent_states.get("test-agent-q1"),
-        Some(&tau_proto::AgentState::Suspended),
+        h.agent_states.get(&side_agent_id),
+        Some(&AgentState::Suspended),
         "completed untouched delegates are automatically suspended"
     );
 
     let side_cid = h
-        .agent_conversations
-        .get("test-agent-q1")
+        .agent_routes
+        .get(&side_agent_id)
         .expect("completed delegate remains targetable")
         .clone();
     let side_conv = h
-        .conversations
+        .agents
         .get(&side_cid)
         .expect("completed delegate conversation is kept");
     // Tool-backed delegates are detached rather than removed after their tool
@@ -6244,8 +6217,8 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
     ));
     assert!(side_conv.source_connection.is_none());
     assert!(side_conv.parent_tool_call_id.is_none());
-    assert!(side_conv.parent_conversation_id.is_none());
-    assert_eq!(side_conv.agent_id.as_deref(), Some("test-agent-q1"));
+    assert!(side_conv.parent_agent_id.is_none());
+    assert_eq!(side_conv.agent_id.as_deref(), Some(side_agent_id.as_str()));
     h.shutdown().expect("shutdown");
 }
 
@@ -6264,7 +6237,6 @@ fn delegated_agent_user_interaction_prevents_auto_suspend() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-user".to_owned(),
-            agent_id: "test-agent-q-user".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -6274,31 +6246,33 @@ fn delegated_agent_user_interaction_prevents_auto_suspend() {
         },
     )
     .expect("query");
+    let side_cid = ext_query_cid(&h, "q-user").expect("side conversation");
+    let side_agent_id = h
+        .agents
+        .get(&side_cid)
+        .and_then(|conv| conv.agent_id.clone())
+        .expect("side agent id");
     assert_eq!(
-        h.agent_states.get("test-agent-q-user"),
-        Some(&tau_proto::AgentState::ActiveDelegated)
+        h.agent_states.get(&side_agent_id),
+        Some(&AgentState::ActiveDelegated)
     );
 
-    h.submit_prompt_to_agent(
-        "s1".into(),
-        "test-agent-q-user",
-        "user follow-up".to_owned(),
-    )
-    .expect("user prompt to delegate");
+    h.submit_prompt_to_agent("s1".into(), &side_agent_id, "user follow-up".to_owned())
+        .expect("user prompt to delegate");
     assert_eq!(
-        h.agent_states.get("test-agent-q-user"),
-        Some(&tau_proto::AgentState::Active),
+        h.agent_states.get(&side_agent_id),
+        Some(&AgentState::Active),
         "user interaction converts active-delegated into ordinary active"
     );
 
     let side_spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: side_spid,
-        target_agent_id: None,
+        agent_prompt_id: side_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
             content: vec![ContentPart::Text {
@@ -6319,22 +6293,22 @@ fn delegated_agent_user_interaction_prevents_auto_suspend() {
     .expect("side finished");
 
     assert_eq!(
-        h.agent_states.get("test-agent-q-user"),
-        Some(&tau_proto::AgentState::Active),
+        h.agent_states.get(&side_agent_id),
+        Some(&AgentState::Active),
         "delegate completion only auto-suspends untouched active-delegated agents"
     );
     assert!(
-        h.agent_conversations.contains_key("test-agent-q-user"),
+        h.agent_routes.contains_key(&side_agent_id),
         "interacted delegate remains targetable"
     );
 
     h.shutdown().expect("shutdown");
 }
 
-/// A side agent that receives `agent.message` while its original turn is in
-/// flight must process that internal message before teardown. Otherwise the
-/// `PromptOriginator::Extension` completion path removes the side conversation
-/// and drops the queued delivery.
+/// A side agent that receives `agent.message_received` while its original turn
+/// is in flight must process that internal message before teardown. Otherwise
+/// the `PromptOriginator::Extension` completion path removes the side
+/// conversation and drops the queued delivery.
 #[test]
 fn side_agent_drains_agent_message_before_extension_teardown() {
     let td = TempDir::new().expect("tempdir");
@@ -6347,7 +6321,6 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-message".to_owned(),
-            agent_id: "test-agent-q-message".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -6359,31 +6332,31 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
     .expect("query");
 
     let (side_spid, side_cid) = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| {
             (prompt_cid.as_str() != "default").then(|| (spid.clone(), prompt_cid.clone()))
         })
         .expect("side prompt id");
     let recipient_id = h
-        .conversations
+        .agents
         .get(&side_cid)
         .and_then(|conv| conv.agent_id.clone())
         .expect("side agent id");
 
     h.publish_event(
         Some(HARNESS_CONNECTION_ID),
-        Event::AgentMessage(tau_proto::AgentMessage {
-            session_id: "s1".into(),
-            sender_id: "manager".to_owned(),
-            recipient_id,
+        Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            message_id: "test-message".into(),
+            sender_id: "manager".to_owned().into(),
+            recipient_id: recipient_id.into(),
             message: "please include this".to_owned(),
         }),
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: side_spid.clone(),
-        target_agent_id: None,
+        agent_prompt_id: side_spid.clone(),
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
             content: vec![ContentPart::Text {
@@ -6404,8 +6377,8 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
     .expect("side first response");
 
     assert!(
-        h.conversations.contains_key(&side_cid),
-        "side conversation must stay alive to process queued agent.message"
+        h.agents.contains_key(&side_cid),
+        "side conversation must stay alive to process queued agent.message_received"
     );
     assert!(
         delegate_events
@@ -6416,7 +6389,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
         "start result must wait until the message turn completes"
     );
     let message_spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| {
             (prompt_cid == &side_cid && spid != &side_spid).then_some(spid.clone())
@@ -6427,8 +6400,8 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
     assert!(serialized.contains("please include this"));
 
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: message_spid,
-        target_agent_id: None,
+        agent_prompt_id: message_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
             content: vec![ContentPart::Text {
@@ -6449,7 +6422,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
     .expect("side message response");
 
     assert!(
-        h.conversations.contains_key(&side_cid),
+        h.agents.contains_key(&side_cid),
         "tool-backed side conversation stays targetable after message turn"
     );
     let events = delegate_events.lock().expect("delegate events");
@@ -6468,9 +6441,9 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
 
 /// Regression for a delegated agent that backgrounds a long exclusive tool,
 /// then asks for another exclusive tool before the long background result
-/// returns. A later `agent.message` must not sit behind that not-yet-started
-/// tool forever; the harness cancels the queued tool call and dispatches the
-/// hidden message prompt immediately.
+/// returns. A later `agent.message_received` must not sit behind that
+/// not-yet-started tool forever; the harness cancels the queued tool call and
+/// dispatches the hidden message prompt immediately.
 #[test]
 fn agent_message_preempts_queued_tool_behind_backgrounded_exclusive_call() {
     let td = TempDir::new().expect("tempdir");
@@ -6492,7 +6465,6 @@ fn agent_message_preempts_queued_tool_behind_backgrounded_exclusive_call() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-preempt".to_owned(),
-            agent_id: "test-agent-q-preempt".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -6504,21 +6476,21 @@ fn agent_message_preempts_queued_tool_behind_backgrounded_exclusive_call() {
     .expect("query");
 
     let (initial_spid, side_cid) = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| {
             (prompt_cid.as_str() != "default").then(|| (spid.clone(), prompt_cid.clone()))
         })
         .expect("side prompt id");
     let recipient_id = h
-        .conversations
+        .agents
         .get(&side_cid)
         .and_then(|conv| conv.agent_id.clone())
         .expect("side agent id");
 
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: initial_spid.clone(),
-        target_agent_id: None,
+        agent_prompt_id: initial_spid.clone(),
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "long-background".into(),
             name: ToolName::new("exclusive_tool"),
@@ -6539,15 +6511,15 @@ fn agent_message_preempts_queued_tool_behind_backgrounded_exclusive_call() {
     assert!(h.tool_turn.is_backgrounded(&"long-background".into()));
 
     let followup_spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| {
             (prompt_cid == &side_cid && spid != &initial_spid).then_some(spid.clone())
         })
         .expect("follow-up prompt after background placeholder");
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: followup_spid.clone(),
-        target_agent_id: None,
+        agent_prompt_id: followup_spid.clone(),
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "queued-wait".into(),
             name: ToolName::new("exclusive_tool"),
@@ -6581,10 +6553,10 @@ fn agent_message_preempts_queued_tool_behind_backgrounded_exclusive_call() {
 
     h.publish_event(
         Some(HARNESS_CONNECTION_ID),
-        Event::AgentMessage(tau_proto::AgentMessage {
-            session_id: "s1".into(),
-            sender_id: "manager".to_owned(),
-            recipient_id,
+        Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            message_id: "test-message".into(),
+            sender_id: "manager".to_owned().into(),
+            recipient_id: recipient_id.into(),
             message: "status please".to_owned(),
         }),
     );
@@ -6597,7 +6569,7 @@ fn agent_message_preempts_queued_tool_behind_backgrounded_exclusive_call() {
         "queued tool call must be closed before the message prompt is sent"
     );
     let message_spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| {
             (prompt_cid == &side_cid && spid != &initial_spid && spid != &followup_spid)
@@ -6608,11 +6580,11 @@ fn agent_message_preempts_queued_tool_behind_backgrounded_exclusive_call() {
     let serialized = serde_json::to_string(&prompt.context_items).expect("json");
     assert!(serialized.contains("status please"));
     assert!(matches!(
-        h.conversations
+        h.agents
             .get(&side_cid)
             .expect("side conversation")
             .turn_state,
-        ConversationTurnState::AgentThinking { .. }
+        AgentTurnState::AgentThinking { .. }
     ));
 
     h.shutdown().expect("shutdown");
@@ -6651,11 +6623,11 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
             background_support: None,
         },
     );
-    let cid = h.default_conversation_id.clone();
-    let spid: SessionPromptId = "sp-main".into();
+    let cid = h.default_agent_id.clone();
+    let spid: AgentPromptId = "sp-main".into();
     seed_agent_thinking(&mut h, &cid, "sp-x");
-    h.prompt_conversations.insert(spid.clone(), cid.clone());
-    h.publish_for_conversation(
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+    h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -6668,8 +6640,8 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
     );
 
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid,
-        target_agent_id: None,
+        agent_prompt_id: spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "delegate-call".into(),
             name: tau_proto::ToolName::new("delegate"),
@@ -6699,7 +6671,6 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q1".to_owned(),
-            agent_id: "test-agent-q1".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -6711,7 +6682,7 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
     .expect("query");
 
     let side_spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("side prompt id");
@@ -6767,7 +6738,7 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
 /// `std-notifications`' idle summary) is **not** a delegate. Its
 /// purpose is to summarize what the user just did, so the side conv
 /// must inherit the parent conversation's branch — assembling the
-/// user's recent UserMessage / AgentMessage history *plus* the new
+/// user's recent user-message / message-projection history *plus* the new
 /// instruction. The whole feature falls back to a useless generic
 /// greeting if the model is asked to summarize an empty transcript.
 ///
@@ -6777,7 +6748,7 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
 /// instruction as a delta. Verified here by comparing the assembled
 /// prompt to what the parent conv sees.
 #[test]
-fn non_tool_start_agent_request_inherits_parent_branch() {
+fn non_tool_start_agent_request_starts_fresh_agent_branch() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -6787,12 +6758,11 @@ fn non_tool_start_agent_request_inherits_parent_branch() {
     // Drive the user's main conversation through one full
     // user-message → agent-final-response turn so the parent conv has
     // a non-empty history when the idle summary fires.
-    let cid = h.default_conversation_id.clone();
-    let main_spid: SessionPromptId = "sp-main".into();
+    let cid = h.default_agent_id.clone();
+    let main_spid: AgentPromptId = "sp-main".into();
     seed_agent_thinking(&mut h, &cid, "sp-main");
-    h.prompt_conversations
-        .insert(main_spid.clone(), cid.clone());
-    h.publish_for_conversation(
+    h.prompt_agents.insert(main_spid.clone(), cid.clone());
+    h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -6804,8 +6774,8 @@ fn non_tool_start_agent_request_inherits_parent_branch() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: main_spid,
-        target_agent_id: None,
+        agent_prompt_id: main_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
 
@@ -6834,7 +6804,7 @@ fn non_tool_start_agent_request_inherits_parent_branch() {
         ws_pool_delta: None,
     })
     .expect("main response");
-    let parent_head_before = h.conversations.get(&cid).expect("default conv").head;
+    let parent_head_before = h.agents.get(&cid).expect("default conv").head;
     assert!(
         parent_head_before.is_some(),
         "parent conv should have advanced its head after the agent's reply",
@@ -6846,7 +6816,6 @@ fn non_tool_start_agent_request_inherits_parent_branch() {
         "conn-notifications",
         StartAgentRequest {
             query_id: "idle-0".to_owned(),
-            agent_id: "test-agent-idle-0".to_owned(),
             instruction: "Summarize in one sentence.".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -6858,17 +6827,16 @@ fn non_tool_start_agent_request_inherits_parent_branch() {
     .expect("start-agent request");
 
     let side_spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("side prompt id");
     let side_prompt = read_prompt_created(&h, &side_spid);
 
-    // The assembled side prompt must contain the user's original
-    // task, the agent's final answer, AND the new instruction — in
-    // that order. Without inheritance the side prompt would only
-    // hold the instruction and the model would default to a generic
-    // "I'm ready for your next task" reply.
+    // A non-tool start-agent request creates an independent agent log.
+    // Parent transcript nodes belong to the parent agent, so the side
+    // prompt starts from its own instruction instead of inheriting the
+    // parent branch.
     let user_task_present = side_prompt.context_items.iter().any(|item| {
         matches!(
             item,
@@ -6897,13 +6865,13 @@ fn non_tool_start_agent_request_inherits_parent_branch() {
         )
     });
     assert!(
-        user_task_present,
-        "side prompt must inherit the user's original task message: {:?}",
+        !user_task_present,
+        "side prompt must not inherit parent user message: {:?}",
         side_prompt.context_items,
     );
     assert!(
-        agent_answer_present,
-        "side prompt must inherit the agent's final reply: {:?}",
+        !agent_answer_present,
+        "side prompt must not inherit parent assistant reply: {:?}",
         side_prompt.context_items,
     );
     assert!(
@@ -6925,7 +6893,7 @@ fn non_tool_start_agent_request_inherits_parent_branch() {
     // the side conv's publish — both convs are now downstream of the
     // parent's previous tip, but the side conv folded onto its own
     // child node.
-    let parent_head_after = h.conversations.get(&cid).expect("default conv").head;
+    let parent_head_after = h.agents.get(&cid).expect("default conv").head;
     assert_eq!(
         parent_head_before, parent_head_after,
         "side conv's UserMessage must not advance the parent conv's head",
@@ -6944,7 +6912,7 @@ fn non_tool_start_agent_request_inherits_parent_branch() {
 /// observed to collapse cache usage to near zero even with a valid
 /// `previous_response_id`.
 #[test]
-fn non_tool_start_agent_request_preserves_chain_anchor_and_tool_choice() {
+fn non_tool_start_agent_request_preserves_tool_choice_without_parent_chain_anchor() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -6955,10 +6923,10 @@ fn non_tool_start_agent_request_preserves_chain_anchor_and_tool_choice() {
     // `handle_provider_response_finished` actually mints the anchor.
     h.submit_user_prompt("s1".into(), "find the bug in foo.rs".to_owned())
         .expect("submit main");
-    let main_spid: SessionPromptId = "sp-0".into();
+    let main_spid: AgentPromptId = "sp-0".into();
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: main_spid,
-        target_agent_id: None,
+        agent_prompt_id: main_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
 
@@ -6993,7 +6961,6 @@ fn non_tool_start_agent_request_preserves_chain_anchor_and_tool_choice() {
         "conn-notifications",
         StartAgentRequest {
             query_id: "idle-0".to_owned(),
-            agent_id: "test-agent-idle-0".to_owned(),
             instruction: "Summarize in one sentence.".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -7005,7 +6972,7 @@ fn non_tool_start_agent_request_preserves_chain_anchor_and_tool_choice() {
     .expect("start-agent request");
 
     let side_spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("side prompt id");
@@ -7022,14 +6989,13 @@ fn non_tool_start_agent_request_preserves_chain_anchor_and_tool_choice() {
          otherwise it cold-starts a separate cache bucket from the user's prefix \
          and the whole point of sharing the warm prefix is lost",
     );
-    let prev = side_prompt.previous_response_candidate.as_ref().expect(
-        "idle-summary side conv must inherit parent's chain anchor — \
-         the wire request stays cache-compatible with the parent",
+    assert!(
+        side_prompt.previous_response_candidate.is_none(),
+        "idle-summary side conv must not reuse the parent agent's chain anchor"
     );
-    assert_eq!(prev.provider_response_id, "resp_parent");
 }
 
-/// Counterpart to `non_tool_start_agent_request_inherits_parent_branch`.
+/// Counterpart to `non_tool_start_agent_request_starts_fresh_agent_branch`.
 /// The harness picks `tool_choice` per conversation in
 /// `send_prompt_to_agent_for`; if that discriminator ever
 /// over-matches (e.g. flips on `originator.is_extension()` alone),
@@ -7060,12 +7026,11 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
         },
     );
 
-    let cid = h.default_conversation_id.clone();
-    let main_spid: SessionPromptId = "sp-main".into();
+    let cid = h.default_agent_id.clone();
+    let main_spid: AgentPromptId = "sp-main".into();
     seed_agent_thinking(&mut h, &cid, "sp-main");
-    h.prompt_conversations
-        .insert(main_spid.clone(), cid.clone());
-    h.publish_for_conversation(
+    h.prompt_agents.insert(main_spid.clone(), cid.clone());
+    h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -7077,8 +7042,8 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: main_spid,
-        target_agent_id: None,
+        agent_prompt_id: main_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "delegate-call".into(),
             name: tau_proto::ToolName::new("delegate"),
@@ -7108,7 +7073,6 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q1".to_owned(),
-            agent_id: "test-agent-q1".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -7120,7 +7084,7 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
     .expect("query");
 
     let side_spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("side prompt id");
@@ -7159,7 +7123,6 @@ fn user_prompt_preempts_in_flight_non_tool_ext_side_conversation() {
         "conn-notifications",
         StartAgentRequest {
             query_id: "idle-0".to_owned(),
-            agent_id: "test-agent-idle-0".to_owned(),
             instruction: "Summarize in one sentence.".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -7171,12 +7134,12 @@ fn user_prompt_preempts_in_flight_non_tool_ext_side_conversation() {
     .expect("start-agent request");
 
     let (side_cid, side_spid) = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find(|(_, prompt_cid)| prompt_cid.as_str() != "default")
         .map(|(spid, cid)| (cid.clone(), spid.clone()))
         .expect("side conv must exist");
-    let side_conv = h.conversations.get(&side_cid).expect("side conv present");
+    let side_conv = h.agents.get(&side_cid).expect("side conv present");
     assert_eq!(
         side_conv.in_flight_prompt.as_ref(),
         Some(&side_spid),
@@ -7189,10 +7152,7 @@ fn user_prompt_preempts_in_flight_non_tool_ext_side_conversation() {
     h.submit_user_prompt("s1".into(), "interrupting prompt".to_owned())
         .expect("submit user");
 
-    let side_conv = h
-        .conversations
-        .get(&side_cid)
-        .expect("side conv still tracked");
+    let side_conv = h.agents.get(&side_cid).expect("side conv still tracked");
     assert!(
         side_conv.in_flight_prompt.is_none(),
         "user prompt must clear the side conv's in-flight spid so the agent's \
@@ -7204,16 +7164,16 @@ fn user_prompt_preempts_in_flight_non_tool_ext_side_conversation() {
         "side conv's spid must be marked canceled so a late response is dropped",
     );
     assert!(
-        !h.prompt_conversations.contains_key(&side_spid),
+        !h.prompt_agents.contains_key(&side_spid),
         "side conv's spid must be unrouted so the agent's eventual abort \
          doesn't try to publish a finished event into a stale slot",
     );
     assert!(
         event_log_contains_any_source(&h, |event| matches!(
             event,
-            Event::SessionPromptTerminated(terminated)
-                if terminated.session_prompt_id.as_str() == side_spid.as_str()
-                    && terminated.reason == tau_proto::SessionPromptTerminationReason::Canceled
+            Event::AgentPromptTerminated(terminated)
+                if terminated.agent_prompt_id.as_str() == side_spid.as_str()
+                    && terminated.reason == tau_proto::AgentPromptTerminationReason::Canceled
         )),
         "preempted side prompt must publish a terminal lifecycle event",
     );
@@ -7266,12 +7226,11 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
 
     // Main agent issues `delegate`, putting an Exclusive call in flight
     // on the default conversation.
-    let cid = h.default_conversation_id.clone();
-    let main_spid: SessionPromptId = "sp-main".into();
+    let cid = h.default_agent_id.clone();
+    let main_spid: AgentPromptId = "sp-main".into();
     seed_agent_thinking(&mut h, &cid, "sp-main");
-    h.prompt_conversations
-        .insert(main_spid.clone(), cid.clone());
-    h.publish_for_conversation(
+    h.prompt_agents.insert(main_spid.clone(), cid.clone());
+    h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -7283,8 +7242,8 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: main_spid,
-        target_agent_id: None,
+        agent_prompt_id: main_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "delegate-call".into(),
             name: tau_proto::ToolName::new("delegate"),
@@ -7316,7 +7275,6 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
         "conn-delegate",
         StartAgentRequest {
             query_id: "q1".to_owned(),
-            agent_id: "test-agent-q1".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -7331,13 +7289,13 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
     // per-conversation gating this would queue forever behind the
     // parent's still-in-flight Exclusive `delegate`.
     let side_spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: side_spid,
-        target_agent_id: None,
+        agent_prompt_id: side_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "websearch-call".into(),
             name: tau_proto::ToolName::new("websearch"),
@@ -7392,7 +7350,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
 ///
 /// A sub-agent can finish after its foreground receives the synthetic
 /// background placeholder while the real tool is still running. Tool-backed
-/// delegate conversations are now detached instead of removed at completion, so
+/// delegate agents are now detached instead of removed at completion, so
 /// the late completion prompt must remain owned by the delegate conversation;
 /// otherwise a resumed delegate could not receive results from tools it
 /// started.
@@ -7434,12 +7392,12 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         },
     );
 
-    let parent_cid = h.default_conversation_id.clone();
-    let main_spid: SessionPromptId = "sp-main".into();
+    let parent_cid = h.default_agent_id.clone();
+    let main_spid: AgentPromptId = "sp-main".into();
     seed_agent_thinking(&mut h, &parent_cid, "sp-main");
-    h.prompt_conversations
+    h.prompt_agents
         .insert(main_spid.clone(), parent_cid.clone());
-    h.publish_for_conversation(
+    h.publish_for_agent(
         &parent_cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -7451,8 +7409,8 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: main_spid,
-        target_agent_id: None,
+        agent_prompt_id: main_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "delegate-call".into(),
             name: ToolName::new("delegate"),
@@ -7474,13 +7432,13 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         .expect("side query");
     let side_cid = ext_query_cid(&h, "q-bg").expect("side conversation");
     let side_spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: side_spid,
-        target_agent_id: None,
+        agent_prompt_id: side_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "slow-call".into(),
             name: ToolName::new("slow"),
@@ -7513,13 +7471,13 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
     )));
 
     let followup_spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
         .expect("side follow-up prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: followup_spid,
-        target_agent_id: None,
+        agent_prompt_id: followup_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
             content: vec![ContentPart::Text {
@@ -7539,10 +7497,10 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
     })
     .expect("finish side conversation");
     assert!(
-        h.conversations.contains_key(&side_cid),
+        h.agents.contains_key(&side_cid),
         "tool-backed delegate conversation is detached/preserved after completion"
     );
-    assert_eq!(h.tool_conversations.get("slow-call"), Some(&side_cid));
+    assert_eq!(h.tool_agents.get("slow-call"), Some(&side_cid));
 
     h.handle_extension_event_inner(
         "conn-slow",
@@ -7565,7 +7523,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
                 && matches!(&result.result, CborValue::Text(text) if text == "real output")
     )));
     let parent = h
-        .conversations
+        .agents
         .get(&parent_cid)
         .expect("parent conversation remains live");
     assert!(
@@ -7583,7 +7541,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
     h.shutdown().expect("shutdown");
 }
 
-/// Background tool completions from removed non-tool side conversations are
+/// Background tool completions from removed non-tool side agents are
 /// transferred to a live parent/default conversation instead of being lost with
 /// the removed conversation.
 #[test]
@@ -7610,7 +7568,7 @@ fn background_completion_from_removed_side_conversation_queues_on_parent() {
         },
     );
 
-    let parent_cid = h.default_conversation_id.clone();
+    let parent_cid = h.default_agent_id.clone();
     h.handle_start_agent_request(
         "conn-agent",
         ext_query("q-removed-bg", ToolExecutionMode::Shared),
@@ -7619,8 +7577,7 @@ fn background_completion_from_removed_side_conversation_queues_on_parent() {
     let side_cid = ext_query_cid(&h, "q-removed-bg").expect("side conversation");
     let call_id: ToolCallId = "removed-slow-call".into();
 
-    h.tool_conversations
-        .insert(call_id.clone(), side_cid.clone());
+    h.tool_agents.insert(call_id.clone(), side_cid.clone());
     h.background_completion_targets
         .insert(call_id.clone(), side_cid.clone());
     h.tool_turn.record_in_flight_for_test(
@@ -7632,24 +7589,24 @@ fn background_completion_from_removed_side_conversation_queues_on_parent() {
     h.queue_background_completion_prompt(&side_cid, &call_id);
 
     h.transfer_background_completion_target_before_teardown(&side_cid);
-    h.remove_conversation(&side_cid);
+    h.remove_agent(&side_cid);
 
-    assert!(!h.conversations.contains_key(&side_cid));
-    assert_eq!(h.tool_conversations.get(&call_id), Some(&parent_cid));
+    assert!(!h.agents.contains_key(&side_cid));
+    assert_eq!(h.tool_agents.get(&call_id), Some(&parent_cid));
     assert_eq!(
         h.background_completion_targets.get(&call_id),
         Some(&parent_cid)
     );
 
     assert!(
-        h.conversations.contains_key(&parent_cid),
+        h.agents.contains_key(&parent_cid),
         "parent conversation remains live"
     );
 
     h.shutdown().expect("shutdown");
 }
 
-/// Canceled side conversations must not transfer their inner background tools
+/// Canceled side agents must not transfer their inner background tools
 /// to the parent. Otherwise a canceled delegate can leak an inner shell
 /// completion prompt and make that inner call waitable in the parent
 /// conversation.
@@ -7691,12 +7648,12 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         },
     );
 
-    let parent_cid = h.default_conversation_id.clone();
-    let main_spid: SessionPromptId = "sp-main-cancel".into();
+    let parent_cid = h.default_agent_id.clone();
+    let main_spid: AgentPromptId = "sp-main-cancel".into();
     seed_agent_thinking(&mut h, &parent_cid, "sp-main-cancel");
-    h.prompt_conversations
+    h.prompt_agents
         .insert(main_spid.clone(), parent_cid.clone());
-    h.publish_for_conversation(
+    h.publish_for_agent(
         &parent_cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -7708,8 +7665,8 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: main_spid,
-        target_agent_id: None,
+        agent_prompt_id: main_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "delegate-call-cancel".into(),
             name: ToolName::new("delegate"),
@@ -7731,13 +7688,13 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         .expect("side query");
     let side_cid = ext_query_cid(&h, "q-bg-cancel").expect("side conversation");
     let side_spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: side_spid,
-        target_agent_id: None,
+        agent_prompt_id: side_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "slow-call-cancel".into(),
             name: ToolName::new("slow"),
@@ -7758,8 +7715,8 @@ fn canceled_side_conversation_drops_inner_background_completion() {
 
     h.cancel_start_agent_request("q-bg-cancel", &"delegate-call-cancel".into(), false)
         .expect("cancel delegate");
-    assert!(!h.conversations.contains_key(&side_cid));
-    assert!(!h.tool_conversations.contains_key("slow-call-cancel"));
+    assert!(!h.agents.contains_key(&side_cid));
+    assert!(!h.tool_agents.contains_key("slow-call-cancel"));
 
     h.handle_extension_event_inner(
         "conn-slow",
@@ -7780,7 +7737,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         Event::ToolBackgroundResult(result) if result.call_id.as_str() == "slow-call-cancel"
     )));
     let parent = h
-        .conversations
+        .agents
         .get(&parent_cid)
         .expect("parent conversation remains live");
     assert!(!parent.pending_prompts.iter().any(|prompt| prompt.text
@@ -7813,11 +7770,11 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
         },
     );
 
-    let cid = h.default_conversation_id.clone();
-    let spid: SessionPromptId = "sp-bg-error".into();
+    let cid = h.default_agent_id.clone();
+    let spid: AgentPromptId = "sp-bg-error".into();
     seed_agent_thinking(&mut h, &cid, "sp-bg-error");
-    h.prompt_conversations.insert(spid.clone(), cid.clone());
-    h.publish_for_conversation(
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+    h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -7829,8 +7786,8 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid,
-        target_agent_id: None,
+        agent_prompt_id: spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "fail-call".into(),
             name: ToolName::new("fail"),
@@ -7870,10 +7827,7 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
         event,
         Event::ToolError(error) if error.call_id.as_str() == "fail-call"
     )));
-    let conv = h
-        .conversations
-        .get(&cid)
-        .expect("conversation remains live");
+    let conv = h.agents.get(&cid).expect("conversation remains live");
     assert!(
         conv.pending_prompts
             .iter()
@@ -7890,16 +7844,16 @@ fn background_notification_unsuppress_before_completion_allows_later_prompt() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     let call_id: ToolCallId = "bg-unsuppress-before".into();
 
     h.suppress_background_completion_prompt(call_id.clone());
     h.unsuppress_background_completion_prompt(call_id.clone());
 
-    h.conversations
+    h.agents
         .get_mut(&cid)
         .expect("default conversation remains live")
-        .turn_state = ConversationTurnState::ToolsRunning {
+        .turn_state = AgentTurnState::ToolsRunning {
         remaining_calls: Vec::new(),
     };
     h.background_completion_targets
@@ -7907,7 +7861,7 @@ fn background_notification_unsuppress_before_completion_allows_later_prompt() {
     h.queue_background_completion_prompt(&cid, &call_id);
 
     let conv = h
-        .conversations
+        .agents
         .get(&cid)
         .expect("default conversation remains live");
     assert!(conv.pending_prompts.iter().any(|prompt| {
@@ -7924,7 +7878,7 @@ fn background_notification_unsuppress_after_suppressed_completion_queues_prompt(
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     let call_id: ToolCallId = "bg-unsuppress-after".into();
 
     h.suppress_background_completion_prompt(call_id.clone());
@@ -7932,7 +7886,7 @@ fn background_notification_unsuppress_after_suppressed_completion_queues_prompt(
         .insert(call_id.clone(), cid.clone());
     h.queue_background_completion_prompt(&cid, &call_id);
     assert!(
-        h.conversations
+        h.agents
             .get(&cid)
             .expect("default conversation remains live")
             .pending_prompts
@@ -7940,16 +7894,16 @@ fn background_notification_unsuppress_after_suppressed_completion_queues_prompt(
             .all(|prompt| prompt.text != background_completion_prompt(&call_id))
     );
 
-    h.conversations
+    h.agents
         .get_mut(&cid)
         .expect("default conversation remains live")
-        .turn_state = ConversationTurnState::ToolsRunning {
+        .turn_state = AgentTurnState::ToolsRunning {
         remaining_calls: Vec::new(),
     };
     h.unsuppress_background_completion_prompt(call_id.clone());
 
     let conv = h
-        .conversations
+        .agents
         .get(&cid)
         .expect("default conversation remains live");
     assert!(conv.pending_prompts.iter().any(|prompt| {
@@ -7966,7 +7920,7 @@ fn background_notification_repeated_suppress_unsuppress_after_completion_requeue
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     let call_id: ToolCallId = "bg-repeat".into();
 
     h.background_completion_targets
@@ -7974,7 +7928,7 @@ fn background_notification_repeated_suppress_unsuppress_after_completion_requeue
     h.queue_background_completion_prompt(&cid, &call_id);
     h.suppress_background_completion_prompt(call_id.clone());
     assert!(
-        h.conversations
+        h.agents
             .get(&cid)
             .expect("default conversation remains live")
             .pending_prompts
@@ -7985,7 +7939,7 @@ fn background_notification_repeated_suppress_unsuppress_after_completion_requeue
     h.unsuppress_background_completion_prompt(call_id.clone());
     h.suppress_background_completion_prompt(call_id.clone());
     assert!(
-        h.conversations
+        h.agents
             .get(&cid)
             .expect("default conversation remains live")
             .pending_prompts
@@ -7995,7 +7949,7 @@ fn background_notification_repeated_suppress_unsuppress_after_completion_requeue
 
     h.unsuppress_background_completion_prompt(call_id.clone());
     let conv = h
-        .conversations
+        .agents
         .get(&cid)
         .expect("default conversation remains live");
     let prompt_count = conv
@@ -8035,11 +7989,11 @@ fn backgrounded_tool_progress_is_not_published() {
         },
     );
 
-    let cid = h.default_conversation_id.clone();
-    let spid: SessionPromptId = "sp-bg-progress".into();
+    let cid = h.default_agent_id.clone();
+    let spid: AgentPromptId = "sp-bg-progress".into();
     seed_agent_thinking(&mut h, &cid, "sp-bg-progress");
-    h.prompt_conversations.insert(spid.clone(), cid.clone());
-    h.publish_for_conversation(
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+    h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -8051,8 +8005,8 @@ fn backgrounded_tool_progress_is_not_published() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid,
-        target_agent_id: None,
+        agent_prompt_id: spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "slow-call".into(),
             name: ToolName::new("slow"),
@@ -8094,10 +8048,10 @@ fn background_notification_suppression_removes_queued_prompt() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     let call_id: ToolCallId = "bg".into();
 
-    h.conversations
+    h.agents
         .get_mut(&cid)
         .expect("default conversation exists")
         .pending_prompts
@@ -8105,7 +8059,7 @@ fn background_notification_suppression_removes_queued_prompt() {
             &call_id,
         )));
     assert!(
-        h.conversations
+        h.agents
             .get(&cid)
             .expect("default conversation exists")
             .pending_prompts
@@ -8115,7 +8069,7 @@ fn background_notification_suppression_removes_queued_prompt() {
 
     h.suppress_background_completion_prompt(call_id.clone());
     assert!(
-        h.conversations
+        h.agents
             .get(&cid)
             .expect("default conversation exists")
             .pending_prompts
@@ -8199,7 +8153,7 @@ fn update_start_agent_request_overlaps_with_shared_and_blocks_later_fifo_jump() 
 }
 
 /// An Exclusive sub-agent is process-global for independent sub-agent work: it
-/// waits for all incompatible side conversations and then blocks later shared
+/// waits for all incompatible side agents and then blocks later shared
 /// or exclusive `StartAgentRequest`s until its result is routed back.
 #[test]
 fn exclusive_start_agent_request_blocks_independent_queries_globally() {
@@ -8303,7 +8257,7 @@ fn nested_start_agent_request_under_active_exclusive_is_allowed() {
     .expect("outer query");
     let outer_cid = ext_query_cid(&h, "q-outer").expect("outer started");
 
-    h.tool_conversations
+    h.tool_agents
         .insert("nested-call".into(), outer_cid.clone());
     let mut nested = ext_query("q-nested", ToolExecutionMode::Shared);
     nested.tool_call_id = Some("nested-call".into());
@@ -8337,7 +8291,7 @@ fn nested_update_start_agent_request_under_active_update_waits() {
     .expect("outer query");
     let outer_cid = ext_query_cid(&h, "q-outer").expect("outer started");
 
-    h.tool_conversations
+    h.tool_agents
         .insert("nested-call".into(), outer_cid.clone());
     let mut nested = ext_query("q-nested", ToolExecutionMode::Update);
     nested.tool_call_id = Some("nested-call".into());
@@ -8363,11 +8317,10 @@ fn wait_resolves_on_synthetic_tool_error() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     let target_call_id: ToolCallId = "target-call".into();
 
-    h.tool_conversations
-        .insert(target_call_id.clone(), cid.clone());
+    h.tool_agents.insert(target_call_id.clone(), cid.clone());
     h.pending_tools.insert(
         target_call_id.clone(),
         PendingTool {
@@ -8428,15 +8381,15 @@ fn wait_tool_reply_is_folded_into_followup_prompt() {
     let mut h = echo_harness(&sp).expect("start");
     h.selected_model = Some("test/model".into());
 
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     append_user_message_via_event(&mut h, "s1", "wait on missing call");
     seed_agent_thinking(&mut h, &cid, "sp-wait");
-    let spid: SessionPromptId = "sp-wait".into();
-    h.prompt_conversations.insert(spid.clone(), cid.clone());
+    let spid: AgentPromptId = "sp-wait".into();
+    h.prompt_agents.insert(spid.clone(), cid.clone());
 
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid.clone(),
-        target_agent_id: None,
+        agent_prompt_id: spid.clone(),
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "wait-call".into(),
             name: ToolName::new("wait"),
@@ -8460,7 +8413,7 @@ fn wait_tool_reply_is_folded_into_followup_prompt() {
         Event::ProviderToolError(error) if error.call_id.as_str() == "wait-call"
     )));
     let followup_spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(prompt_id, prompt_cid)| {
             (prompt_id != &spid && prompt_cid == &cid).then_some(prompt_id.clone())
@@ -8578,14 +8531,14 @@ fn exclusive_tools_in_distinct_side_conversations_dispatch_concurrently() {
     );
 
     // The parent uses shared delegates only to create two realistic
-    // side conversations concurrently. The assertion below is about
-    // the exclusive tools owned by those distinct side conversations.
-    let parent_cid = h.default_conversation_id.clone();
-    let main_spid: SessionPromptId = "sp-main".into();
+    // side agents concurrently. The assertion below is about
+    // the exclusive tools owned by those distinct side agents.
+    let parent_cid = h.default_agent_id.clone();
+    let main_spid: AgentPromptId = "sp-main".into();
     seed_agent_thinking(&mut h, &parent_cid, "sp-main");
-    h.prompt_conversations
+    h.prompt_agents
         .insert(main_spid.clone(), parent_cid.clone());
-    h.publish_for_conversation(
+    h.publish_for_agent(
         &parent_cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -8601,8 +8554,8 @@ fn exclusive_tools_in_distinct_side_conversations_dispatch_concurrently() {
         CborValue::Text("shared".to_owned()),
     )]);
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: main_spid,
-        target_agent_id: None,
+        agent_prompt_id: main_spid,
+        agent_id: "main".into(),
         output_items: vec![
             ContextItem::ToolCall(ToolCallItem {
                 call_id: "delegate-A".into(),
@@ -8630,7 +8583,6 @@ fn exclusive_tools_in_distinct_side_conversations_dispatch_concurrently() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-A".to_owned(),
-            agent_id: "test-agent-q-A".to_owned(),
             instruction: "side task A".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -8644,7 +8596,6 @@ fn exclusive_tools_in_distinct_side_conversations_dispatch_concurrently() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-B".to_owned(),
-            agent_id: "test-agent-q-B".to_owned(),
             instruction: "side task B".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -8656,7 +8607,7 @@ fn exclusive_tools_in_distinct_side_conversations_dispatch_concurrently() {
     .expect("query B");
 
     let cid_a = h
-        .conversations
+        .agents
         .iter()
         .find_map(|(cid, conv)| {
             matches!(
@@ -8667,7 +8618,7 @@ fn exclusive_tools_in_distinct_side_conversations_dispatch_concurrently() {
         })
         .expect("conversation A");
     let cid_b = h
-        .conversations
+        .agents
         .iter()
         .find_map(|(cid, conv)| {
             matches!(
@@ -8677,22 +8628,22 @@ fn exclusive_tools_in_distinct_side_conversations_dispatch_concurrently() {
             .then_some(cid.clone())
         })
         .expect("conversation B");
-    assert_ne!(cid_a, cid_b, "side conversations must be distinct");
+    assert_ne!(cid_a, cid_b, "side agents must be distinct");
 
     let spid_a = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| (prompt_cid == &cid_a).then_some(spid.clone()))
         .expect("prompt A");
     let spid_b = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| (prompt_cid == &cid_b).then_some(spid.clone()))
         .expect("prompt B");
 
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid_a,
-        target_agent_id: None,
+        agent_prompt_id: spid_a,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "mut-A".into(),
             name: ToolName::new("mutate"),
@@ -8711,8 +8662,8 @@ fn exclusive_tools_in_distinct_side_conversations_dispatch_concurrently() {
     })
     .expect("side response A");
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid_b,
-        target_agent_id: None,
+        agent_prompt_id: spid_b,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "mut-B".into(),
             name: ToolName::new("mutate"),
@@ -8743,11 +8694,11 @@ fn exclusive_tools_in_distinct_side_conversations_dispatch_concurrently() {
         Some(&ToolExecutionMode::Exclusive),
         "conversation B's exclusive call should be in flight too",
     );
-    assert_eq!(h.tool_conversations.get("mut-A"), Some(&cid_a));
-    assert_eq!(h.tool_conversations.get("mut-B"), Some(&cid_b));
+    assert_eq!(h.tool_agents.get("mut-A"), Some(&cid_a));
+    assert_eq!(h.tool_agents.get("mut-B"), Some(&cid_b));
     assert_ne!(
-        h.tool_conversations.get("mut-A"),
-        h.tool_conversations.get("mut-B"),
+        h.tool_agents.get("mut-A"),
+        h.tool_agents.get("mut-B"),
         "exclusive calls must be attributed to different dispatch scopes",
     );
     assert_eq!(
@@ -8801,12 +8752,11 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
         },
     );
 
-    let cid = h.default_conversation_id.clone();
-    let main_spid: SessionPromptId = "sp-main".into();
+    let cid = h.default_agent_id.clone();
+    let main_spid: AgentPromptId = "sp-main".into();
     seed_agent_thinking(&mut h, &cid, "sp-main");
-    h.prompt_conversations
-        .insert(main_spid.clone(), cid.clone());
-    h.publish_for_conversation(
+    h.prompt_agents.insert(main_spid.clone(), cid.clone());
+    h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -8818,8 +8768,8 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: main_spid,
-        target_agent_id: None,
+        agent_prompt_id: main_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "delegate-call".into(),
             name: tau_proto::ToolName::new("delegate"),
@@ -8851,7 +8801,6 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q1".to_owned(),
-            agent_id: "test-agent-q1".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Update,
@@ -8876,13 +8825,13 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
     assert_delegate_counter_order(&initial, &["tools"]);
 
     let side_spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: side_spid,
-        target_agent_id: None,
+        agent_prompt_id: side_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "websearch-call".into(),
             name: tau_proto::ToolName::new("websearch"),
@@ -9003,12 +8952,12 @@ fn provider_disconnect_for_backgrounded_delegate_tool_updates_progress_and_targe
         },
     );
 
-    let parent_cid = h.default_conversation_id.clone();
-    let main_spid: SessionPromptId = "sp-main".into();
+    let parent_cid = h.default_agent_id.clone();
+    let main_spid: AgentPromptId = "sp-main".into();
     seed_agent_thinking(&mut h, &parent_cid, "sp-main");
-    h.prompt_conversations
+    h.prompt_agents
         .insert(main_spid.clone(), parent_cid.clone());
-    h.publish_for_conversation(
+    h.publish_for_agent(
         &parent_cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -9020,8 +8969,8 @@ fn provider_disconnect_for_backgrounded_delegate_tool_updates_progress_and_targe
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: main_spid,
-        target_agent_id: None,
+        agent_prompt_id: main_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "delegate-call".into(),
             name: tau_proto::ToolName::new("delegate"),
@@ -9042,7 +8991,6 @@ fn provider_disconnect_for_backgrounded_delegate_tool_updates_progress_and_targe
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-disconnect".to_owned(),
-            agent_id: "test-agent-q-disconnect".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -9056,13 +9004,13 @@ fn provider_disconnect_for_backgrounded_delegate_tool_updates_progress_and_targe
 
     let side_cid = ext_query_cid(&h, "q-disconnect").expect("side conversation");
     let side_spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: side_spid,
-        target_agent_id: None,
+        agent_prompt_id: side_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "websearch-call".into(),
             name: tau_proto::ToolName::new("websearch"),
@@ -9105,7 +9053,7 @@ fn provider_disconnect_for_backgrounded_delegate_tool_updates_progress_and_targe
     assert_eq!(after_disconnect.tools_total, 1);
     assert_delegate_tools_counter(&after_disconnect, Some(1), Some(1));
     assert_eq!(
-        h.conversations
+        h.agents
             .get(&side_cid)
             .expect("side conversation remains live")
             .tools_in_flight,
@@ -9116,7 +9064,7 @@ fn provider_disconnect_for_backgrounded_delegate_tool_updates_progress_and_targe
         Some(&side_cid)
     );
     assert!(!h.pending_tool_providers.contains_key(&call_id));
-    assert!(!h.tool_conversations.contains_key(&call_id));
+    assert!(!h.tool_agents.contains_key(&call_id));
     let expected = extension_disconnected_background_tool_call_error_message(&call_id);
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
@@ -9129,7 +9077,7 @@ fn provider_disconnect_for_backgrounded_delegate_tool_updates_progress_and_targe
         Event::ToolError(error) if error.call_id.as_str() == call_id.as_str()
     )));
     assert!(
-        h.conversations
+        h.agents
             .get(&side_cid)
             .expect("side conversation remains live")
             .pending_prompts
@@ -9139,7 +9087,7 @@ fn provider_disconnect_for_backgrounded_delegate_tool_updates_progress_and_targe
 
     h.unsuppress_background_completion_prompt(call_id.clone());
     let side = h
-        .conversations
+        .agents
         .get(&side_cid)
         .expect("side conversation remains live");
     assert!(side.pending_prompts.iter().any(|prompt| {
@@ -9300,7 +9248,6 @@ fn delegate_explicit_role_uses_role_model_params_prompt_and_tools() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-worker".to_owned(),
-            agent_id: "test-agent-q-worker".to_owned(),
             instruction: "side task".to_owned(),
             role: Some("worker".to_owned()),
             execution_mode: ToolExecutionMode::Shared,
@@ -9316,7 +9263,7 @@ fn delegate_explicit_role_uses_role_model_params_prompt_and_tools() {
 
     let side_cid = ext_query_cid(&h, "q-worker").expect("side conversation");
     let side_spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
         .expect("side prompt id");
@@ -9435,7 +9382,6 @@ fn delegate_invalid_or_unavailable_role_errors_with_sorted_available_roles() {
             "conn-delegate",
             StartAgentRequest {
                 query_id: query_id.to_owned(),
-                agent_id: format!("test-agent-{}", query_id),
                 instruction: "side task".to_owned(),
                 role: Some(role.to_owned()),
                 execution_mode: ToolExecutionMode::Shared,
@@ -9475,7 +9421,6 @@ fn delegate_missing_default_senior_engineer_errors_when_unavailable() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-default".to_owned(),
-            agent_id: "test-agent-q-default".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -9503,7 +9448,7 @@ fn delegate_missing_default_senior_engineer_errors_when_unavailable() {
 }
 
 /// Regression: when one side conversation tears down (running
-/// `snap_to_default_conversation`) before another's tool result
+/// `snap_to_default_agent`) before another's tool result
 /// arrives, the result must still fold onto the *originating*
 /// conversation's branch. Before this fix, the result landed at
 /// `tree.head` (which `snap_to_default` had moved to the parent
@@ -9534,12 +9479,11 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
     );
 
     // Set up the main agent's turn that emits a single delegate call.
-    let cid = h.default_conversation_id.clone();
-    let main_spid: SessionPromptId = "sp-main".into();
+    let cid = h.default_agent_id.clone();
+    let main_spid: AgentPromptId = "sp-main".into();
     seed_agent_thinking(&mut h, &cid, "sp-main");
-    h.prompt_conversations
-        .insert(main_spid.clone(), cid.clone());
-    h.publish_for_conversation(
+    h.prompt_agents.insert(main_spid.clone(), cid.clone());
+    h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -9551,8 +9495,8 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: main_spid,
-        target_agent_id: None,
+        agent_prompt_id: main_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "outer-call".into(),
             name: ToolName::new("delegate"),
@@ -9583,7 +9527,6 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-outer".to_owned(),
-            agent_id: "test-agent-q-outer".to_owned(),
             instruction: "outer task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -9600,13 +9543,13 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
     // produced the misplacement: outer side conv runs teardown
     // (snap_to_default) before nested side conv's tool result lands.
     let outer_side_spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("outer side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: outer_side_spid,
-        target_agent_id: None,
+        agent_prompt_id: outer_side_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "nested-call".into(),
             name: ToolName::new("delegate"),
@@ -9638,7 +9581,6 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-nested".to_owned(),
-            agent_id: "test-agent-q-nested".to_owned(),
             instruction: "nested task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -9650,13 +9592,13 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
     .expect("nested query");
 
     // Nested sub-agent finishes with a final answer. This triggers
-    // side teardown: `snap_to_default_conversation` runs, moving
+    // side teardown: `snap_to_default_agent` runs, moving
     // tree.head back to the main branch. The delegate ext then
     // publishes a ToolResult for `nested-call` — which must fold on
     // the *outer* conv's branch (since outer issued nested-call), not
     // wherever tree.head happens to be.
     let nested_side_spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| {
             (prompt_cid.as_str() != "default" && prompt_cid.as_str() != outer_side_cid_str(&h))
@@ -9664,8 +9606,8 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         })
         .expect("nested side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: nested_side_spid,
-        target_agent_id: None,
+        agent_prompt_id: nested_side_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
 
@@ -9720,7 +9662,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
     // sub-agent should see is its own `nested-call` (with a
     // matching ToolResult).
     let outer_resume_spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| {
             (prompt_cid.as_str() == outer_side_cid_str(&h)).then_some(spid.clone())
@@ -9784,12 +9726,12 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
         },
     );
 
-    let default_cid = h.default_conversation_id.clone();
-    let main_spid: SessionPromptId = "sp-main".into();
+    let default_cid = h.default_agent_id.clone();
+    let main_spid: AgentPromptId = "sp-main".into();
     seed_agent_thinking(&mut h, &default_cid, "sp-main");
-    h.prompt_conversations
+    h.prompt_agents
         .insert(main_spid.clone(), default_cid.clone());
-    h.publish_for_conversation(
+    h.publish_for_agent(
         &default_cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -9801,8 +9743,8 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: main_spid,
-        target_agent_id: None,
+        agent_prompt_id: main_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "outer-call".into(),
             name: ToolName::new("delegate"),
@@ -9832,7 +9774,6 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-outer".to_owned(),
-            agent_id: "test-agent-q-outer".to_owned(),
             instruction: "outer task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -9844,13 +9785,13 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
     .expect("outer query");
 
     let outer_side_spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("outer side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: outer_side_spid,
-        target_agent_id: None,
+        agent_prompt_id: outer_side_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "nested-call".into(),
             name: ToolName::new("delegate"),
@@ -9883,7 +9824,6 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-nested".to_owned(),
-            agent_id: "test-agent-q-nested".to_owned(),
             instruction: "nested task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -9895,7 +9835,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
     .expect("nested query");
 
     let nested_side_spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| {
             (prompt_cid.as_str() != "default" && prompt_cid.as_str() != outer_side_cid_str(&h))
@@ -9945,11 +9885,11 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         },
     );
 
-    let cid = h.default_conversation_id.clone();
-    let spid: SessionPromptId = "sp-main".into();
+    let cid = h.default_agent_id.clone();
+    let spid: AgentPromptId = "sp-main".into();
     seed_agent_thinking(&mut h, &cid, "sp-main");
-    h.prompt_conversations.insert(spid.clone(), cid.clone());
-    h.publish_for_conversation(
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+    h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -9961,8 +9901,8 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: spid,
-        target_agent_id: None,
+        agent_prompt_id: spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "outer-call".into(),
             name: ToolName::new("delegate"),
@@ -9992,7 +9932,6 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-outer".to_owned(),
-            agent_id: "test-agent-q-outer".to_owned(),
             instruction: "outer task".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -10004,13 +9943,13 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
     .expect("query");
 
     let side_spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: side_spid,
-        target_agent_id: None,
+        agent_prompt_id: side_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
 
@@ -10058,7 +9997,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
     .expect("delegate result");
 
     let main_resume_spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() == "default").then_some(spid.clone()))
         .expect("main resume prompt id");
@@ -10100,12 +10039,12 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         },
     );
 
-    let default_cid = h.default_conversation_id.clone();
-    let main_spid: SessionPromptId = "sp-main".into();
+    let default_cid = h.default_agent_id.clone();
+    let main_spid: AgentPromptId = "sp-main".into();
     seed_agent_thinking(&mut h, &default_cid, "sp-main");
-    h.prompt_conversations
+    h.prompt_agents
         .insert(main_spid.clone(), default_cid.clone());
-    h.publish_for_conversation(
+    h.publish_for_agent(
         &default_cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -10117,8 +10056,8 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         }),
     );
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: main_spid,
-        target_agent_id: None,
+        agent_prompt_id: main_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "top-call".into(),
             name: ToolName::new("delegate"),
@@ -10148,7 +10087,6 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-top".to_owned(),
-            agent_id: "test-agent-q-top".to_owned(),
             instruction: "TOP: delegate exactly two more subtasks".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -10160,13 +10098,13 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
     .expect("top query");
 
     let top_spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("top prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: top_spid,
-        target_agent_id: None,
+        agent_prompt_id: top_spid,
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "leaf-call".into(),
             name: ToolName::new("delegate"),
@@ -10199,7 +10137,6 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         "conn-delegate",
         StartAgentRequest {
             query_id: "q-leaf".to_owned(),
-            agent_id: "test-agent-q-leaf".to_owned(),
             instruction: "LEAF: do one terminal search only".to_owned(),
             role: None,
             execution_mode: ToolExecutionMode::Shared,
@@ -10211,11 +10148,11 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
     .expect("leaf query");
 
     let leaf_spid = h
-        .prompt_conversations
+        .prompt_agents
         .iter()
         .find_map(|(spid, prompt_cid)| {
             matches!(
-                h.conversations
+                h.agents
                     .get(prompt_cid)
                     .map(|conv| &conv.originator),
                 Some(tau_proto::PromptOriginator::Extension { query_id, .. }) if query_id == "q-leaf"
@@ -10269,20 +10206,20 @@ fn stale_same_conversation_tool_call_response_is_ignored() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    let cid = h.default_conversation_id.clone();
-    let old_spid: SessionPromptId = "sp-old".into();
-    let new_spid: SessionPromptId = "sp-new".into();
-    h.prompt_conversations.insert(old_spid.clone(), cid.clone());
-    h.prompt_conversations.insert(new_spid.clone(), cid.clone());
+    let cid = h.default_agent_id.clone();
+    let old_spid: AgentPromptId = "sp-old".into();
+    let new_spid: AgentPromptId = "sp-new".into();
+    h.prompt_agents.insert(old_spid.clone(), cid.clone());
+    h.prompt_agents.insert(new_spid.clone(), cid.clone());
     {
-        let conv = h.conversations.get_mut(&cid).expect("default conversation");
+        let conv = h.agents.get_mut(&cid).expect("default conversation");
         conv.in_flight_prompt = Some(new_spid.clone());
         conv.last_prompt_id = Some(new_spid.clone());
     }
 
     h.handle_provider_response_finished(ProviderResponseFinished {
-        session_prompt_id: old_spid.clone(),
-        target_agent_id: None,
+        agent_prompt_id: old_spid.clone(),
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(ToolCallItem {
             call_id: "stale-call".into(),
             name: ToolName::new("wait"),
@@ -10308,21 +10245,21 @@ fn stale_same_conversation_tool_call_response_is_ignored() {
     assert!(
         event_log_contains_any_source(&h, |event| matches!(
             event,
-            Event::SessionPromptTerminated(terminated)
-                if terminated.session_prompt_id.as_str() == old_spid.as_str()
-                    && terminated.reason == tau_proto::SessionPromptTerminationReason::Stale
+            Event::AgentPromptTerminated(terminated)
+                if terminated.agent_prompt_id.as_str() == old_spid.as_str()
+                    && terminated.reason == tau_proto::AgentPromptTerminationReason::Stale
         )),
         "stale prompt must publish a terminal lifecycle event",
     );
-    assert!(!h.prompt_conversations.contains_key(old_spid.as_str()));
-    let conv = h.conversations.get(&cid).expect("default conversation");
+    assert!(!h.prompt_agents.contains_key(old_spid.as_str()));
+    let conv = h.agents.get(&cid).expect("default conversation");
     assert_eq!(conv.in_flight_prompt.as_ref(), Some(&new_spid));
-    assert!(matches!(conv.turn_state, ConversationTurnState::Idle));
+    assert!(matches!(conv.turn_state, AgentTurnState::Idle));
 
     h.shutdown().expect("shutdown");
 }
 
-/// Regression: parallel side conversations must not steal each
+/// Regression: parallel side agents must not steal each
 /// other's branch cursor. Before the per-event `folded_node_id`
 /// sync, `commit_event` synced `c.head` from the global
 /// `tree.head()`. A non-folding event on conv-A (e.g. an
@@ -10351,24 +10288,52 @@ fn message_tool_call(id: &str, recipient_id: &str, message: &str) -> AgentToolCa
     }
 }
 
-fn session_agent_messages(h: &Harness) -> Vec<tau_proto::AgentMessage> {
-    h.store
-        .session_events("s1")
-        .expect("session events")
+fn session_agent_message_sent_events(h: &Harness) -> Vec<tau_proto::AgentMessageSent> {
+    event_log_events(h)
         .into_iter()
-        .filter_map(|entry| match entry.event {
-            Event::AgentMessage(message) => Some(message),
+        .filter_map(|event| match event {
+            Event::AgentMessageSent(message) => Some(message),
+            _ => None,
+        })
+        .collect()
+}
+
+fn session_agent_message_received_events(h: &Harness) -> Vec<tau_proto::AgentMessageReceived> {
+    event_log_events(h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentMessageReceived(message) => Some(message),
+            _ => None,
+        })
+        .collect()
+}
+
+fn durable_agent_message_sent_events(h: &Harness) -> Vec<tau_proto::AgentMessageSent> {
+    loaded_agent_events(h, "s1")
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentMessageSent(message) => Some(message),
+            _ => None,
+        })
+        .collect()
+}
+
+fn durable_agent_message_received_events(h: &Harness) -> Vec<tau_proto::AgentMessageReceived> {
+    loaded_agent_events(h, "s1")
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentMessageReceived(message) => Some(message),
             _ => None,
         })
         .collect()
 }
 
 #[test]
-fn message_tool_to_user_emits_exactly_one_agent_message() {
+fn message_tool_to_user_emits_only_sender_projection() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
 
     h.handle_message_tool_call(
         &cid,
@@ -10377,23 +10342,38 @@ fn message_tool_to_user_emits_exactly_one_agent_message() {
     )
     .expect("message tool");
 
-    let messages = session_agent_messages(&h);
-    assert_eq!(messages.len(), 1);
-    assert!(messages[0].sender_id.starts_with("senior-engineer_"));
-    assert_eq!(messages[0].recipient_id, "user");
-    assert_eq!(messages[0].message, "hello user");
+    let sent = session_agent_message_sent_events(&h);
+    let received = session_agent_message_received_events(&h);
+    assert_eq!(sent.len(), 1);
+    let sender_agent_id = h
+        .agents
+        .get(&cid)
+        .and_then(|conv| conv.agent_id.as_deref())
+        .expect("sender agent id");
+    assert_eq!(sent[0].sender_id.as_str(), sender_agent_id);
+    assert_role_hex_agent_id(sender_agent_id, "senior-engineer");
+    assert_eq!(sent[0].recipient, tau_proto::AgentMessageRecipient::User);
+    assert_eq!(sent[0].message, "hello user");
+    assert!(received.is_empty());
+
+    let durable_sent = durable_agent_message_sent_events(&h);
+    let durable_received = durable_agent_message_received_events(&h);
+    assert_eq!(durable_sent.len(), 1);
+    assert_eq!(durable_sent[0].message_id, sent[0].message_id);
+    assert_eq!(durable_sent[0].message, "hello user");
+    assert!(durable_received.is_empty());
 
     h.shutdown().expect("shutdown");
 }
 
 /// Unknown agent recipients must fail the tool call before publishing any
-/// `AgentMessage`, so a typo cannot create forged transcript state.
+/// message projection, so a typo cannot create forged transcript state.
 #[test]
 fn message_tool_unknown_recipient_errors_without_agent_message() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
 
     h.handle_message_tool_call(
         &cid,
@@ -10402,13 +10382,13 @@ fn message_tool_unknown_recipient_errors_without_agent_message() {
     )
     .expect("message tool");
 
-    assert!(session_agent_messages(&h).is_empty());
-    let errors: Vec<_> = h
-        .store
-        .session_events("s1")
-        .expect("session events")
+    assert!(session_agent_message_sent_events(&h).is_empty());
+    assert!(session_agent_message_received_events(&h).is_empty());
+    assert!(durable_agent_message_sent_events(&h).is_empty());
+    assert!(durable_agent_message_received_events(&h).is_empty());
+    let errors: Vec<_> = event_log_events(&h)
         .into_iter()
-        .filter_map(|entry| match entry.event {
+        .filter_map(|event| match event {
             Event::ToolError(error) if error.call_id.as_str() == "msg-bad" => Some(error),
             _ => None,
         })
@@ -10428,11 +10408,11 @@ fn message_tool_stopped_recipient_errors_without_agent_message() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    let cid = h.default_conversation_id.clone();
-    let stopped_cid = ConversationId::new("stopped-recipient");
-    h.conversations.insert(
+    let cid = h.default_agent_id.clone();
+    let stopped_cid: AgentId = "stopped-recipient".into();
+    h.agents.insert(
         stopped_cid.clone(),
-        Conversation::new(
+        Agent::new(
             stopped_cid.clone(),
             "s1".into(),
             tau_proto::PromptOriginator::User,
@@ -10440,10 +10420,8 @@ fn message_tool_stopped_recipient_errors_without_agent_message() {
             None,
         ),
     );
-    let recipient_id = h
-        .ensure_agent_id_for_conversation(&stopped_cid)
-        .expect("agent id");
-    h.remove_conversation(&stopped_cid);
+    let recipient_id = h.ensure_agent_id_for_agent(&stopped_cid).expect("agent id");
+    h.remove_agent(&stopped_cid);
 
     h.handle_message_tool_call(
         &cid,
@@ -10452,13 +10430,13 @@ fn message_tool_stopped_recipient_errors_without_agent_message() {
     )
     .expect("message tool");
 
-    assert!(session_agent_messages(&h).is_empty());
-    let errors: Vec<_> = h
-        .store
-        .session_events("s1")
-        .expect("session events")
+    assert!(session_agent_message_sent_events(&h).is_empty());
+    assert!(session_agent_message_received_events(&h).is_empty());
+    assert!(durable_agent_message_sent_events(&h).is_empty());
+    assert!(durable_agent_message_received_events(&h).is_empty());
+    let errors: Vec<_> = event_log_events(&h)
         .into_iter()
-        .filter_map(|entry| match entry.event {
+        .filter_map(|event| match event {
             Event::ToolError(error) if error.call_id.as_str() == "msg-stopped" => Some(error),
             _ => None,
         })
@@ -10470,21 +10448,18 @@ fn message_tool_stopped_recipient_errors_without_agent_message() {
     h.shutdown().expect("shutdown");
 }
 
-/// Agent-directed messages are displayed in the UI like every `AgentMessage`,
-/// and the recipient agent receives an internal queued prompt with stable
-/// markup.
+/// Agent-directed messages are displayed in the UI like every message
+/// projection, and the recipient agent receives an internal queued prompt with
+/// stable markup.
 #[test]
 fn message_tool_to_agent_queues_internal_prompt_markup() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    let cid = h.default_conversation_id.clone();
-    let recipient_id = h.ensure_agent_id_for_conversation(&cid).expect("agent id");
-    h.conversations
-        .get_mut(&cid)
-        .expect("conversation")
-        .turn_state = ConversationTurnState::AgentThinking {
-        session_prompt_id: "sp-message-target".into(),
+    let cid = h.default_agent_id.clone();
+    let recipient_id = h.ensure_agent_id_for_agent(&cid).expect("agent id");
+    h.agents.get_mut(&cid).expect("conversation").turn_state = AgentTurnState::AgentThinking {
+        agent_prompt_id: "sp-message-target".into(),
     };
 
     h.handle_message_tool_call(
@@ -10498,7 +10473,23 @@ fn message_tool_to_agent_queues_internal_prompt_markup() {
     )
     .expect("message tool");
 
-    let conv = h.conversations.get(&cid).expect("conversation");
+    let sent = session_agent_message_sent_events(&h);
+    let received = session_agent_message_received_events(&h);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(received.len(), 1);
+    assert_eq!(sent[0].message_id, received[0].message_id);
+    assert_eq!(sent[0].sender_id.as_str(), recipient_id);
+    assert_eq!(received[0].sender_id.as_str(), recipient_id);
+    assert_eq!(received[0].recipient_id.as_str(), recipient_id);
+
+    let durable_sent = durable_agent_message_sent_events(&h);
+    let durable_received = durable_agent_message_received_events(&h);
+    assert_eq!(durable_sent.len(), 1);
+    assert_eq!(durable_received.len(), 1);
+    assert_eq!(durable_sent[0].message_id, sent[0].message_id);
+    assert_eq!(durable_received[0].message_id, received[0].message_id);
+
+    let conv = h.agents.get(&cid).expect("conversation");
     let queued = conv.pending_prompts.back().expect("queued prompt");
     assert_eq!(
         queued.message_class,
@@ -10514,41 +10505,39 @@ fn message_tool_to_agent_queues_internal_prompt_markup() {
     h.shutdown().expect("shutdown");
 }
 
-/// Agent ids are minted once per conversation, are role-prefixed with a short
-/// suffix, and are removed from the reverse lookup when the conversation is
-/// torn down.
+/// Agent ids are minted once per conversation as role-prefixed hex strings and
+/// are removed from the reverse lookup when the conversation is torn down.
 #[test]
 fn agent_id_generation_is_stable_and_cleaned_up() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
 
-    let first = h.ensure_agent_id_for_conversation(&cid).expect("agent id");
-    let second = h.ensure_agent_id_for_conversation(&cid).expect("agent id");
+    let first = h.ensure_agent_id_for_agent(&cid).expect("agent id");
+    let second = h.ensure_agent_id_for_agent(&cid).expect("agent id");
     assert_eq!(first, second);
-    assert!(first.starts_with("senior-engineer_"));
-    assert_eq!(first.len(), "senior-engineer_".len() + 4);
-    assert_eq!(h.agent_conversations.get(&first), Some(&cid));
+    assert_role_hex_agent_id(&first, "senior-engineer");
+    assert_eq!(h.agent_routes.get(&first), Some(&cid));
 
-    h.remove_conversation(&cid);
-    assert!(!h.agent_conversations.contains_key(&first));
+    h.remove_agent(&cid);
+    assert!(!h.agent_routes.contains_key(&first));
 
     h.shutdown().expect("shutdown");
 }
 
-/// External clients and extensions must not forge `AgentMessage` events; only
-/// the harness-owned message tool may publish them.
+/// External clients and extensions must not forge message projection events;
+/// only the harness-owned message tool may publish them.
 #[test]
 fn inbound_agent_message_events_are_ignored() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    let forged = Event::AgentMessage(tau_proto::AgentMessage {
-        session_id: "s1".into(),
-        sender_id: "attacker".to_owned(),
-        recipient_id: "user".to_owned(),
+    let forged = Event::AgentMessageSent(tau_proto::AgentMessageSent {
+        message_id: "test-message".into(),
+        sender_id: "attacker".to_owned().into(),
+        recipient: tau_proto::AgentMessageRecipient::User,
         message: "forged".to_owned(),
     });
     h.handle_client_event_inner("ui", forged.clone())
@@ -10564,7 +10553,10 @@ fn inbound_agent_message_events_are_ignored() {
     )
     .expect("extension emit");
 
-    assert!(session_agent_messages(&h).is_empty());
+    assert!(session_agent_message_sent_events(&h).is_empty());
+    assert!(session_agent_message_received_events(&h).is_empty());
+    assert!(durable_agent_message_sent_events(&h).is_empty());
+    assert!(durable_agent_message_received_events(&h).is_empty());
 
     h.shutdown().expect("shutdown");
 }

@@ -200,7 +200,7 @@ pub(crate) fn dispatch_user_shell_command(
         mut pipe: R,
         stream: tau_proto::ShellStream,
         command_id: tau_proto::ShellCommandId,
-        target_agent_id: Option<String>,
+        target_agent_id: Option<tau_proto::AgentId>,
         tx: mpsc::Sender<Frame>,
     ) -> std::thread::JoinHandle<String> {
         std::thread::spawn(move || {

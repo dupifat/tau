@@ -103,6 +103,12 @@ macro_rules! string_newtype {
 
 string_newtype!(/// Session identifier.
     SessionId);
+string_newtype!(/// Global durable agent identifier.
+    AgentId);
+string_newtype!(/// Stable identifier for one agent transcript prompt.
+    AgentPromptId);
+string_newtype!(/// Stable identifier for one global agent message.
+    AgentMessageId);
 // ToolName is defined manually below with validation.
 string_newtype!(/// Tool call identifier.
     ToolCallId);
@@ -110,8 +116,7 @@ string_newtype!(/// User-interface action invocation identifier.
     ActionInvocationId);
 string_newtype!(/// Connection identifier.
     ConnectionId);
-string_newtype!(/// Unique identifier for one prompt within a session.
-    SessionPromptId);
+
 string_newtype!(/// Extension name.
     ExtensionName);
 string_newtype!(/// Session-scoped context key published by an extension.
@@ -421,7 +426,7 @@ impl serde::Serialize for ModelId {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         // Wire form is the flat `"provider/model"` string — same
         // bytes as the previous flat-string newtype, so existing
-        // CBOR / JSON5 / persisted session logs keep working.
+        // CBOR / JSON5 / persisted logs keep working.
         self.to_string().serialize(serializer)
     }
 }

@@ -437,7 +437,7 @@ where
     // prewarm, or cancel events would rerun or cancel completed turns.
     tau_extension::Handshake::with_kind(EXTENSION_NAME, ClientKind::Provider)
         .subscribe([
-            EventName::SESSION_PROMPT_PREWARM_REQUESTED,
+            EventName::AGENT_PROMPT_PREWARM_REQUESTED,
             EventName::UI_CANCEL_PROMPT,
         ])
         .announce_event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
@@ -531,17 +531,17 @@ where
         }
         let mut complete_log_now = true;
         match inner {
-            Frame::Event(Event::SessionPromptPrewarmRequested(prewarm)) => {
+            Frame::Event(Event::AgentPromptPrewarmRequested(prewarm)) => {
                 let mut profiles = load_prompt_profiles();
                 handle_prewarm(&prewarm, &mut profiles, &chatgpt_runtime);
             }
-            Frame::Event(Event::SessionCompactionRequested(request)) => {
-                let session_prompt_id = request.prompt.session_prompt_id.clone();
+            Frame::Event(Event::AgentCompactionRequested(request)) => {
+                let agent_prompt_id = request.prompt.agent_prompt_id.clone();
                 let prompt = materialize_prompt(&request.prompt);
 
-                if cancellation.take_canceled(&session_prompt_id) {
+                if cancellation.take_canceled(&agent_prompt_id) {
                     let mut frame_writer = FrameWriter::new(&mut writer);
-                    finish_canceled(&session_prompt_id, &prompt.originator, &mut frame_writer)?;
+                    finish_canceled(&agent_prompt_id, &prompt, &mut frame_writer)?;
                     if let Some(id) = log_id {
                         ack_tracker.complete(id);
                     }
@@ -549,11 +549,11 @@ where
                     continue;
                 }
 
-                trace_prompt_like("provider compaction request", &request, &session_prompt_id);
+                trace_prompt_like("provider compaction request", &request, &agent_prompt_id);
                 {
                     let mut frame_writer = FrameWriter::new(&mut writer);
                     write_prompt_submitted(
-                        &session_prompt_id,
+                        &agent_prompt_id,
                         &prompt.originator,
                         &mut frame_writer,
                     )?;
@@ -572,22 +572,22 @@ where
                     .and_then(|model| resolve_responses_backend(model, &mut profiles))
                 {
                     Some(backend) => handle_compaction_request(
-                        &session_prompt_id,
+                        &agent_prompt_id,
                         &backend,
                         &prompt,
                         &mut frame_writer,
                         &mut retry_ctx,
                     )?,
-                    None => finish_missing_backend(&prompt, &session_prompt_id, &mut frame_writer)?,
+                    None => finish_missing_backend(&prompt, &agent_prompt_id, &mut frame_writer)?,
                 }
             }
-            Frame::Event(Event::SessionPromptCreated(prompt)) => {
-                let session_prompt_id = prompt.session_prompt_id.clone();
+            Frame::Event(Event::AgentPromptCreated(prompt)) => {
+                let agent_prompt_id = prompt.agent_prompt_id.clone();
                 let prompt = materialize_prompt(&prompt);
 
-                if cancellation.take_canceled(&session_prompt_id) {
+                if cancellation.take_canceled(&agent_prompt_id) {
                     let mut frame_writer = FrameWriter::new(&mut writer);
-                    finish_canceled(&session_prompt_id, &prompt.originator, &mut frame_writer)?;
+                    finish_canceled(&agent_prompt_id, &prompt, &mut frame_writer)?;
                     if let Some(id) = log_id {
                         ack_tracker.complete(id);
                     }
@@ -595,7 +595,7 @@ where
                     continue;
                 }
 
-                trace_prompt_like("provider prompt", &prompt, &session_prompt_id);
+                trace_prompt_like("provider prompt", &prompt, &agent_prompt_id);
 
                 let mut profiles = load_prompt_profiles();
                 match prompt
@@ -606,7 +606,7 @@ where
                     Some(backend) => {
                         let job = PromptJob {
                             log_id,
-                            session_prompt_id,
+                            agent_prompt_id,
                             prompt,
                             backend,
                         };
@@ -620,19 +620,19 @@ where
                     None => {
                         let mut frame_writer = FrameWriter::new(&mut writer);
                         write_prompt_submitted(
-                            &session_prompt_id,
+                            &agent_prompt_id,
                             &prompt.originator,
                             &mut frame_writer,
                         )?;
-                        finish_missing_backend(&prompt, &session_prompt_id, &mut frame_writer)?;
+                        finish_missing_backend(&prompt, &agent_prompt_id, &mut frame_writer)?;
                     }
                 }
             }
-            Frame::Event(Event::UiCancelPrompt(cancel)) => match cancel.session_prompt_id {
-                Some(spid) => {
-                    cancellation.cancel(spid.clone());
+            Frame::Event(Event::UiCancelPrompt(cancel)) => match cancel.agent_prompt_id {
+                Some(apid) => {
+                    cancellation.cancel(apid.clone());
                     finish_queued_canceled(
-                        &spid,
+                        &apid,
                         &mut prompt_queue,
                         &mut writer,
                         &mut ack_tracker,
@@ -659,8 +659,8 @@ type PromptExecutor = Arc<dyn Fn(PromptExecution) + Send + Sync + 'static>;
 
 struct PromptJob {
     log_id: Option<tau_proto::LogEventId>,
-    session_prompt_id: tau_proto::SessionPromptId,
-    prompt: tau_proto::SessionPromptCreated,
+    agent_prompt_id: tau_proto::AgentPromptId,
+    prompt: tau_proto::AgentPromptCreated,
     backend: PromptBackend,
 }
 
@@ -774,15 +774,15 @@ struct CancellationState {
 
 #[derive(Default)]
 struct CancellationInner {
-    canceled_spids: HashSet<tau_proto::SessionPromptId>,
+    canceled_apids: HashSet<tau_proto::AgentPromptId>,
     retry_cancel_generation: u64,
     shutdown: bool,
 }
 
 impl CancellationState {
-    fn cancel(&self, spid: tau_proto::SessionPromptId) {
+    fn cancel(&self, apid: tau_proto::AgentPromptId) {
         if let Ok(mut inner) = self.inner.lock() {
-            inner.canceled_spids.insert(spid);
+            inner.canceled_apids.insert(apid);
             self.changed.notify_all();
         }
     }
@@ -801,14 +801,14 @@ impl CancellationState {
         }
     }
 
-    fn take_canceled(&self, spid: &tau_proto::SessionPromptId) -> bool {
+    fn take_canceled(&self, apid: &tau_proto::AgentPromptId) -> bool {
         self.inner
             .lock()
-            .map(|mut inner| inner.canceled_spids.remove(spid) || inner.shutdown)
+            .map(|mut inner| inner.canceled_apids.remove(apid) || inner.shutdown)
             .unwrap_or(true)
     }
 
-    fn sleep_or_abort(&self, delay: Duration, current_spid: &str) -> SleepOutcome {
+    fn sleep_or_abort(&self, delay: Duration, current_apid: &str) -> SleepOutcome {
         let deadline = Instant::now() + delay;
         let mut inner = match self.inner.lock() {
             Ok(inner) => inner,
@@ -819,9 +819,9 @@ impl CancellationState {
             if inner.shutdown
                 || inner.retry_cancel_generation != generation
                 || inner
-                    .canceled_spids
+                    .canceled_apids
                     .iter()
-                    .any(|spid| spid.as_str() == current_spid)
+                    .any(|apid| apid.as_str() == current_apid)
             {
                 return SleepOutcome::Aborted;
             }
@@ -852,13 +852,13 @@ fn prompt_concurrency_limit() -> usize {
 
 fn production_prompt_executor() -> PromptExecutor {
     Arc::new(|execution| {
-        let session_prompt_id = execution.job.session_prompt_id.clone();
+        let agent_prompt_id = execution.job.agent_prompt_id.clone();
         let mut writer = execution.frame_writer();
         let mut retry_ctx = SharedRetryContext {
             cancellation: execution.cancellation.clone(),
         };
         let result = handle_prompt_backend(
-            &session_prompt_id,
+            &agent_prompt_id,
             &execution.job.backend,
             &execution.job.prompt,
             &mut writer,
@@ -868,7 +868,7 @@ fn production_prompt_executor() -> PromptExecutor {
         if let Err(error) = result {
             tracing::warn!(
                 target: LOG_TARGET,
-                session_prompt_id = %session_prompt_id,
+                agent_prompt_id = %agent_prompt_id,
                 "prompt worker failed to emit provider response: {error}"
             );
         }
@@ -904,13 +904,9 @@ fn start_queued_prompts<W: Write>(
         let Some(job) = prompt_queue.pop_front() else {
             return Ok(());
         };
-        if context.cancellation.take_canceled(&job.session_prompt_id) {
+        if context.cancellation.take_canceled(&job.agent_prompt_id) {
             let mut frame_writer = FrameWriter::new(&mut *writer);
-            finish_canceled(
-                &job.session_prompt_id,
-                &job.prompt.originator,
-                &mut frame_writer,
-            )?;
+            finish_canceled(&job.agent_prompt_id, &job.prompt, &mut frame_writer)?;
             if let Some(id) = job.log_id {
                 ack_tracker.complete(id);
             }
@@ -922,14 +918,14 @@ fn start_queued_prompts<W: Write>(
 }
 
 fn finish_queued_canceled<W: Write>(
-    spid: &tau_proto::SessionPromptId,
+    apid: &tau_proto::AgentPromptId,
     prompt_queue: &mut VecDeque<PromptJob>,
     writer: &mut BufWriter<W>,
     ack_tracker: &mut AckTracker,
 ) -> Result<(), Box<dyn Error>> {
     let Some(index) = prompt_queue
         .iter()
-        .position(|job| job.session_prompt_id.as_str() == spid.as_str())
+        .position(|job| job.agent_prompt_id.as_str() == apid.as_str())
     else {
         return Ok(());
     };
@@ -937,11 +933,7 @@ fn finish_queued_canceled<W: Write>(
         return Ok(());
     };
     let mut frame_writer = FrameWriter::new(writer);
-    finish_canceled(
-        &job.session_prompt_id,
-        &job.prompt.originator,
-        &mut frame_writer,
-    )?;
+    finish_canceled(&job.agent_prompt_id, &job.prompt, &mut frame_writer)?;
     if let Some(id) = job.log_id {
         ack_tracker.complete(id);
     }
@@ -986,38 +978,38 @@ fn write_ready_acks<W: Write>(
     Ok(())
 }
 
-fn materialize_prompt(prompt: &tau_proto::SessionPromptCreated) -> tau_proto::SessionPromptCreated {
+fn materialize_prompt(prompt: &tau_proto::AgentPromptCreated) -> tau_proto::AgentPromptCreated {
     let mut materialized = prompt.clone();
     materialized.tools_ref = None;
     materialized
 }
 
-fn trace_prompt_like<T: serde::Serialize>(label: &str, value: &T, session_prompt_id: &str) {
+fn trace_prompt_like<T: serde::Serialize>(label: &str, value: &T, agent_prompt_id: &str) {
     if !tracing::enabled!(target: LOG_TARGET, tracing::Level::TRACE) {
         return;
     }
     match serde_json::to_string_pretty(value) {
         Ok(json) => tracing::trace!(
             target: LOG_TARGET,
-            session_prompt_id,
+            agent_prompt_id,
             "{label}:\n{json}"
         ),
         Err(error) => tracing::trace!(
             target: LOG_TARGET,
-            session_prompt_id,
+            agent_prompt_id,
             "{label} (failed to serialize for log: {error})"
         ),
     }
 }
 
 fn write_prompt_submitted<W: Write>(
-    session_prompt_id: &str,
+    agent_prompt_id: &str,
     originator: &tau_proto::PromptOriginator,
     writer: &mut FrameWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
     writer.write_frame(&Frame::Event(Event::ProviderPromptSubmitted(
         ProviderPromptSubmitted {
-            session_prompt_id: session_prompt_id.into(),
+            agent_prompt_id: agent_prompt_id.into(),
             originator: originator.clone(),
         },
     )))?;
@@ -1026,19 +1018,20 @@ fn write_prompt_submitted<W: Write>(
 }
 
 fn finish_canceled<W: Write>(
-    session_prompt_id: &str,
-    originator: &tau_proto::PromptOriginator,
+    agent_prompt_id: &str,
+    prompt: &tau_proto::AgentPromptCreated,
     writer: &mut FrameWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
     tracing::info!(
         target: LOG_TARGET,
-        session_prompt_id,
+        agent_prompt_id,
         "skipping provider request — already canceled by harness",
     );
     writer.write_frame(&Frame::Event(Event::ProviderResponseFinished(
         simple_finished(
-            session_prompt_id.into(),
-            originator.clone(),
+            agent_prompt_id.into(),
+            prompt.agent_id.clone(),
+            prompt.originator.clone(),
             "(cancelled by harness)",
         ),
     )))?;
@@ -1047,8 +1040,8 @@ fn finish_canceled<W: Write>(
 }
 
 fn finish_missing_backend<W: Write>(
-    prompt: &tau_proto::SessionPromptCreated,
-    session_prompt_id: &str,
+    prompt: &tau_proto::AgentPromptCreated,
+    agent_prompt_id: &str,
     writer: &mut FrameWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
     let msg = match &prompt.model {
@@ -1056,20 +1049,26 @@ fn finish_missing_backend<W: Write>(
         None => "no model specified".to_owned(),
     };
     writer.write_frame(&Frame::Event(Event::ProviderResponseFinished(
-        simple_finished(session_prompt_id.into(), prompt.originator.clone(), msg),
+        simple_finished(
+            agent_prompt_id.into(),
+            prompt.agent_id.clone(),
+            prompt.originator.clone(),
+            msg,
+        ),
     )))?;
     writer.flush()?;
     Ok(())
 }
 
 fn simple_finished(
-    session_prompt_id: tau_proto::SessionPromptId,
+    agent_prompt_id: tau_proto::AgentPromptId,
+    agent_id: tau_proto::AgentId,
     originator: tau_proto::PromptOriginator,
     text: impl Into<String>,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
-        session_prompt_id,
-        target_agent_id: None,
+        agent_prompt_id,
+        agent_id,
         output_items: vec![common::assistant_text_item(text)],
         stop_reason: ProviderStopReason::EndTurn,
         originator,
@@ -1097,11 +1096,11 @@ fn stop_reason_from_output_items(output_items: &[ContextItem]) -> ProviderStopRe
 }
 
 trait RetrySleeper {
-    fn sleep_or_abort(&mut self, delay: Duration, current_spid: &str) -> SleepOutcome;
+    fn sleep_or_abort(&mut self, delay: Duration, current_apid: &str) -> SleepOutcome;
 
-    fn is_aborted(&mut self, current_spid: &str) -> bool {
+    fn is_aborted(&mut self, current_apid: &str) -> bool {
         matches!(
-            self.sleep_or_abort(Duration::ZERO, current_spid),
+            self.sleep_or_abort(Duration::ZERO, current_apid),
             SleepOutcome::Aborted,
         )
     }
@@ -1124,12 +1123,12 @@ enum SleepOutcome {
 }
 
 impl RetrySleeper for FrameRetryContext<'_> {
-    fn sleep_or_abort(&mut self, delay: Duration, current_spid: &str) -> SleepOutcome {
+    fn sleep_or_abort(&mut self, delay: Duration, current_apid: &str) -> SleepOutcome {
         let deadline = Instant::now() + delay;
         loop {
             if self
                 .cancellation
-                .sleep_or_abort(Duration::ZERO, current_spid)
+                .sleep_or_abort(Duration::ZERO, current_apid)
                 == SleepOutcome::Aborted
             {
                 return SleepOutcome::Aborted;
@@ -1143,19 +1142,19 @@ impl RetrySleeper for FrameRetryContext<'_> {
                 Err(RecvTimeoutError::Disconnected) => return SleepOutcome::Aborted,
                 Ok(frame) => {
                     if let Frame::Event(Event::UiCancelPrompt(cancel)) = &frame {
-                        match &cancel.session_prompt_id {
+                        match &cancel.agent_prompt_id {
                             None => {
                                 self.cancellation.cancel_retry_sleeps();
                                 self.deferred.push_back(frame);
                                 return SleepOutcome::Aborted;
                             }
-                            Some(spid) if spid.as_str() == current_spid => {
-                                self.cancellation.cancel(spid.clone());
+                            Some(apid) if apid.as_str() == current_apid => {
+                                self.cancellation.cancel(apid.clone());
                                 self.deferred.push_back(frame);
                                 return SleepOutcome::Aborted;
                             }
-                            Some(spid) => {
-                                self.cancellation.cancel(spid.clone());
+                            Some(apid) => {
+                                self.cancellation.cancel(apid.clone());
                                 continue;
                             }
                         }
@@ -1175,13 +1174,13 @@ impl RetrySleeper for FrameRetryContext<'_> {
 }
 
 impl RetrySleeper for SharedRetryContext {
-    fn sleep_or_abort(&mut self, delay: Duration, current_spid: &str) -> SleepOutcome {
+    fn sleep_or_abort(&mut self, delay: Duration, current_apid: &str) -> SleepOutcome {
         // Prompt workers do not own the blocking network request, so targeted
         // cancel cannot preempt an in-flight HTTP/WS read yet. It still aborts
         // retry backoff sleeps and keeps queued prompts from starting, matching
         // the existing provider's retry-abort safety without collateral-canceling
         // unrelated prompt ids.
-        self.cancellation.sleep_or_abort(delay, current_spid)
+        self.cancellation.sleep_or_abort(delay, current_apid)
     }
 }
 
@@ -1329,7 +1328,7 @@ fn llm_retry_schedule(max_attempts: usize) -> backon::FibonacciBackoff {
 }
 
 fn with_llm_retry<F, R, W: Write, T>(
-    session_prompt_id: &str,
+    agent_prompt_id: &str,
     originator: &tau_proto::PromptOriginator,
     writer: &mut FrameWriter<W>,
     retry_ctx: &mut R,
@@ -1357,11 +1356,11 @@ where
         attempt += 1;
         tracing::warn!(
             target: LOG_TARGET,
-            session_prompt_id,
+            agent_prompt_id,
             "provider error, retrying in {delay:?} (attempt {attempt}/{max_attempts}): {error}",
         );
         emit_retry_banner(
-            session_prompt_id,
+            agent_prompt_id,
             originator,
             writer,
             &error,
@@ -1370,12 +1369,12 @@ where
             max_attempts,
         );
         if matches!(
-            retry_ctx.sleep_or_abort(delay, session_prompt_id),
+            retry_ctx.sleep_or_abort(delay, agent_prompt_id),
             SleepOutcome::Aborted,
         ) {
             tracing::info!(
                 target: LOG_TARGET,
-                session_prompt_id,
+                agent_prompt_id,
                 "retry aborted by disconnect/cancel",
             );
             return Err(error);
@@ -1384,7 +1383,7 @@ where
 }
 
 fn emit_retry_banner<W: Write>(
-    session_prompt_id: &str,
+    agent_prompt_id: &str,
     originator: &tau_proto::PromptOriginator,
     writer: &mut FrameWriter<W>,
     error: &common::LlmError,
@@ -1401,7 +1400,7 @@ fn emit_retry_banner<W: Write>(
     );
     let _ = writer.write_frame(&Frame::Event(Event::ProviderResponseUpdated(
         ProviderResponseUpdated {
-            session_prompt_id: session_prompt_id.into(),
+            agent_prompt_id: agent_prompt_id.into(),
             text: banner,
             thinking: None,
             originator: originator.clone(),
@@ -1419,14 +1418,14 @@ fn is_canceled_by_harness(error: &common::LlmError) -> bool {
 }
 
 fn handle_prewarm(
-    prewarm: &tau_proto::SessionPromptPrewarmRequested,
+    prewarm: &tau_proto::AgentPromptPrewarmRequested,
     profiles: &mut BuiltinProviderProfiles,
     chatgpt_runtime: &ChatGptRuntime,
 ) {
     let Some(model) = prewarm.model.as_ref() else {
         tracing::debug!(
             target: LOG_TARGET,
-            session_id = %prewarm.session_id,
+            agent_id = %prewarm.agent_id,
             "skipping prompt prewarm: no selected model",
         );
         return;
@@ -1434,13 +1433,14 @@ fn handle_prewarm(
     let Some(config) = resolve_responses_backend(model, profiles) else {
         tracing::debug!(
             target: LOG_TARGET,
-            session_id = %prewarm.session_id,
+            agent_id = %prewarm.agent_id,
             model = %model,
             "skipping prompt prewarm: unsupported backend",
         );
         return;
     };
-    let session_id = prewarm.session_id.as_str();
+    let session_id: tau_proto::SessionId = prewarm.agent_id.as_str().into();
+    let session_id_str = session_id.as_str();
     let request = common::PromptPayload {
         system_prompt: &prewarm.system_prompt,
         context_items: &prewarm.context_items,
@@ -1450,23 +1450,25 @@ fn handle_prewarm(
         previous_response: None,
         originator: &prewarm.originator,
         share_user_cache_key: prewarm.share_user_cache_key,
-        session_id: &prewarm.session_id,
+        session_id: &session_id,
     };
-    tracing::debug!(target: LOG_TARGET, session_id, "starting prompt prewarm");
-    match chatgpt_runtime.prewarm(&config, session_id, &request) {
-        Ok(()) => tracing::debug!(target: LOG_TARGET, session_id, "completed prompt prewarm"),
+    tracing::debug!(target: LOG_TARGET, session_id = session_id_str, "starting prompt prewarm");
+    match chatgpt_runtime.prewarm(&config, session_id_str, &request) {
+        Ok(()) => {
+            tracing::debug!(target: LOG_TARGET, session_id = session_id_str, "completed prompt prewarm")
+        }
         Err(error) => tracing::debug!(
             target: LOG_TARGET,
-            session_id,
+            session_id = session_id_str,
             "prompt prewarm failed: {error}",
         ),
     }
 }
 
 fn handle_prompt_backend<R, W: Write>(
-    session_prompt_id: &tau_proto::SessionPromptId,
+    agent_prompt_id: &tau_proto::AgentPromptId,
     backend: &PromptBackend,
-    prompt: &tau_proto::SessionPromptCreated,
+    prompt: &tau_proto::AgentPromptCreated,
     writer: &mut FrameWriter<W>,
     retry_ctx: &mut R,
     chatgpt_runtime: &ChatGptRuntime,
@@ -1476,7 +1478,7 @@ where
 {
     match backend {
         PromptBackend::Responses(config) => handle_prompt(
-            session_prompt_id.as_str(),
+            agent_prompt_id.as_str(),
             config,
             prompt,
             writer,
@@ -1484,9 +1486,9 @@ where
             chatgpt_runtime,
         ),
         PromptBackend::ChatCompletions { provider, model } => {
-            write_prompt_submitted(session_prompt_id, &prompt.originator, writer)?;
+            write_prompt_submitted(agent_prompt_id, &prompt.originator, writer)?;
             let finished =
-                run_chat_completions_prompt(session_prompt_id, prompt, provider, model, writer);
+                run_chat_completions_prompt(agent_prompt_id, prompt, provider, model, writer);
             writer.write_frame(&Frame::Event(Event::ProviderResponseFinished(finished)))?;
             writer.flush()?;
             Ok(())
@@ -1495,9 +1497,9 @@ where
 }
 
 fn handle_prompt<R, W: Write>(
-    session_prompt_id: &str,
+    agent_prompt_id: &str,
     config: &responses::ResponsesConfig,
-    prompt: &tau_proto::SessionPromptCreated,
+    prompt: &tau_proto::AgentPromptCreated,
     writer: &mut FrameWriter<W>,
     retry_ctx: &mut R,
     chatgpt_runtime: &ChatGptRuntime,
@@ -1505,7 +1507,8 @@ fn handle_prompt<R, W: Write>(
 where
     R: RetrySleeper,
 {
-    write_prompt_submitted(session_prompt_id, &prompt.originator, writer)?;
+    write_prompt_submitted(agent_prompt_id, &prompt.originator, writer)?;
+    let agent_session_id = tau_proto::SessionId::new(prompt.agent_id.as_str());
     let request = common::PromptPayload {
         system_prompt: &prompt.system_prompt,
         context_items: &prompt.context_items,
@@ -1521,7 +1524,7 @@ where
         }),
         originator: &prompt.originator,
         share_user_cache_key: prompt.share_user_cache_key,
-        session_id: &prompt.session_id,
+        session_id: &agent_session_id,
     };
 
     let originator = prompt.originator.clone();
@@ -1529,7 +1532,7 @@ where
     let mut transport_taken = ProviderBackendTransport::HttpSse;
     let mut ws_pool_delta = None;
     let result = with_llm_retry(
-        session_prompt_id,
+        agent_prompt_id,
         &originator,
         writer,
         retry_ctx,
@@ -1537,7 +1540,7 @@ where
             let mut on_update = |text_so_far: &str, thinking_so_far: Option<&str>| {
                 let _ = writer.write_frame(&Frame::Event(Event::ProviderResponseUpdated(
                     ProviderResponseUpdated {
-                        session_prompt_id: session_prompt_id.into(),
+                        agent_prompt_id: agent_prompt_id.into(),
                         text: text_so_far.to_owned(),
                         thinking: thinking_so_far.map(str::to_owned),
                         originator: originator.clone(),
@@ -1546,11 +1549,11 @@ where
                 let _ = writer.flush();
             };
             chatgpt_runtime.stream(
-                session_prompt_id,
+                agent_prompt_id,
                 config,
                 &request,
                 &mut chatgpt_turn_state,
-                &mut || retry_ctx.is_aborted(session_prompt_id),
+                &mut || retry_ctx.is_aborted(agent_prompt_id),
                 &mut on_update,
             )
         },
@@ -1562,9 +1565,9 @@ where
             let backend =
                 backend_descriptor(config, transport_taken, dispatch.state.stale_chain_fallback);
             finish_stream(
-                &prompt.session_id,
-                session_prompt_id,
-                &prompt.originator,
+                agent_session_id.as_str(),
+                agent_prompt_id,
+                prompt,
                 &backend,
                 dispatch.state,
                 ws_pool_delta,
@@ -1572,14 +1575,14 @@ where
             )?
         }
         Err(error) if is_canceled_by_harness(&error) => {
-            finish_canceled(session_prompt_id, &prompt.originator, writer)?
+            finish_canceled(agent_prompt_id, prompt, writer)?
         }
         Err(error) => {
             let backend = backend_descriptor(config, transport_taken, false);
             finish_error(
-                &prompt.session_id,
-                session_prompt_id,
-                &prompt.originator,
+                agent_session_id.as_str(),
+                agent_prompt_id,
+                prompt,
                 &backend,
                 error,
                 ws_pool_delta,
@@ -1591,15 +1594,16 @@ where
 }
 
 fn handle_compaction_request<R, W: Write>(
-    session_prompt_id: &str,
+    agent_prompt_id: &str,
     config: &responses::ResponsesConfig,
-    prompt: &tau_proto::SessionPromptCreated,
+    prompt: &tau_proto::AgentPromptCreated,
     writer: &mut FrameWriter<W>,
     retry_ctx: &mut R,
 ) -> Result<(), Box<dyn Error>>
 where
     R: RetrySleeper,
 {
+    let agent_session_id = tau_proto::SessionId::new(prompt.agent_id.as_str());
     let request = common::PromptPayload {
         system_prompt: &prompt.system_prompt,
         context_items: &prompt.context_items,
@@ -1609,12 +1613,12 @@ where
         previous_response: None,
         originator: &prompt.originator,
         share_user_cache_key: prompt.share_user_cache_key,
-        session_id: &prompt.session_id,
+        session_id: &agent_session_id,
     };
     let backend = backend_descriptor(config, ProviderBackendTransport::HttpSse, false);
     let result = if config.supports_compaction {
         with_llm_retry(
-            session_prompt_id,
+            agent_prompt_id,
             &prompt.originator,
             writer,
             retry_ctx,
@@ -1635,18 +1639,18 @@ where
     };
     match result {
         Ok(state) => finish_stream(
-            &prompt.session_id,
-            session_prompt_id,
-            &prompt.originator,
+            agent_session_id.as_str(),
+            agent_prompt_id,
+            prompt,
             &backend,
             state,
             None,
             writer,
         )?,
         Err(error) => finish_error(
-            &prompt.session_id,
-            session_prompt_id,
-            &prompt.originator,
+            agent_session_id.as_str(),
+            agent_prompt_id,
+            prompt,
             &backend,
             error,
             None,
@@ -1687,7 +1691,7 @@ fn maybe_debug_write_provider_response(
         tracing::warn!(
             target: LOG_TARGET,
             session_id,
-            session_prompt_id = %response.session_prompt_id,
+            agent_prompt_id = %response.agent_prompt_id,
             "failed to create provider response debug dir: {error}",
         );
         return;
@@ -1702,11 +1706,11 @@ fn maybe_debug_write_provider_response(
     };
     let path = dir.join(format!(
         "{ts}-{}-{transport_label}-response.json",
-        response.session_prompt_id
+        response.agent_prompt_id
     ));
     let metadata = serde_json::json!({
         "session_id": session_id,
-        "session_prompt_id": response.session_prompt_id,
+        "agent_prompt_id": response.agent_prompt_id,
         "transport": transport_label,
         "backend": backend,
         "provider_response_id": response.provider_response_id,
@@ -1721,7 +1725,7 @@ fn maybe_debug_write_provider_response(
         tracing::warn!(
             target: LOG_TARGET,
             session_id,
-            session_prompt_id = %response.session_prompt_id,
+            agent_prompt_id = %response.agent_prompt_id,
             "failed to write provider response debug log: {error}",
         );
     }
@@ -1729,8 +1733,8 @@ fn maybe_debug_write_provider_response(
 
 fn finish_stream<W: Write>(
     session_id: &str,
-    session_prompt_id: &str,
-    originator: &tau_proto::PromptOriginator,
+    agent_prompt_id: &str,
+    prompt: &tau_proto::AgentPromptCreated,
     backend: &ProviderBackend,
     mut state: common::StreamState,
     ws_pool_delta: Option<tau_proto::WsPoolDelta>,
@@ -1741,7 +1745,7 @@ fn finish_stream<W: Write>(
     let output_tokens = state.output_tokens;
     tracing::debug!(
         target: LOG_TARGET,
-        session_prompt_id,
+        agent_prompt_id,
         input_tokens,
         cached_tokens,
         output_tokens,
@@ -1757,11 +1761,11 @@ fn finish_stream<W: Write>(
         ));
     }
     let finished = ProviderResponseFinished {
-        session_prompt_id: session_prompt_id.into(),
-        target_agent_id: None,
+        agent_prompt_id: agent_prompt_id.into(),
+        agent_id: prompt.agent_id.clone(),
         stop_reason: stop_reason_from_output_items(&output_items),
         output_items,
-        originator: originator.clone(),
+        originator: prompt.originator.clone(),
         usage,
         backend: Some(backend.clone()),
         provider_response_id,
@@ -1775,19 +1779,19 @@ fn finish_stream<W: Write>(
 
 fn finish_error<W: Write>(
     session_id: &str,
-    session_prompt_id: &str,
-    originator: &tau_proto::PromptOriginator,
+    agent_prompt_id: &str,
+    prompt: &tau_proto::AgentPromptCreated,
     backend: &ProviderBackend,
     error: common::LlmError,
     ws_pool_delta: Option<tau_proto::WsPoolDelta>,
     writer: &mut FrameWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
     let finished = ProviderResponseFinished {
-        session_prompt_id: session_prompt_id.into(),
-        target_agent_id: None,
+        agent_prompt_id: agent_prompt_id.into(),
+        agent_id: prompt.agent_id.clone(),
         output_items: vec![common::assistant_text_item(format!("LLM error: {error}"))],
         stop_reason: ProviderStopReason::Error,
-        originator: originator.clone(),
+        originator: prompt.originator.clone(),
         usage: None,
         backend: Some(backend.clone()),
         provider_response_id: None,

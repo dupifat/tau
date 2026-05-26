@@ -192,14 +192,15 @@ fn restart_tool_config_exit_overrides_random_error() {
 
 fn intercepted_prompt(text: &str) -> Frame {
     Frame::Message(Message::InterceptRequest(InterceptRequest {
-        event: Box::new(Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
-            session_id: "s1".into(),
-            text: text.to_owned(),
-            target_agent_id: None,
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        })),
+        event: Box::new(Event::AgentPromptSubmitted(
+            tau_proto::AgentPromptSubmitted {
+                agent_id: "main".into(),
+                text: text.to_owned(),
+                message_class: tau_proto::PromptMessageClass::User,
+                originator: tau_proto::PromptOriginator::User,
+                ctx_id: None,
+            },
+        )),
         transient: false,
     }))
 }
@@ -232,7 +233,7 @@ fn run_intercept(prompt: &str) -> (Vec<tau_proto::Emit>, Vec<InterceptReply>) {
 fn replaced_prompt_text(reply: &InterceptReply) -> Option<String> {
     match &reply.action {
         tau_proto::InterceptAction::Pass(Some(boxed)) => match boxed.as_ref() {
-            Event::UiPromptSubmitted(p) => Some(p.text.clone()),
+            Event::AgentPromptSubmitted(p) => Some(p.text.clone()),
             _ => None,
         },
         _ => None,

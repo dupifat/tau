@@ -35,7 +35,7 @@ fn cancel_requests_prompt_cancellation() {
     match event("/cancel").expect("cancel event") {
         Event::UiCancelPrompt(cancel) => {
             assert_eq!(cancel.session_id, SESSION_ID);
-            assert_eq!(cancel.session_prompt_id, None);
+            assert_eq!(cancel.agent_prompt_id, None);
         }
         other => panic!("expected UiCancelPrompt, got {other:?}"),
     }

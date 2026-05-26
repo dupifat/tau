@@ -2,8 +2,8 @@ use tau_proto::{BackgroundSupport, CborValue, ToolExecutionMode};
 
 use super::*;
 
-fn cid(value: &str) -> ConversationId {
-    ConversationId::new(value)
+fn cid(value: &str) -> AgentId {
+    value.into()
 }
 
 fn call(id: &str) -> AgentToolCall {
@@ -16,7 +16,7 @@ fn call(id: &str) -> AgentToolCall {
     }
 }
 
-fn push(machine: &mut ToolTurnMachine, cid: &ConversationId, id: &str, mode: ToolExecutionMode) {
+fn push(machine: &mut ToolTurnMachine, cid: &AgentId, id: &str, mode: ToolExecutionMode) {
     machine.push(cid.clone(), call(id), mode, BackgroundSupport::Never);
 }
 
@@ -245,7 +245,7 @@ fn rewrite_conversation_id_updates_queued_and_in_flight_owners() {
     push(&mut machine, &old, "queued", ToolExecutionMode::Exclusive);
 
     assert_eq!(pop_id(&mut machine).as_deref(), Some("in-flight"));
-    machine.rewrite_conversation_id(&old, &new);
+    machine.rewrite_agent_id(&old, &new);
 
     assert!(!machine.any_pending_for(&old));
     assert!(!machine.any_in_flight_for(&old));

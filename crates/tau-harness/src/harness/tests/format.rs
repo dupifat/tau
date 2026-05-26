@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn format_session_entry_tree_preview_shows_grouped_tool_results() {
-    let result = SessionEntry::ToolResults {
+    let result = AgentEntry::ToolResults {
         items: vec![tau_proto::ToolResultItem {
             call_id: "call_ugly".into(),
             tool_type: tau_proto::ToolType::Function,
@@ -15,7 +15,7 @@ fn format_session_entry_tree_preview_shows_grouped_tool_results() {
         "tool.result call_ugly -> hello"
     );
 
-    let multibyte_result = SessionEntry::ToolResults {
+    let multibyte_result = AgentEntry::ToolResults {
         items: vec![tau_proto::ToolResultItem {
             call_id: "call_utf8".into(),
             tool_type: tau_proto::ToolType::Function,
@@ -57,12 +57,12 @@ fn session_and_policy_lines_are_printable() {
 
     let sessions_dir = tau_config::settings::sessions_dir_of(&sp);
     let sl = session_lines(&sessions_dir, "s1").expect("lines");
-    assert!(sl.iter().any(|l| l.contains("user: hello")));
-    assert!(sl.iter().any(|l| l.contains("tool.result call-1 -> hello")));
+    assert!(sl.iter().any(|l| l.contains("loaded agent")));
+    assert!(sl.iter().all(|l| !l.contains("user: hello")));
     let sll = session_list_lines(&sessions_dir).expect("list");
     assert!(
         sll.iter()
-            .any(|l| l.starts_with("s1 (") && l.contains(" entries"))
+            .any(|l| l.starts_with("s1 (") && l.contains("loaded agent"))
     );
     let pl = policy_lines(sp.join("policy.cbor")).expect("policy");
     assert!(pl.iter().any(|l| l.contains("socket-ui")));

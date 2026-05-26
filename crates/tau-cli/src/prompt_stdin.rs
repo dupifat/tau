@@ -6,9 +6,9 @@ use std::os::unix::net::UnixStream;
 
 use tau_harness::SessionLaunchStatus;
 use tau_proto::{
-    ClientKind, ContentPart, ContextItem, ContextRole, Event, EventName, EventSelector, Frame,
-    FrameReader, FrameWriter, Hello, Message, PROTOCOL_VERSION, PromptOriginator,
-    ProviderResponseFinished, ProviderResponseUpdated, ProviderStopReason, SessionPromptTerminated,
+    AgentPromptTerminated, ClientKind, ContentPart, ContextItem, ContextRole, Event, EventName,
+    EventSelector, Frame, FrameReader, FrameWriter, Hello, Message, PROTOCOL_VERSION,
+    PromptOriginator, ProviderResponseFinished, ProviderResponseUpdated, ProviderStopReason,
     Subscribe, UiPromptSubmitted,
 };
 
@@ -103,7 +103,7 @@ fn subscribe_to_prompt_stdin_events(writer: &mut OneShotWriter) -> io::Result<()
             selectors: vec![
                 EventSelector::Exact(EventName::PROVIDER_RESPONSE_UPDATED),
                 EventSelector::Exact(EventName::PROVIDER_RESPONSE_FINISHED),
-                EventSelector::Exact(EventName::SESSION_PROMPT_TERMINATED),
+                EventSelector::Exact(EventName::AGENT_PROMPT_TERMINATED),
             ],
         })),
     )
@@ -147,7 +147,7 @@ fn handle_prompt_stdin_frame(frame: Frame, output: &mut OneShotOutput) -> Result
         Frame::Event(Event::ProviderResponseFinished(finished)) => {
             Ok(output.capture_finished(&finished))
         }
-        Frame::Event(Event::SessionPromptTerminated(terminated)) => {
+        Frame::Event(Event::AgentPromptTerminated(terminated)) => {
             handle_prompt_terminated(&terminated)
         }
         Frame::Message(Message::Disconnect(disconnect)) => Err(CliError::Participant(
@@ -159,7 +159,7 @@ fn handle_prompt_stdin_frame(frame: Frame, output: &mut OneShotOutput) -> Result
     }
 }
 
-fn handle_prompt_terminated(terminated: &SessionPromptTerminated) -> Result<bool, CliError> {
+fn handle_prompt_terminated(terminated: &AgentPromptTerminated) -> Result<bool, CliError> {
     if terminated.originator.is_user() {
         return Err(CliError::Participant(format!(
             "prompt terminated: {}",
@@ -196,7 +196,7 @@ impl OneShotOutput {
         if !update.originator.is_user() {
             return;
         }
-        let prompt_id = update.session_prompt_id.to_string();
+        let prompt_id = update.agent_prompt_id.to_string();
         if let Some(thinking) = update
             .thinking
             .as_ref()
@@ -217,7 +217,7 @@ impl OneShotOutput {
         }
         if let Some(thinking) = self
             .thinking_by_prompt
-            .remove(finished.session_prompt_id.as_str())
+            .remove(finished.agent_prompt_id.as_str())
         {
             self.thinking_blocks.push(thinking);
         }
@@ -228,7 +228,7 @@ impl OneShotOutput {
             self.final_response =
                 assistant_text_from_output_items(&finished.output_items).or_else(|| {
                     self.response_by_prompt
-                        .remove(finished.session_prompt_id.as_str())
+                        .remove(finished.agent_prompt_id.as_str())
                 });
         }
         true
@@ -278,10 +278,10 @@ fn assistant_text_from_output_items(output_items: &[ContextItem]) -> Option<Stri
     (!text.is_empty()).then_some(text)
 }
 
-fn terminated_reason(terminated: &SessionPromptTerminated) -> &'static str {
+fn terminated_reason(terminated: &AgentPromptTerminated) -> &'static str {
     match terminated.reason {
-        tau_proto::SessionPromptTerminationReason::Stale => "stale",
-        tau_proto::SessionPromptTerminationReason::Canceled => "canceled",
+        tau_proto::AgentPromptTerminationReason::Stale => "stale",
+        tau_proto::AgentPromptTerminationReason::Canceled => "canceled",
     }
 }
 
@@ -293,7 +293,7 @@ mod tests {
 
     fn user_update(spid: &str, text: &str, thinking: Option<&str>) -> ProviderResponseUpdated {
         ProviderResponseUpdated {
-            session_prompt_id: spid.into(),
+            agent_prompt_id: spid.into(),
             text: text.to_owned(),
             thinking: thinking.map(str::to_owned),
             originator: PromptOriginator::User,
@@ -306,8 +306,8 @@ mod tests {
         stop_reason: ProviderStopReason,
     ) -> ProviderResponseFinished {
         ProviderResponseFinished {
-            session_prompt_id: spid.into(),
-            target_agent_id: None,
+            agent_prompt_id: spid.into(),
+            agent_id: "main".into(),
             output_items: vec![ContextItem::Message(MessageItem {
                 role: ContextRole::Assistant,
                 content: vec![ContentPart::Text {
@@ -331,8 +331,8 @@ mod tests {
         output.capture_update(&user_update("sp-tool", "", Some("plan final")));
 
         assert!(!output.capture_finished(&ProviderResponseFinished {
-            session_prompt_id: "sp-tool".into(),
-            target_agent_id: None,
+            agent_prompt_id: "sp-tool".into(),
+            agent_id: "main".into(),
             stop_reason: ProviderStopReason::ToolCalls,
             originator: PromptOriginator::User,
             ..ProviderResponseFinished::default()
@@ -363,8 +363,8 @@ mod tests {
         output.capture_update(&user_update("sp-final", "complete", None));
 
         assert!(output.capture_finished(&ProviderResponseFinished {
-            session_prompt_id: "sp-final".into(),
-            target_agent_id: None,
+            agent_prompt_id: "sp-final".into(),
+            agent_id: "main".into(),
             stop_reason: ProviderStopReason::EndTurn,
             originator: PromptOriginator::User,
             ..ProviderResponseFinished::default()

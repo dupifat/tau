@@ -15,6 +15,16 @@ fn assistant_message(text: &str) -> ContextItem {
     })
 }
 
+fn user_prompt(text: &str) -> Event {
+    Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+        agent_id: "main".into(),
+        text: text.to_owned(),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::default(),
+        ctx_id: None,
+    })
+}
+
 fn discovered_skill(description: &str, add_to_prompt: bool) -> DiscoveredSkill {
     DiscoveredSkill {
         source_id: "test-extension".into(),
@@ -550,19 +560,12 @@ fn cbor_to_text_puts_line_numbered_content_on_next_line() {
 /// diagnostic output.
 #[test]
 fn assemble_conversation_includes_tool_error_details() {
-    let mut tree = tau_core::SessionTree::from_events("session-1".into(), &[]);
-    tree.apply_event(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
-        text: "build firefox".to_owned(),
-        target_agent_id: None,
-        message_class: tau_proto::PromptMessageClass::User,
-        session_id: "session-1".into(),
-        originator: tau_proto::PromptOriginator::default(),
-        ctx_id: None,
-    }));
+    let mut tree = tau_core::AgentTree::from_events("session-1".into(), &[]);
+    tree.apply_event(&user_prompt("build firefox"));
     tree.apply_event(&Event::ProviderResponseFinished(
         tau_proto::ProviderResponseFinished {
-            session_prompt_id: "sp-tools".into(),
-            target_agent_id: None,
+            agent_prompt_id: "sp-tools".into(),
+            agent_id: "main".into(),
             output_items: vec![ContextItem::ToolCall(tau_proto::ToolCallItem {
                 call_id: "call-1".into(),
                 name: tau_proto::ToolName::new("shell"),
@@ -640,19 +643,12 @@ fn assemble_conversation_includes_tool_error_details() {
 /// through a separate side channel.
 #[test]
 fn assemble_conversation_preserves_agent_phase() {
-    let mut tree = tau_core::SessionTree::from_events("session-1".into(), &[]);
-    tree.apply_event(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
-        text: "hi".to_owned(),
-        target_agent_id: None,
-        message_class: tau_proto::PromptMessageClass::User,
-        session_id: "session-1".into(),
-        originator: tau_proto::PromptOriginator::default(),
-        ctx_id: None,
-    }));
+    let mut tree = tau_core::AgentTree::from_events("session-1".into(), &[]);
+    tree.apply_event(&user_prompt("hi"));
     tree.apply_event(&Event::ProviderResponseFinished(
         tau_proto::ProviderResponseFinished {
-            session_prompt_id: "sp-1".into(),
-            target_agent_id: None,
+            agent_prompt_id: "sp-1".into(),
+            agent_id: "main".into(),
             output_items: vec![ContextItem::Message(MessageItem {
                 role: ContextRole::Assistant,
                 content: vec![ContentPart::Text {
@@ -684,19 +680,12 @@ fn assemble_conversation_preserves_agent_phase() {
 
 #[test]
 fn assemble_conversation_restarts_from_compacted_summary() {
-    let mut tree = tau_core::SessionTree::from_events("session-1".into(), &[]);
-    tree.apply_event(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
-        text: "first question".to_owned(),
-        target_agent_id: None,
-        message_class: tau_proto::PromptMessageClass::User,
-        session_id: "session-1".into(),
-        originator: tau_proto::PromptOriginator::default(),
-        ctx_id: None,
-    }));
+    let mut tree = tau_core::AgentTree::from_events("session-1".into(), &[]);
+    tree.apply_event(&user_prompt("first question"));
     tree.apply_event(&Event::ProviderResponseFinished(
         tau_proto::ProviderResponseFinished {
-            session_prompt_id: "sp-1".into(),
-            target_agent_id: None,
+            agent_prompt_id: "sp-1".into(),
+            agent_id: "main".into(),
             output_items: vec![assistant_message("first answer")],
             stop_reason: tau_proto::ProviderStopReason::EndTurn,
             originator: tau_proto::PromptOriginator::User,
@@ -706,10 +695,9 @@ fn assemble_conversation_restarts_from_compacted_summary() {
             ws_pool_delta: None,
         },
     ));
-    tree.apply_event(&Event::SessionCompacted(tau_proto::SessionCompacted {
-            session_id: "session-1".into(),
-            target_agent_id: None,
-            originator: tau_proto::PromptOriginator::User,
+    tree.apply_event(&Event::AgentCompacted(tau_proto::AgentCompacted {
+        agent_id: "main".into(),
+        originator: tau_proto::PromptOriginator::User,
             original_input_tokens: None,
             compacted_input_tokens: None,
             replacement_window: vec![ContextItem::Message(MessageItem {
@@ -721,14 +709,7 @@ fn assemble_conversation_restarts_from_compacted_summary() {
                 phase: None,
             })],
         }));
-    tree.apply_event(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
-        text: "continue".to_owned(),
-        target_agent_id: None,
-        message_class: tau_proto::PromptMessageClass::User,
-        session_id: "session-1".into(),
-        originator: tau_proto::PromptOriginator::default(),
-        ctx_id: None,
-    }));
+    tree.apply_event(&user_prompt("continue"));
 
     let items = assemble_conversation_from(&tree, tree.head());
     assert_eq!(items.len(), 2, "pre-compaction history must be dropped");
@@ -746,6 +727,44 @@ fn assemble_conversation_restarts_from_compacted_summary() {
     ));
 }
 
+/// Split durable agent-message events must preserve prompt roles: sender-side
+/// projections replay as assistant history, while recipient-side projections
+/// replay as user-style input. Otherwise a follow-up prompt can invert who said
+/// what after an agent-agent or agent-user handoff.
+#[test]
+fn assemble_conversation_assigns_roles_for_sent_and_received_agent_messages() {
+    let mut tree = tau_core::AgentTree::from_events("main".into(), &[]);
+    tree.apply_event(&Event::AgentMessageSent(tau_proto::AgentMessageSent {
+        message_id: "msg-user".into(),
+        sender_id: "main".into(),
+        recipient: tau_proto::AgentMessageRecipient::User,
+        message: "status update".to_owned(),
+    }));
+    tree.apply_event(&Event::AgentMessageReceived(
+        tau_proto::AgentMessageReceived {
+            message_id: "msg-agent".into(),
+            sender_id: "manager".into(),
+            recipient_id: "main".into(),
+            message: "please investigate".to_owned(),
+        },
+    ));
+
+    let items = assemble_conversation_from(&tree, tree.head());
+    assert_eq!(items.len(), 2);
+    assert!(matches!(
+        &items[0],
+        ContextItem::Message(MessageItem { role, content, .. })
+            if *role == ContextRole::Assistant
+                && matches!(&content[0], ContentPart::Text { text } if text == "status update")
+    ));
+    assert!(matches!(
+        &items[1],
+        ContextItem::Message(MessageItem { role, content, .. })
+            if *role == ContextRole::User
+                && matches!(&content[0], ContentPart::Text { text } if text == "please investigate")
+    ));
+}
+
 /// Encrypted-reasoning replay: when `ProviderResponseFinished` carries
 /// `reasoning_items`, the next assembled prompt's assistant
 /// message must front-load them as `ContentBlock::Reasoning` blocks
@@ -756,15 +775,8 @@ fn assemble_conversation_restarts_from_compacted_summary() {
 /// future fold refactor can't silently drop them on the floor.
 #[test]
 fn assemble_conversation_replays_reasoning_items_before_text() {
-    let mut tree = tau_core::SessionTree::from_events("session-1".into(), &[]);
-    tree.apply_event(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
-        text: "hi".to_owned(),
-        target_agent_id: None,
-        message_class: tau_proto::PromptMessageClass::User,
-        session_id: "session-1".into(),
-        originator: tau_proto::PromptOriginator::default(),
-        ctx_id: None,
-    }));
+    let mut tree = tau_core::AgentTree::from_events("session-1".into(), &[]);
+    tree.apply_event(&user_prompt("hi"));
     let blob = serde_json::json!({
         "type": "reasoning",
         "id": "rs_xyz",
@@ -773,8 +785,8 @@ fn assemble_conversation_replays_reasoning_items_before_text() {
     .to_string();
     tree.apply_event(&Event::ProviderResponseFinished(
         tau_proto::ProviderResponseFinished {
-            session_prompt_id: "sp-1".into(),
-            target_agent_id: None,
+            agent_prompt_id: "sp-1".into(),
+            agent_id: "main".into(),
             output_items: vec![
                 ContextItem::Reasoning(serde_json::from_str(&blob).expect("opaque reasoning item")),
                 assistant_message("here's what I found"),
@@ -806,15 +818,8 @@ fn assemble_conversation_replays_reasoning_items_before_text() {
 /// before any function_call items that follow.
 #[test]
 fn assemble_conversation_persists_reasoning_on_tool_only_turn() {
-    let mut tree = tau_core::SessionTree::from_events("session-1".into(), &[]);
-    tree.apply_event(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
-        text: "go".to_owned(),
-        target_agent_id: None,
-        message_class: tau_proto::PromptMessageClass::User,
-        session_id: "session-1".into(),
-        originator: tau_proto::PromptOriginator::default(),
-        ctx_id: None,
-    }));
+    let mut tree = tau_core::AgentTree::from_events("session-1".into(), &[]);
+    tree.apply_event(&user_prompt("go"));
     let blob = serde_json::json!({
         "type": "reasoning",
         "id": "rs_tool_turn",
@@ -823,8 +828,8 @@ fn assemble_conversation_persists_reasoning_on_tool_only_turn() {
     .to_string();
     tree.apply_event(&Event::ProviderResponseFinished(
         tau_proto::ProviderResponseFinished {
-            session_prompt_id: "sp-1".into(),
-            target_agent_id: None,
+            agent_prompt_id: "sp-1".into(),
+            agent_id: "main".into(),
             output_items: vec![ContextItem::Reasoning(
                 serde_json::from_str(&blob).expect("opaque reasoning item"),
             )],

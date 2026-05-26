@@ -2,9 +2,9 @@ use std::io::Cursor;
 use std::sync::Once;
 
 use tau_proto::{
-    ContentPart, ContextItem, ContextRole, Event, FrameReader, FrameWriter, MessageItem,
-    ProviderResponseFinished, ProviderStopReason, ToolBackgroundResult, ToolCallItem, ToolResult,
-    UiPromptSubmitted,
+    AgentPromptSubmitted, ContentPart, ContextItem, ContextRole, Event, FrameReader, FrameWriter,
+    MessageItem, ProviderResponseFinished, ProviderStopReason, ToolBackgroundResult, ToolCallItem,
+    ToolResult,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -22,8 +22,8 @@ fn message_variant(msg: &Message) -> &'static str {
         Message::Emit(_) => "Emit",
         Message::InterceptRequest(_) => "InterceptRequest",
         Message::InterceptReply(_) => "InterceptReply",
-        Message::GetSessionPromptCreated(_) => "GetSessionPromptCreated",
-        Message::SessionPromptCreatedResult(_) => "SessionPromptCreatedResult",
+        Message::GetAgentPromptCreated(_) => "GetAgentPromptCreated",
+        Message::AgentPromptCreatedResult(_) => "AgentPromptCreatedResult",
         Message::GetRenderedSystemPrompt(_) => "GetRenderedSystemPrompt",
         Message::RenderedSystemPromptResult(_) => "RenderedSystemPromptResult",
         Message::GetRenderedToolDefinitions(_) => "GetRenderedToolDefinitions",
@@ -140,13 +140,13 @@ fn immediate_idle_agent_summary_config_frame() -> Frame {
 }
 
 fn assistant_finished_response(
-    session_prompt_id: &str,
+    agent_prompt_id: &str,
     text: &str,
     originator: tau_proto::PromptOriginator,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
-        session_prompt_id: session_prompt_id.into(),
-        target_agent_id: None,
+        agent_prompt_id: agent_prompt_id.into(),
+        agent_id: "main".into(),
         output_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
             content: vec![ContentPart::Text {
@@ -192,14 +192,27 @@ fn tool_background_result(
     }
 }
 
+fn user_prompt_submitted(
+    text: impl Into<String>,
+    originator: tau_proto::PromptOriginator,
+) -> Event {
+    Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        agent_id: "main".into(),
+        text: text.into(),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator,
+        ctx_id: None,
+    })
+}
+
 fn tool_call_finished_response(
-    session_prompt_id: &str,
+    agent_prompt_id: &str,
     tool_call: ToolCallItem,
     originator: tau_proto::PromptOriginator,
 ) -> ProviderResponseFinished {
     ProviderResponseFinished {
-        session_prompt_id: session_prompt_id.into(),
-        target_agent_id: None,
+        agent_prompt_id: agent_prompt_id.into(),
+        agent_id: "main".into(),
         output_items: vec![ContextItem::ToolCall(tool_call)],
         stop_reason: ProviderStopReason::ToolCalls,
         originator,
@@ -225,14 +238,10 @@ fn emits_start_and_end_user_var_in_order() {
     let mut input = Vec::new();
     let mut writer = EventWriter::new(&mut input);
     writer
-        .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
-            text: "hello".into(),
-            target_agent_id: None,
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        }))
+        .write_event(&user_prompt_submitted(
+            "hello",
+            tau_proto::PromptOriginator::User,
+        ))
         .expect("write");
     writer
         .write_event(&Event::ProviderResponseFinished(
@@ -281,14 +290,10 @@ fn mid_turn_finish_with_tool_calls_does_not_emit_end_sound() {
     let mut input = Vec::new();
     let mut writer = EventWriter::new(&mut input);
     writer
-        .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
-            text: "hello".into(),
-            target_agent_id: None,
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        }))
+        .write_event(&user_prompt_submitted(
+            "hello",
+            tau_proto::PromptOriginator::User,
+        ))
         .expect("write");
     // Mid-turn finish: text=None, tool_calls non-empty. No
     // notification should fire.
@@ -336,14 +341,10 @@ fn final_response_waits_for_background_tools_before_end_sound() {
     let mut input = Vec::new();
     let mut writer = EventWriter::new(&mut input);
     writer
-        .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
-            text: "run slow thing".into(),
-            target_agent_id: None,
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        }))
+        .write_event(&user_prompt_submitted(
+            "run slow thing",
+            tau_proto::PromptOriginator::User,
+        ))
         .expect("write");
     writer
         .write_event(&Event::ToolResult(tool_background_placeholder(
@@ -394,14 +395,10 @@ fn new_prompt_does_not_forget_previous_background_tool() {
     let mut writer = EventWriter::new(&mut input);
     for (text, spid) in [("run slow thing", "sp-0"), ("next prompt", "sp-1")] {
         writer
-            .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
-                session_id: "s1".into(),
-                text: text.into(),
-                target_agent_id: None,
-                message_class: tau_proto::PromptMessageClass::User,
-                originator: tau_proto::PromptOriginator::User,
-                ctx_id: None,
-            }))
+            .write_event(&user_prompt_submitted(
+                text,
+                tau_proto::PromptOriginator::User,
+            ))
             .expect("write");
         if spid == "sp-0" {
             writer
@@ -444,14 +441,10 @@ fn final_response_without_background_completion_does_not_emit_end_sound() {
     let mut input = Vec::new();
     let mut writer = EventWriter::new(&mut input);
     writer
-        .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
-            text: "run slow thing".into(),
-            target_agent_id: None,
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        }))
+        .write_event(&user_prompt_submitted(
+            "run slow thing",
+            tau_proto::PromptOriginator::User,
+        ))
         .expect("write");
     writer
         .write_event(&Event::ToolResult(tool_background_placeholder(
@@ -860,11 +853,12 @@ fn idle_command_runs_with_title_body_and_env() {
     let td = TempDir::new().expect("tempdir");
     let out_path = td.path().join("out.txt");
 
-    // bash one-liner: writes title (arg 1) + env vars + stdin
-    // into the output file, separated by `|||` so the test can
-    // assert each piece.
+    // bash one-liner: writes the appended title arg (always the final argv
+    // element), env vars, and stdin into the output file, separated by `|||`
+    // so the test can assert each piece without depending on `bash -c`
+    // positional-parameter quirks in different packaging environments.
     let cmd = format!(
-        "printf '%s|||%s|||%s|||' \"$1\" \"$NOTIFY_URGENCY\" \"$NOTIFY_APP_NAME\" >> {dest}; \
+        "printf '%s|||%s|||%s|||' \"${{!#}}\" \"$NOTIFY_URGENCY\" \"$NOTIFY_APP_NAME\" >> {dest}; \
              cat >> {dest}",
         dest = out_path.display(),
     );
@@ -985,8 +979,6 @@ fn invalid_config_emits_lifecycle_config_error() {
 /// emitted before stdin closes.
 #[test]
 fn user_prompt_during_idle_window_cancels_text_notification() {
-    use tau_proto::UiPromptSubmitted;
-
     let mut input = Vec::new();
     let mut writer = EventWriter::new(&mut input);
     writer
@@ -995,14 +987,10 @@ fn user_prompt_during_idle_window_cancels_text_notification() {
         ))
         .expect("write");
     writer
-        .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
-            text: "another question".into(),
-            target_agent_id: None,
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        }))
+        .write_event(&user_prompt_submitted(
+            "another question",
+            tau_proto::PromptOriginator::User,
+        ))
         .expect("write");
     writer.flush().expect("flush");
 
@@ -1047,14 +1035,10 @@ fn sub_agent_prompts_and_responses_are_ignored() {
 
     // User starts a turn → expect agent_start sound.
     writer
-        .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
-            text: "delegate something".into(),
-            target_agent_id: None,
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        }))
+        .write_event(&user_prompt_submitted(
+            "delegate something",
+            tau_proto::PromptOriginator::User,
+        ))
         .expect("write");
 
     // Main agent emits a delegate tool_call (mid-turn).
@@ -1077,7 +1061,7 @@ fn sub_agent_prompts_and_responses_are_ignored() {
     // touch `waiting_for_final_response`.
     writer
         .write_event(&Event::ProviderPromptSubmitted(ProviderPromptSubmitted {
-            session_prompt_id: "sp-side".into(),
+            agent_prompt_id: "sp-side".into(),
             originator: tau_proto::PromptOriginator::Extension {
                 name: "core-subagents".into(),
                 query_id: "q1".into(),
@@ -1085,17 +1069,13 @@ fn sub_agent_prompts_and_responses_are_ignored() {
         }))
         .expect("write");
     writer
-        .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
-            text: "side instruction".into(),
-            target_agent_id: None,
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::Extension {
+        .write_event(&user_prompt_submitted(
+            "side instruction",
+            tau_proto::PromptOriginator::Extension {
                 name: "core-subagents".into(),
                 query_id: "q1".into(),
             },
-            ctx_id: None,
-        }))
+        ))
         .expect("write");
     writer
         .write_event(&Event::ProviderResponseFinished(
@@ -1147,28 +1127,20 @@ fn sub_agent_prompts_and_responses_are_ignored() {
 }
 
 #[test]
-fn duplicate_ui_prompt_submitted_during_same_turn_emits_one_start_sound() {
+fn duplicate_agent_prompt_submitted_during_same_turn_emits_one_start_sound() {
     let mut input = Vec::new();
     let mut writer = EventWriter::new(&mut input);
     writer
-        .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
-            text: "hello".into(),
-            target_agent_id: None,
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        }))
+        .write_event(&user_prompt_submitted(
+            "hello",
+            tau_proto::PromptOriginator::User,
+        ))
         .expect("write");
     writer
-        .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
-            text: "internal replay".into(),
-            target_agent_id: None,
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        }))
+        .write_event(&user_prompt_submitted(
+            "internal replay",
+            tau_proto::PromptOriginator::User,
+        ))
         .expect("write");
     writer
         .write_event(&Event::ProviderResponseFinished(

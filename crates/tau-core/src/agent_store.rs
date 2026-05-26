@@ -1,0 +1,686 @@
+//! Append-only on-disk persistence of per-agent protocol events.
+//!
+//! Each agent is just a CBOR event log plus a small JSON sidecar.
+//! The in-memory [`AgentTree`] is a *derived* view, folded from the
+//! persisted events via [`AgentTree::from_events`]; nothing else
+//! mutates it. Writers go through [`AgentStore::append_agent_event`],
+//! which appends one durable record to disk and applies the same
+//! event to the cached tree.
+
+use std::collections::HashMap;
+use std::error::Error;
+use std::fmt;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use fs2::FileExt;
+use serde::{Deserialize, Serialize};
+use tau_proto::{AgentId, ConnectionId, Event, LogEventId, NodeId, UnixMicros};
+
+use crate::session::{
+    AgentEventParent, AgentEventValidationError, AgentMeta, AgentTree, PersistedAgentEvent,
+};
+
+/// Errors returned by the append-only agent store.
+#[derive(Debug)]
+pub enum AgentStoreError {
+    CreateParentDirectory {
+        path: PathBuf,
+        source: io::Error,
+    },
+    Open {
+        path: PathBuf,
+        source: io::Error,
+    },
+    Read {
+        path: PathBuf,
+        source: io::Error,
+    },
+    Write {
+        path: PathBuf,
+        source: io::Error,
+    },
+    Decode {
+        path: PathBuf,
+        source: tau_proto::DecodeError,
+    },
+    Encode {
+        path: PathBuf,
+        source: tau_proto::EncodeError,
+    },
+    /// Another process holds the exclusive lock on this agent.
+    Locked {
+        path: PathBuf,
+        holder: String,
+    },
+    InvalidAgentDir {
+        path: PathBuf,
+    },
+    InvalidEvent {
+        source: AgentEventValidationError,
+    },
+}
+
+impl fmt::Display for AgentStoreError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CreateParentDirectory { path, source } => write!(
+                f,
+                "failed to create parent directory for agent store {}: {source}",
+                path.display()
+            ),
+            Self::Open { path, source } => {
+                write!(f, "failed to open agent store {}: {source}", path.display())
+            }
+            Self::Read { path, source } => {
+                write!(f, "failed to read agent store {}: {source}", path.display())
+            }
+            Self::Write { path, source } => {
+                write!(
+                    f,
+                    "failed to write agent store {}: {source}",
+                    path.display()
+                )
+            }
+            Self::Decode { path, source } => write!(
+                f,
+                "failed to decode agent store record from {}: {source}",
+                path.display()
+            ),
+            Self::Encode { path, source } => write!(
+                f,
+                "failed to encode agent store record for {}: {source}",
+                path.display()
+            ),
+            Self::Locked { path, holder } => write!(
+                f,
+                "agent lock at {} held by another process ({})",
+                path.display(),
+                holder.trim()
+            ),
+            Self::InvalidAgentDir { path } => write!(
+                f,
+                "invalid agent directory name (non-utf8): {}",
+                path.display()
+            ),
+            Self::InvalidEvent { source } => write!(f, "invalid agent event: {source}"),
+        }
+    }
+}
+
+impl Error for AgentStoreError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::CreateParentDirectory { source, .. } => Some(source),
+            Self::Open { source, .. } => Some(source),
+            Self::Read { source, .. } => Some(source),
+            Self::Write { source, .. } => Some(source),
+            Self::Decode { source, .. } => Some(source),
+            Self::Encode { source, .. } => Some(source),
+            Self::InvalidEvent { source } => Some(source),
+            Self::Locked { .. } => None,
+            Self::InvalidAgentDir { .. } => None,
+        }
+    }
+}
+
+/// Append-only persistence for per-agent protocol events, with a
+/// derived [`AgentTree`] cached in memory.
+///
+/// Each agent lives in its own directory under `agents_dir` (the
+/// per-agent subdirectory of `state_dir`, typically
+/// `<state_dir>/agents/`):
+///
+/// ```text
+/// <agents_dir>/<agent_id>/
+///   events.cbor   # length-prefixed PersistedAgentEvent stream — the source of truth
+///   meta.json     # AgentMeta sidecar (cwd, created_at, last_touched)
+///   lock          # exclusively flock'd while this store has the agent loaded for write
+/// ```
+///
+/// Existing agent dirs are loaded lazily. Startup constructs an
+/// empty store and loads individual agent trees on first access.
+/// Flocks are still taken lazily on first write so read-only
+/// consumers (e.g. inspection commands) don't contend with a running
+/// daemon.
+/// Result of one [`AgentStore::append_agent_event_at`] call:
+/// the durable event id and, when the event produced a tree node,
+/// that node's id. Callers maintaining a per-conversation branch
+/// cursor advance it from `folded_node_id` rather than from the
+/// global `tree.head()` so non-folding events (e.g. an
+/// `ProviderResponseFinished` carrying only tool calls) don't sync
+/// the cursor onto a sibling conversation's last fold.
+#[derive(Clone, Debug)]
+pub struct AgentAppendOutcome {
+    pub id: LogEventId,
+    pub folded_node_id: Option<NodeId>,
+}
+
+#[derive(Debug)]
+pub struct AgentStore {
+    agents_dir: PathBuf,
+    agents: HashMap<AgentId, AgentTree>,
+    /// Held flocks per agent, acquired lazily on first write. Released
+    /// when this store is dropped (the OS releases the flock when the
+    /// file handle closes).
+    locks: HashMap<AgentId, File>,
+}
+
+impl AgentStore {
+    /// Opens the agent store rooted at `agents_dir`, eagerly loading
+    /// every agent subdirectory found there.
+    ///
+    /// Cost is O(total bytes across every agent's `events.cbor`),
+    /// so this is intended for read-only inspection callers (e.g.
+    /// `tau agent list`) that genuinely need every tree resident in
+    /// memory. Daemon startup should use [`Self::open_lazy`] and
+    /// load individual trees on demand via [`Self::load_agent`].
+    pub fn open(agents_dir: impl Into<PathBuf>) -> Result<Self, AgentStoreError> {
+        let agents_dir = agents_dir.into();
+        let mut store = Self::open_lazy(agents_dir.clone())?;
+        for entry in fs::read_dir(&agents_dir).map_err(|source| AgentStoreError::Read {
+            path: agents_dir.clone(),
+            source,
+        })? {
+            let entry = entry.map_err(|source| AgentStoreError::Read {
+                path: agents_dir.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let events_path = path.join("events.cbor");
+            if !events_path.exists() {
+                continue;
+            }
+            let agent_id_str = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| AgentStoreError::InvalidAgentDir { path: path.clone() })?;
+            store.load_agent_if_needed(agent_id_str)?;
+        }
+        Ok(store)
+    }
+
+    /// Opens the agent store rooted at `agents_dir` without
+    /// loading agent event logs. Individual agents are loaded on
+    /// write; callers that need a pre-existing tree should use
+    /// [`Self::open`].
+    pub fn open_lazy(agents_dir: impl Into<PathBuf>) -> Result<Self, AgentStoreError> {
+        let agents_dir = agents_dir.into();
+        fs::create_dir_all(&agents_dir).map_err(|source| {
+            AgentStoreError::CreateParentDirectory {
+                path: agents_dir.clone(),
+                source,
+            }
+        })?;
+
+        Ok(Self {
+            agents_dir,
+            agents: HashMap::new(),
+            locks: HashMap::new(),
+        })
+    }
+
+    fn load_agent_if_needed(&mut self, agent_id: &str) -> Result<(), AgentStoreError> {
+        let aid: AgentId = agent_id.into();
+        if self.agents.contains_key(&aid) {
+            return Ok(());
+        }
+        let events_path = self.agent_dir(agent_id).join("events.cbor");
+        if !events_path.exists() {
+            return Ok(());
+        }
+        let events = load_agent_events(&events_path)?;
+        let tree = AgentTree::from_events(aid.clone(), &events);
+        self.agents.insert(aid, tree);
+        Ok(())
+    }
+
+    /// Returns the path to one agent's directory (created lazily on
+    /// write).
+    fn agent_dir(&self, agent_id: &str) -> PathBuf {
+        self.agents_dir.join(agent_id)
+    }
+
+    /// Returns whether an agent already exists in memory or on disk.
+    ///
+    /// A durable `events.cbor` log or `meta.json` sidecar reserves the
+    /// id even when this lazy store has not loaded that agent yet.
+    #[must_use]
+    pub fn agent_exists(&self, agent_id: &str) -> bool {
+        let aid = AgentId::from(agent_id);
+        if self.agents.contains_key(&aid) {
+            return true;
+        }
+        let agent_dir = self.agent_dir(agent_id);
+        agent_dir.join("events.cbor").exists() || agent_dir.join("meta.json").exists()
+    }
+
+    /// Acquires an exclusive flock on the agent's `lock` file if not
+    /// already held.
+    fn ensure_locked(&mut self, agent_id: &str) -> Result<(), AgentStoreError> {
+        let sid: AgentId = agent_id.into();
+        if self.locks.contains_key(&sid) {
+            return Ok(());
+        }
+        let agent_dir = self.agent_dir(agent_id);
+        fs::create_dir_all(&agent_dir).map_err(|source| {
+            AgentStoreError::CreateParentDirectory {
+                path: agent_dir.clone(),
+                source,
+            }
+        })?;
+        let lock_path = agent_dir.join("lock");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|source| AgentStoreError::Open {
+                path: lock_path.clone(),
+                source,
+            })?;
+        if FileExt::try_lock_exclusive(&file).is_err() {
+            // Read the holder's `pid=...` line from the same fd we
+            // just tried to lock. flock is released by the kernel on
+            // process exit, so reaching this branch implies the
+            // holder is alive (modulo a thin race window where the
+            // holder has the lock but hasn't yet written its pid; in
+            // that case `holder` is empty, which Display handles
+            // fine).
+            let mut holder = String::new();
+            let _ = file.read_to_string(&mut holder);
+            return Err(AgentStoreError::Locked {
+                path: lock_path,
+                holder,
+            });
+        }
+        // Replace lock contents with our PID + start time.
+        file.set_len(0).map_err(|source| AgentStoreError::Write {
+            path: lock_path.clone(),
+            source,
+        })?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|source| AgentStoreError::Write {
+                path: lock_path.clone(),
+                source,
+            })?;
+        let pid = std::process::id();
+        let now = unix_now();
+        writeln!(&mut file, "pid={pid} start={now}").map_err(|source| AgentStoreError::Write {
+            path: lock_path.clone(),
+            source,
+        })?;
+        self.locks.insert(sid, file);
+        Ok(())
+    }
+
+    /// Appends one non-transient protocol event to the durable
+    /// per-agent event log and applies it to the in-memory tree.
+    /// The persisted event is the single source of truth — both the
+    /// on-disk log and the derived [`AgentTree`] are populated from
+    /// it here, so they cannot drift.
+    ///
+    /// Convenience wrapper around
+    /// [`AgentStore::append_agent_event_at`] that uses the
+    /// agent tree's current head as the fold parent.
+    pub fn append_agent_event(
+        &mut self,
+        agent_id: &str,
+        source: Option<ConnectionId>,
+        event: Event,
+    ) -> Result<AgentAppendOutcome, AgentStoreError> {
+        self.append_agent_event_at(
+            agent_id,
+            source,
+            AgentEventParent::InheritHead,
+            event,
+            UnixMicros::now(),
+        )
+    }
+
+    /// Like [`AgentStore::append_agent_event`] but folds the
+    /// event onto an explicit fold parent instead of the agent
+    /// tree's current write cursor. The harness uses this when
+    /// publishing on a conversation's behalf, so cross-conversation
+    /// events don't have to bounce a shared `head` cursor through
+    /// `UiNavigateTree`.
+    pub fn append_agent_event_at(
+        &mut self,
+        agent_id: &str,
+        source: Option<ConnectionId>,
+        parent: AgentEventParent,
+        event: Event,
+        recorded_at: UnixMicros,
+    ) -> Result<AgentAppendOutcome, AgentStoreError> {
+        self.ensure_locked(agent_id)?;
+        self.load_agent_if_needed(agent_id)?;
+        let agent_dir = self.agent_dir(agent_id);
+        fs::create_dir_all(&agent_dir).map_err(|source| {
+            AgentStoreError::CreateParentDirectory {
+                path: agent_dir.clone(),
+                source,
+            }
+        })?;
+        let events_path = agent_dir.join("events.cbor");
+
+        let sid: AgentId = agent_id.into();
+        let tree = self
+            .agents
+            .entry(sid.clone())
+            .or_insert_with(|| AgentTree::from_events(sid, &[]));
+        tree.validate_event(&event)
+            .map_err(|source| AgentStoreError::InvalidEvent { source })?;
+        tree.validate_event_parent(parent)
+            .map_err(|source| AgentStoreError::InvalidEvent { source })?;
+        // Cached: `from_events` populated this from the highest
+        // persisted id at load time; we keep it advanced below.
+        // Avoids re-reading and re-decoding the entire on-disk log
+        // on every write.
+        let next_id = tree.next_event_id();
+        let record = PersistedAgentEvent {
+            id: next_id,
+            source,
+            event: event.clone(),
+            parent,
+            recorded_at,
+        };
+        append_cbor_record(&events_path, &record)?;
+        touch_meta_for_event(&agent_dir.join("meta.json"), &event)?;
+
+        let folded_node_id = tree.apply_event_at(parent, &event);
+        tree.advance_next_event_id();
+
+        Ok(AgentAppendOutcome {
+            id: next_id,
+            folded_node_id,
+        })
+    }
+
+    /// Loads durable per-agent protocol events.
+    pub fn agent_events(
+        &self,
+        agent_id: &str,
+    ) -> Result<Vec<PersistedAgentEvent>, AgentStoreError> {
+        let path = self.agent_dir(agent_id).join("events.cbor");
+        load_agent_events(&path)
+    }
+
+    /// Returns the per-agent storage root this store is rooted at
+    /// (typically `<state_dir>/agents/`).
+    #[must_use]
+    pub fn agents_dir(&self) -> &Path {
+        &self.agents_dir
+    }
+
+    /// Returns one agent tree if it exists, loading a persisted log
+    /// on demand.
+    pub fn load_agent(&mut self, agent_id: &str) -> Result<Option<&AgentTree>, AgentStoreError> {
+        self.load_agent_if_needed(agent_id)?;
+        Ok(self.agents.get(&AgentId::from(agent_id)))
+    }
+
+    /// Returns one already-loaded agent tree if it exists.
+    #[must_use]
+    pub fn agent(&self, agent_id: &str) -> Option<&AgentTree> {
+        self.agents.get(&AgentId::from(agent_id))
+    }
+
+    /// Returns all known agents.
+    #[must_use]
+    pub fn agents(&self) -> Vec<&AgentTree> {
+        self.agents.values().collect()
+    }
+
+    /// Records initial cwd metadata for an agent if not already
+    /// present. Idempotent: subsequent calls only update
+    /// `last_touched`.
+    pub fn record_agent_meta(
+        &mut self,
+        agent_id: &str,
+        cwd: Option<PathBuf>,
+    ) -> Result<(), AgentStoreError> {
+        self.ensure_locked(agent_id)?;
+        let path = self.agent_dir(agent_id).join("meta.json");
+        let now = unix_now();
+        let mut meta = read_meta(&path).unwrap_or_default();
+        if meta.created_at == 0 {
+            meta.created_at = now;
+        }
+        if meta.cwd.is_none() {
+            meta.cwd = cwd;
+        }
+        meta.last_touched = now;
+        write_meta(&path, &meta)
+    }
+}
+
+/// Lists agent metadata across `agents_dir` without taking any flocks.
+///
+/// Agents whose `meta.json` is missing are skipped silently (the
+/// agent may have just been created and not yet touched). A
+/// `meta.json` that *exists* but fails to parse is also skipped, but
+/// emits a warning to stderr so a corrupt sidecar does not become
+/// invisible to operators. The goal is best-effort discovery for
+/// `-r` resumption, not strict listing.
+pub fn list_agent_metas(agents_dir: &Path) -> io::Result<Vec<(AgentId, AgentMeta)>> {
+    let mut out = Vec::new();
+    if !agents_dir.exists() {
+        return Ok(out);
+    }
+    for entry in fs::read_dir(agents_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let meta_path = path.join("meta.json");
+        let meta = match read_meta(&meta_path) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                eprintln!(
+                    "tau: skipping agent {name}: failed to read {}: {error}",
+                    meta_path.display()
+                );
+                continue;
+            }
+        };
+        out.push((AgentId::from(name), meta));
+    }
+    Ok(out)
+}
+
+/// Best-effort check whether an agent's lock is currently held.
+pub fn agent_is_locked(agents_dir: &Path, agent_id: &str) -> io::Result<bool> {
+    let lock_path = agents_dir.join(agent_id).join("lock");
+    let file = match OpenOptions::new().read(true).write(true).open(&lock_path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    match FileExt::try_lock_exclusive(&file) {
+        Ok(()) => {
+            let _ = FileExt::unlock(&file);
+            Ok(false)
+        }
+        Err(_) => Ok(true),
+    }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn read_meta(path: &Path) -> io::Result<AgentMeta> {
+    let bytes = fs::read(path)?;
+    serde_json::from_slice(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+fn write_meta(path: &Path, meta: &AgentMeta) -> Result<(), AgentStoreError> {
+    let bytes = serde_json::to_vec_pretty(meta).map_err(|e| AgentStoreError::Write {
+        path: path.to_path_buf(),
+        source: io::Error::new(io::ErrorKind::InvalidData, e),
+    })?;
+    fs::write(path, bytes).map_err(|source| AgentStoreError::Write {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn touch_meta_for_event(path: &Path, event: &Event) -> Result<(), AgentStoreError> {
+    let now = unix_now();
+    let mut meta = read_meta(path).unwrap_or_default();
+    if meta.created_at == 0 {
+        meta.created_at = now;
+    }
+    meta.last_touched = now;
+    if let Some(text) = user_prompt_text(event) {
+        meta.latest_user_prompt_preview = Some(preview_text(text, 48));
+    }
+    write_meta(path, &meta)
+}
+
+fn user_prompt_text(event: &Event) -> Option<&str> {
+    match event {
+        Event::AgentPromptSubmitted(prompt)
+            if prompt.originator.is_user() && !prompt.message_class.is_internal() =>
+        {
+            Some(&prompt.text)
+        }
+        Event::AgentPromptSteered(steered) if !steered.message_class.is_internal() => {
+            Some(&steered.text)
+        }
+        _ => None,
+    }
+}
+
+fn preview_text(text: &str, max: usize) -> String {
+    let single_line: String = text
+        .chars()
+        .map(|c| if c == '\n' { ' ' } else { c })
+        .collect();
+    if single_line.chars().count() < max + 1 {
+        single_line
+    } else {
+        format!("{}…", single_line.chars().take(max).collect::<String>())
+    }
+}
+
+fn append_cbor_record<T: Serialize>(path: &Path, record: &T) -> Result<(), AgentStoreError> {
+    let mut encoded = Vec::new();
+    ciborium::into_writer(record, &mut encoded).map_err(|source| AgentStoreError::Encode {
+        path: path.to_path_buf(),
+        source,
+    })?;
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|source| AgentStoreError::Open {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    file.write_all(&(encoded.len() as u64).to_le_bytes())
+        .map_err(|source| AgentStoreError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    file.write_all(&encoded)
+        .map_err(|source| AgentStoreError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    // Durability: sync_data() guards against the failure mode where
+    // the kernel acknowledged the write (length + payload bytes
+    // visible) but a crash before flush leaves a torn record on
+    // disk. read_cbor_records would then either error or — pre-bound
+    // — try to allocate a garbage length on the next read.
+    file.sync_data().map_err(|source| AgentStoreError::Write {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn load_agent_events(path: &Path) -> Result<Vec<PersistedAgentEvent>, AgentStoreError> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut events = Vec::new();
+    read_cbor_records(path, |record: PersistedAgentEvent| {
+        events.push(record);
+    })?;
+    Ok(events)
+}
+
+/// Largest individual CBOR record we'll allocate from the
+/// length-prefix on disk. A torn or corrupt log can have garbage in
+/// the 8-byte length header; without a sanity bound a single
+/// `vec![0; record_length]` could try to allocate up to
+/// `usize::MAX` bytes. 64 MiB is generous compared to any agent
+/// event we actually persist (largest are tool results, which live
+/// in the same KB-to-MB range as user-visible chat content).
+const MAX_RECORD_BYTES: u64 = 64 * 1024 * 1024;
+
+fn read_cbor_records<T, F>(path: &Path, mut handle: F) -> Result<(), AgentStoreError>
+where
+    T: for<'de> Deserialize<'de>,
+    F: FnMut(T),
+{
+    let mut file = File::open(path).map_err(|source| AgentStoreError::Open {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    loop {
+        let mut length_bytes = [0_u8; 8];
+        match file.read_exact(&mut length_bytes) {
+            Ok(()) => {}
+            Err(source) if source.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+            Err(source) => {
+                return Err(AgentStoreError::Read {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        }
+
+        let record_length = u64::from_le_bytes(length_bytes);
+        if record_length > MAX_RECORD_BYTES {
+            return Err(AgentStoreError::Read {
+                path: path.to_path_buf(),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "record length {record_length} exceeds maximum {MAX_RECORD_BYTES} \
+                         (likely a corrupt or torn write)"
+                    ),
+                ),
+            });
+        }
+        let mut record_bytes = vec![0_u8; record_length as usize];
+        file.read_exact(&mut record_bytes)
+            .map_err(|source| AgentStoreError::Read {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        let record: T = ciborium::from_reader(record_bytes.as_slice()).map_err(|source| {
+            AgentStoreError::Decode {
+                path: path.to_path_buf(),
+                source,
+            }
+        })?;
+        handle(record);
+    }
+}

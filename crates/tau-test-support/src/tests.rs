@@ -10,8 +10,8 @@ use tau_core::{
     EventBus, RoutedFrame, SessionStore, ToolRegistry, memory_connection,
 };
 use tau_proto::{
-    ClientKind, ConnectionId, ContentPart, ContextItem, ContextRole, Event, EventName,
-    EventSelector, Frame, FrameReader, FrameWriter, MessageItem, SessionPromptCreated,
+    AgentPromptCreated, ClientKind, ConnectionId, ContentPart, ContextItem, ContextRole, Event,
+    EventName, EventSelector, Frame, FrameReader, FrameWriter, MessageItem,
 };
 use tempfile::TempDir;
 
@@ -219,13 +219,12 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
     assert!(registered_tool_names.iter().any(|name| name == "echo"));
     assert!(registered_tool_names.iter().any(|name| name == "read"));
 
-    // Send a SessionPromptCreated directly to the provider.
+    // Send an AgentPromptCreated directly to the provider.
     use tau_proto::ToolDefinition;
 
-    let prompt = SessionPromptCreated {
-        session_prompt_id: "sp-1".into(),
-        session_id: "session-1".into(),
-        target_agent_id: None,
+    let prompt = AgentPromptCreated {
+        agent_prompt_id: "sp-1".into(),
+        agent_id: "main".into(),
         system_prompt: "You are helpful.".to_owned(),
         context_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::User,
@@ -254,7 +253,7 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
     let _ = bus.send_to(
         &provider_id,
         None,
-        Frame::Event(Event::SessionPromptCreated(prompt)),
+        Frame::Event(Event::AgentPromptCreated(prompt)),
     );
 
     // Without a model, the provider should close the turn without network I/O.

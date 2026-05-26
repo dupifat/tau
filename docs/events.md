@@ -8,7 +8,7 @@ component (or class of component) that emits them.
 
 Events are distinct from **messages**: messages are point-to-point control-plane
 traffic (handshake, subscribe/intercept, the `LogEvent`/`Ack` envelope, etc.)
-and never appear on the bus or in the durable session log. See
+and never appear on the bus or in durable semantic logs. See
 [messages.md](messages.md) for the message-side reference.
 
 A few categories don't map to a single emitter — those are grouped by the
@@ -35,51 +35,68 @@ for control of the emit/intercept pipeline.
 
 ## Session (harness session tracker)
 
-Emitted by the harness's session tracker. They drive the durable session
-tree and the prompt lifecycle.
+Emitted by the harness's session tracker. The durable session log is a
+membership journal, not a transcript.
 
 - **`session.started`** — A session was created or switched to. Carries
-  a reason (`initial` startup, `new` via `/session new`, `resume` of an
-  existing session). Extensions react with per-session setup and reply
-  with `extension.context_ready`.
+  `session_id` and a reason (`initial` startup, `new` via `/session new`,
+  `resume` of an existing session). Extensions react with per-session setup
+  and reply with `extension.context_ready`.
 - **`session.shutdown`** — The harness is leaving the current session,
   emitted before `session.started` for the next one. Extensions flush or
-  drop per-session state. `/session new` follows this by starting a fresh
-  session with no agents, as if the harness had just started.
-- **`session.agent_state_changed`** — Durable harness-owned state for one
-  session-scoped agent. `active` and `active_delegated` count as active
-  prompt targets; `suspended` keeps the agent resumable but hides it from
-  active switch/suspend completions. Tool-backed delegates start as
-  `active_delegated` and automatically become `suspended` when their
-  delegated reply is returned unless a user has targeted them in the
-  meantime.
-- **`session.prompt_queued`** — A user prompt arrived while the agent
-  was busy and was queued instead of dispatched. Operational only;
-  transient rather than durable transcript state.
-- **`session.prompt_steered`** — A previously queued prompt is being
-  folded into the in-flight turn as a steering message rather than
-  starting a fresh turn. Folds into the session tree as one user
-  message at the current head.
-- **`session.prompt_created`** — The harness persisted a prompt and
-  assigned it an id; payload carries `system_prompt`, assembled
-  `context_items`, available tools, model, effort,
-  thinking-summary setting, and originator. This is the input handed
-  to the selected provider. `context_items` is fully materialized history for the
-  turn. This event is transient operational delivery state, not durable
-  transcript truth. `tools_ref`, when present, means
-  `tools` is empty; copy full tool definitions from the referenced
-  prompt. Durable transcript truth comes from later
-  user/assistant/completed-tool/session-compacted facts.
-- **`session.user_message_injected`** — A synthetic user message
-  inserted by the harness (e.g. `!`-shell command output, AGENTS.md
-  preamble). Folds into the session tree like a real user prompt.
+  drop per-session state.
+- **`session.agent_loaded`** — Durable membership fact: a global agent is
+  loaded into this session. The session log folds these facts to determine the
+  current loaded-agent set on resume.
+- **`session.agent_unloaded`** — Durable membership fact: a global agent is no
+  longer loaded into this session.
+
+Historical load/unload facts are not transcript history. On reconnect/resume the
+harness announces the current loaded-agent snapshot, then replays each loaded
+agent log once.
+
+## Agent transcript and prompt lifecycle
+
+Emitted mostly by the harness as it routes UI requests into concrete global
+agents. Durable transcript facts are written to the owning agent log, not the
+session log.
+
+- **`agent.prompt_submitted`** — A `ui.prompt_submitted` request was accepted
+  into a concrete agent transcript. Carries `agent_id`, text, originator, and
+  user/internal message class.
+- **`agent.prompt_queued`** — A prompt arrived while the agent was busy and was
+  queued instead of dispatched. Runtime UI state; not durable transcript truth.
+- **`agent.prompt_recalled`** — A queued prompt was recalled for editing.
+- **`agent.prompt_steered`** — A previously queued prompt is folded into an
+  in-flight turn as a steering user message rather than starting a fresh turn.
+- **`agent.user_message_injected`** — A synthetic user message inserted by the
+  harness (e.g. `!`-shell command output, AGENTS.md preamble). Folds into the
+  agent tree like a real user prompt.
+- **`agent.prompt_created`** — The harness assembled a provider prompt and
+  assigned it an `agent_prompt_id`; payload carries `agent_id`,
+  `system_prompt`, materialized `context_items`, tools or `tools_ref`, model,
+  model params, tool choice, originator, and previous-response hint. This is
+  operational delivery state for the provider; transcript truth is still the
+  accepted prompt, provider response, terminal tool results, and compaction
+  facts.
+- **`agent.prompt_terminated`** — A prompt ended without an accepted
+  `provider.response_finished` (stale or canceled). Runtime lifecycle state.
+- **`agent.prompt_prewarm_requested`** — Best-effort provider cache prewarm for
+  the next prompt prefix. Runtime/provider optimization state.
+- **`agent.compaction_started`** / **`agent.compaction_finished`** — Runtime
+  lifecycle around provider-side compaction.
+- **`agent.compaction_requested`** — Provider-facing compaction request using
+  the same materialized prompt shape as `agent.prompt_created`.
+- **`agent.compacted`** — Durable compaction fact for an agent transcript. Prompt
+  assembly treats this as a history reset point for that agent branch.
 
 ## Provider execution
 
 Emitted by the provider backend that owns the selected model.
 
-- **`provider.prompt_submitted`** — The provider accepted a `session.prompt_created`
-  and started processing it. Echoes the originator. Transient.
+- **`provider.prompt_submitted`** — The provider accepted an `agent.prompt_created`
+  or `agent.compaction_requested` and started processing it. Echoes the
+  originator. Transient.
 - **`provider.response_updated`** — Streaming update with the full text so
   far (replace, not delta) and accumulated reasoning summary if any.
   Transient by default.
@@ -102,12 +119,13 @@ the agent requests calls, and the harness orchestrates dispatch.
   execution mode).
 - **`tool.unregister`** *(extension)* — A previously registered tool is
   withdrawn.
-- **`tool.request`** *(provider/extension)* — A request to run a
+- **`tool.request`** *(provider/extension)* — A runtime request to run a
   tool call by id, model-produced name, and CBOR arguments. It may come from
   an agent response or another extension, and can still be rejected before any
-  provider receives it. Persisted as the pre-routing intent.
+  tool provider receives it. Transcript tool-call truth comes from the provider
+  response's `ContextItem::ToolCall`, not this routing event.
 - **`tool.started`** *(harness)* — The harness accepted and routed a
-  tool request. This durable broadcast is the signal that the selected tool
+  tool request. This runtime broadcast is the signal that the selected tool
   provider should start the call, and that UIs can show the tool as running.
 - **`tool.rejected`** *(harness)* — The harness rejected a tool request
   before any tool provider was asked to run it. UIs can display this as a tool
@@ -177,30 +195,32 @@ harness/agent.
 - **`agent.start_result`** — The agent's final answer to an
   earlier `agent.start_request`, routed point-to-point back to the
   requesting extension. Carries the same `query_id`.
-- **`agent.message`** — An agent sends a short text message to another
-  agent or to the user. Carries `session_id`, `sender_id`,
-  `recipient_id`, and `message`. This is durable transcript state, so
-  late UI subscribers can replay it. UI subscribers filter, summarize, or
-  fully display messages according to `/set show-messages`. A
-  `recipient_id` of `user` only displays the message. Any other recipient
-  is resolved to a live or pending agent conversation and delivered as a
-  hidden internal prompt; if that agent is a side/delegate agent about to
-  finish, teardown waits until the message turn has been dispatched and
-  answered. See [agent-messaging.md](agent-messaging.md) for model-facing
-  tool examples.
+- **`agent.message_sent`** — Sender-side projection for a short message an
+  agent sent to another agent or to the user. Carries stable `message_id`,
+  `sender_id`, recipient (`agent_id` or `user`), and `message`; it does not carry
+  a `session_id`.
+- **`agent.message_received`** — Recipient-side projection for an agent-to-agent
+  message. Carries the same stable `message_id`, the `sender_id`, the receiving
+  `recipient_id`, and `message`; user-recipient messages have no received
+  projection. UI subscribers filter, summarize, or fully display message
+  projections according to `/set show-messages`. Agent recipients are delivered
+  as hidden internal prompts; if a side/delegate agent is about to finish,
+  teardown waits until the message turn has been dispatched and answered. See
+  [agent-messaging.md](agent-messaging.md) for model-facing tool examples.
 - **`extension.event`** — Custom extension-defined event with a free-form
   dotted name and CBOR payload. The harness routes it like any other
-  event; if `session_id` is set it can be folded into that session's
-  durable log.
+  event. It is runtime/debug-log state unless a typed semantic event is added
+  for a durable use case.
 
 ## UI
 
 Emitted by attached UI clients (tau-cli-term, etc.) to express user
 intent.
 
-- **`ui.prompt_submitted`** — The user submitted a prompt: session id,
-  text, originator (defaults to `user`; reused for extension-driven
-  side prompts).
+- **`ui.prompt_submitted`** — The user submitted a prompt request: session id,
+  text, optional `target_agent_id`, originator (defaults to `user`; reused for
+  extension-driven side prompts), and user/internal message class. The harness
+  translates accepted requests into durable `agent.prompt_submitted` facts.
 - **`ui.prompt_draft`** — Trailing-edge debounced (≤1/s) snapshot of the
   current draft buffer. Transient — used for "user is alive" signals
   (e.g. notification idle reset), not persisted.
@@ -222,13 +242,10 @@ intent.
   but rotate the harness default conversation so the next untargeted prompt
   starts a fresh agent. The invoking UI clears its own current-agent
   selection locally; this request is not replayed to synchronize other UIs.
-- **`ui.agent_state_request`** — User typed `/agent suspend` or
-  `/agent resume`: ask the harness to change the replayable
-  `session.agent_state_changed` state for that agent.
-- **`ui.tree_request`** — User typed `/tree`: render the session
-  branching tree to chat.
-- **`ui.navigate_tree`** — User typed `/tree <id>`: move the session
-  head to that node so the next prompt branches off there.
+- **`ui.tree_request`** — User typed `/tree`: render the selected or targeted
+  agent branching tree to chat.
+- **`ui.navigate_tree`** — User typed `/tree <id>`: move the selected or targeted
+  agent head to that node so the next prompt branches off there.
 
 ## Shell (shell extension, user-initiated commands)
 

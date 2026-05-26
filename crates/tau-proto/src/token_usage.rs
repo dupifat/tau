@@ -90,10 +90,10 @@ pub struct ProviderTokenUsage {
 }
 
 /// Deserializer for `Option<ModelId>` that maps a literal `""` to
-/// `None` so persisted session events written before `ModelId` got
-/// strict validation (where the provider's `Default::default()` filled
-/// the field with an empty string before the harness rewrote it) keep
-/// replaying instead of failing the whole session log decode.
+/// `None` so persisted events written before `ModelId` got strict
+/// validation (where the provider's `Default::default()` filled the
+/// field with an empty string before the harness rewrote it) keep
+/// replaying instead of failing a whole log decode.
 fn deserialize_optional_model_id<'de, D>(deserializer: D) -> Result<Option<ModelId>, D::Error>
 where
     D: serde::Deserializer<'de>,

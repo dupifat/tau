@@ -12,17 +12,17 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use tau_core::{
-    Connection, ConnectionMetadata, ConnectionOrigin, ConnectionSendError, ConnectionSink,
-    RoutedFrame, SessionEntry,
+    AgentEntry, AgentStore, AgentTree, Connection, ConnectionMetadata, ConnectionOrigin,
+    ConnectionSendError, ConnectionSink, RoutedFrame,
 };
 use tau_proto::{
-    CborValue, ContentPart, ContextItem, ContextRole, Disconnect, Event, EventSelector, Frame,
-    FrameReader, FrameWriter, Intercept, InterceptAction, InterceptReply, InterceptionPriority,
-    Message, MessageItem, ProviderResponseFinished, ProviderResponseUpdated,
-    SessionCompactionRequested, SessionPromptCreated, SessionPromptId, SessionPromptQueued,
-    SessionPromptRecalled, SessionPromptSteered, StartAgentRequest, Subscribe, ToolCallId,
-    ToolCallItem, ToolExecutionMode, ToolName, ToolResult, ToolResultItem, ToolResultStatus,
-    ToolSpec, UiPromptDraft, UiPromptSubmitted,
+    AgentCompactionRequested, AgentPromptCreated, AgentPromptId, AgentPromptQueued,
+    AgentPromptRecalled, AgentPromptSteered, CborValue, ContentPart, ContextItem, ContextRole,
+    Disconnect, Event, EventSelector, Frame, FrameReader, FrameWriter, Intercept, InterceptAction,
+    InterceptReply, InterceptionPriority, Message, MessageItem, NodeId, ProviderResponseFinished,
+    ProviderResponseUpdated, StartAgentRequest, Subscribe, ToolCallId, ToolCallItem,
+    ToolExecutionMode, ToolName, ToolResult, ToolResultItem, ToolResultStatus, ToolSpec,
+    UiPromptDraft, UiPromptSubmitted,
 };
 use tau_session_inspect::{
     default_session_id, format_session_entry, open_session_store, policy_lines, session_lines,
@@ -30,8 +30,9 @@ use tau_session_inspect::{
 };
 use tempfile::TempDir;
 
-use super::{AgentToolCall, HARNESS_CONNECTION_ID, Harness};
-use crate::conversation::ConversationTurnState;
+use super::{AgentState, AgentToolCall, HARNESS_CONNECTION_ID, Harness};
+use crate::AgentId;
+use crate::agent::{AgentTurnState, PendingPrompt};
 use crate::daemon::{
     ServeOptions, bind_listener, get_daemon_rendered_system_prompt,
     get_daemon_rendered_tool_definitions, run_daemon_with_echo, run_embedded_message_with_echo,
@@ -50,34 +51,91 @@ fn echo_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
     crate::harness::run_echo_provider(r, w).map_err(|e| e.to_string())
 }
 
-#[test]
-fn minted_agent_ids_use_short_hex_suffixes() {
-    // Agent ids are shown in delegated tool output, so keep the
-    // harness-owned random suffix compact while preserving the
-    // `<role>_<suffix>` shape expected by routing and display code.
-    let agent_id = super::mint_agent_id_for_role("engineer");
-    let suffix = agent_id
-        .strip_prefix("engineer_")
-        .expect("agent id should include the role prefix");
+fn agent_id_suffix<'a>(agent_id: &'a str, role: &str) -> &'a str {
+    let prefix = format!("{role}_");
+    agent_id
+        .strip_prefix(&prefix)
+        .expect("agent id should include the role prefix")
+}
 
-    assert_eq!(suffix.len(), 4);
-    assert!(suffix.chars().all(|ch| ch.is_ascii_hexdigit()));
+fn assert_role_hex_agent_id(agent_id: &str, role: &str) {
+    let suffix = agent_id_suffix(agent_id, role);
+
+    assert!(
+        (super::AGENT_ID_MIN_SUFFIX_NIBBLES..=super::AGENT_ID_MAX_SUFFIX_NIBBLES)
+            .contains(&suffix.len())
+    );
+    assert!(suffix.chars().all(|ch| matches!(ch, '0'..='9' | 'a'..='f')));
 }
 
 #[test]
-fn minting_agent_ids_retries_suffix_collisions() {
-    // Four hex characters intentionally make collisions more likely than the
-    // old long suffix. The harness must resolve them centrally instead of
-    // forcing delegate/start-agent callers to handle uniqueness themselves.
-    let mut suffixes =
-        std::collections::VecDeque::from(["cafe".to_owned(), "cafe".to_owned(), "babe".to_owned()]);
+fn minted_agent_ids_use_minimal_role_prefixed_hex_suffixes() {
+    let agent_id = super::mint_agent_id_for_role("engineer");
+
+    assert_role_hex_agent_id(&agent_id, "engineer");
+    assert_eq!(
+        agent_id_suffix(&agent_id, "engineer").len(),
+        super::AGENT_ID_MIN_SUFFIX_NIBBLES
+    );
+}
+
+#[test]
+fn minting_agent_ids_retries_same_size_hex_collisions() {
+    // Randomized search can start on a used suffix. The harness should keep
+    // grinding the current minimal width before growing the visible id.
     let agent_id = super::mint_available_agent_id_for_role_with(
         "engineer",
-        |agent_id| agent_id == "engineer_cafe",
-        || suffixes.pop_front().expect("test suffix exhausted"),
+        |agent_id| agent_id == "engineer_a",
+        |suffix_nibbles, candidate_count| {
+            assert_eq!(suffix_nibbles, 1);
+            assert_eq!(candidate_count, 16);
+            0xa
+        },
     );
 
-    assert_eq!(agent_id, "engineer_babe");
+    assert_eq!(agent_id, "engineer_b");
+}
+
+#[test]
+fn minting_agent_ids_grows_only_after_shorter_suffixes_are_taken() {
+    // If every one-nibble suffix is already reserved in memory or on disk,
+    // the harness moves to two nibbles and keeps the id as short as possible.
+    let mut searched = Vec::new();
+    let agent_id = super::mint_available_agent_id_for_role_with(
+        "engineer",
+        |agent_id| {
+            agent_id
+                .strip_prefix("engineer_")
+                .is_some_and(|suffix| suffix.len() == 1)
+        },
+        |suffix_nibbles, candidate_count| {
+            searched.push((suffix_nibbles, candidate_count));
+            0
+        },
+    );
+
+    assert_eq!(agent_id, "engineer_00");
+    assert_eq!(searched, vec![(1, 16), (2, 256)]);
+}
+
+#[test]
+fn minting_agent_ids_skips_persisted_agent_dirs() {
+    // A suffix already present on disk must stay reserved even when the lazy
+    // store has not loaded that agent tree into memory yet.
+    let td = TempDir::new().expect("tempdir");
+    let agents_dir = td.path().join("agents");
+    let store = AgentStore::open_lazy(agents_dir.clone()).expect("agent store");
+    let reserved_dir = agents_dir.join("engineer_0");
+    std::fs::create_dir_all(&reserved_dir).expect("agent dir");
+    std::fs::write(reserved_dir.join("meta.json"), "{}").expect("agent meta");
+
+    let agent_id = super::mint_available_agent_id_for_role_with(
+        "engineer",
+        |agent_id| store.agent_exists(agent_id),
+        |_, _| 0,
+    );
+
+    assert_eq!(agent_id, "engineer_1");
 }
 
 #[test]
@@ -92,23 +150,81 @@ fn render_self_knowledge_content_inserts_config_defaults() {
     assert!(rendered.contains("show_thinking: true"));
 }
 
-/// Test-only helper that pushes a `UiPromptSubmitted` through the
-/// harness's normal publish path, which writes the durable per-session
-/// event and folds it into the SessionTree. Production code reaches
-/// the same place via `dispatch_user_prompt`; tests use this when
-/// they want a tree node without driving the full agent turn.
+fn agent_tree_for_conversation<'a>(h: &'a Harness, cid: &AgentId) -> &'a AgentTree {
+    let agent_id = h
+        .agents
+        .get(cid)
+        .and_then(|conv| conv.agent_id.as_deref())
+        .expect("conversation has agent id");
+    h.agent_store.agent(agent_id).expect("agent tree")
+}
+
+fn default_agent_tree(h: &Harness) -> &AgentTree {
+    agent_tree_for_conversation(h, &h.default_agent_id)
+}
+
+fn agent_branch_for_conversation<'a>(h: &'a Harness, cid: &AgentId) -> Vec<&'a AgentEntry> {
+    let head = h.agents.get(cid).and_then(|conv| conv.head);
+    agent_tree_for_conversation(h, cid).branch_from(head)
+}
+
+fn default_agent_branch(h: &Harness) -> Vec<&AgentEntry> {
+    agent_branch_for_conversation(h, &h.default_agent_id)
+}
+
+fn default_agent_node(h: &Harness, id: NodeId) -> &tau_core::AgentNode {
+    default_agent_tree(h).node(id).expect("agent node")
+}
+
+fn event_log_events(h: &Harness) -> Vec<Event> {
+    let mut events = Vec::new();
+    let mut seq = 0;
+    while let Some(entry) = h.event_log.get_next_from(seq) {
+        seq = entry.seq + 1;
+        events.push(entry.event);
+    }
+    events
+}
+
+fn loaded_agent_events(h: &Harness, session_id: &str) -> Vec<Event> {
+    let Some(session) = h.store.session(session_id) else {
+        return Vec::new();
+    };
+
+    session
+        .loaded_agents()
+        .into_iter()
+        .filter_map(|agent_id| h.agent_store.agent_events(agent_id.as_str()).ok())
+        .flatten()
+        .map(|entry| entry.event)
+        .collect()
+}
+
+fn persisted_agent_branch(state_dir: &Path, session_id: &str) -> Vec<AgentEntry> {
+    let sessions_dir = tau_config::settings::sessions_dir_of(state_dir);
+    let store = open_session_store(&sessions_dir).expect("session store");
+    let session = store.session(session_id).expect("session membership");
+    let agent_id = session
+        .loaded_agents()
+        .into_iter()
+        .next()
+        .expect("loaded agent")
+        .clone();
+    let mut agent_store = AgentStore::open(state_dir.join("agents")).expect("agent store");
+    let tree = agent_store
+        .load_agent(agent_id.as_str())
+        .expect("load agent")
+        .expect("agent tree");
+    tree.current_branch().into_iter().cloned().collect()
+}
+
+/// Test-only helper that appends a user message through the harness's normal
+/// agent-transcript publish path without driving a provider turn.
 fn append_user_message_via_event(h: &mut Harness, session_id: &str, text: &str) {
-    h.publish_event(
-        None,
-        Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: session_id.into(),
-            text: text.to_owned(),
-            target_agent_id: None,
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        }),
-    );
+    assert_eq!(session_id, h.current_session_id.as_str());
+    let cid = h.default_agent_id.clone();
+    h.publish_pending_prompt_for_agent(&cid, PendingPrompt::user(text.to_owned()))
+        .expect("append user message");
 }
 
 fn echo_harness(state_dir: impl Into<PathBuf>) -> Result<Harness, HarnessError> {
@@ -275,44 +391,46 @@ fn connect_test_tool(h: &mut Harness, name: &str) -> Arc<Mutex<Vec<RoutedFrame>>
 }
 
 /// Pre-seed the per-conversation `AgentThinking` state for tests that
-/// bypass `dispatch_prompt_for_conversation` and call response handlers
+/// bypass `dispatch_prompt_for_agent` and call response handlers
 /// directly.
-fn seed_agent_thinking(h: &mut Harness, cid: &crate::conversation::ConversationId, spid: &str) {
-    h.conversations
-        .get_mut(cid)
-        .expect("conversation present")
-        .turn_state = ConversationTurnState::AgentThinking {
-        session_prompt_id: spid.into(),
+fn seed_agent_thinking(h: &mut Harness, cid: &crate::AgentId, spid: &str) {
+    // Tests that bypass prompt dispatch still need the same loaded-agent and
+    // session-membership side effects that a real dispatch would establish.
+    let agent_id = h
+        .ensure_agent_id_for_agent(cid)
+        .expect("conversation agent id");
+    let conv = h.agents.get_mut(cid).expect("conversation present");
+    conv.turn_state = AgentTurnState::AgentThinking {
+        agent_prompt_id: spid.into(),
     };
+    h.agent_routes.insert(agent_id.clone(), cid.clone());
+    h.agent_states.insert(agent_id, AgentState::Active);
 }
 
 /// Pre-seed the per-conversation `ToolsRunning` state for tests that
 /// bypass the agent-response path and call tool handlers directly.
-fn seed_tools_running(
-    h: &mut Harness,
-    cid: &crate::conversation::ConversationId,
-    remaining: Vec<ToolCallId>,
-) {
-    h.conversations
+fn seed_tools_running(h: &mut Harness, cid: &crate::AgentId, remaining: Vec<ToolCallId>) {
+    h.agents
         .get_mut(cid)
         .expect("conversation present")
-        .turn_state = ConversationTurnState::ToolsRunning {
+        .turn_state = AgentTurnState::ToolsRunning {
         remaining_calls: remaining,
     };
 }
 
 /// Seed the transcript and turn state as if the assistant had just
 /// emitted one or more tool calls for this conversation.
-fn seed_assistant_tool_round(
-    h: &mut Harness,
-    cid: &crate::conversation::ConversationId,
-    calls: &[(&str, &str)],
-) {
-    h.publish_for_conversation(
+fn seed_assistant_tool_round(h: &mut Harness, cid: &crate::AgentId, calls: &[(&str, &str)]) {
+    let agent_id = h
+        .agents
+        .get(cid)
+        .and_then(|conv| conv.agent_id.clone())
+        .unwrap_or_else(|| "main".to_owned());
+    h.publish_for_agent(
         cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
-            session_prompt_id: "sp-seeded-tools".into(),
-            target_agent_id: None,
+            agent_prompt_id: "sp-seeded-tools".into(),
+            agent_id: agent_id.into(),
             output_items: calls
                 .iter()
                 .map(|(call_id, tool_name)| {
@@ -397,7 +515,7 @@ fn wait_for_session_unlock(state_dir: &Path, session_id: &str) {
 /// the cross-conversation regression test above to disambiguate
 /// nested-vs-outer side prompt ids.
 fn outer_side_cid_str(h: &Harness) -> &str {
-    h.conversations
+    h.agents
         .iter()
         .find_map(|(cid, conv)| {
             matches!(
@@ -474,7 +592,7 @@ fn drain_delegate_progress(
     out
 }
 
-fn read_raw_prompt_created(h: &Harness, spid: &SessionPromptId) -> SessionPromptCreated {
+fn read_raw_prompt_created(h: &Harness, spid: &AgentPromptId) -> AgentPromptCreated {
     let mut cursor = 0;
     loop {
         let entry = h
@@ -483,7 +601,7 @@ fn read_raw_prompt_created(h: &Harness, spid: &SessionPromptId) -> SessionPrompt
             .expect("prompt event in log");
         cursor = entry.seq + 1;
         match entry.event {
-            Event::SessionPromptCreated(prompt) if &prompt.session_prompt_id == spid => {
+            Event::AgentPromptCreated(prompt) if &prompt.agent_prompt_id == spid => {
                 return prompt;
             }
             _ => {}
@@ -491,10 +609,7 @@ fn read_raw_prompt_created(h: &Harness, spid: &SessionPromptId) -> SessionPrompt
     }
 }
 
-fn read_raw_compaction_requested(
-    h: &Harness,
-    spid: &SessionPromptId,
-) -> SessionCompactionRequested {
+fn read_raw_compaction_requested(h: &Harness, spid: &AgentPromptId) -> AgentCompactionRequested {
     let mut cursor = 0;
     loop {
         let entry = h
@@ -503,9 +618,7 @@ fn read_raw_compaction_requested(
             .expect("compaction request event in log");
         cursor = entry.seq + 1;
         match entry.event {
-            Event::SessionCompactionRequested(request)
-                if &request.prompt.session_prompt_id == spid =>
-            {
+            Event::AgentCompactionRequested(request) if &request.prompt.agent_prompt_id == spid => {
                 return request;
             }
             _ => {}
@@ -513,14 +626,14 @@ fn read_raw_compaction_requested(
     }
 }
 
-fn read_prompt_created(h: &Harness, spid: &SessionPromptId) -> SessionPromptCreated {
-    h.read_session_prompt_created(spid)
+fn read_prompt_created(h: &Harness, spid: &AgentPromptId) -> AgentPromptCreated {
+    h.read_agent_prompt_created(spid)
         .expect("materialized prompt event")
 }
 
-fn read_compaction_requested(h: &Harness, spid: &SessionPromptId) -> SessionPromptCreated {
+fn read_compaction_requested(h: &Harness, spid: &AgentPromptId) -> AgentPromptCreated {
     let request = read_raw_compaction_requested(h, spid);
-    h.materialize_session_prompt_created(&request.prompt)
+    h.materialize_agent_prompt_created(&request.prompt)
         .expect("materialized compaction request")
 }
 

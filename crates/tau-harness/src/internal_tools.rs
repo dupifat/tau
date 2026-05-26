@@ -12,7 +12,7 @@ use tau_proto::{
 use crate::discovery::DiscoveredSkillSource;
 use crate::error::HarnessError;
 use crate::harness::{HARNESS_CONNECTION_ID, Harness};
-use crate::{AgentToolCall, ConversationId};
+use crate::{AgentId, AgentToolCall};
 
 /// A handler for tools implemented inside the harness process.
 pub trait InternalToolHandler: Send + Sync {
@@ -123,17 +123,8 @@ impl<'a> InternalToolHost<'a> {
     }
 
     /// Ensure and return the agent id for a conversation.
-    pub fn ensure_agent_id_for_conversation(
-        &mut self,
-        conversation_id: &ConversationId,
-    ) -> Option<String> {
-        self.harness
-            .ensure_agent_id_for_conversation(conversation_id)
-    }
-
-    /// Mint an agent id appropriate for `role`.
-    pub fn mint_agent_id_for_role(&self, role: &str) -> String {
-        self.harness.mint_available_agent_id_for_role(role)
+    pub fn ensure_agent_id_for_agent(&mut self, conversation_id: &AgentId) -> Option<String> {
+        self.harness.ensure_agent_id_for_agent(conversation_id)
     }
 
     /// Enqueue a start-agent request from an internal handler without draining.
@@ -186,7 +177,7 @@ impl<'a> InternalToolHost<'a> {
     /// Handle the built-in `wait` tool.
     pub fn handle_wait_tool_call(
         &mut self,
-        conversation_id: &ConversationId,
+        conversation_id: &AgentId,
         call: &AgentToolCall,
         visible_tool_name: ToolName,
     ) -> Result<(), HarnessError> {
@@ -197,7 +188,7 @@ impl<'a> InternalToolHost<'a> {
     #[cfg(test)]
     pub(crate) fn handle_message_tool_call(
         &mut self,
-        conversation_id: &ConversationId,
+        conversation_id: &AgentId,
         call: &AgentToolCall,
         visible_tool_name: ToolName,
     ) -> Result<(), HarnessError> {
@@ -209,12 +200,8 @@ impl<'a> InternalToolHost<'a> {
     pub fn internal_started_call(
         &mut self,
         started: &tau_proto::ToolStarted,
-    ) -> Option<(ConversationId, AgentToolCall, ToolName)> {
-        let cid = self
-            .harness
-            .tool_conversations
-            .get(&started.call_id)?
-            .clone();
+    ) -> Option<(AgentId, AgentToolCall, ToolName)> {
+        let cid = self.harness.tool_agents.get(&started.call_id)?.clone();
         let pending = self.harness.pending_tools.get(&started.call_id)?.clone();
         let call = AgentToolCall {
             id: started.call_id.clone(),
@@ -229,7 +216,7 @@ impl<'a> InternalToolHost<'a> {
     /// Ensure the harness tracks an internal tool call before it completes.
     pub fn ensure_internal_tool_tracking(
         &mut self,
-        conversation_id: &ConversationId,
+        conversation_id: &AgentId,
         call: &AgentToolCall,
         visible_tool_name: &ToolName,
     ) {
@@ -240,7 +227,7 @@ impl<'a> InternalToolHost<'a> {
     /// Complete an internal tool call with a final text result.
     pub fn finish_tool_with_result(
         &mut self,
-        conversation_id: &ConversationId,
+        conversation_id: &AgentId,
         call_id: tau_proto::ToolCallId,
         tool_name: ToolName,
         tool_type: tau_proto::ToolType,
@@ -260,7 +247,7 @@ impl<'a> InternalToolHost<'a> {
     /// Complete an internal tool call with a final structured result.
     pub fn finish_tool_with_cbor_result(
         &mut self,
-        conversation_id: &ConversationId,
+        conversation_id: &AgentId,
         call_id: tau_proto::ToolCallId,
         tool_name: ToolName,
         tool_type: tau_proto::ToolType,
@@ -280,7 +267,7 @@ impl<'a> InternalToolHost<'a> {
     /// Complete an internal tool call with a final error.
     pub fn finish_tool_with_error(
         &mut self,
-        conversation_id: &ConversationId,
+        conversation_id: &AgentId,
         call_id: tau_proto::ToolCallId,
         tool_name: ToolName,
         tool_type: tau_proto::ToolType,
@@ -301,7 +288,7 @@ impl<'a> InternalToolHost<'a> {
     #[allow(clippy::too_many_arguments)]
     pub fn finish_tool_with_display_error(
         &mut self,
-        conversation_id: &ConversationId,
+        conversation_id: &AgentId,
         call_id: tau_proto::ToolCallId,
         tool_name: ToolName,
         tool_type: tau_proto::ToolType,
@@ -359,12 +346,12 @@ impl<'a> InternalToolHost<'a> {
     /// Publish an agent-to-agent or agent-to-user message from a conversation.
     pub fn publish_agent_message(
         &mut self,
-        conversation_id: &ConversationId,
+        conversation_id: &AgentId,
         recipient_id: String,
         message: String,
     ) -> Result<(), String> {
         self.harness
-            .publish_agent_message_from_conversation(conversation_id, recipient_id, message)
+            .publish_agent_message_from_agent(conversation_id, recipient_id, message)
     }
 }
 

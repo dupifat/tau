@@ -143,7 +143,7 @@ Current background timing: most tools background after about 5 seconds, `delegat
 
 Slow `delegate` calls should include the same `duration_seconds` header semantics as `shell`: omit fast calls, include approximate whole seconds for calls that took longer than about 5 seconds, and allow internal overheads and jitter. Delegate duration measures parent-observed delegate wall-clock time, not only inner tool runtime. It includes sub-agent model latency, tool scheduling, inner background/wait turns, final response latency, and is rounded up to whole seconds. Verify this both for direct background delegate results and for delegate results collected through `wait`.
 
-When asked to verify the `delegate` tool, also verify delayed `message` delivery to a live delegated sub-agent whose own tool turn is parked behind a backgrounded tool. This is a delegate-specific regression path, not only a `message` tool test. Use a delegate prompt that first runs `sleep 30`, then after the background placeholder requests a second shell command `sleep 5`, and asks it to report to `user` if it receives a parent message. After the first shell backgrounds and the second shell request is queued, send `message` to the delegate `sub_agent_id` with a nonce. Expected: `Message sent`, the queued `sleep 5` is terminalized internally, and the delegate promptly reports receiving the nonce instead of staying stuck until `sleep 30` finishes. If event logs are available, confirm `AgentMessage`, `ToolCancelled` for the not-yet-started queued call, and a new `SessionPromptCreated` for the delegate message prompt. Treat omission of this scenario as incomplete `delegate` verification.
+When asked to verify the `delegate` tool, also verify delayed `message` delivery to a live delegated sub-agent whose own tool turn is parked behind a backgrounded tool. This is a delegate-specific regression path, not only a `message` tool test. Use a delegate prompt that first runs `sleep 30`, then after the background placeholder requests a second shell command `sleep 5`, and asks it to report to `user` if it receives a parent message. After the first shell backgrounds and the second shell request is queued, send `message` to the delegate `sub_agent_id` with a nonce. Expected: `Message sent`, the queued `sleep 5` is terminalized internally, and the delegate promptly reports receiving the nonce instead of staying stuck until `sleep 30` finishes. If event logs are available, confirm `AgentMessage`, `ToolCancelled` for the not-yet-started queued call, and a new `AgentPromptCreated` for the delegate message prompt. Treat omission of this scenario as incomplete `delegate` verification.
 
 A completed background result is consumed by the first successful `wait`. Later waits for the same id should fail with an already-consumed error. Parallel duplicate waits on the same id race; at most one should receive the result, and the rest should fail. Parallel duplicate no-arg waits in the same conversation should also fail clearly because only one waiter can consume the next completion. The exact error depends on timing: an in-progress duplicate-wait error, an already-consumed error, or another clear race-related error can be acceptable if only one wait receives the result.
 
@@ -290,7 +290,7 @@ If you have direct access to harness event logs, verify:
 
 * Successful cancel emitted `HarnessInfo` with `tool call cancellation request`.
 * The canceled delegate emitted `ToolBackgroundError` with `Tool call canceled`.
-* No `SessionPromptSteered` or queued pending prompt remains for canceled nested delegate completions.
+* No `AgentPromptSteered` or queued pending prompt remains for canceled nested delegate completions.
 * Completed results are consumed once, and the consumed result is not available to later `wait` calls.
 
 #### Reporting format for `cancel` verification
@@ -434,7 +434,7 @@ Expected behavior:
 
 * The message call returns `Message sent`.
 * The delegate responds to `user` with `QUEUED-TOOL MESSAGE RECEIVED nonce=queued-tool-message-001` instead of remaining stuck behind the queued `sleep 5`.
-* If event logs are available, verify that the `AgentMessage` was recorded, the not-yet-started queued tool call was terminalized with `ToolCancelled`, and a new `SessionPromptCreated` was emitted for the delegate message prompt.
+* If event logs are available, verify that the `AgentMessage` was recorded, the not-yet-started queued tool call was terminalized with `ToolCancelled`, and a new `AgentPromptCreated` was emitted for the delegate message prompt.
 * The long backgrounded `sleep 30` may still complete later in the delegate conversation. Its completion should not be delivered to the parent conversation or block the message response.
 
 This scenario specifically protects the code path where `agent.message` delivery preempts queued-but-not-started tool calls behind an already-backgrounded exclusive tool. Without that behavior, the message can be received by the harness but never become a model-visible prompt for the sub-agent.

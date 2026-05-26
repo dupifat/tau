@@ -1592,9 +1592,8 @@ fn apply_event_error_nested_code_is_propagated() {
     }
 }
 
-/// Legacy nested `error.type` shape — kept as a fallback so an older
-/// recorded session log replayed through the agent still classifies
-/// correctly.
+/// Nested `error.type` shape observed from upstream — kept as a fallback so
+/// captured provider events still classify correctly.
 #[test]
 fn apply_event_error_nested_type_fallback_is_propagated() {
     let mut state = crate::common::StreamState::new();

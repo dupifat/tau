@@ -10,9 +10,8 @@ use std::time::{Duration, Instant};
 use tau_config::settings::CliBindingAction;
 use tau_harness::SessionLaunchStatus;
 use tau_proto::{
-    CborValue, ClientKind, Disconnect, Event, EventName, EventSelector, Frame, FrameReader,
-    FrameWriter, Hello, Message, PROTOCOL_VERSION, Subscribe, UiPromptDraft, UiPromptSubmitted,
-    UnixMicros,
+    CborValue, ClientKind, Disconnect, Event, EventSelector, Frame, FrameReader, FrameWriter,
+    Hello, Message, PROTOCOL_VERSION, Subscribe, UiPromptDraft, UiPromptSubmitted, UnixMicros,
 };
 
 use crate::action_commands::ActionCommandState;
@@ -50,22 +49,6 @@ fn send_new_agent_request(writer: &WriterHandle, session_id: &str) -> io::Result
         writer,
         &Event::UiNewAgent(tau_proto::UiNewAgent {
             session_id: session_id.into(),
-        }),
-    )
-}
-
-fn send_agent_state_request(
-    writer: &WriterHandle,
-    session_id: &str,
-    agent_id: &str,
-    action: tau_proto::UiAgentStateAction,
-) -> io::Result<()> {
-    send_event(
-        writer,
-        &Event::UiAgentStateRequest(tau_proto::UiAgentStateRequest {
-            session_id: session_id.into(),
-            agent_id: agent_id.to_owned(),
-            action,
         }),
     )
 }
@@ -360,7 +343,7 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/tree",
-        "Print the session tree (`/tree <id>` rewinds head to that node)",
+        "Print the selected agent tree (`/tree <id>` rewinds head to that node)",
     ),
     (
         "/compact",
@@ -528,7 +511,6 @@ pub(crate) fn run_chat(
             selectors: vec![
                 EventSelector::Prefix("ui.".to_owned()),
                 EventSelector::Prefix("action.".to_owned()),
-                EventSelector::Exact(EventName::AGENT_MESSAGE),
                 EventSelector::Prefix("agent.".to_owned()),
                 EventSelector::Prefix("session.".to_owned()),
                 EventSelector::Prefix("provider.".to_owned()),
@@ -1156,19 +1138,21 @@ impl<'a> TerminalInputSession<'a> {
                 // Broadcast cancel within the selected agent conversation — abort
                 // whatever is in flight there, regardless of spid. The targeted
                 // variant is used by the harness for surgical preempts.
-                session_prompt_id: None,
+                agent_prompt_id: None,
             }),
         );
     }
 
-    fn selected_side_agent_id(&self) -> Option<String> {
+    fn selected_side_agent_id(&self) -> Option<tau_proto::AgentId> {
         let selected_agent = self
             .ctx
             .current_agent_state
             .lock()
             .ok()
             .and_then(|agent| agent.clone());
-        selected_agent.filter(|agent| agent != "main")
+        selected_agent
+            .filter(|agent| agent != "main")
+            .map(Into::into)
     }
 
     fn handle_tree_or_compact_command(&self, text: &str) -> bool {
@@ -1181,6 +1165,7 @@ impl<'a> TerminalInputSession<'a> {
                 self.writer,
                 &Event::UiTreeRequest(tau_proto::UiTreeRequest {
                     session_id: self.session_id.as_str().into(),
+                    target_agent_id: self.selected_side_agent_id(),
                 }),
             );
             return true;
@@ -1199,6 +1184,7 @@ impl<'a> TerminalInputSession<'a> {
                     self.writer,
                     &Event::UiNavigateTree(tau_proto::UiNavigateTree {
                         session_id: self.session_id.as_str().into(),
+                        target_agent_id: self.selected_side_agent_id(),
                         node_id,
                     }),
                 );
@@ -1393,12 +1379,6 @@ impl<'a> TerminalInputSession<'a> {
                 .system_info(&format!("unknown agent: {agent_id}"));
             return;
         }
-        let _ = send_agent_state_request(
-            self.writer,
-            self.session_id.as_str(),
-            &agent_id,
-            tau_proto::UiAgentStateAction::Suspend,
-        );
         mark_agent_suspended(&self.ctx.suspended_agents, &agent_id);
         let _ = self
             .ctx
@@ -1424,12 +1404,6 @@ impl<'a> TerminalInputSession<'a> {
                 .system_info(&format!("unknown agent: {agent_id}"));
             return;
         }
-        let _ = send_agent_state_request(
-            self.writer,
-            self.session_id.as_str(),
-            &agent_id,
-            tau_proto::UiAgentStateAction::Resume,
-        );
         mark_agent_resumed(&self.ctx.live_agents, &self.ctx.suspended_agents, &agent_id);
         let _ = self
             .ctx
@@ -1548,7 +1522,8 @@ impl<'a> TerminalInputSession<'a> {
             .lock()
             .ok()
             .and_then(|agent| agent.clone())
-            .filter(|agent| agent != "main");
+            .filter(|agent| agent != "main")
+            .map(Into::into);
         send_shell_command(
             self.writer,
             self.session_id,
@@ -1578,7 +1553,9 @@ impl<'a> TerminalInputSession<'a> {
         self.ctx
             .agent_in_progress
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        let target_agent_id = selected_agent.filter(|agent| agent != "main");
+        let target_agent_id = selected_agent
+            .filter(|agent| agent != "main")
+            .map(Into::into);
         if send_event(
             self.writer,
             &Event::UiPromptSubmitted(UiPromptSubmitted {
@@ -2158,7 +2135,7 @@ fn send_shell_command(
     session_id: &str,
     command: &str,
     include_in_context: bool,
-    target_agent_id: Option<String>,
+    target_agent_id: Option<tau_proto::AgentId>,
 ) -> io::Result<()> {
     use std::time::{SystemTime, UNIX_EPOCH};
     let command_id = format!(
@@ -2232,35 +2209,6 @@ mod role_cycle_tests {
             frame,
             Frame::Event(Event::UiNewAgent(tau_proto::UiNewAgent { session_id }))
                 if session_id.as_str() == "s1"
-        ));
-    }
-
-    #[test]
-    fn agent_suspend_sends_harness_state_request() {
-        // Explicit suspend/resume is harness-owned state, so the CLI sends a
-        // protocol request in addition to its optimistic local renderer update.
-        let (server_end, client_end) = UnixStream::pair().expect("socket pair");
-        let writer = Arc::new(Mutex::new(FrameWriter::new(BufWriter::new(client_end))));
-        send_agent_state_request(
-            &writer,
-            "s1",
-            "worker",
-            tau_proto::UiAgentStateAction::Suspend,
-        )
-        .expect("send /agent suspend request");
-
-        let mut reader = FrameReader::new(BufReader::new(server_end));
-        let frame = reader
-            .read_frame()
-            .expect("read frame")
-            .expect("frame present");
-        assert!(matches!(
-            frame,
-            Frame::Event(Event::UiAgentStateRequest(tau_proto::UiAgentStateRequest {
-                session_id,
-                agent_id,
-                action: tau_proto::UiAgentStateAction::Suspend,
-            })) if session_id.as_str() == "s1" && agent_id == "worker"
         ));
     }
 

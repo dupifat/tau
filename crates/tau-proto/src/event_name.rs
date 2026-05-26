@@ -18,7 +18,7 @@ pub enum EventCategory {
     Tool,
     /// Extension-provided UI action events.
     Action,
-    /// Harness-owned side/sub-agent command events.
+    /// Global agent transcript and command events.
     Agent,
     /// Extension lifecycle and publication events.
     Extension,
@@ -30,7 +30,7 @@ pub enum EventCategory {
     Ui,
     /// Shell command lifecycle events.
     Shell,
-    /// Session lifecycle and durable transcript events.
+    /// Session lifecycle and membership events.
     Session,
     /// Terminal-output side effects directed at the UI: escape
     /// sequences the UI should write straight through to its
@@ -227,7 +227,9 @@ impl EventName {
     pub const AGENT_START_ACCEPTED: Self =
         Self::from_static(EventCategory::Agent, "start_accepted");
     pub const AGENT_START_RESULT: Self = Self::from_static(EventCategory::Agent, "start_result");
-    pub const AGENT_MESSAGE: Self = Self::from_static(EventCategory::Agent, "message");
+    pub const AGENT_MESSAGE_SENT: Self = Self::from_static(EventCategory::Agent, "message_sent");
+    pub const AGENT_MESSAGE_RECEIVED: Self =
+        Self::from_static(EventCategory::Agent, "message_received");
     pub const PROVIDER_MODELS_UPDATED: Self =
         Self::from_static(EventCategory::Provider, "models_updated");
     pub const PROVIDER_TOOL_RESULT: Self =
@@ -267,8 +269,6 @@ impl EventName {
     pub const UI_SHELL_COMMAND: Self = Self::from_static(EventCategory::Ui, "shell_command");
     pub const UI_SWITCH_SESSION: Self = Self::from_static(EventCategory::Ui, "switch_session");
     pub const UI_NEW_AGENT: Self = Self::from_static(EventCategory::Ui, "new_agent");
-    pub const UI_AGENT_STATE_REQUEST: Self =
-        Self::from_static(EventCategory::Ui, "agent_state_request");
     pub const UI_TREE_REQUEST: Self = Self::from_static(EventCategory::Ui, "tree_request");
     pub const UI_NAVIGATE_TREE: Self = Self::from_static(EventCategory::Ui, "navigate_tree");
     pub const UI_COMPACT_REQUEST: Self = Self::from_static(EventCategory::Ui, "compact_request");
@@ -285,31 +285,36 @@ impl EventName {
     pub const SHELL_COMMAND_FINISHED: Self =
         Self::from_static(EventCategory::Shell, "command_finished");
 
-    pub const SESSION_PROMPT_QUEUED: Self =
-        Self::from_static(EventCategory::Session, "prompt_queued");
-    pub const SESSION_PROMPT_RECALLED: Self =
-        Self::from_static(EventCategory::Session, "prompt_recalled");
-    pub const SESSION_PROMPT_STEERED: Self =
-        Self::from_static(EventCategory::Session, "prompt_steered");
+    pub const AGENT_PROMPT_SUBMITTED: Self =
+        Self::from_static(EventCategory::Agent, "prompt_submitted");
+    pub const AGENT_PROMPT_QUEUED: Self = Self::from_static(EventCategory::Agent, "prompt_queued");
+    pub const AGENT_PROMPT_RECALLED: Self =
+        Self::from_static(EventCategory::Agent, "prompt_recalled");
+    pub const AGENT_PROMPT_STEERED: Self =
+        Self::from_static(EventCategory::Agent, "prompt_steered");
+    pub const AGENT_STARTED: Self = Self::from_static(EventCategory::Agent, "started");
     pub const SESSION_STARTED: Self = Self::from_static(EventCategory::Session, "started");
     pub const SESSION_SHUTDOWN: Self = Self::from_static(EventCategory::Session, "shutdown");
-    pub const SESSION_AGENT_STATE_CHANGED: Self =
-        Self::from_static(EventCategory::Session, "agent_state_changed");
-    pub const SESSION_COMPACTION_STARTED: Self =
-        Self::from_static(EventCategory::Session, "compaction_started");
-    pub const SESSION_COMPACTION_FINISHED: Self =
-        Self::from_static(EventCategory::Session, "compaction_finished");
-    pub const SESSION_COMPACTED: Self = Self::from_static(EventCategory::Session, "compacted");
-    pub const SESSION_COMPACTION_REQUESTED: Self =
-        Self::from_static(EventCategory::Session, "compaction_requested");
-    pub const SESSION_PROMPT_CREATED: Self =
-        Self::from_static(EventCategory::Session, "prompt_created");
-    pub const SESSION_PROMPT_TERMINATED: Self =
-        Self::from_static(EventCategory::Session, "prompt_terminated");
-    pub const SESSION_PROMPT_PREWARM_REQUESTED: Self =
-        Self::from_static(EventCategory::Session, "prompt_prewarm_requested");
-    pub const SESSION_USER_MESSAGE_INJECTED: Self =
-        Self::from_static(EventCategory::Session, "user_message_injected");
+    pub const SESSION_AGENT_LOADED: Self =
+        Self::from_static(EventCategory::Session, "agent_loaded");
+    pub const SESSION_AGENT_UNLOADED: Self =
+        Self::from_static(EventCategory::Session, "agent_unloaded");
+    pub const AGENT_COMPACTION_STARTED: Self =
+        Self::from_static(EventCategory::Agent, "compaction_started");
+    pub const AGENT_COMPACTION_FINISHED: Self =
+        Self::from_static(EventCategory::Agent, "compaction_finished");
+    pub const AGENT_COMPACTED: Self = Self::from_static(EventCategory::Agent, "compacted");
+    pub const AGENT_COMPACTION_REQUESTED: Self =
+        Self::from_static(EventCategory::Agent, "compaction_requested");
+    pub const AGENT_PROMPT_CREATED: Self =
+        Self::from_static(EventCategory::Agent, "prompt_created");
+    pub const AGENT_PROMPT_TERMINATED: Self =
+        Self::from_static(EventCategory::Agent, "prompt_terminated");
+    pub const AGENT_PROMPT_PREWARM_REQUESTED: Self =
+        Self::from_static(EventCategory::Agent, "prompt_prewarm_requested");
+    pub const AGENT_USER_MESSAGE_INJECTED: Self =
+        Self::from_static(EventCategory::Agent, "user_message_injected");
+    pub const AGENT_HEAD_MOVED: Self = Self::from_static(EventCategory::Agent, "head_moved");
 }
 
 impl fmt::Display for EventName {

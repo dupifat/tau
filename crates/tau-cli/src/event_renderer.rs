@@ -61,10 +61,10 @@ pub(crate) struct EventRenderer {
     shell_agents: HashMap<String, String>,
     /// Shared current visible agent mirror for prompt submission.
     current_agent_state: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-    /// Per-`session_prompt_id` UI state. An entry is created on
-    /// `SessionPromptCreated` (or `ProviderPromptSubmitted` for prompts
+    /// Per-`agent_prompt_id` UI state. An entry is created on
+    /// `AgentPromptCreated` (or `ProviderPromptSubmitted` for prompts
     /// without an explicit creation event) and torn down on
-    /// `ProviderResponseFinished` or `SessionPromptTerminated`. Storing the
+    /// `ProviderResponseFinished` or `AgentPromptTerminated`. Storing the
     /// response block id, thinking block id/text, and dispatch timestamp in one
     /// place means every
     /// per-prompt cleanup is a single `prompts.remove(spid)` instead of
@@ -73,13 +73,13 @@ pub(crate) struct EventRenderer {
     /// Live provider-side compaction blocks keyed by session id.
     /// Compaction has first-class session lifecycle events rather than
     /// being inferred from the hidden compact prompt sent to the agent.
-    compaction_blocks: HashMap<tau_proto::SessionId, tau_cli_term::BlockId>,
+    compaction_blocks: HashMap<tau_proto::AgentId, tau_cli_term::BlockId>,
     /// Last locally-echoed user message that has not yet been classified
     /// as a normal or queued prompt. Used to replace only the matching
     /// echo when the harness reports that prompt as queued.
     last_user_block: Option<(tau_cli_term::BlockId, String)>,
     /// Queued user-message blocks (in above_sticky zone).
-    /// When `SessionPromptCreated` fires for a dequeued prompt,
+    /// When `AgentPromptCreated` fires for a dequeued prompt,
     /// the first entry is popped and moved back to history.
     queued_user_blocks: VecDeque<(tau_cli_term::BlockId, String)>,
     /// Per-`call_id` UI state. Tracks the live block (if any), the
@@ -247,7 +247,7 @@ const MAIN_AGENT_ID: &str = "main";
 struct AgentUiState {
     output: tau_cli_term::OutputSnapshot,
     prompts: HashMap<String, PromptState>,
-    compaction_blocks: HashMap<tau_proto::SessionId, tau_cli_term::BlockId>,
+    compaction_blocks: HashMap<tau_proto::AgentId, tau_cli_term::BlockId>,
     last_user_block: Option<(tau_cli_term::BlockId, String)>,
     queued_user_blocks: VecDeque<(tau_cli_term::BlockId, String)>,
     tool_calls: HashMap<String, ToolCallState>,
@@ -349,7 +349,7 @@ struct ToolBlockEntry {
 
 struct MessageBlockEntry {
     block_id: tau_cli_term::BlockId,
-    message: tau_proto::AgentMessage,
+    event: Event,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -604,12 +604,12 @@ struct TurnStatsBlockEntry {
 }
 
 /// Per-prompt UI state held by [`EventRenderer`]. Lives from the first
-/// event observed for the prompt (`SessionPromptCreated` or
+/// event observed for the prompt (`AgentPromptCreated` or
 /// `ProviderPromptSubmitted`) through `ProviderResponseFinished` or
-/// `SessionPromptTerminated`.
+/// `AgentPromptTerminated`.
 #[derive(Default)]
 struct PromptState {
-    /// Live agent-response block. `None` until `SessionPromptCreated`
+    /// Live agent-response block. `None` until `AgentPromptCreated`
     /// allocates it (some prompts arrive without a creation event).
     response_block_id: Option<tau_cli_term::BlockId>,
     /// Live thinking block. Lazy-created the first time the agent emits
@@ -700,17 +700,17 @@ impl AgentActivity {
         self.optimistic_submissions = self.optimistic_submissions.saturating_add(1);
     }
 
-    fn start_prompt(&mut self, session_prompt_id: &tau_proto::SessionPromptId) {
+    fn start_prompt(&mut self, agent_prompt_id: &tau_proto::AgentPromptId) {
         self.optimistic_submissions = self.optimistic_submissions.saturating_sub(1);
-        self.active_prompts.insert(session_prompt_id.to_string());
+        self.active_prompts.insert(agent_prompt_id.to_string());
     }
 
     fn finish_prompt(
         &mut self,
-        session_prompt_id: &tau_proto::SessionPromptId,
+        agent_prompt_id: &tau_proto::AgentPromptId,
         output_items: &[ContextItem],
     ) {
-        if self.active_prompts.remove(session_prompt_id.as_str()) {
+        if self.active_prompts.remove(agent_prompt_id.as_str()) {
             for call in tool_calls_from_output_items(output_items) {
                 self.active_tools.insert(call.call_id.to_string());
             }
@@ -1461,9 +1461,9 @@ impl EventRenderer {
 
     fn handle_compaction_event(&mut self, event: &Event) -> bool {
         let originator = match event {
-            Event::SessionCompactionStarted(started) => &started.originator,
-            Event::SessionCompactionFinished(finished) => &finished.originator,
-            Event::SessionCompacted(compacted) => &compacted.originator,
+            Event::AgentCompactionStarted(started) => &started.originator,
+            Event::AgentCompactionFinished(finished) => &finished.originator,
+            Event::AgentCompacted(compacted) => &compacted.originator,
             _ => return false,
         };
         if !originator.is_user() {
@@ -1471,8 +1471,8 @@ impl EventRenderer {
         }
 
         match event {
-            Event::SessionCompactionStarted(started) => {
-                if let Some(existing) = self.compaction_blocks.remove(&started.session_id) {
+            Event::AgentCompactionStarted(started) => {
+                if let Some(existing) = self.compaction_blocks.remove(&started.agent_id) {
                     self.handle.remove_block(existing);
                 }
                 let block = render_compaction_block(
@@ -1483,17 +1483,16 @@ impl EventRenderer {
                 let id = self.handle.new_block("compaction-progress", block);
                 self.handle.push_above_active(id);
                 self.handle.redraw();
-                self.compaction_blocks
-                    .insert(started.session_id.clone(), id);
+                self.compaction_blocks.insert(started.agent_id.clone(), id);
                 true
             }
-            Event::SessionCompacted(compacted) => {
-                // `SessionCompacted` is the durable success fact replayed to
+            Event::AgentCompacted(compacted) => {
+                // `AgentCompacted` is the durable success fact replayed to
                 // late-joining UIs. During a live compaction we still wait for
-                // `SessionCompactionFinished` to replace the in-flight block;
+                // `AgentCompactionFinished` to replace the in-flight block;
                 // on replay there is no lifecycle block, so render the final
                 // status from this event.
-                if !self.compaction_blocks.contains_key(&compacted.session_id) {
+                if !self.compaction_blocks.contains_key(&compacted.agent_id) {
                     self.handle.print_output(
                         "compaction-result",
                         render_compaction_block(
@@ -1508,19 +1507,19 @@ impl EventRenderer {
                 }
                 true
             }
-            Event::SessionCompactionFinished(finished) => {
-                if let Some(block_id) = self.compaction_blocks.remove(&finished.session_id) {
+            Event::AgentCompactionFinished(finished) => {
+                if let Some(block_id) = self.compaction_blocks.remove(&finished.agent_id) {
                     self.handle.remove_block(block_id);
                 }
                 let (status_text, status) = match finished.outcome {
-                    tau_proto::SessionCompactionOutcome::Succeeded => (
+                    tau_proto::AgentCompactionOutcome::Succeeded => (
                         Self::compaction_success_status(
                             finished.original_input_tokens,
                             finished.compacted_input_tokens,
                         ),
                         CompactionStatus::Success,
                     ),
-                    tau_proto::SessionCompactionOutcome::Failed => (
+                    tau_proto::AgentCompactionOutcome::Failed => (
                         Self::compaction_failure_status(
                             finished.original_input_tokens,
                             finished.message.as_deref(),
@@ -1645,7 +1644,7 @@ impl EventRenderer {
         for entry in &self.message_history {
             self.handle.set_block(
                 entry.block_id,
-                self.render_agent_message_block(&entry.message),
+                self.render_agent_message_block(&entry.event),
             );
         }
         for entry in &self.tool_history {
@@ -1699,7 +1698,7 @@ impl EventRenderer {
         for entry in &self.message_history {
             self.handle.set_block(
                 entry.block_id,
-                self.render_agent_message_block(&entry.message),
+                self.render_agent_message_block(&entry.event),
             );
         }
         self.invalidate_for_retroactive_toggle();
@@ -2124,23 +2123,22 @@ impl EventRenderer {
     fn sync_agent_activity_for_lifecycle(&mut self, event: &Event) {
         match event {
             Event::UiPromptSubmitted(_) => self.agent_activity.mark_optimistic_submission(),
-            Event::SessionPromptCreated(prompt) => {
-                self.agent_activity.start_prompt(&prompt.session_prompt_id);
+            Event::AgentPromptCreated(prompt) => {
+                self.agent_activity.start_prompt(&prompt.agent_prompt_id);
             }
             Event::ProviderPromptSubmitted(submitted) => {
-                self.agent_activity
-                    .start_prompt(&submitted.session_prompt_id);
+                self.agent_activity.start_prompt(&submitted.agent_prompt_id);
             }
             Event::ProviderResponseUpdated(update) => {
-                self.agent_activity.start_prompt(&update.session_prompt_id);
+                self.agent_activity.start_prompt(&update.agent_prompt_id);
             }
             Event::ProviderResponseFinished(finished) => {
                 self.agent_activity
-                    .finish_prompt(&finished.session_prompt_id, &finished.output_items);
+                    .finish_prompt(&finished.agent_prompt_id, &finished.output_items);
             }
-            Event::SessionPromptTerminated(terminated) => {
+            Event::AgentPromptTerminated(terminated) => {
                 self.agent_activity
-                    .finish_prompt(&terminated.session_prompt_id, &[]);
+                    .finish_prompt(&terminated.agent_prompt_id, &[]);
             }
             Event::ToolRequest(_) => {}
             Event::ToolStarted(invoke) => self.agent_activity.start_tool(&invoke.call_id),
@@ -2175,7 +2173,7 @@ impl EventRenderer {
 
     fn sync_main_tools_visibility_for_prompt_lifecycle(&mut self, event: &Event) {
         match event {
-            Event::SessionPromptCreated(prompt) => {
+            Event::AgentPromptCreated(prompt) => {
                 if prompt.originator.is_user() || !self.has_live_main_delegate_tool_call() {
                     self.set_main_agent_turn_active(prompt.originator.is_user());
                 }
@@ -2195,12 +2193,12 @@ impl EventRenderer {
             {
                 self.set_main_agent_turn_active(false);
             }
-            Event::SessionPromptTerminated(terminated) if terminated.originator.is_user() => {
+            Event::AgentPromptTerminated(terminated) if terminated.originator.is_user() => {
                 if self.agent_activity.active_prompts.is_empty() {
                     self.set_main_agent_turn_active(false);
                 }
             }
-            Event::SessionPromptTerminated(terminated)
+            Event::AgentPromptTerminated(terminated)
                 if !terminated.originator.is_user() && !self.has_live_main_delegate_tool_call() =>
             {
                 self.set_main_agent_turn_active(false);
@@ -2336,7 +2334,10 @@ impl EventRenderer {
                 self.update_agent_in_progress();
                 return;
             }
-            if matches!(event, Event::AgentMessage(_)) {
+            if matches!(
+                event,
+                Event::AgentMessageSent(_) | Event::AgentMessageReceived(_)
+            ) {
                 self.handle_recorded_at_for_visible_agent(event, recorded_at);
                 self.update_agent_in_progress();
                 return;
@@ -2398,17 +2399,24 @@ impl EventRenderer {
 
     fn event_selects_agent_from_empty(&self, event: &Event) -> bool {
         match event {
-            Event::SessionPromptCreated(prompt) => {
-                prompt.target_agent_id.is_some() && prompt.originator.is_user()
+            Event::AgentPromptCreated(prompt) => {
+                prompt.agent_id != MAIN_AGENT_ID && prompt.originator.is_user()
             }
-            Event::SessionCompactionRequested(request) => {
-                request.prompt.target_agent_id.is_some() && request.prompt.originator.is_user()
+            Event::AgentCompactionRequested(request) => {
+                request.prompt.agent_id != MAIN_AGENT_ID && request.prompt.originator.is_user()
             }
-            Event::SessionPromptQueued(queued) => {
-                queued.target_agent_id.is_some() && !queued.message_class.is_internal()
+            Event::AgentPromptQueued(queued) => {
+                queued.agent_id != MAIN_AGENT_ID && !queued.message_class.is_internal()
+            }
+            Event::AgentPromptSubmitted(prompt) => {
+                prompt.agent_id != MAIN_AGENT_ID
+                    && prompt.originator.is_user()
+                    && !prompt.message_class.is_internal()
             }
             Event::UiPromptSubmitted(prompt) => {
-                prompt.target_agent_id.is_some() && prompt.originator.is_user()
+                prompt.target_agent_id.as_deref() != Some(MAIN_AGENT_ID)
+                    && prompt.target_agent_id.is_some()
+                    && prompt.originator.is_user()
             }
             _ => false,
         }
@@ -2427,24 +2435,13 @@ impl EventRenderer {
 
     fn learn_agent_metadata(&mut self, event: &Event) {
         match event {
-            Event::StartAgentRequest(request) => {
-                self.query_agents
-                    .insert(request.query_id.clone(), request.agent_id.clone());
-                self.remember_agent(request.agent_id.clone());
-            }
+            Event::StartAgentRequest(_) => {}
             Event::StartAgentAccepted(accepted) => {
+                let agent_id = accepted.agent_id.to_string();
                 self.query_agents
-                    .insert(accepted.query_id.clone(), accepted.agent_id.clone());
-                self.remember_agent(accepted.agent_id.clone());
+                    .insert(accepted.query_id.clone(), agent_id.clone());
+                self.remember_agent(agent_id);
             }
-            Event::SessionAgentStateChanged(changed) => match changed.state {
-                tau_proto::AgentState::Active | tau_proto::AgentState::ActiveDelegated => {
-                    self.mark_agent_live_and_unsuspended(changed.agent_id.clone());
-                }
-                tau_proto::AgentState::Suspended => {
-                    self.mark_agent_suspended(&changed.agent_id);
-                }
-            },
             Event::StartAgentResult(_) => {}
             Event::UiPromptSubmitted(prompt) => {
                 if let Some(agent_id) = prompt.target_agent_id.as_deref() {
@@ -2485,73 +2482,68 @@ impl EventRenderer {
                         .insert(finished.command_id.to_string(), agent_id.to_owned());
                 }
             }
-            Event::SessionPromptQueued(queued) => {
-                if let Some(agent_id) = queued.target_agent_id.as_deref() {
-                    self.mark_agent_live(agent_id.to_owned());
+            Event::AgentPromptQueued(queued) => {
+                self.mark_agent_live(queued.agent_id.to_string());
+            }
+            Event::AgentPromptSubmitted(prompt) => {
+                let agent_id = prompt.agent_id.to_string();
+                if prompt.originator.is_user() {
+                    self.mark_agent_live(agent_id.clone());
+                } else {
+                    self.remember_agent(agent_id.clone());
+                }
+                if let tau_proto::PromptOriginator::Extension { query_id, .. } = &prompt.originator
+                {
+                    self.query_agents.insert(query_id.clone(), agent_id);
                 }
             }
-            Event::SessionPromptCreated(prompt) => {
-                let agent_id = prompt
-                    .target_agent_id
-                    .clone()
-                    .unwrap_or_else(|| self.agent_id_for_originator(&prompt.originator));
+            Event::AgentPromptCreated(prompt) => {
+                let agent_id = prompt.agent_id.to_string();
                 self.remember_agent(agent_id.clone());
-                if prompt.target_agent_id.is_some() {
+                if prompt.originator.is_user() {
                     self.mark_agent_live(agent_id.clone());
                 }
                 self.prompt_agents
-                    .insert(prompt.session_prompt_id.to_string(), agent_id);
+                    .insert(prompt.agent_prompt_id.to_string(), agent_id);
             }
-            Event::SessionCompactionRequested(request) => {
-                let agent_id =
-                    request.prompt.target_agent_id.clone().unwrap_or_else(|| {
-                        self.agent_id_for_originator(&request.prompt.originator)
-                    });
+            Event::AgentCompactionRequested(request) => {
+                let agent_id = request.prompt.agent_id.to_string();
                 self.mark_agent_live(agent_id.clone());
                 self.prompt_agents
-                    .insert(request.prompt.session_prompt_id.to_string(), agent_id);
+                    .insert(request.prompt.agent_prompt_id.to_string(), agent_id);
             }
             Event::ProviderResponseFinished(finished) => {
-                let agent_id = finished.target_agent_id.clone().unwrap_or_else(|| {
-                    self.agent_id_for_prompt(
-                        finished.session_prompt_id.as_str(),
-                        &finished.originator,
-                    )
-                });
-                if finished.originator.is_user() && finished.target_agent_id.is_some() {
+                let agent_id = finished.agent_id.to_string();
+                if finished.originator.is_user() {
                     self.mark_agent_live(agent_id.clone());
                 } else {
                     self.remember_agent(agent_id.clone());
                 }
                 self.prompt_agents
-                    .insert(finished.session_prompt_id.to_string(), agent_id.clone());
+                    .insert(finished.agent_prompt_id.to_string(), agent_id.clone());
                 for call in tool_calls_from_output_items(&finished.output_items) {
                     self.tool_agents
                         .insert(call.call_id.to_string(), agent_id.clone());
                 }
             }
-            Event::SessionCompactionStarted(started) => {
-                if let Some(agent_id) = started.target_agent_id.as_deref() {
+            Event::AgentCompactionStarted(started) => {
+                self.remember_agent(started.agent_id.to_string());
+            }
+            Event::AgentCompactionFinished(finished) => {
+                self.remember_agent(finished.agent_id.to_string());
+            }
+            Event::AgentCompacted(compacted) => {
+                self.remember_agent(compacted.agent_id.to_string());
+            }
+            Event::AgentMessageSent(message) => {
+                self.remember_agent(message.sender_id.to_string());
+                if let Some(agent_id) = Self::agent_message_sent_recipient_agent_id(message) {
                     self.remember_agent(agent_id.to_owned());
                 }
             }
-            Event::SessionCompactionFinished(finished) => {
-                if let Some(agent_id) = finished.target_agent_id.as_deref() {
-                    self.remember_agent(agent_id.to_owned());
-                }
-            }
-            Event::SessionCompacted(compacted) => {
-                if let Some(agent_id) = compacted.target_agent_id.as_deref() {
-                    self.remember_agent(agent_id.to_owned());
-                }
-            }
-            Event::AgentMessage(message) => {
-                if message.sender_id != "user" {
-                    self.remember_agent(message.sender_id.clone());
-                }
-                if message.recipient_id != "user" {
-                    self.remember_agent(message.recipient_id.clone());
-                }
+            Event::AgentMessageReceived(message) => {
+                self.remember_agent(message.sender_id.to_string());
+                self.remember_agent(message.recipient_id.to_string());
             }
             _ => {}
         }
@@ -2604,99 +2596,62 @@ impl EventRenderer {
                 .get(cancelled.call_id.as_str())
                 .cloned()
                 .unwrap_or_else(|| MAIN_AGENT_ID.to_owned()),
-            Event::AgentMessage(message) if message.recipient_id == "user" => {
-                message.sender_id.clone()
-            }
-            Event::AgentMessage(message) if message.sender_id == "user" => {
-                message.recipient_id.clone()
-            }
-            Event::AgentMessage(message) => message.recipient_id.clone(),
+            Event::AgentMessageSent(message) => message.sender_id.to_string(),
+            Event::AgentMessageReceived(message) => message.recipient_id.to_string(),
             Event::UiPromptSubmitted(prompt) => prompt
                 .target_agent_id
-                .clone()
+                .as_ref()
+                .map(ToString::to_string)
                 .unwrap_or_else(|| self.agent_id_for_originator(&prompt.originator)),
-            Event::SessionPromptQueued(queued) => queued
-                .target_agent_id
-                .clone()
-                .unwrap_or_else(|| MAIN_AGENT_ID.to_owned()),
-            Event::SessionPromptRecalled(recalled) => recalled
-                .target_agent_id
-                .clone()
-                .unwrap_or_else(|| MAIN_AGENT_ID.to_owned()),
-            Event::SessionPromptSteered(steered) => steered
-                .target_agent_id
-                .clone()
-                .unwrap_or_else(|| MAIN_AGENT_ID.to_owned()),
+            Event::AgentPromptSubmitted(prompt) => prompt.agent_id.to_string(),
+            Event::AgentPromptQueued(queued) => queued.agent_id.to_string(),
+            Event::AgentPromptRecalled(recalled) => recalled.agent_id.to_string(),
+            Event::AgentPromptSteered(steered) => steered.agent_id.to_string(),
             Event::UiCancelPrompt(cancel) => cancel
                 .target_agent_id
-                .clone()
+                .as_ref()
+                .map(ToString::to_string)
                 .unwrap_or_else(|| MAIN_AGENT_ID.to_owned()),
             Event::UiRecallQueuedPrompt(recall) => recall
                 .target_agent_id
-                .clone()
+                .as_ref()
+                .map(ToString::to_string)
                 .unwrap_or_else(|| MAIN_AGENT_ID.to_owned()),
             Event::UiShellCommand(command) => command
                 .target_agent_id
-                .clone()
+                .as_ref()
+                .map(ToString::to_string)
                 .unwrap_or_else(|| MAIN_AGENT_ID.to_owned()),
             Event::ShellCommandProgress(progress) => progress
                 .target_agent_id
-                .clone()
+                .as_ref()
+                .map(ToString::to_string)
                 .or_else(|| self.shell_agents.get(progress.command_id.as_str()).cloned())
                 .unwrap_or_else(|| MAIN_AGENT_ID.to_owned()),
             Event::ShellCommandFinished(finished) => finished
                 .target_agent_id
-                .clone()
+                .as_ref()
+                .map(ToString::to_string)
                 .or_else(|| self.shell_agents.get(finished.command_id.as_str()).cloned())
                 .unwrap_or_else(|| MAIN_AGENT_ID.to_owned()),
-            Event::SessionPromptCreated(prompt) => prompt
-                .target_agent_id
-                .clone()
-                .unwrap_or_else(|| self.agent_id_for_originator(&prompt.originator)),
-            Event::SessionCompactionRequested(request) => request
-                .prompt
-                .target_agent_id
-                .clone()
-                .or_else(|| {
-                    self.prompt_agents
-                        .get(request.prompt.session_prompt_id.as_str())
-                        .cloned()
-                })
-                .unwrap_or_else(|| self.agent_id_for_originator(&request.prompt.originator)),
-            Event::SessionPromptTerminated(terminated) => self.agent_id_for_prompt(
-                terminated.session_prompt_id.as_str(),
-                &terminated.originator,
-            ),
+            Event::AgentPromptCreated(prompt) => prompt.agent_id.to_string(),
+            Event::AgentCompactionRequested(request) => request.prompt.agent_id.to_string(),
+            Event::AgentPromptTerminated(terminated) => self
+                .agent_id_for_prompt(terminated.agent_prompt_id.as_str(), &terminated.originator),
             Event::ProviderPromptSubmitted(submitted) => self
                 .prompt_agents
-                .get(submitted.session_prompt_id.as_str())
+                .get(submitted.agent_prompt_id.as_str())
                 .cloned()
                 .unwrap_or_else(|| self.agent_id_for_originator(&submitted.originator)),
             Event::ProviderResponseUpdated(update) => self
                 .prompt_agents
-                .get(update.session_prompt_id.as_str())
+                .get(update.agent_prompt_id.as_str())
                 .cloned()
                 .unwrap_or_else(|| self.agent_id_for_originator(&update.originator)),
-            Event::ProviderResponseFinished(finished) => {
-                finished.target_agent_id.clone().unwrap_or_else(|| {
-                    self.agent_id_for_prompt(
-                        finished.session_prompt_id.as_str(),
-                        &finished.originator,
-                    )
-                })
-            }
-            Event::SessionCompactionStarted(started) => started
-                .target_agent_id
-                .clone()
-                .unwrap_or_else(|| self.agent_id_for_originator(&started.originator)),
-            Event::SessionCompactionFinished(finished) => finished
-                .target_agent_id
-                .clone()
-                .unwrap_or_else(|| self.agent_id_for_originator(&finished.originator)),
-            Event::SessionCompacted(compacted) => compacted
-                .target_agent_id
-                .clone()
-                .unwrap_or_else(|| self.agent_id_for_originator(&compacted.originator)),
+            Event::ProviderResponseFinished(finished) => finished.agent_id.to_string(),
+            Event::AgentCompactionStarted(started) => started.agent_id.to_string(),
+            Event::AgentCompactionFinished(finished) => finished.agent_id.to_string(),
+            Event::AgentCompacted(compacted) => compacted.agent_id.to_string(),
             _ => self
                 .current_agent_id
                 .clone()
@@ -2706,11 +2661,11 @@ impl EventRenderer {
 
     fn agent_id_for_prompt(
         &self,
-        session_prompt_id: &str,
+        agent_prompt_id: &str,
         originator: &tau_proto::PromptOriginator,
     ) -> String {
         self.prompt_agents
-            .get(session_prompt_id)
+            .get(agent_prompt_id)
             .cloned()
             .unwrap_or_else(|| self.agent_id_for_originator(originator))
     }
@@ -2770,51 +2725,89 @@ impl EventRenderer {
     }
 
     fn handle_agent_message_event(&mut self, event: &Event) -> bool {
-        let Event::AgentMessage(message) = event else {
+        if !matches!(
+            event,
+            Event::AgentMessageSent(_) | Event::AgentMessageReceived(_)
+        ) {
             return false;
-        };
-        let block = self.render_agent_message_block(message);
+        }
+        let block = self.render_agent_message_block(event);
         let block_id = self.handle.print_output("agent-message", block);
         self.message_history.push(MessageBlockEntry {
             block_id,
-            message: message.clone(),
+            event: event.clone(),
         });
         true
     }
 
-    fn render_agent_message_block(
-        &self,
-        message: &tau_proto::AgentMessage,
-    ) -> tau_cli_term::StyledBlock {
-        match Self::message_render_mode(self.show_messages, message) {
+    fn render_agent_message_block(&self, event: &Event) -> tau_cli_term::StyledBlock {
+        match Self::message_render_mode(self.show_messages, event) {
             MessageRenderMode::Hidden => Self::empty_block(),
             MessageRenderMode::Summary => self.submitted_prompt_block(
                 tau_themes::names::SYSTEM_INFO,
-                Self::agent_message_summary(message),
+                Self::agent_message_summary(event),
             ),
             MessageRenderMode::Full => self.submitted_prompt_block(
                 tau_themes::names::SYSTEM_INFO,
                 format!(
                     "{}:\n{}",
-                    Self::agent_message_summary(message),
-                    message.message
+                    Self::agent_message_summary(event),
+                    Self::agent_message_body(event)
                 ),
             ),
         }
     }
 
-    fn agent_message_summary(message: &tau_proto::AgentMessage) -> String {
-        format!(
-            "Message from {} to {}",
-            message.sender_id, message.recipient_id
-        )
+    fn agent_message_summary(event: &Event) -> String {
+        match event {
+            Event::AgentMessageSent(message) => format!(
+                "Message from {} to {}",
+                message.sender_id,
+                Self::agent_message_sent_recipient_label(message)
+            ),
+            Event::AgentMessageReceived(message) => format!(
+                "Message from {} to {}",
+                message.sender_id, message.recipient_id
+            ),
+            _ => unreachable!("only agent message events are rendered here"),
+        }
+    }
+
+    fn agent_message_body(event: &Event) -> &str {
+        match event {
+            Event::AgentMessageSent(message) => message.message.as_str(),
+            Event::AgentMessageReceived(message) => message.message.as_str(),
+            _ => unreachable!("only agent message events are rendered here"),
+        }
+    }
+
+    fn agent_message_sent_recipient_label(message: &tau_proto::AgentMessageSent) -> &str {
+        match &message.recipient {
+            tau_proto::AgentMessageRecipient::Agent { agent_id } => agent_id.as_str(),
+            tau_proto::AgentMessageRecipient::User => "user",
+        }
+    }
+
+    fn agent_message_sent_recipient_agent_id(
+        message: &tau_proto::AgentMessageSent,
+    ) -> Option<&str> {
+        match &message.recipient {
+            tau_proto::AgentMessageRecipient::Agent { agent_id } => Some(agent_id.as_str()),
+            tau_proto::AgentMessageRecipient::User => None,
+        }
     }
 
     fn message_render_mode(
         show_messages: tau_config::settings::ShowMessages,
-        message: &tau_proto::AgentMessage,
+        event: &Event,
     ) -> MessageRenderMode {
-        let self_msg = message.sender_id == "user" || message.recipient_id == "user";
+        let self_msg = matches!(
+            event,
+            Event::AgentMessageSent(tau_proto::AgentMessageSent {
+                recipient: tau_proto::AgentMessageRecipient::User,
+                ..
+            })
+        );
         match (show_messages, self_msg) {
             (tau_config::settings::ShowMessages::None, _) => MessageRenderMode::Hidden,
             (tau_config::settings::ShowMessages::SelfSummary, true) => MessageRenderMode::Summary,
@@ -2839,7 +2832,6 @@ impl EventRenderer {
                 self.handle_existing_session_started(started);
                 true
             }
-            Event::SessionAgentStateChanged(_) => true,
             _ => false,
         }
     }
@@ -2865,24 +2857,28 @@ impl EventRenderer {
                 self.handle_ui_prompt_submitted(prompt);
                 true
             }
-            Event::SessionPromptQueued(queued) => {
-                self.handle_session_prompt_queued(queued);
+            Event::AgentPromptSubmitted(prompt) => {
+                self.handle_agent_prompt_submitted(prompt);
                 true
             }
-            Event::SessionPromptRecalled(recalled) => {
-                self.handle_session_prompt_recalled(recalled);
+            Event::AgentPromptQueued(queued) => {
+                self.handle_agent_prompt_queued(queued);
                 true
             }
-            Event::SessionPromptSteered(steered) => {
-                self.handle_session_prompt_steered(steered);
+            Event::AgentPromptRecalled(recalled) => {
+                self.handle_agent_prompt_recalled(recalled);
                 true
             }
-            Event::SessionPromptCreated(prompt) => {
-                self.handle_session_prompt_created(prompt);
+            Event::AgentPromptSteered(steered) => {
+                self.handle_agent_prompt_steered(steered);
                 true
             }
-            Event::SessionPromptTerminated(terminated) => {
-                self.handle_session_prompt_terminated(terminated);
+            Event::AgentPromptCreated(prompt) => {
+                self.handle_agent_prompt_created(prompt);
+                true
+            }
+            Event::AgentPromptTerminated(terminated) => {
+                self.handle_agent_prompt_terminated(terminated);
                 true
             }
             _ => false,
@@ -2890,7 +2886,19 @@ impl EventRenderer {
     }
 
     fn handle_ui_prompt_submitted(&mut self, prompt: &tau_proto::UiPromptSubmitted) {
-        if prompt.message_class.is_internal() {
+        self.handle_submitted_user_prompt(&prompt.text, prompt.message_class);
+    }
+
+    fn handle_agent_prompt_submitted(&mut self, prompt: &tau_proto::AgentPromptSubmitted) {
+        self.handle_submitted_user_prompt(&prompt.text, prompt.message_class);
+    }
+
+    fn handle_submitted_user_prompt(
+        &mut self,
+        text: &str,
+        message_class: tau_proto::PromptMessageClass,
+    ) {
+        if message_class.is_internal() {
             return;
         }
 
@@ -2899,28 +2907,28 @@ impl EventRenderer {
         if self
             .queued_user_blocks
             .front()
-            .is_some_and(|(_, text)| text == &prompt.text)
+            .is_some_and(|(_, queued_text)| queued_text == text)
         {
-            let Some((queued_id, text)) = self.queued_user_blocks.pop_front() else {
+            let Some((queued_id, queued_text)) = self.queued_user_blocks.pop_front() else {
                 return;
             };
             self.handle.remove_block(queued_id);
             self.reset_main_tool_usage();
             let id = self.handle.print_output(
                 "user-prompt",
-                self.submitted_prompt_block(names::USER_PROMPT, text),
+                self.submitted_prompt_block(names::USER_PROMPT, queued_text.clone()),
             );
-            self.last_user_block = Some((id, prompt.text.clone()));
+            self.last_user_block = Some((id, queued_text));
             self.handle.redraw();
             return;
         }
         self.reset_main_tool_usage();
-        let block = self.submitted_prompt_block(names::USER_PROMPT, prompt.text.clone());
+        let block = self.submitted_prompt_block(names::USER_PROMPT, text.to_owned());
         let id = self.handle.print_output("user-prompt", block);
-        self.last_user_block = Some((id, prompt.text.clone()));
+        self.last_user_block = Some((id, text.to_owned()));
     }
 
-    fn handle_session_prompt_queued(&mut self, queued: &tau_proto::SessionPromptQueued) {
+    fn handle_agent_prompt_queued(&mut self, queued: &tau_proto::AgentPromptQueued) {
         if queued.message_class.is_internal() {
             return;
         }
@@ -2946,7 +2954,7 @@ impl EventRenderer {
             .push_back((queued_id, queued.text.clone()));
     }
 
-    fn handle_session_prompt_recalled(&mut self, recalled: &tau_proto::SessionPromptRecalled) {
+    fn handle_agent_prompt_recalled(&mut self, recalled: &tau_proto::AgentPromptRecalled) {
         if let Some((queued_id, _text)) = self.queued_user_blocks.pop_back() {
             self.handle.remove_above_sticky(queued_id);
             self.handle.remove_block(queued_id);
@@ -2956,7 +2964,7 @@ impl EventRenderer {
         self.handle.redraw();
     }
 
-    fn handle_session_prompt_steered(&mut self, steered: &tau_proto::SessionPromptSteered) {
+    fn handle_agent_prompt_steered(&mut self, steered: &tau_proto::AgentPromptSteered) {
         if steered.message_class.is_internal() {
             return;
         }
@@ -2985,11 +2993,11 @@ impl EventRenderer {
         }
     }
 
-    fn handle_session_prompt_created(&mut self, prompt: &tau_proto::SessionPromptCreated) {
+    fn handle_agent_prompt_created(&mut self, prompt: &tau_proto::AgentPromptCreated) {
         self.clear_editor_active_prompt_for_user_prompt(prompt.originator.is_user());
         self.last_user_block = None;
         self.prompts
-            .entry(prompt.session_prompt_id.to_string())
+            .entry(prompt.agent_prompt_id.to_string())
             .or_default()
             .started_at = Some(Instant::now());
         self.promote_next_queued_prompt("user-prompt-created");
@@ -3002,12 +3010,9 @@ impl EventRenderer {
         }
     }
 
-    fn handle_session_prompt_terminated(
-        &mut self,
-        terminated: &tau_proto::SessionPromptTerminated,
-    ) {
+    fn handle_agent_prompt_terminated(&mut self, terminated: &tau_proto::AgentPromptTerminated) {
         self.clear_editor_active_prompt_for_user_prompt(terminated.originator.is_user());
-        let Some(prompt_state) = self.prompts.remove(terminated.session_prompt_id.as_str()) else {
+        let Some(prompt_state) = self.prompts.remove(terminated.agent_prompt_id.as_str()) else {
             return;
         };
         if let Some(block_id) = prompt_state.thinking_block_id {
@@ -3029,18 +3034,18 @@ impl EventRenderer {
         }
     }
 
-    fn create_live_response_block(&mut self, prompt: &tau_proto::SessionPromptCreated) {
+    fn create_live_response_block(&mut self, prompt: &tau_proto::AgentPromptCreated) {
         use tau_themes::names;
 
         let block = streaming_block(&self.theme, names::AGENT_PENDING, "");
         let id = self.handle.new_block(
-            format!("agent-response-live:{}", prompt.session_prompt_id),
+            format!("agent-response-live:{}", prompt.agent_prompt_id),
             block,
         );
         self.handle.push_above_active(id);
         self.handle.redraw();
         self.prompts
-            .entry(prompt.session_prompt_id.to_string())
+            .entry(prompt.agent_prompt_id.to_string())
             .or_default()
             .response_block_id = Some(id);
     }
@@ -3065,13 +3070,13 @@ impl EventRenderer {
 
     fn handle_provider_prompt_submitted(&mut self, submitted: &tau_proto::ProviderPromptSubmitted) {
         self.prompts
-            .entry(submitted.session_prompt_id.to_string())
+            .entry(submitted.agent_prompt_id.to_string())
             .or_default()
             .started_at = Some(Instant::now());
     }
 
     fn handle_provider_response_updated(&mut self, update: &tau_proto::ProviderResponseUpdated) {
-        let spid = update.session_prompt_id.as_str();
+        let spid = update.agent_prompt_id.as_str();
         self.update_editor_active_prompt(update);
         self.update_live_thinking_block(spid, update.thinking.as_deref());
         self.update_live_response_block(spid, &update.text);
@@ -3118,7 +3123,7 @@ impl EventRenderer {
     fn insert_live_thinking_block(&mut self, spid: &str, block: tau_cli_term::StyledBlock) {
         // Insert the thinking block ABOVE the pending response block in
         // `above_active`. The response block was pushed first (in
-        // SessionPromptCreated), so a plain push would land below it. Briefly
+        // AgentPromptCreated), so a plain push would land below it. Briefly
         // remove the response, push thinking, re-push response — net effect:
         // thinking is at the response's old position and the response moves
         // down by one.
@@ -3171,7 +3176,7 @@ impl EventRenderer {
         &mut self,
         finished: &tau_proto::ProviderResponseFinished,
     ) -> (PromptState, Option<Duration>) {
-        let spid = finished.session_prompt_id.as_str();
+        let spid = finished.agent_prompt_id.as_str();
         // Drain the whole per-prompt state in one shot — every field tracked
         // through the stream is consumed here.
         let prompt_state = self.prompts.remove(spid).unwrap_or_default();

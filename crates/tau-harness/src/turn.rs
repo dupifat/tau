@@ -1,6 +1,6 @@
 //! Minimal global harness gate for session initialization.
 //!
-//! Per-conversation agent/tool progress lives on `Conversation`; this
+//! Per-conversation agent/tool progress lives on `Agent`; this
 //! type only tracks states that genuinely block the whole harness —
 //! currently just per-session setup waiting on extensions.
 
@@ -8,7 +8,7 @@ use tau_proto::{SessionId, SessionStartReason};
 
 /// Global harness state that is not owned by one conversation.
 pub(crate) enum TurnState {
-    /// Normal operation: conversations may dispatch their next prompt
+    /// Normal operation: agents may dispatch their next prompt
     /// as soon as the model is selected and extensions are ready.
     Idle,
     /// Waiting for tool extensions to finish per-session setup

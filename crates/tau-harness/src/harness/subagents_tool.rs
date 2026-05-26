@@ -3,12 +3,11 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use tau_proto::{
-    AgentMessage, CborValue, Event, SessionContextKey, SessionContextValue, ToolBackgroundError,
-    ToolBackgroundResult, ToolCallId, ToolDisplay, ToolError, ToolName, ToolResult, ToolResultKind,
-    ToolType,
+    AgentId, AgentMessageReceived, AgentMessageSent, CborValue, Event, SessionContextKey,
+    SessionContextValue, ToolBackgroundError, ToolBackgroundResult, ToolCallId, ToolDisplay,
+    ToolError, ToolName, ToolResult, ToolResultKind, ToolType,
 };
 
-use crate::conversation::ConversationId;
 use crate::error::HarnessError;
 use crate::harness::{AgentMessageRecipientStatus, AgentToolCall, HARNESS_CONNECTION_ID, Harness};
 
@@ -23,10 +22,10 @@ pub(crate) struct SubagentToolState {
 }
 
 impl SubagentToolState {
-    /// Rewrite conversation ids held by harness-owned sub-agent tool state
-    /// after the harness re-keys a conversation.
-    pub(crate) fn rewrite_conversation_id(&mut self, old: &ConversationId, new: &ConversationId) {
-        self.wait_tracker.rewrite_conversation_id(old, new);
+    /// Rewrite live agent ids held by harness-owned sub-agent tool state after
+    /// the harness re-keys an agent.
+    pub(crate) fn rewrite_agent_id(&mut self, old: &AgentId, new: &AgentId) {
+        self.wait_tracker.rewrite_agent_id(old, new);
     }
 }
 
@@ -122,8 +121,8 @@ impl Harness {
     pub(crate) fn transfer_wait_background_owner_before_teardown(
         &mut self,
         call_id: &ToolCallId,
-        source: &ConversationId,
-        target: &ConversationId,
+        source: &AgentId,
+        target: &AgentId,
     ) {
         self.subagents
             .wait_tracker
@@ -131,23 +130,23 @@ impl Harness {
     }
 
     /// Drop wait ownership for a background call that belongs to a canceled
-    /// side conversation so it cannot become waitable from its parent.
+    /// side agent so it cannot become waitable from its parent.
     pub(crate) fn discard_wait_background_owner_before_teardown(
         &mut self,
         call_id: &ToolCallId,
-        source: &ConversationId,
+        source: &AgentId,
     ) {
         self.subagents
             .wait_tracker
             .discard_call_owner(call_id, source);
     }
 
-    fn wait_owner_for_call(&self, call_id: &ToolCallId) -> ConversationId {
-        self.tool_conversations
+    fn wait_owner_for_call(&self, call_id: &ToolCallId) -> AgentId {
+        self.tool_agents
             .get(call_id)
             .or_else(|| self.background_completion_targets.get(call_id))
             .cloned()
-            .unwrap_or_else(|| self.default_conversation_id.clone())
+            .unwrap_or_else(|| self.default_agent_id.clone())
     }
 
     pub(crate) fn interrupt_active_waits(&mut self) {
@@ -165,15 +164,15 @@ impl Harness {
 
     /// Handle the harness-owned `message` tool call inline.
     /// Publish an agent message after validating sender and recipient state.
-    pub(crate) fn publish_agent_message_from_conversation(
+    pub(crate) fn publish_agent_message_from_agent(
         &mut self,
-        cid: &ConversationId,
+        agent_id: &AgentId,
         recipient_id: String,
         message: String,
     ) -> Result<(), String> {
         let sender_id = self
-            .ensure_agent_id_for_conversation(cid)
-            .ok_or_else(|| "sender conversation no longer exists".to_owned())?;
+            .ensure_agent_id_for_agent(agent_id)
+            .ok_or_else(|| "sender agent no longer exists".to_owned())?;
         if recipient_id != "user" {
             match self.agent_message_recipient_status(&recipient_id) {
                 AgentMessageRecipientStatus::Live => {}
@@ -185,38 +184,58 @@ impl Harness {
                 }
             }
         }
-        let session_id = self
-            .conversations
-            .get(cid)
-            .map(|conv| conv.session_id.clone())
-            .unwrap_or_else(|| self.current_session_id.clone());
-        self.publish_event(
+        let recipient = if recipient_id == "user" {
+            tau_proto::AgentMessageRecipient::User
+        } else {
+            tau_proto::AgentMessageRecipient::Agent {
+                agent_id: recipient_id.into(),
+            }
+        };
+        let message_id = tau_proto::AgentMessageId::from(format!(
+            "msg-{}-{}",
+            sender_id,
+            tau_proto::UnixMicros::now().get()
+        ));
+        let sender_id: tau_proto::AgentId = sender_id.into();
+        self.publish_for_agent_from(
+            agent_id,
             Some(HARNESS_CONNECTION_ID),
-            Event::AgentMessage(AgentMessage {
-                session_id,
-                sender_id,
-                recipient_id,
-                message,
+            Event::AgentMessageSent(AgentMessageSent {
+                message_id: message_id.clone(),
+                sender_id: sender_id.clone(),
+                recipient: recipient.clone(),
+                message: message.clone(),
             }),
         );
+        if let tau_proto::AgentMessageRecipient::Agent { agent_id } = recipient {
+            self.publish_event(
+                Some(HARNESS_CONNECTION_ID),
+                Event::AgentMessageReceived(AgentMessageReceived {
+                    message_id,
+                    sender_id,
+                    recipient_id: agent_id,
+                    message,
+                }),
+            );
+        }
         Ok(())
     }
 
     #[cfg(test)]
     pub(crate) fn handle_message_tool_call(
         &mut self,
-        cid: &ConversationId,
+        agent_id: &AgentId,
         call: &AgentToolCall,
         visible_tool_name: ToolName,
     ) -> Result<(), HarnessError> {
         let call_id: ToolCallId = call.id.clone();
-        self.ensure_harness_owned_tool_tracking(cid, call, &visible_tool_name);
+        self.ensure_harness_owned_tool_tracking(agent_id, call, &visible_tool_name);
         let result = parse_message_args(&call.arguments).and_then(|parsed| {
-            self.publish_agent_message_from_conversation(cid, parsed.recipient_id, parsed.message)
+            self.publish_agent_message_from_agent(agent_id, parsed.recipient_id, parsed.message)
         });
         match result {
             Ok(()) => self.finish_harness_owned_tool_with_result(
-                cid,
+                agent_id,
                 call_id,
                 visible_tool_name,
                 call.tool_type,
@@ -224,7 +243,7 @@ impl Harness {
                 None,
             ),
             Err(message) => self.finish_harness_owned_tool_with_error(
-                cid,
+                agent_id,
                 call_id,
                 visible_tool_name,
                 call.tool_type,
@@ -238,14 +257,14 @@ impl Harness {
     /// Handle the harness-owned `wait` tool call inline.
     pub(crate) fn handle_wait_tool_call(
         &mut self,
-        cid: &ConversationId,
+        agent_id: &AgentId,
         call: &AgentToolCall,
         visible_tool_name: ToolName,
     ) -> Result<(), HarnessError> {
         let call_id: ToolCallId = call.id.clone();
-        self.ensure_harness_owned_tool_tracking(cid, call, &visible_tool_name);
+        self.ensure_harness_owned_tool_tracking(agent_id, call, &visible_tool_name);
         let start = self.subagents.wait_tracker.handle_wait_invoke(
-            cid,
+            agent_id,
             call_id,
             visible_tool_name,
             &call.arguments,
@@ -259,14 +278,14 @@ impl Harness {
 
     pub(crate) fn ensure_harness_owned_tool_tracking(
         &mut self,
-        cid: &ConversationId,
+        cid: &AgentId,
         call: &AgentToolCall,
         visible_tool_name: &ToolName,
     ) {
-        if self.tool_conversations.contains_key(&call.id) {
+        if self.tool_agents.contains_key(&call.id) {
             return;
         }
-        self.tool_conversations.insert(call.id.clone(), cid.clone());
+        self.tool_agents.insert(call.id.clone(), cid.clone());
         self.pending_tools.insert(
             call.id.clone(),
             crate::harness::PendingTool {
@@ -280,7 +299,7 @@ impl Harness {
 
     pub(crate) fn finish_harness_owned_tool_with_result(
         &mut self,
-        cid: &ConversationId,
+        cid: &AgentId,
         call_id: ToolCallId,
         tool_name: ToolName,
         tool_type: ToolType,
@@ -299,7 +318,7 @@ impl Harness {
 
     pub(crate) fn finish_harness_owned_tool_with_cbor_result(
         &mut self,
-        cid: &ConversationId,
+        cid: &AgentId,
         call_id: ToolCallId,
         tool_name: ToolName,
         tool_type: ToolType,
@@ -322,7 +341,7 @@ impl Harness {
 
     pub(crate) fn finish_harness_owned_tool_with_error(
         &mut self,
-        cid: &ConversationId,
+        cid: &AgentId,
         call_id: ToolCallId,
         tool_name: ToolName,
         tool_type: ToolType,
@@ -337,7 +356,7 @@ impl Harness {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn finish_harness_owned_tool_with_display_error(
         &mut self,
-        cid: &ConversationId,
+        cid: &AgentId,
         call_id: ToolCallId,
         tool_name: ToolName,
         tool_type: ToolType,
@@ -362,10 +381,10 @@ impl Harness {
     pub(crate) fn finish_prebuilt_internal_tool_result(&mut self, result: ToolResult) {
         let call_id = result.call_id.clone();
         let owner_cid = self
-            .tool_conversations
+            .tool_agents
             .get(&call_id)
             .cloned()
-            .unwrap_or_else(|| self.default_conversation_id.clone());
+            .unwrap_or_else(|| self.default_agent_id.clone());
         if self.tool_turn.is_backgrounded(&call_id) {
             self.handle_background_tool_result(HARNESS_CONNECTION_ID, result);
         } else {
@@ -378,10 +397,10 @@ impl Harness {
     pub(crate) fn finish_prebuilt_internal_tool_error(&mut self, error: ToolError) {
         let call_id = error.call_id.clone();
         let owner_cid = self
-            .tool_conversations
+            .tool_agents
             .get(&call_id)
             .cloned()
-            .unwrap_or_else(|| self.default_conversation_id.clone());
+            .unwrap_or_else(|| self.default_agent_id.clone());
         if self.tool_turn.is_backgrounded(&call_id) {
             self.handle_background_tool_error(Some(HARNESS_CONNECTION_ID), error);
         } else {
@@ -400,7 +419,7 @@ impl Harness {
                 self.suppress_background_completion_prompt(call_id);
             }
             let wait_call_id = reply.wait_call_id.clone();
-            let Some(cid) = self.tool_conversations.get(&wait_call_id).cloned() else {
+            let Some(cid) = self.tool_agents.get(&wait_call_id).cloned() else {
                 continue;
             };
             match reply.kind {
@@ -627,18 +646,13 @@ struct WaitCancel {
 struct WaitTracker {
     calls: HashMap<ToolCallId, WaitCallState>,
     waiters: HashMap<ToolCallId, WaitRequest>,
-    any_waiters: HashMap<ConversationId, WaitRequest>,
-    call_owners: HashMap<ToolCallId, ConversationId>,
+    any_waiters: HashMap<AgentId, WaitRequest>,
+    call_owners: HashMap<ToolCallId, AgentId>,
     completion_order: VecDeque<ToolCallId>,
 }
 
 impl WaitTracker {
-    fn record_tool_invoke(
-        &mut self,
-        call_id: ToolCallId,
-        tool_name: ToolName,
-        owner: ConversationId,
-    ) {
+    fn record_tool_invoke(&mut self, call_id: ToolCallId, tool_name: ToolName, owner: AgentId) {
         if tool_name.as_str() != WAIT_TOOL_NAME {
             self.call_owners.insert(call_id.clone(), owner);
             self.calls.entry(call_id).or_insert(WaitCallState::Pending);
@@ -647,7 +661,7 @@ impl WaitTracker {
 
     fn handle_wait_invoke(
         &mut self,
-        owner: &ConversationId,
+        owner: &AgentId,
         call_id: ToolCallId,
         tool_name: ToolName,
         arguments: &CborValue,
@@ -733,7 +747,7 @@ impl WaitTracker {
         }
     }
 
-    fn start_any_wait(&mut self, owner: ConversationId, wait: WaitRequest) -> WaitStart {
+    fn start_any_wait(&mut self, owner: AgentId, wait: WaitRequest) -> WaitStart {
         if self.any_waiters.contains_key(&owner) {
             return WaitStart::reply(wait_error_reply(
                 wait.call_id,
@@ -801,7 +815,7 @@ impl WaitTracker {
         }
     }
 
-    fn record_tool_result(&mut self, result: ToolResult, owner: ConversationId) -> Vec<WaitReply> {
+    fn record_tool_result(&mut self, result: ToolResult, owner: AgentId) -> Vec<WaitReply> {
         if result.tool_name.as_str() == WAIT_TOOL_NAME {
             return Vec::new();
         }
@@ -827,7 +841,7 @@ impl WaitTracker {
         Vec::new()
     }
 
-    fn record_tool_error(&mut self, error: ToolError, owner: ConversationId) -> Vec<WaitReply> {
+    fn record_tool_error(&mut self, error: ToolError, owner: AgentId) -> Vec<WaitReply> {
         if error.tool_name.as_str() == WAIT_TOOL_NAME {
             return Vec::new();
         }
@@ -850,7 +864,7 @@ impl WaitTracker {
     fn record_background_result(
         &mut self,
         result: ToolBackgroundResult,
-        owner: ConversationId,
+        owner: AgentId,
     ) -> Vec<WaitReply> {
         if result.tool_name.as_str() == WAIT_TOOL_NAME {
             return Vec::new();
@@ -892,7 +906,7 @@ impl WaitTracker {
     fn record_background_error(
         &mut self,
         error: ToolBackgroundError,
-        owner: ConversationId,
+        owner: AgentId,
     ) -> Vec<WaitReply> {
         if error.tool_name.as_str() == WAIT_TOOL_NAME {
             return Vec::new();
@@ -938,7 +952,7 @@ impl WaitTracker {
             return WaitCancel::default();
         }
 
-        let cancelled_owners: HashSet<ConversationId> = call_ids
+        let cancelled_owners: HashSet<AgentId> = call_ids
             .iter()
             .filter_map(|call_id| self.call_owners.get(call_id).cloned())
             .collect();
@@ -1036,7 +1050,7 @@ impl WaitTracker {
         replies
     }
 
-    fn rewrite_conversation_id(&mut self, old: &ConversationId, new: &ConversationId) {
+    fn rewrite_agent_id(&mut self, old: &AgentId, new: &AgentId) {
         if let Some(wait) = self.any_waiters.remove(old) {
             self.any_waiters.entry(new.clone()).or_insert(wait);
         }
@@ -1047,12 +1061,7 @@ impl WaitTracker {
         }
     }
 
-    fn transfer_call_owner(
-        &mut self,
-        call_id: &ToolCallId,
-        source: &ConversationId,
-        target: &ConversationId,
-    ) {
+    fn transfer_call_owner(&mut self, call_id: &ToolCallId, source: &AgentId, target: &AgentId) {
         if !self.calls.contains_key(call_id) {
             return;
         }
@@ -1064,7 +1073,7 @@ impl WaitTracker {
         }
     }
 
-    fn discard_call_owner(&mut self, call_id: &ToolCallId, source: &ConversationId) {
+    fn discard_call_owner(&mut self, call_id: &ToolCallId, source: &AgentId) {
         if self.call_owners.get(call_id) == Some(source) {
             self.call_owners.remove(call_id);
         }
@@ -1075,7 +1084,7 @@ impl WaitTracker {
             .retain(|completed| completed != call_id);
     }
 
-    fn finish_any_waiter_if_no_candidates(&mut self, owner: &ConversationId) -> Vec<WaitReply> {
+    fn finish_any_waiter_if_no_candidates(&mut self, owner: &AgentId) -> Vec<WaitReply> {
         if self.oldest_completed_for_owner(owner).is_some()
             || self.has_running_background_for_owner(owner)
         {
@@ -1092,14 +1101,14 @@ impl WaitTracker {
         )]
     }
 
-    fn oldest_completed_for_owner(&self, owner: &ConversationId) -> Option<ToolCallId> {
+    fn oldest_completed_for_owner(&self, owner: &AgentId) -> Option<ToolCallId> {
         self.completion_order.iter().find_map(|call_id| {
             (self.call_owners.get(call_id) == Some(owner) && self.is_completed(call_id))
                 .then_some(call_id.clone())
         })
     }
 
-    fn has_running_background_for_owner(&self, owner: &ConversationId) -> bool {
+    fn has_running_background_for_owner(&self, owner: &AgentId) -> bool {
         self.calls.iter().any(|(call_id, state)| {
             matches!(state, WaitCallState::Backgrounded)
                 && self.call_owners.get(call_id) == Some(owner)

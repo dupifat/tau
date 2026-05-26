@@ -63,7 +63,7 @@ impl ChatGptRuntime {
     /// session.
     pub fn stream(
         &self,
-        session_prompt_id: &str,
+        agent_prompt_id: &str,
         config: &responses::ResponsesConfig,
         request: &common::PromptPayload<'_>,
         turn_state: &mut ChatGptTurnState,
@@ -84,7 +84,7 @@ impl ChatGptRuntime {
             match responses::pool::run_turn_through_shared_pool(
                 &self.ws_pool,
                 config,
-                session_prompt_id,
+                agent_prompt_id,
                 &ws_request,
                 should_abort,
                 on_update,
@@ -106,12 +106,7 @@ impl ChatGptRuntime {
                     }
                     let http_request =
                         request_for_transport(request, ProviderBackendTransport::HttpSse);
-                    responses::responses_stream(
-                        session_prompt_id,
-                        config,
-                        &http_request,
-                        on_update,
-                    )?
+                    responses::responses_stream(agent_prompt_id, config, &http_request, on_update)?
                 }
                 Err(other) => {
                     let error = other.into_llm_error();
@@ -141,7 +136,7 @@ impl ChatGptRuntime {
                         let http_request =
                             request_for_transport(request, ProviderBackendTransport::HttpSse);
                         responses::responses_stream(
-                            session_prompt_id,
+                            agent_prompt_id,
                             config,
                             &http_request,
                             on_update,
@@ -153,7 +148,7 @@ impl ChatGptRuntime {
             }
         } else {
             let http_request = request_for_transport(request, ProviderBackendTransport::HttpSse);
-            responses::responses_stream(session_prompt_id, config, &http_request, on_update)?
+            responses::responses_stream(agent_prompt_id, config, &http_request, on_update)?
         };
         let ws_pool_delta = ws_pool_before.and_then(|before| {
             self.ws_pool

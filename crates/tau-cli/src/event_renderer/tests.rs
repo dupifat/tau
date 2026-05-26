@@ -1,12 +1,18 @@
 use super::{AgentActivity, MessageRenderMode, RoleCompletionDetails, role_value_completion};
 
-fn agent_message(sender_id: &str, recipient_id: &str, message: &str) -> tau_proto::AgentMessage {
-    tau_proto::AgentMessage {
-        session_id: "session".into(),
-        sender_id: sender_id.to_owned(),
-        recipient_id: recipient_id.to_owned(),
+fn agent_message(sender_id: &str, recipient: &str, message: &str) -> tau_proto::Event {
+    tau_proto::Event::AgentMessageSent(tau_proto::AgentMessageSent {
+        message_id: format!("msg-{sender_id}-{recipient}").into(),
+        sender_id: sender_id.to_owned().into(),
+        recipient: if recipient == "user" {
+            tau_proto::AgentMessageRecipient::User
+        } else {
+            tau_proto::AgentMessageRecipient::Agent {
+                agent_id: recipient.to_owned().into(),
+            }
+        },
         message: message.to_owned(),
-    }
+    })
 }
 
 /// `/set show-messages` must hide, summarize, or fully render durable
@@ -14,7 +20,6 @@ fn agent_message(sender_id: &str, recipient_id: &str, message: &str) -> tau_prot
 /// privacy modes without needing a terminal renderer fixture.
 #[test]
 fn show_messages_modes_map_user_and_agent_messages() {
-    let user_sender_message = agent_message("user", "agent", "visible body");
     let user_recipient_message = agent_message("agent", "user", "visible body");
     let agent_message = agent_message("agent-a", "agent-b", "private body");
 
@@ -47,10 +52,6 @@ fn show_messages_modes_map_user_and_agent_messages() {
     ];
 
     for (mode, expected_self, expected_agent) in cases {
-        assert_eq!(
-            super::EventRenderer::message_render_mode(mode, &user_sender_message),
-            expected_self
-        );
         assert_eq!(
             super::EventRenderer::message_render_mode(mode, &user_recipient_message),
             expected_self

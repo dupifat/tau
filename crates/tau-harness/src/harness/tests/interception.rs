@@ -345,7 +345,7 @@ fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
     // Regression for a real rostra session failure. A tool result can
     // arrive while an unrelated event is parked in interception. The
     // result publish is deferred, but the intake path still completes
-    // the call immediately and clears `tool_conversations`. The
+    // the call immediately and clears `tool_agents`. The
     // eventual deferred commit must persist to the conversation's
     // session from the publish snapshot, not from now-missing call
     // tracking; otherwise the next LLM prompt contains a tool_use
@@ -354,11 +354,14 @@ fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
     let mut h = echo_harness(tmp.path()).expect("harness");
     let session_id = h.current_session_id.clone();
     h.initialized_sessions.insert(session_id.clone());
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
     let call_id: ToolCallId = "call-read".into();
     let tool_name = ToolName::new("read");
 
-    h.tool_conversations.insert(call_id.clone(), cid.clone());
+    let agent_id = h
+        .ensure_agent_id_for_agent(&cid)
+        .expect("default conversation has an agent id");
+    h.tool_agents.insert(call_id.clone(), cid.clone());
     h.pending_tools.insert(
         call_id.clone(),
         PendingTool {
@@ -367,11 +370,11 @@ fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
             tool_type: tau_proto::ToolType::Function,
         },
     );
-    h.publish_for_conversation(
+    h.publish_for_agent(
         &cid,
         Event::ProviderResponseFinished(ProviderResponseFinished {
-            session_prompt_id: "sp-main".into(),
-            target_agent_id: None,
+            agent_prompt_id: "sp-main".into(),
+            agent_id: agent_id.into(),
             output_items: vec![ContextItem::ToolCall(ToolCallItem {
                 call_id: call_id.clone(),
                 name: tool_name.clone(),
@@ -416,7 +419,7 @@ fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
     )
     .expect("defer tool result");
     assert!(
-        !h.tool_conversations.contains_key(&call_id),
+        !h.tool_agents.contains_key(&call_id),
         "tool call tracking is cleared before the deferred publish commits"
     );
 
@@ -428,11 +431,10 @@ fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
     )
     .expect("intercept reply");
 
-    let tree = h.store.session(session_id.as_str()).expect("session tree");
-    let has_result = tree.current_branch().iter().any(|entry| {
+    let has_result = default_agent_branch(&h).iter().any(|entry| {
         matches!(
             entry,
-            SessionEntry::ToolResults { items }
+            AgentEntry::ToolResults { items }
                 if items.iter().any(|item|
                     item.call_id == call_id && item.status == ToolResultStatus::Success
                 )
@@ -446,7 +448,7 @@ fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
 
 #[test]
 fn interception_drop_of_must_pass_event_is_overridden() {
-    // UiPromptSubmitted is on the MUST_PASS list — even if an
+    // AgentPromptSubmitted is on the MUST_PASS list — even if an
     // interceptor returns Drop, the harness must publish the
     // original event (with a warn).
     let tmp = TempDir::new().expect("tempdir");
@@ -456,7 +458,7 @@ fn interception_drop_of_must_pass_event_is_overridden() {
         "interceptor",
         Frame::Message(Message::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(
-                tau_proto::EventName::UI_PROMPT_SUBMITTED,
+                tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
             )],
             priority: InterceptionPriority::new(0),
         })),
@@ -464,10 +466,9 @@ fn interception_drop_of_must_pass_event_is_overridden() {
     .expect("intercept registration");
     let baseline_seq = h.event_log.next_seq();
 
-    let prompt = Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: "s1".into(),
+    let prompt = Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+        agent_id: "main".into(),
         text: "hello".to_owned(),
-        target_agent_id: None,
         message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
@@ -496,25 +497,22 @@ fn interception_drop_of_session_compacted_is_overridden() {
     h.handle_extension_event(
         "interceptor",
         Frame::Message(Message::Intercept(Intercept {
-            selectors: vec![EventSelector::Exact(
-                tau_proto::EventName::SESSION_COMPACTED,
-            )],
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::AGENT_COMPACTED)],
             priority: InterceptionPriority::new(0),
         })),
     )
     .expect("intercept registration");
     let baseline_seq = h.event_log.next_seq();
 
-    let compacted = Event::SessionCompacted(tau_proto::SessionCompacted {
-        session_id: "s1".into(),
-        target_agent_id: None,
+    let compacted = Event::AgentCompacted(tau_proto::AgentCompacted {
+        agent_id: "main".into(),
         originator: tau_proto::PromptOriginator::User,
         original_input_tokens: None,
         compacted_input_tokens: None,
         replacement_window: vec![ContextItem::Message(MessageItem {
             role: ContextRole::Assistant,
             content: vec![ContentPart::Text {
-                text: "Conversation compacted.".to_owned(),
+                text: "Agent compacted.".to_owned(),
             }],
             phase: None,
         })],
@@ -564,7 +562,7 @@ fn interception_disconnect_mid_reply_publishes_original() {
 
 #[test]
 fn interception_user_prompt_dispatch_waits_for_commit() {
-    // Regression for the "Ready" loop. When `UiPromptSubmitted` is
+    // Regression for the "Ready" loop. When `AgentPromptSubmitted` is
     // held in interception, the harness must not dispatch the agent
     // prompt against the pre-prompt conversation tail — the
     // assembled message list must include the just-committed user
@@ -580,37 +578,37 @@ fn interception_user_prompt_dispatch_waits_for_commit() {
         "interceptor",
         Frame::Message(Message::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(
-                tau_proto::EventName::UI_PROMPT_SUBMITTED,
+                tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
             )],
             priority: InterceptionPriority::new(0),
         })),
     )
     .expect("intercept registration");
 
-    let cid = h.default_conversation_id.clone();
-    let head_before_dispatch = h.conversations.get(&cid).and_then(|c| c.head);
-    let next_sp_before = h.next_session_prompt_id;
+    let cid = h.default_agent_id.clone();
+    let head_before_dispatch = h.agents.get(&cid).and_then(|c| c.head);
+    let next_sp_before = h.next_agent_prompt_id;
 
     // Drive the user-prompt path. The publish parks in interception.
-    h.dispatch_prompt_for_conversation(&cid, "real question".to_owned())
+    h.dispatch_prompt_for_agent(&cid, "real question".to_owned())
         .expect("dispatch");
 
     // While the intercept is in flight: no agent prompt was minted,
     // c.head hasn't moved, and the deferred-dispatch queue contains
     // our cid.
     assert_eq!(
-        h.next_session_prompt_id, next_sp_before,
+        h.next_agent_prompt_id, next_sp_before,
         "agent dispatch must wait until the prompt commits"
     );
     assert_eq!(
-        h.conversations.get(&cid).and_then(|c| c.head),
+        h.agents.get(&cid).and_then(|c| c.head),
         head_before_dispatch,
         "c.head must not advance while the prompt is parked"
     );
     assert_eq!(h.pending_user_prompt_dispatches.len(), 1);
 
     // Reply pass-through. Commit + react fires the deferred
-    // dispatch, and the SessionPromptCreated is built from the
+    // dispatch, and the AgentPromptCreated is built from the
     // updated tree.
     h.handle_extension_event(
         "interceptor",
@@ -622,21 +620,20 @@ fn interception_user_prompt_dispatch_waits_for_commit() {
 
     assert_eq!(h.pending_user_prompt_dispatches.len(), 0);
     assert_eq!(
-        h.next_session_prompt_id,
+        h.next_agent_prompt_id,
         next_sp_before + 1,
         "agent dispatch fires once the prompt commits"
     );
     let head_after = h
-        .conversations
+        .agents
         .get(&cid)
         .and_then(|c| c.head)
         .expect("c.head advanced");
-    let tree = h.store.session(session_id.as_str()).expect("session tree");
-    let entry = tree.node(head_after).expect("head node");
+    let entry = default_agent_node(&h, head_after);
     assert!(
         matches!(
             &entry.entry,
-            SessionEntry::UserInput { items }
+            AgentEntry::UserInput { items }
                 if matches!(
                     items.as_slice(),
                     [ContextItem::Message(MessageItem {
@@ -669,22 +666,27 @@ fn interception_mutating_prompt_reaches_agent() {
         "interceptor",
         Frame::Message(Message::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(
-                tau_proto::EventName::UI_PROMPT_SUBMITTED,
+                tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
             )],
             priority: InterceptionPriority::new(0),
         })),
     )
     .expect("intercept registration");
 
-    let cid = h.default_conversation_id.clone();
-    h.dispatch_prompt_for_conversation(&cid, "I love Tao".to_owned())
+    let cid = h.default_agent_id.clone();
+    h.dispatch_prompt_for_agent(&cid, "I love Tao".to_owned())
         .expect("dispatch");
 
     // Interceptor replies with the mutated event.
-    let mutated = Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: session_id.clone(),
+    let agent_id = h
+        .agents
+        .get(&cid)
+        .and_then(|conv| conv.agent_id.as_ref())
+        .expect("prompt publish assigned an agent id")
+        .clone();
+    let mutated = Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+        agent_id: agent_id.into(),
         text: "I love Tau".to_owned(),
-        target_agent_id: None,
         message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
@@ -701,16 +703,15 @@ fn interception_mutating_prompt_reaches_agent() {
     // c.head points at it (see `interception_user_prompt_dispatch_
     // waits_for_commit` for the dispatch-side assertion).
     let head = h
-        .conversations
+        .agents
         .get(&cid)
         .and_then(|c| c.head)
         .expect("c.head advanced");
-    let tree = h.store.session(session_id.as_str()).expect("session tree");
-    let entry = tree.node(head).expect("head node");
+    let entry = default_agent_node(&h, head);
     assert!(
         matches!(
             &entry.entry,
-            SessionEntry::UserInput { items }
+            AgentEntry::UserInput { items }
                 if matches!(
                     items.as_slice(),
                     [ContextItem::Message(MessageItem {
@@ -725,11 +726,11 @@ fn interception_mutating_prompt_reaches_agent() {
 }
 
 #[test]
-fn publish_for_conversation_does_not_emit_navigate_tree() {
+fn publish_for_agent_does_not_emit_navigate_tree() {
     // Phase 4: cross-conversation publishes used to bounce
     // `tree.head()` via a `UiNavigateTree` event before folding the
     // real event. With explicit-parent folds in
-    // `SessionTree::apply_event_at`, the bounce is gone — the harness
+    // `AgentTree::apply_event_at`, the bounce is gone — the harness
     // stamps the conversation's `head` directly.
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");
@@ -737,14 +738,14 @@ fn publish_for_conversation_does_not_emit_navigate_tree() {
     h.initialized_sessions.insert(session_id.clone());
 
     let baseline_seq = h.event_log.next_seq();
-    let cid = h.default_conversation_id.clone();
+    let cid = h.default_agent_id.clone();
 
     // Two prompts in a row on the same conversation. Either would
-    // historically have caused `publish_for_conversation_from` to
+    // historically have caused `publish_for_agent_from` to
     // bounce `tree.head()` via `UiNavigateTree`.
-    h.dispatch_prompt_for_conversation(&cid, "first".to_owned())
+    h.dispatch_prompt_for_agent(&cid, "first".to_owned())
         .expect("first dispatch");
-    h.dispatch_prompt_for_conversation(&cid, "second".to_owned())
+    h.dispatch_prompt_for_agent(&cid, "second".to_owned())
         .expect("second dispatch");
 
     let mut navigates = 0;
@@ -753,7 +754,7 @@ fn publish_for_conversation_does_not_emit_navigate_tree() {
     while let Some(entry) = h.event_log.get_next_from(id) {
         match &entry.event {
             Event::UiNavigateTree(_) => navigates += 1,
-            Event::UiPromptSubmitted(_) => user_msgs += 1,
+            Event::AgentPromptSubmitted(_) => user_msgs += 1,
             _ => {}
         }
         id = entry.seq + 1;

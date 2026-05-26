@@ -241,8 +241,8 @@ pub struct LogEvent {
 /// delivery metadata.
 ///
 /// The inner `event` is the fact that subscribers see. `transient`
-/// controls whether the harness writes it to durable per-session
-/// event history; it is not part of the emitted fact itself.
+/// controls whether the harness writes eligible semantic facts to durable
+/// session or agent event history; it is not part of the emitted fact itself.
 ///
 /// `Emit` is strictly for emitting fresh events. Interceptor replies
 /// — including the optionally-mutated event — go through
@@ -289,19 +289,19 @@ pub struct InterceptReply {
     pub action: InterceptAction,
 }
 
-/// Request a materialized full `session.prompt_created` payload by id.
+/// Request a materialized full `agent.prompt_created` payload by id.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct GetSessionPromptCreated {
+pub struct GetAgentPromptCreated {
     pub request_id: String,
-    pub session_prompt_id: crate::SessionPromptId,
+    pub agent_prompt_id: crate::AgentPromptId,
 }
 
-/// Response to [`GetSessionPromptCreated`].
+/// Response to [`GetAgentPromptCreated`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct SessionPromptCreatedResult {
+pub struct AgentPromptCreatedResult {
     pub request_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<crate::SessionPromptCreated>,
+    pub prompt: Option<crate::AgentPromptCreated>,
 }
 
 /// Request that the harness render the effective system prompt for one role.
@@ -383,8 +383,8 @@ pub enum Message {
     Emit(Emit),
     InterceptRequest(InterceptRequest),
     InterceptReply(InterceptReply),
-    GetSessionPromptCreated(GetSessionPromptCreated),
-    SessionPromptCreatedResult(Box<SessionPromptCreatedResult>),
+    GetAgentPromptCreated(GetAgentPromptCreated),
+    AgentPromptCreatedResult(Box<AgentPromptCreatedResult>),
     GetRenderedSystemPrompt(GetRenderedSystemPrompt),
     RenderedSystemPromptResult(Box<RenderedSystemPromptResult>),
     GetRenderedToolDefinitions(GetRenderedToolDefinitions),

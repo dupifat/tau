@@ -256,7 +256,7 @@ where
         .subscribe([
             tau_proto::EventName::PROVIDER_PROMPT_SUBMITTED,
             tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
-            tau_proto::EventName::UI_PROMPT_SUBMITTED,
+            tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
             // Trailing-edge debounced typing pings from the UI:
             // bumps the idle deadline so the desktop notification
             // doesn't fire while the user is mid-sentence.
@@ -306,8 +306,8 @@ where
     let mut waiting_for_final_response = false;
     let mut turn_end_emitted = false;
     let mut final_response_pending_background_tools = false;
-    let mut pending_final_response_prompt: Option<tau_proto::SessionPromptId> = None;
-    let mut completed_response_prompts: HashSet<tau_proto::SessionPromptId> = HashSet::new();
+    let mut pending_final_response_prompt: Option<tau_proto::AgentPromptId> = None;
+    let mut completed_response_prompts: HashSet<tau_proto::AgentPromptId> = HashSet::new();
     let mut active_background_tools: HashSet<tau_proto::ToolCallId> = HashSet::new();
     let mut next_query_id: u64 = 0;
     loop {
@@ -401,7 +401,7 @@ where
                     Event::ProviderPromptSubmitted(_submitted) => {
                         idle = None;
                     }
-                    Event::UiPromptSubmitted(prompt) => {
+                    Event::AgentPromptSubmitted(prompt) => {
                         idle = None;
                         if prompt.message_class.is_internal() {
                             tracing::trace!(target: LOG_TARGET, "skipping internal prompt submit");
@@ -460,10 +460,10 @@ where
                             );
                             continue;
                         }
-                        if completed_response_prompts.contains(&finished.session_prompt_id) {
+                        if completed_response_prompts.contains(&finished.agent_prompt_id) {
                             tracing::trace!(
                                 target: LOG_TARGET,
-                                session_prompt_id = %finished.session_prompt_id,
+                                agent_prompt_id = %finished.agent_prompt_id,
                                 "skipping already-completed response",
                             );
                             continue;
@@ -480,10 +480,10 @@ where
                                 &mut idle,
                                 idle_duration,
                             )?;
-                            completed_response_prompts.insert(finished.session_prompt_id);
+                            completed_response_prompts.insert(finished.agent_prompt_id);
                         } else {
                             final_response_pending_background_tools = true;
-                            pending_final_response_prompt = Some(finished.session_prompt_id);
+                            pending_final_response_prompt = Some(finished.agent_prompt_id);
                             tracing::debug!(
                                 target: LOG_TARGET,
                                 active_background_tools = active_background_tools.len(),
@@ -600,7 +600,6 @@ where
                         writer.write_frame(&Frame::Event(Event::StartAgentRequest(
                             StartAgentRequest {
                                 query_id: query_id.clone(),
-                                agent_id: format!("notifications-{query_id}"),
                                 instruction: SUMMARY_INSTRUCTION.to_owned(),
                                 role: None,
                                 execution_mode: tau_proto::ToolExecutionMode::Shared,
@@ -729,8 +728,8 @@ fn is_sub_agent_event(event: &Event) -> bool {
         Event::ProviderPromptSubmitted(s) => !s.originator.is_user(),
         Event::ProviderResponseUpdated(u) => !u.originator.is_user(),
         Event::ProviderResponseFinished(f) => !f.originator.is_user(),
-        Event::UiPromptSubmitted(p) => !p.originator.is_user(),
-        Event::SessionPromptCreated(p) => !p.originator.is_user(),
+        Event::AgentPromptSubmitted(p) => !p.originator.is_user(),
+        Event::AgentPromptCreated(p) => !p.originator.is_user(),
         _ => false,
     }
 }

@@ -221,9 +221,9 @@ The model-visible tool name is `email`. Commands are selected through the `comma
 - `trash`
 - `send`
 
-`list_recent` accepts optional `account`, `folder`, `limit`, `cursor`, and `days`; `days` defaults to 7. `list_by_uid` accepts optional `account`, `folder`, `limit`, and `cursor`. List-style commands return a `format` header and one line per listed item. `read`, `request_full`, `mark_read`, `mark_unread`, `star`, `unstar`, and `trash` take the same `account`/`folder`/`uid` target. `request_full` creates or reuses a pending incoming approval so the user can decide whether the agent may read the full message. Message-management commands do not require content approval. `trash` moves the message to the account's IMAP Trash mailbox.
+`list_recent` accepts optional `account`, `folder`, `limit`, `cursor`, and `days`; omitted `account` and `folder` default to the first configured account and INBOX, and `days` defaults to 7. `list_by_uid` accepts optional `account`, `folder`, `limit`, and `cursor` with the same account/folder defaults. List-style commands return a `format` header and one line per listed item. `read`, `request_full`, `mark_read`, `mark_unread`, `star`, `unstar`, and `trash` take the same `account`/`folder`/`uid` target and default omitted account/folder the same way. `request_full` creates or reuses a pending incoming approval so the user can decide whether the agent may read the full message. Message-management commands do not require content approval. `trash` moves the message to the account's IMAP Trash mailbox.
 
-Use `list_accounts` first when the account id is not known.
+Use `list_accounts` to inspect configured account ids; normal single-account use can omit `account`.
 
 
 ## User approval actions

@@ -4465,7 +4465,7 @@ fn email_tool_spec() -> ToolSpec {
     ToolSpec {
         name: tau_proto::ToolName::new(TOOL_NAME),
         model_visible_name: None,
-        description: Some("Controlled email access through configured accounts. Use command=list_accounts first if unsure. Commands: list_accounts (no args, line-oriented), list_folders (optional account, line-oriented), list_recent (optional account/folder/limit/days, defaults to first account/INBOX/100/7 and searches by IMAP internal date), list_by_uid (optional account/folder/limit/cursor, pages by descending UID), read (uid required; account/folder optional, default to first account/INBOX), request_full (same target as read; asks the user to approve full content), mark_read, mark_unread, star, unstar, trash, send. List results are line-oriented and include a format header. request_full and sends can require approval; message-management commands do not.".to_owned()),
+        description: Some("Controlled email access through configured accounts. Omit account/folder to use the first configured account and INBOX. Commands: list_accounts (no args, line-oriented), list_folders (optional account, line-oriented), list_recent (optional account/folder/limit/days, defaults to first account/INBOX/100/7 and searches by IMAP internal date), list_by_uid (optional account/folder/limit/cursor, pages by descending UID), read (uid required; account/folder optional, default to first account/INBOX), request_full (same target as read; asks the user to approve full content), mark_read, mark_unread, star, unstar, trash, send. List results are line-oriented and include a format header. request_full and sends can require approval; message-management commands do not.".to_owned()),
         tool_type: tau_proto::ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
@@ -4477,7 +4477,7 @@ fn email_tool_spec() -> ToolSpec {
                 },
                 "args": {
                     "type": "object",
-                    "description": "Command arguments. Use {} for list_accounts. For list_folders account is optional. For list_recent, account/folder/limit/days are optional and default to first configured account, INBOX, 100, and 7. For list_by_uid, account/folder/limit/cursor are optional. For read, request_full, mark_read, mark_unread, star, unstar, and trash, uid is required while account/folder default to first configured account and INBOX.",
+                    "description": "Command arguments. May be omitted when every command argument has a default. Use {} for list_accounts when args is present. For list_folders account is optional. For list_recent, account/folder/limit/days are optional and default to first configured account, INBOX, 100, and 7. For list_by_uid, account/folder/limit/cursor are optional. For read, request_full, mark_read, mark_unread, star, unstar, and trash, uid is required while account/folder default to first configured account and INBOX.",
                     "properties": {
                         "account": {"type": "string", "description": "Configured account id. Optional for list_folders, list_recent, list_by_uid, read, request_full, mark_read, mark_unread, star, unstar, trash, and send; defaults to the first configured account."},
                         "folder": {"type": "string", "description": "Mailbox folder. Optional for list_recent, list_by_uid, read, request_full, mark_read, mark_unread, star, unstar, and trash; defaults to INBOX."},
@@ -4497,7 +4497,7 @@ fn email_tool_spec() -> ToolSpec {
                     "additionalProperties": false
                 }
             },
-            "required": ["command", "args"],
+            "required": ["command"],
             "additionalProperties": false
         })),
         format: None,
@@ -4906,7 +4906,7 @@ fn parse_command_envelope(arguments: &CborValue) -> Result<CommandEnvelope<'_>, 
     };
     let mut seen = BTreeSet::new();
     let command = required_string(entries, &mut seen, "command", None)?;
-    let args = required_object(entries, &mut seen, "args", Some(&command))?;
+    let args = optional_object(entries, &mut seen, "args", Some(&command))?.unwrap_or(&[]);
     reject_extra(entries, &seen, Some(&command))?;
     Ok((command, args))
 }
@@ -5247,23 +5247,19 @@ fn reject_non_empty_array(
         None => Ok(()),
     }
 }
-fn required_object<'a>(
+fn optional_object<'a>(
     entries: &'a [(CborValue, CborValue)],
     seen: &mut BTreeSet<String>,
     name: &str,
     command: Option<&str>,
-) -> Result<&'a [(CborValue, CborValue)], CborValue> {
+) -> Result<Option<&'a [(CborValue, CborValue)]>, CborValue> {
     match field(entries, seen, name, command)? {
-        Some(CborValue::Map(values)) => Ok(values),
+        Some(CborValue::Map(values)) => Ok(Some(values)),
+        Some(CborValue::Null) | None => Ok(None),
         Some(_) => Err(error_envelope(
             command,
             "invalid_input",
             &format!("`{name}` must be an object"),
-        )),
-        None => Err(error_envelope(
-            command,
-            "invalid_input",
-            &format!("missing `{name}`"),
         )),
     }
 }

@@ -157,7 +157,7 @@ Advice:
 Incoming reads:
 
 - `email.list_accounts` and `email.list_folders` return a `format` header plus one line per account/folder.
-- `email.list_recent` shows recent messages from IMAP internal-date search; `email.list_by_uid` shows raw UID-ordered pages. Both return a `format` header plus one line per message, redact untrusted message details, and include `access=full|preview|none`.
+- `email.list_recent` shows recent messages from IMAP internal-date search; omit `account`/`folder` to use the first configured account and INBOX. `email.list_by_uid` shows raw UID-ordered pages with the same account/folder defaults. Both return a `format` header plus one line per message, redact untrusted message details, and include `access=full|preview|none`.
 - `email.read` returns full body content only when access is `full`, meaning policy passes or an exact incoming approval exists. Agent-visible read bodies are simplified and wrapped in `<external_unstrusted_message>...</external_unstrusted_message>`.
 - For `preview` access, `email.read` returns only a heavily stripped `body_preview`: HTML removed, links replaced with `LINK`, and only ASCII letters/digits, spaces, commas, and periods inside the wrapper. It does not ask the user for approval.
 - Use `email.request_full` for a preview/none message only when the preview or metadata justifies asking the user. Then use `/email in list`, `/email in open <id>`, and `/email in approve <id> [id...]`.

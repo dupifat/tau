@@ -388,6 +388,10 @@ fn command_args(command: &str, args: Vec<(&str, CborValue)>) -> CborValue {
     ])
 }
 
+fn command_without_args(command: &str) -> CborValue {
+    cbor_map(vec![("command", CborValue::Text(command.to_owned()))])
+}
+
 fn tool_started(command: &str, args: Vec<(&str, CborValue)>) -> ToolStarted {
     ToolStarted {
         call_id: tau_proto::ToolCallId::from("call-1"),
@@ -450,7 +454,11 @@ fn registers_single_email_tool() {
     assert_eq!(tool.name.as_str(), TOOL_NAME);
     assert_eq!(tool.execution_mode, ToolExecutionMode::Exclusive);
     assert!(!tool.enabled_by_default);
-    assert!(tool.parameters.is_some());
+    let parameters = tool.parameters.expect("parameters");
+    assert_eq!(
+        parameters.pointer("/required").expect("required"),
+        &serde_json::json!(["command"])
+    );
 }
 
 #[test]
@@ -678,7 +686,7 @@ fn list_accounts_returns_config_without_secrets_and_folders_are_whitelisted() {
 }
 
 #[test]
-fn omitted_read_scope_defaults_to_first_account_inbox_and_limit_100() {
+fn omitted_tool_scope_defaults_to_first_account_inbox_and_limit_100() {
     // Local models often omit obvious list/read scope arguments. Keep the
     // parser permissive and resolve omitted account at execution time so the
     // default follows configuration order instead of lexical map order.
@@ -702,6 +710,21 @@ fn omitted_read_scope_defaults_to_first_account_inbox_and_limit_100() {
         &CborValue::Text("INBOX".to_owned())
     );
     let CborValue::Array(messages) = data_field(&listed, "messages") else {
+        panic!("messages")
+    };
+    assert_eq!(messages.len(), 2);
+
+    let recent = engine
+        .dispatch(parse_command(&command_args("list_recent", vec![])).expect("parse recent list"));
+    assert_eq!(
+        data_field(&recent, "account"),
+        &CborValue::Text("work".to_owned())
+    );
+    assert_eq!(
+        data_field(&recent, "folder"),
+        &CborValue::Text("INBOX".to_owned())
+    );
+    let CborValue::Array(messages) = data_field(&recent, "messages") else {
         panic!("messages")
     };
     assert_eq!(messages.len(), 2);
@@ -3327,6 +3350,16 @@ fn parser_accepts_and_rejects_command_shapes() {
             limit: DEFAULT_LIST_LIMIT,
             cursor: None,
             days: 3
+        }
+    );
+    assert_eq!(
+        parse_command(&command_without_args("list_recent")).expect("list_recent args default"),
+        EmailCommand::ListRecent {
+            account: String::new(),
+            folder: DEFAULT_FOLDER.to_owned(),
+            limit: DEFAULT_LIST_LIMIT,
+            cursor: None,
+            days: DEFAULT_RECENT_DAYS
         }
     );
     assert_eq!(

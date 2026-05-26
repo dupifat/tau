@@ -258,11 +258,11 @@ fn read_daemon_output_since(path: &Path, start_offset: u64) -> io::Result<String
 
 /// Spawns a new harness daemon and waits for its socket to be ready.
 ///
-/// Synchronization is via an inherited pipe rather than a polling
-/// loop: a `pipe2` is created with the read end retained by the parent
-/// and the write end inherited by the child. The harness writes one
-/// byte and closes its end once the socket is bound and the runtime
-/// markers are in place (see [`runtime_dir::signal_ready_to_parent`]);
+/// Synchronization is via a pipe wired to the child process's stdin rather
+/// than a polling loop: the read end is retained by the parent and the write
+/// end is passed to the child. The harness writes one byte and closes its end
+/// once the socket is bound and the runtime markers are in place (see
+/// [`runtime_dir::signal_ready_to_parent`]);
 /// the parent blocks on `read_exact` until that byte arrives. EOF
 /// without a byte means the child exited early — we reap it and
 /// surface its captured output.
@@ -274,12 +274,10 @@ fn start_daemon(
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
     extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
 ) -> Result<DaemonHandle, CliError> {
-    use std::os::fd::FromRawFd;
-
     let tau_binary = std::env::current_exe()?;
     tracing::debug!(target: "tau_cli::startup", tau_binary = %tau_binary.display(), session_id, "spawning harness daemon");
 
-    let ReadyPipe { read_fd, write_fd } = ReadyPipe::create()?;
+    let (mut read_pipe, write_pipe) = io::pipe()?;
 
     let spawn_result = build_daemon_command(DaemonCommandSpec {
         tau_binary: &tau_binary,
@@ -287,34 +285,19 @@ fn start_daemon(
         session_status,
         stdout: output.stdout,
         stderr: output.stderr,
-        write_fd,
+        stdin: Stdio::from(write_pipe),
         startup_role,
         role_cli_overrides,
         extension_cli_overrides,
     })
     .spawn();
 
-    // Parent never writes to the pipe; close our copy of the write end
-    // so the only remaining handle is the child's, and the read end
-    // will see EOF as soon as the child exits.
-    ReadyPipe::close_fd(write_fd);
-
-    let mut child = match spawn_result {
-        Ok(child) => child,
-        Err(e) => {
-            ReadyPipe::close_fd(read_fd);
-            return Err(e.into());
-        }
-    };
+    let mut child = spawn_result?;
 
     tracing::debug!(target: "tau_cli::startup", pid = child.id(), "harness daemon spawned");
     let daemon_dir = runtime_dir::root_runtime_dir().join(child.id().to_string());
     let started_at = Instant::now();
 
-    // SAFETY: read_fd was created above and not closed; ownership is
-    // transferred to this File which closes it on drop.
-    #[allow(unsafe_code)]
-    let mut read_pipe = unsafe { std::fs::File::from_raw_fd(read_fd) };
     let mut byte = [0u8; 1];
     match read_pipe.read_exact(&mut byte) {
         Ok(()) => {
@@ -325,9 +308,8 @@ fn start_daemon(
             })
         }
         Err(_eof_or_err) => {
-            // Read end closed without a byte. Either the child exited
-            // before signaling ready, or its pre_exec failed. Reap it
-            // either way so we can surface the captured stderr.
+            // Read end closed without a byte. The child exited before
+            // signaling ready. Reap it so we can surface the captured stderr.
             let status = child.wait()?;
             tracing::debug!(target: "tau_cli::startup", pid = child.id(), %status, elapsed_ms = started_at.elapsed().as_millis(), "harness daemon exited before signaling ready");
             let captured = read_daemon_output_since(&output.log_path, output.start_offset)?;
@@ -347,18 +329,15 @@ struct DaemonCommandSpec<'a> {
     session_status: SessionLaunchStatus,
     stdout: Stdio,
     stderr: Stdio,
-    write_fd: libc::c_int,
+    stdin: Stdio,
     startup_role: Option<&'a str>,
     role_cli_overrides: &'a [tau_config::settings::RoleCliOverride],
     extension_cli_overrides: &'a [tau_config::settings::ExtensionCliOverride],
 }
 
-/// Build the `tau ext harness` command with the readiness-pipe write fd
-/// arranged to survive `execve`. Splitting this out keeps the unsafe
-/// `pre_exec` block isolated from [`start_daemon`]'s control flow.
+/// Build the `tau ext harness` command with the readiness-pipe write end wired
+/// to the child's stdin.
 fn build_daemon_command(spec: DaemonCommandSpec<'_>) -> Command {
-    use std::os::unix::process::CommandExt;
-
     let mut cmd = Command::new(spec.tau_binary);
     cmd.arg("ext")
         .arg("harness")
@@ -368,10 +347,7 @@ fn build_daemon_command(spec: DaemonCommandSpec<'_>) -> Command {
         // here; the harness child now reads its own `built` snapshot
         // (see `tau_harness::version::export_to_env`) and publishes
         // them to its own environment instead.
-        .env(
-            tau_harness::runtime_dir::READY_FD_ENV,
-            spec.write_fd.to_string(),
-        )
+        .env(tau_harness::runtime_dir::READY_FD_ENV, "0")
         // Default-enable info logging in the child process so `tau`
         // captures harness logs without requiring an env var. Users
         // can still override/filter with `TAU_LOG`.
@@ -381,7 +357,7 @@ fn build_daemon_command(spec: DaemonCommandSpec<'_>) -> Command {
                 "tau_harness=info,tau_cli=info,provider-builtin=info".to_owned()
             }),
         )
-        .stdin(Stdio::null())
+        .stdin(spec.stdin)
         .stdout(spec.stdout)
         .stderr(spec.stderr);
 
@@ -402,55 +378,5 @@ fn build_daemon_command(spec: DaemonCommandSpec<'_>) -> Command {
         );
     }
 
-    // Safety: `pre_exec` runs in the forked child between `fork` and
-    // `execve`. We only call `fcntl` (signal-safe) and only on the fd
-    // we created ourselves. Clearing `FD_CLOEXEC` is required so the
-    // descriptor survives `execve` into the harness binary.
-    #[allow(unsafe_code)]
-    unsafe {
-        cmd.pre_exec(move || {
-            let flags = libc::fcntl(spec.write_fd, libc::F_GETFD);
-            if flags == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            if libc::fcntl(spec.write_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
     cmd
-}
-
-/// A `pipe2(O_CLOEXEC)` pair created for the parent↔child readiness
-/// handshake. The read end is retained by the parent, the write end is
-/// passed to the child via the [`runtime_dir::READY_FD_ENV`] env var.
-struct ReadyPipe {
-    read_fd: libc::c_int,
-    write_fd: libc::c_int,
-}
-
-impl ReadyPipe {
-    fn create() -> io::Result<Self> {
-        let mut fds = [0 as libc::c_int; 2];
-        // Safety: we pass a valid 2-element array to `pipe2`; on success
-        // it writes two new fds owned by this process.
-        #[allow(unsafe_code)]
-        let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
-        if rc != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(Self {
-            read_fd: fds[0],
-            write_fd: fds[1],
-        })
-    }
-
-    fn close_fd(fd: libc::c_int) {
-        // Safety: each fd is closed at most once across this module.
-        #[allow(unsafe_code)]
-        unsafe {
-            libc::close(fd);
-        }
-    }
 }

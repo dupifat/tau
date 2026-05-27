@@ -2223,7 +2223,7 @@ mod role_cycle_tests {
 
     #[test]
     fn agent_mention_completer_offers_only_active_agents() {
-        // Prompt-text `&agent` completion is for routing to active agents. It
+        // Prompt-text `@agent` completion is for routing to active agents. It
         // must not suggest suspended agents even though `/agent resume` does.
         let known = Arc::new(Mutex::new(vec!["helper".to_owned(), "worker".to_owned()]));
         let live = Arc::new(Mutex::new(std::collections::HashSet::from([

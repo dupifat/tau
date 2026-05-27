@@ -198,7 +198,7 @@ impl CompletionData {
     }
 
     /// Registers prompt-text completion for active agent mentions typed as
-    /// `&<partial-agent-id>`.
+    /// `@<partial-agent-id>`.
     pub fn set_agent_mention_completer(&self, completer: ArgCompleter) {
         self.inner
             .lock()
@@ -338,7 +338,7 @@ fn agent_mention_token(buffer: &str, cursor: usize) -> Option<PathToken<'_>> {
         .find_map(|(idx, ch)| ch.is_whitespace().then_some(cursor + idx))
         .unwrap_or(buffer.len());
     let prefix = &buffer[token_start..cursor];
-    prefix.starts_with('&').then_some(PathToken {
+    prefix.starts_with('@').then_some(PathToken {
         prefix,
         before: &buffer[..token_start],
         after: &buffer[token_end..],
@@ -349,13 +349,13 @@ fn build_agent_mention_candidates(data: &CompletionData, token: &PathToken<'_>) 
     let Some(completer) = data.get_agent_mention_completer() else {
         return Vec::new();
     };
-    let partial = token.prefix.strip_prefix('&').unwrap_or(token.prefix);
+    let partial = token.prefix.strip_prefix('@').unwrap_or(token.prefix);
     completer(&[partial])
         .into_iter()
         .map(|item| Candidate {
             label: item.value.clone(),
             description: item.description.clone(),
-            replacement: format!("{}&{}{}", token.before, item.value, token.after),
+            replacement: format!("{}@{}{}", token.before, item.value, token.after),
         })
         .collect()
 }

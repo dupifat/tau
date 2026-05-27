@@ -1859,7 +1859,7 @@ impl EventRenderer {
                 &mut themed,
                 role_style,
                 &mut needs_space,
-                format!("&{agent_id}"),
+                format!("@{agent_id}"),
             ),
             (None, Some(role), _) => push_status_chip(
                 &mut themed,
@@ -1947,7 +1947,7 @@ impl EventRenderer {
                 &mut right_themed,
                 agents_style,
                 &mut right_needs_space,
-                format!("&{active_agents}"),
+                format!("@{active_agents}"),
             );
         }
         if let Some(context) = self.context_status_chip() {

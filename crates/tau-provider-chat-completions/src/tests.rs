@@ -29,6 +29,7 @@ fn prompt() -> tau_proto::AgentPromptCreated {
     tau_proto::AgentPromptCreated {
         agent_prompt_id: "ap-test".into(),
         agent_id: "agent-test".into(),
+        session_id: "session-test".into(),
         system_prompt: String::new(),
         context_items: vec![ContextItem::Message(tau_proto::MessageItem {
             role: ContextRole::User,

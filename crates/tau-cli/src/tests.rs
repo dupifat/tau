@@ -308,10 +308,11 @@ fn assistant_message_item(text: impl Into<String>) -> ContextItem {
     })
 }
 
-fn agent_prompt_created(agent_prompt_id: &str, _session_id: &str) -> AgentPromptCreated {
+fn agent_prompt_created(agent_prompt_id: &str, session_id: &str) -> AgentPromptCreated {
     AgentPromptCreated {
         agent_prompt_id: agent_prompt_id.into(),
         agent_id: "main".into(),
+        session_id: session_id.into(),
         system_prompt: String::new(),
         context_items: Vec::new(),
         tools: Vec::new(),

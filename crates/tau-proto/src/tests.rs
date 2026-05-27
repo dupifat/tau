@@ -171,6 +171,7 @@ fn representative_events() -> Vec<Event> {
             prompt: AgentPromptCreated {
                 agent_prompt_id: "sp-compact-1".into(),
                 agent_id: "engineer_abcd1234".into(),
+                session_id: "session_123".into(),
                 system_prompt: "You are helpful.".to_owned(),
                 context_items: vec![user_text_item("compact this")],
                 tools: Vec::new(),
@@ -190,6 +191,7 @@ fn representative_events() -> Vec<Event> {
         Event::AgentPromptCreated(AgentPromptCreated {
             agent_prompt_id: "sp-1".into(),
             agent_id: "engineer_abcd1234".into(),
+            session_id: "session_123".into(),
             system_prompt: "You are helpful.".to_owned(),
             context_items: vec![user_text_item("hello")],
             tools: vec![ToolDefinition {

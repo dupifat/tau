@@ -2218,6 +2218,8 @@ pub struct AgentPromptCreated {
     pub agent_prompt_id: AgentPromptId,
     /// Agent transcript this prompt belongs to.
     pub agent_id: AgentId,
+    /// Session where this request was first made.
+    pub session_id: SessionId,
     /// System prompt sent alongside the item timeline.
     pub system_prompt: String,
     /// Fully materialized context items for this turn.
@@ -2326,6 +2328,7 @@ pub struct AgentCompactionRequested {
 pub struct AgentPromptPrewarmRequested {
     /// Agent whose prompt prefix should be warmed.
     pub agent_id: AgentId,
+    pub session_id: SessionId,
     pub system_prompt: String,
     pub context_items: Vec<ContextItem>,
     pub tools: Vec<ToolDefinition>,

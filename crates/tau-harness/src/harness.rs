@@ -2951,9 +2951,10 @@ impl Harness {
         let prompt = self
             .prompt_snapshots
             .get(&request.agent_prompt_id)
+            .filter(|prompt| prompt.session_id == request.session_id)
             .cloned()
             .or_else(|| {
-                self.read_agent_prompt_created(&request.agent_prompt_id)
+                self.read_agent_prompt_created(&request.session_id, &request.agent_prompt_id)
                     .ok()
             });
         let _ = self.bus.send_to(
@@ -7667,6 +7668,12 @@ impl Harness {
                 },
             );
         }
+        let session_id = self
+            .agents
+            .get(cid)
+            .expect("agent still exists")
+            .session_id
+            .clone();
         let agent_id: tau_proto::AgentId = if is_compaction_request {
             self.pending_compactions
                 .get(cid)
@@ -7680,6 +7687,7 @@ impl Harness {
         let prompt = AgentPromptCreated {
             agent_prompt_id: agent_prompt_id.clone(),
             agent_id,
+            session_id,
             system_prompt,
             context_items,
             tools,
@@ -9568,7 +9576,8 @@ impl Harness {
         );
 
         let prompt_id = harness.send_prompt_to_agent_for(&cid);
-        let prompt = harness.read_agent_prompt_created(&prompt_id)?;
+        let session_id = harness.agents[&cid].session_id.clone();
+        let prompt = harness.read_agent_prompt_created(&session_id, &prompt_id)?;
         let mut out = String::new();
         out.push_str("================ MODEL / EFFORT ================\n");
         out.push_str(&format!(
@@ -9612,6 +9621,7 @@ impl Harness {
 
     fn read_agent_prompt_created(
         &self,
+        session_id: &SessionId,
         prompt_id: &AgentPromptId,
     ) -> Result<AgentPromptCreated, HarnessError> {
         let mut cursor = 0;
@@ -9633,7 +9643,9 @@ impl Harness {
                     materialized.tools_ref = None;
                 }
                 snapshots.insert(materialized.agent_prompt_id.clone(), materialized.clone());
-                if &materialized.agent_prompt_id == prompt_id {
+                if &materialized.session_id == session_id
+                    && &materialized.agent_prompt_id == prompt_id
+                {
                     return Ok(materialized);
                 }
             }

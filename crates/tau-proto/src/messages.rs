@@ -292,7 +292,11 @@ pub struct InterceptReply {
 /// Request a materialized full `agent.prompt_created` payload by id.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GetAgentPromptCreated {
+    /// Request correlation id echoed by [`AgentPromptCreatedResult`].
     pub request_id: String,
+    /// Session containing the requested prompt.
+    pub session_id: crate::SessionId,
+    /// Prompt to materialize.
     pub agent_prompt_id: crate::AgentPromptId,
 }
 

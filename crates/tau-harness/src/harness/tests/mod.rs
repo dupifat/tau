@@ -666,7 +666,8 @@ fn read_raw_compaction_requested(h: &Harness, spid: &AgentPromptId) -> AgentComp
 }
 
 fn read_prompt_created(h: &Harness, spid: &AgentPromptId) -> AgentPromptCreated {
-    h.read_agent_prompt_created(spid)
+    let raw = read_raw_prompt_created(h, spid);
+    h.read_agent_prompt_created(&raw.session_id, spid)
         .expect("materialized prompt event")
 }
 

@@ -575,6 +575,7 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
     let agent_id = h
         .ensure_agent_id_for_agent(&cid)
         .expect("default conversation has an agent id");
+    let session_id = h.agents[&cid].session_id.clone();
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.publish_event(
         None,
@@ -589,6 +590,7 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
         Event::AgentPromptCreated(AgentPromptCreated {
             agent_id: agent_id.clone().into(),
             agent_prompt_id: spid.clone(),
+            session_id: session_id.clone(),
             system_prompt: String::new(),
             context_items: Vec::new(),
             tools: Vec::new(),

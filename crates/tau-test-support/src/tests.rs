@@ -225,6 +225,7 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
     let prompt = AgentPromptCreated {
         agent_prompt_id: "sp-1".into(),
         agent_id: "main".into(),
+        session_id: "session-1".into(),
         system_prompt: "You are helpful.".to_owned(),
         context_items: vec![ContextItem::Message(MessageItem {
             role: ContextRole::User,

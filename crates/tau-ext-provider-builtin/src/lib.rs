@@ -1447,8 +1447,7 @@ fn handle_prewarm(
         );
         return;
     };
-    let session_id: tau_proto::SessionId = prewarm.agent_id.as_str().into();
-    let session_id_str = session_id.as_str();
+    let session_id_str = prewarm.session_id.as_str();
     let request = common::PromptPayload {
         system_prompt: &prewarm.system_prompt,
         context_items: &prewarm.context_items,
@@ -1458,7 +1457,7 @@ fn handle_prewarm(
         previous_response: None,
         originator: &prewarm.originator,
         share_user_cache_key: prewarm.share_user_cache_key,
-        session_id: &session_id,
+        session_id: &prewarm.session_id,
     };
     tracing::debug!(target: LOG_TARGET, session_id = session_id_str, "starting prompt prewarm");
     match chatgpt_runtime.prewarm(&config, session_id_str, &request) {
@@ -1516,7 +1515,6 @@ where
     R: RetrySleeper,
 {
     write_prompt_submitted(agent_prompt_id, &prompt.originator, writer)?;
-    let agent_session_id = tau_proto::SessionId::new(prompt.agent_id.as_str());
     let request = common::PromptPayload {
         system_prompt: &prompt.system_prompt,
         context_items: &prompt.context_items,
@@ -1532,7 +1530,7 @@ where
         }),
         originator: &prompt.originator,
         share_user_cache_key: prompt.share_user_cache_key,
-        session_id: &agent_session_id,
+        session_id: &prompt.session_id,
     };
 
     let originator = prompt.originator.clone();
@@ -1573,7 +1571,7 @@ where
             let backend =
                 backend_descriptor(config, transport_taken, dispatch.state.stale_chain_fallback);
             finish_stream(
-                agent_session_id.as_str(),
+                prompt.session_id.as_str(),
                 agent_prompt_id,
                 prompt,
                 &backend,
@@ -1588,7 +1586,7 @@ where
         Err(error) => {
             let backend = backend_descriptor(config, transport_taken, false);
             finish_error(
-                agent_session_id.as_str(),
+                prompt.session_id.as_str(),
                 agent_prompt_id,
                 prompt,
                 &backend,
@@ -1621,7 +1619,7 @@ where
         previous_response: None,
         originator: &prompt.originator,
         share_user_cache_key: prompt.share_user_cache_key,
-        session_id: &agent_session_id,
+        session_id: &prompt.session_id,
     };
     let backend = backend_descriptor(config, ProviderBackendTransport::HttpSse, false);
     let result = if config.supports_compaction {

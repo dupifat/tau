@@ -660,9 +660,22 @@ struct ResponsesRequest {
 #[derive(Serialize)]
 struct ReasoningRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<ReasoningContext>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     effort: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     summary: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+enum ReasoningContext {
+    /// Server removes thinking after every user message.
+    #[allow(dead_code)]
+    #[serde(rename = "current_turn")]
+    CurrentTurn,
+    /// Server never removes thinking. Gives more cache hits.
+    #[serde(rename = "all_turns")]
+    AllTurns,
 }
 
 #[derive(Serialize)]
@@ -722,7 +735,11 @@ fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> Respo
         None
     };
     let reasoning = if effort.is_some() || summary.is_some() {
-        Some(ReasoningRequest { effort, summary })
+        Some(ReasoningRequest {
+            effort,
+            context: Some(ReasoningContext::AllTurns),
+            summary,
+        })
     } else {
         None
     };

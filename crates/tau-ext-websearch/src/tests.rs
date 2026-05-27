@@ -551,7 +551,9 @@ fn parallel_http_client_posts_tools_call_without_authorization_header() {
             if line == "\r\n" {
                 break;
             }
-            if let Some(value) = line.strip_prefix("Content-Length:") {
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
                 content_len = value.trim().parse().expect("content length");
             }
             headers.push(line);

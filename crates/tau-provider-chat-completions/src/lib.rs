@@ -379,22 +379,22 @@ fn chat_completions_stream(
     let body_str = serde_json::to_string(&body).map_err(LlmError::Json)?;
     let mut request = tau_provider::oauth::proxy_agent()
         .post(&url)
-        .set("Content-Type", "application/json")
-        .set("Accept", "text/event-stream");
+        .content_type("application/json")
+        .header("Accept", "text/event-stream");
     if !provider.api_key.trim().is_empty() {
-        request = request.set("Authorization", &format!("Bearer {}", provider.api_key));
+        request = request.header("Authorization", format!("Bearer {}", provider.api_key));
     }
-    let response = request
-        .send_string(&body_str)
-        .map_err(|error| match error {
-            ureq::Error::Status(code, response) => {
-                LlmError::HttpStatus(code, response.into_string().unwrap_or_default())
-            }
-            other => LlmError::Http(Box::new(other)),
-        })?;
+    let mut response = request
+        .send(&body_str)
+        .map_err(|error| LlmError::Http(Box::new(error)))?;
+    if !response.status().is_success() {
+        let code = response.status().as_u16();
+        let body = response.body_mut().read_to_string().unwrap_or_default();
+        return Err(LlmError::HttpStatus(code, body));
+    }
 
     let mut state = StreamState::new();
-    let reader = BufReader::new(response.into_reader());
+    let reader = BufReader::new(response.body_mut().as_reader());
     for line in reader.lines() {
         let line = line.map_err(LlmError::Io)?;
         let Some(data) = line.strip_prefix("data: ") else {

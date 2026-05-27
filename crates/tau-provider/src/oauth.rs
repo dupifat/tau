@@ -17,7 +17,7 @@ use url::Url;
 /// internally by ureq's agent.
 pub fn proxy_agent() -> &'static ureq::Agent {
     static AGENT: LazyLock<ureq::Agent> = LazyLock::new(|| {
-        let mut builder = ureq::AgentBuilder::new();
+        let mut builder = ureq::Agent::config_builder().http_status_as_error(false);
 
         for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
             if let Ok(val) = std::env::var(key) {
@@ -25,12 +25,12 @@ pub fn proxy_agent() -> &'static ureq::Agent {
                     continue;
                 }
                 if let Ok(proxy) = ureq::Proxy::new(&val) {
-                    builder = builder.proxy(proxy);
+                    builder = builder.proxy(Some(proxy));
                 }
             }
         }
 
-        builder.build()
+        ureq::Agent::new_with_config(builder.build())
     });
     &AGENT
 }
@@ -332,12 +332,12 @@ pub fn github_device_code_poll(
 pub fn github_copilot_token(github_token: &str) -> Result<OAuthTokens, io::Error> {
     let resp = proxy_agent()
         .get(GITHUB_COPILOT_TOKEN_URL)
-        .set("Authorization", &format!("Bearer {github_token}"))
-        .set("Accept", "application/json")
+        .header("Authorization", format!("Bearer {github_token}"))
+        .header("Accept", "application/json")
         .call()
         .map_err(|e| io::Error::other(e.to_string()))?;
 
-    let json = read_json(resp)?;
+    let json = read_success_json(GITHUB_COPILOT_TOKEN_URL, resp)?;
 
     let token = json["token"]
         .as_str()
@@ -363,10 +363,10 @@ pub fn github_copilot_token(github_token: &str) -> Result<OAuthTokens, io::Error
 fn post_form(url: &str, body: &str) -> Result<serde_json::Value, io::Error> {
     let resp = proxy_agent()
         .post(url)
-        .set("Content-Type", "application/x-www-form-urlencoded")
-        .send_string(body)
+        .content_type("application/x-www-form-urlencoded")
+        .send(body)
         .map_err(|e| map_ureq_error(url, e))?;
-    read_json(resp)
+    read_success_json(url, resp)
 }
 
 /// POST a form-encoded body with custom Accept header and parse JSON
@@ -378,32 +378,42 @@ fn post_form_with_accept(
 ) -> Result<serde_json::Value, io::Error> {
     let resp = proxy_agent()
         .post(url)
-        .set("Content-Type", "application/x-www-form-urlencoded")
-        .set("Accept", accept)
-        .send_string(body)
+        .content_type("application/x-www-form-urlencoded")
+        .header("Accept", accept)
+        .send(body)
         .map_err(|e| map_ureq_error(url, e))?;
-    read_json(resp)
+    read_success_json(url, resp)
 }
 
-/// Convert a `ureq::Error` into an `io::Error`, including the response body
-/// when the server returned a non-2xx status. Most OAuth providers return
-/// a JSON body like `{"error": "...", "error_description": "..."}` that
-/// is essential for diagnosing the failure.
+/// Convert transport-level `ureq::Error`s into `io::Error`s. HTTP status
+/// responses are handled separately so OAuth error bodies can be surfaced.
 fn map_ureq_error(url: &str, err: ureq::Error) -> io::Error {
-    match err {
-        ureq::Error::Status(code, resp) => {
-            let content_type = resp.content_type().to_string();
-            let body = resp.into_string().unwrap_or_default();
-            let detail = format_error_body(&content_type, &body);
-            let msg = if detail.is_empty() {
-                format!("{url}: HTTP {code} (empty response body)")
-            } else {
-                format!("{url}: HTTP {code}: {detail}")
-            };
-            io::Error::other(msg)
-        }
-        ureq::Error::Transport(t) => io::Error::other(format!("{url}: {t}")),
+    io::Error::other(format!("{url}: {err}"))
+}
+
+fn map_status_error(
+    url: &str,
+    mut resp: ureq::http::Response<ureq::Body>,
+) -> Result<ureq::http::Response<ureq::Body>, io::Error> {
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(resp);
     }
+
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    let body = resp.body_mut().read_to_string().unwrap_or_default();
+    let detail = format_error_body(&content_type, &body);
+    let msg = if detail.is_empty() {
+        format!("{url}: HTTP {} (empty response body)", status.as_u16())
+    } else {
+        format!("{url}: HTTP {}: {detail}", status.as_u16())
+    };
+    Err(io::Error::other(msg))
 }
 
 /// Pretty-print an error body. If it parses as JSON with `error` /
@@ -433,9 +443,14 @@ fn format_error_body(content_type: &str, body: &str) -> String {
 }
 
 /// Read a ureq response body as JSON.
-fn read_json(resp: ureq::Response) -> Result<serde_json::Value, io::Error> {
+fn read_success_json(
+    url: &str,
+    resp: ureq::http::Response<ureq::Body>,
+) -> Result<serde_json::Value, io::Error> {
+    let mut resp = map_status_error(url, resp)?;
     let text = resp
-        .into_string()
+        .body_mut()
+        .read_to_string()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     serde_json::from_str(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }

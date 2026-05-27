@@ -534,7 +534,11 @@ impl Default for HttpExaSearcher {
 
 impl HttpExaSearcher {
     fn new(endpoint: String) -> Self {
-        let agent = ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).build();
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(REQUEST_TIMEOUT))
+            .http_status_as_error(false)
+            .build();
+        let agent = ureq::Agent::new_with_config(config);
         Self {
             endpoint: Mutex::new(endpoint),
             agent,
@@ -583,7 +587,11 @@ impl Default for HttpParallelClient {
 
 impl HttpParallelClient {
     fn new(endpoint: String) -> Self {
-        let agent = ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).build();
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(REQUEST_TIMEOUT))
+            .http_status_as_error(false)
+            .build();
+        let agent = ureq::Agent::new_with_config(config);
         Self {
             endpoint: Mutex::new(endpoint),
             agent,
@@ -624,19 +632,20 @@ fn post_mcp(
 ) -> Result<String, String> {
     let response = agent
         .post(endpoint)
-        .set("Content-Type", "application/json")
-        .set("Accept", "application/json, text/event-stream")
-        .set("MCP-Protocol-Version", MCP_PROTOCOL_VERSION)
-        .send_string(&body.to_string())
-        .map_err(|e| match e {
-            ureq::Error::Status(code, resp) => {
-                let body = read_capped(resp.into_reader());
-                format!("{provider} MCP returned HTTP {code}: {body}")
-            }
-            ureq::Error::Transport(err) => format!("{provider} MCP transport error: {err}"),
-        })?;
+        .content_type("application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .header("MCP-Protocol-Version", MCP_PROTOCOL_VERSION)
+        .send(body.to_string())
+        .map_err(|e| format!("{provider} MCP transport error: {e}"))?;
+    let mut response = response;
+    if !response.status().is_success() {
+        let code = response.status().as_u16();
+        let body = read_capped(response.body_mut().as_reader());
+        return Err(format!("{provider} MCP returned HTTP {code}: {body}"));
+    }
     response
-        .into_string()
+        .body_mut()
+        .read_to_string()
         .map_err(|e| format!("reading {provider} MCP response: {e}"))
 }
 

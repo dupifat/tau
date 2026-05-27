@@ -256,22 +256,23 @@ pub fn responses_compact(
 
     let mut req = tau_provider::oauth::proxy_agent()
         .post(&url)
-        .set("Content-Type", "application/json")
-        .set("Authorization", &format!("Bearer {}", config.api_key))
-        .set("OpenAI-Beta", "responses=experimental");
+        .content_type("application/json")
+        .header("Authorization", format!("Bearer {}", config.api_key))
+        .header("OpenAI-Beta", "responses=experimental");
     if let Some(ref account_id) = config.account_id {
-        req = req.set("chatgpt-account-id", account_id);
+        req = req.header("chatgpt-account-id", account_id);
     }
 
-    let response = req.send_string(&body_str).map_err(|e| match e {
-        ureq::Error::Status(code, resp) => {
-            let body = resp.into_string().unwrap_or_default();
-            LlmError::HttpStatus(code, body)
-        }
-        other => LlmError::Http(Box::new(other)),
-    })?;
+    let mut response = req
+        .send(&body_str)
+        .map_err(|e| LlmError::Http(Box::new(e)))?;
+    if !response.status().is_success() {
+        let code = response.status().as_u16();
+        let body = response.body_mut().read_to_string().unwrap_or_default();
+        return Err(LlmError::HttpStatus(code, body));
+    }
     let value: serde_json::Value =
-        serde_json::from_reader(response.into_reader()).map_err(LlmError::Json)?;
+        serde_json::from_reader(response.body_mut().as_reader()).map_err(LlmError::Json)?;
     let output = value
         .get("output")
         .and_then(serde_json::Value::as_array)
@@ -314,24 +315,25 @@ fn responses_stream_once(
 
     let mut req = tau_provider::oauth::proxy_agent()
         .post(&url)
-        .set("Content-Type", "application/json")
-        .set("Accept", "text/event-stream")
-        .set("Authorization", &format!("Bearer {}", config.api_key))
-        .set("OpenAI-Beta", "responses=experimental");
+        .content_type("application/json")
+        .header("Accept", "text/event-stream")
+        .header("Authorization", format!("Bearer {}", config.api_key))
+        .header("OpenAI-Beta", "responses=experimental");
 
     if let Some(ref account_id) = config.account_id {
-        req = req.set("chatgpt-account-id", account_id);
+        req = req.header("chatgpt-account-id", account_id);
     }
 
-    let response = req.send_string(&body_str).map_err(|e| match e {
-        ureq::Error::Status(code, resp) => {
-            let body = resp.into_string().unwrap_or_default();
-            LlmError::HttpStatus(code, body)
-        }
-        other => LlmError::Http(Box::new(other)),
-    })?;
+    let mut response = req
+        .send(&body_str)
+        .map_err(|e| LlmError::Http(Box::new(e)))?;
+    if !response.status().is_success() {
+        let code = response.status().as_u16();
+        let body = response.body_mut().read_to_string().unwrap_or_default();
+        return Err(LlmError::HttpStatus(code, body));
+    }
 
-    let reader = std::io::BufReader::new(response.into_reader());
+    let reader = std::io::BufReader::new(response.body_mut().as_reader());
     let mut state = StreamState::new();
 
     for line in reader.lines() {

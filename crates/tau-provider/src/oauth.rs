@@ -17,7 +17,12 @@ use url::Url;
 /// internally by ureq's agent.
 pub fn proxy_agent() -> &'static ureq::Agent {
     static AGENT: LazyLock<ureq::Agent> = LazyLock::new(|| {
-        let mut builder = ureq::Agent::config_builder().http_status_as_error(false);
+        let tls_config = ureq::tls::TlsConfig::builder()
+            .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+            .build();
+        let mut builder = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .tls_config(tls_config);
 
         for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
             if let Ok(val) = std::env::var(key) {

@@ -534,9 +534,13 @@ impl Default for HttpExaSearcher {
 
 impl HttpExaSearcher {
     fn new(endpoint: String) -> Self {
+        let tls_config = ureq::tls::TlsConfig::builder()
+            .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+            .build();
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(REQUEST_TIMEOUT))
             .http_status_as_error(false)
+            .tls_config(tls_config)
             .build();
         let agent = ureq::Agent::new_with_config(config);
         Self {
@@ -587,9 +591,13 @@ impl Default for HttpParallelClient {
 
 impl HttpParallelClient {
     fn new(endpoint: String) -> Self {
+        let tls_config = ureq::tls::TlsConfig::builder()
+            .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+            .build();
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(REQUEST_TIMEOUT))
             .http_status_as_error(false)
+            .tls_config(tls_config)
             .build();
         let agent = ureq::Agent::new_with_config(config);
         Self {

@@ -1,7 +1,4 @@
-use tau_proto::{
-    ACTION_SCHEMA_VERSION, ActionArg, ActionArgKind, ActionCommand, ActionError, ActionInvoke,
-    ActionOutput, ActionResult, ActionSchema, Event,
-};
+use tau_proto::{ACTION_SCHEMA_VERSION, ActionArg, ActionArgKind, ActionCommand, ActionSchema};
 
 /// Return the `/calendar` action schema.
 pub fn calendar_action_schema() -> ActionSchema {
@@ -84,29 +81,5 @@ pub fn calendar_action_schema() -> ActionSchema {
                 },
             ],
         }],
-    }
-}
-
-pub(crate) fn dispatch_action(invoke: ActionInvoke) -> Event {
-    let result = match invoke.action_id.as_str() {
-        "calendar.log.last" => Ok("calendar log is not implemented yet".to_owned()),
-        "calendar.change.list" => Ok("no pending calendar changes".to_owned()),
-        "calendar.change.open" | "calendar.change.approve" | "calendar.change.deny" => {
-            Err("calendar change approvals are not implemented yet".to_owned())
-        }
-        _ => Err(format!("unknown calendar action `{}`", invoke.action_id)),
-    };
-    match result {
-        Ok(text) => Event::ActionResult(ActionResult {
-            invocation_id: invoke.invocation_id,
-            action_id: invoke.action_id,
-            output: ActionOutput::Text { text },
-        }),
-        Err(message) => Event::ActionError(ActionError {
-            invocation_id: invoke.invocation_id,
-            action_id: invoke.action_id,
-            message,
-            details: None,
-        }),
     }
 }

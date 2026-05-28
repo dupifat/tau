@@ -1,8 +1,11 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
-use tau_proto::{CborValue, Event, SecretValue, ToolError, ToolResult, ToolStarted};
+use tau_proto::{
+    ActionError, ActionInvoke, ActionOutput, ActionResult, CborValue, Event, SecretValue,
+    ToolError, ToolResult, ToolStarted,
+};
 
-use super::actions;
 use super::config::{
     CalendarExtensionConfig, ValidatedAccount, ValidatedBackendConfig, ValidatedConfig,
 };
@@ -10,6 +13,7 @@ use super::google::{GoogleBackend, GoogleEvent};
 use super::ics_feed::{
     IcsEvent, IcsFeedBackend, TimeRange, default_calendar_id, parse_rfc3339_bound,
 };
+use super::state::{CalendarLogEntry, StateStore};
 use super::tool::{CalendarArgs, CalendarCommand, ToolInvocation};
 
 const LIST_ACCOUNTS_FORMAT: &str =
@@ -19,6 +23,11 @@ const LIST_EVENTS_FORMAT: &str = "format: account calendar event_id start end fl
 const FREE_BUSY_FORMAT: &str = "format: account calendar event_id start end flags";
 const DEFAULT_EVENT_LIMIT: u32 = 50;
 const MAX_EVENT_LIMIT: u32 = 100;
+const CALENDAR_LOG_DEFAULT_LIMIT: usize = 20;
+const CALENDAR_LOG_MAX_LIMIT: usize = 200;
+const MAX_LOG_FIELD_CHARS: usize = 512;
+const MAX_LOG_REASON_CHARS: usize = 512;
+const MAX_DISPLAY_LINE_CHARS: usize = 256;
 
 /// Runtime state for the calendar module.
 pub struct RuntimeState {
@@ -41,6 +50,7 @@ enum ConfigState {
 
 struct Engine {
     config: ValidatedConfig,
+    state: StateStore,
     google: GoogleBackend,
     ics_feed: IcsFeedBackend,
 }
@@ -50,15 +60,22 @@ impl RuntimeState {
     pub fn configure_with_config(
         &mut self,
         cfg: CalendarExtensionConfig,
+        state_dir: Option<PathBuf>,
         secrets: BTreeMap<String, SecretValue>,
     ) -> Result<(), String> {
-        match cfg.validate() {
-            Ok(config) => {
-                self.config_state = ConfigState::Configured(Engine {
-                    config,
-                    google: GoogleBackend::new(secrets.clone()),
-                    ics_feed: IcsFeedBackend::new(secrets),
-                });
+        let result = cfg.validate().and_then(|config| {
+            let state_dir = state_dir
+                .ok_or_else(|| "calendar module requires Configure.state_dir".to_owned())?;
+            Ok(Engine {
+                config,
+                state: StateStore::open(state_dir)?,
+                google: GoogleBackend::new(secrets.clone()),
+                ics_feed: IcsFeedBackend::new(secrets),
+            })
+        });
+        match result {
+            Ok(engine) => {
+                self.config_state = ConfigState::Configured(engine);
                 Ok(())
             }
             Err(message) => {
@@ -86,8 +103,20 @@ impl RuntimeState {
     }
 
     /// Dispatch a user `/calendar` action invocation.
-    pub fn dispatch_action(&mut self, invoke: tau_proto::ActionInvoke) -> Event {
-        actions::dispatch_action(invoke)
+    pub fn dispatch_action(&mut self, invoke: ActionInvoke) -> Event {
+        let result = match &self.config_state {
+            ConfigState::Configured(engine) => {
+                engine.dispatch_action(&invoke.action_id, &invoke.argv)
+            }
+            ConfigState::Unconfigured => Err("calendar module has not been configured".to_owned()),
+            ConfigState::Rejected { reason } => Err(format!(
+                "calendar module configuration was rejected: {reason}"
+            )),
+        };
+        match result {
+            Ok(text) => action_result(invoke, text),
+            Err(message) => action_error(invoke, message),
+        }
     }
 }
 
@@ -101,7 +130,7 @@ impl Engine {
         let invocation: ToolInvocation = arguments
             .deserialized()
             .map_err(|error| format!("invalid calendar tool arguments: {error}"))?;
-        match invocation.command {
+        let result = match invocation.command {
             CalendarCommand::ListAccounts => Ok(self.list_accounts()),
             CalendarCommand::ListCalendars => self.list_calendars(&invocation.args),
             CalendarCommand::ListEvents => self.list_events(&invocation.args),
@@ -117,7 +146,119 @@ impl Engine {
                     command_name(invocation.command)
                 ))
             }
+        };
+        self.append_calendar_log_for_invocation(&invocation, &result);
+        result
+    }
+
+    fn dispatch_action(&self, action_id: &str, argv: &[String]) -> Result<String, String> {
+        match action_id {
+            "calendar.log.last" => {
+                parse_log_limit(argv).and_then(|limit| self.action_log_last(limit))
+            }
+            "calendar.change.list" => {
+                require_no_args(argv).map(|()| "no pending calendar changes".to_owned())
+            }
+            "calendar.change.open" | "calendar.change.approve" | "calendar.change.deny" => {
+                require_one_arg(argv)?;
+                Err("calendar change approvals are not implemented yet".to_owned())
+            }
+            _ => Err(format!("unknown calendar action `{action_id}`")),
         }
+    }
+
+    fn action_log_last(&self, limit: usize) -> Result<String, String> {
+        let entries = self.state.recent_calendar_log(limit)?;
+        if entries.is_empty() {
+            return Ok("No calendar log entries.".to_owned());
+        }
+        let mut lines = vec![format!("Last {} calendar log entry(s):", entries.len())];
+        for entry in entries.iter().rev() {
+            lines.push(format_calendar_log_entry(entry));
+        }
+        Ok(lines.join("\n"))
+    }
+
+    fn append_calendar_log_for_invocation(
+        &self,
+        invocation: &ToolInvocation,
+        result: &Result<String, String>,
+    ) {
+        let Some(entry) = self.calendar_log_entry(invocation, result) else {
+            return;
+        };
+        if let Err(message) = self.state.append_calendar_log(&entry) {
+            tracing::warn!(target: crate::LOG_TARGET, error = %message, "failed to append calendar log");
+        }
+    }
+
+    fn calendar_log_entry(
+        &self,
+        invocation: &ToolInvocation,
+        result: &Result<String, String>,
+    ) -> Option<CalendarLogEntry> {
+        if invocation.command == CalendarCommand::ListAccounts {
+            return None;
+        }
+        let args = &invocation.args;
+        let status = if result.is_ok() { "ok" } else { "error" };
+        let account = self.log_account(args);
+        let mut entry = CalendarLogEntry::tool(command_name(invocation.command), status);
+        entry.account = account
+            .as_deref()
+            .map(|value| safe_log_value(value, MAX_LOG_FIELD_CHARS));
+        entry.calendar = self
+            .log_calendar(args, account.as_deref())
+            .map(|value| safe_log_value(&value, MAX_LOG_FIELD_CHARS));
+        entry.event_id = args
+            .event_id
+            .as_deref()
+            .map(|value| safe_log_value(value, MAX_LOG_FIELD_CHARS));
+        entry.time_min = args
+            .time_min
+            .as_deref()
+            .map(|value| safe_log_value(value, MAX_LOG_FIELD_CHARS));
+        entry.time_max = args
+            .time_max
+            .as_deref()
+            .map(|value| safe_log_value(value, MAX_LOG_FIELD_CHARS));
+        entry.limit = args.limit;
+        entry.item_count = result
+            .as_ref()
+            .ok()
+            .and_then(|text| calendar_log_item_count(invocation.command, text));
+        entry.reason = result
+            .as_ref()
+            .err()
+            .map(|reason| safe_log_value(reason, MAX_LOG_REASON_CHARS));
+        Some(entry)
+    }
+
+    fn log_account(&self, args: &CalendarArgs) -> Option<String> {
+        if let Some(account) = &args.account {
+            return Some(account.clone());
+        }
+        let mut accounts = self
+            .config
+            .account_order
+            .iter()
+            .filter_map(|id| self.config.accounts.get(id))
+            .filter(|account| account.enable);
+        let first = accounts.next()?;
+        if accounts.next().is_none() {
+            Some(first.id.clone())
+        } else {
+            None
+        }
+    }
+
+    fn log_calendar(&self, args: &CalendarArgs, account_id: Option<&str>) -> Option<String> {
+        args.calendar.clone().or_else(|| {
+            account_id
+                .and_then(|id| self.config.accounts.get(id))
+                .and_then(default_calendar_id)
+                .map(str::to_owned)
+        })
     }
 
     fn list_accounts(&self) -> String {
@@ -361,6 +502,84 @@ fn required_arg<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str, Strin
     }
 }
 
+fn parse_log_limit(argv: &[String]) -> Result<usize, String> {
+    let limit = match argv {
+        [] => CALENDAR_LOG_DEFAULT_LIMIT,
+        [value] if !value.trim().is_empty() => value
+            .parse::<usize>()
+            .map_err(|_| "log limit must be a positive integer".to_owned())?,
+        [_] => return Err("log limit must not be empty".to_owned()),
+        _ => return Err("too many action arguments".to_owned()),
+    };
+    if limit == 0 {
+        return Err("log limit must be a positive integer".to_owned());
+    }
+    Ok(if CALENDAR_LOG_MAX_LIMIT < limit {
+        CALENDAR_LOG_MAX_LIMIT
+    } else {
+        limit
+    })
+}
+
+fn require_no_args(argv: &[String]) -> Result<(), String> {
+    if argv.is_empty() {
+        Ok(())
+    } else {
+        Err("this calendar action does not accept arguments".to_owned())
+    }
+}
+
+fn require_one_arg(argv: &[String]) -> Result<&str, String> {
+    match argv {
+        [value] if !value.trim().is_empty() => Ok(value),
+        [_] => Err("action argument must not be empty".to_owned()),
+        [] => Err("missing required action argument".to_owned()),
+        _ => Err("too many action arguments".to_owned()),
+    }
+}
+
+fn calendar_log_item_count(command: CalendarCommand, text: &str) -> Option<u64> {
+    match command {
+        CalendarCommand::ListCalendars
+        | CalendarCommand::ListEvents
+        | CalendarCommand::FreeBusy => Some(text.lines().skip(1).count() as u64),
+        CalendarCommand::ReadEvent => Some(1),
+        CalendarCommand::ListAccounts
+        | CalendarCommand::CreateEvent
+        | CalendarCommand::UpdateEvent
+        | CalendarCommand::DeleteEvent
+        | CalendarCommand::RespondInvite => None,
+    }
+}
+
+fn format_calendar_log_entry(entry: &CalendarLogEntry) -> String {
+    let mut fields = vec![
+        format!("ts={}", entry.ts_unix_ms),
+        format!("kind={}", safe_display_line(&entry.kind)),
+        format!("command={}", safe_display_line(&entry.command)),
+        format!("status={}", safe_display_line(&entry.status)),
+    ];
+    push_log_field(&mut fields, "account", entry.account.as_deref());
+    push_log_field(&mut fields, "calendar", entry.calendar.as_deref());
+    push_log_field(&mut fields, "event_id", entry.event_id.as_deref());
+    push_log_field(&mut fields, "time_min", entry.time_min.as_deref());
+    push_log_field(&mut fields, "time_max", entry.time_max.as_deref());
+    if let Some(limit) = entry.limit {
+        fields.push(format!("limit={limit}"));
+    }
+    if let Some(item_count) = entry.item_count {
+        fields.push(format!("items={item_count}"));
+    }
+    push_log_field(&mut fields, "reason", entry.reason.as_deref());
+    fields.join(" ")
+}
+
+fn push_log_field(fields: &mut Vec<String>, name: &str, value: Option<&str>) {
+    if let Some(value) = value {
+        fields.push(format!("{name}={}", safe_display_line(value)));
+    }
+}
+
 fn format_event_line(account: &ValidatedAccount, calendar: &str, event: &BackendEvent) -> String {
     let status = event_status(event).unwrap_or("-");
     format!(
@@ -563,6 +782,23 @@ fn tool_error(invoke: ToolStarted, message: String) -> Event {
     })
 }
 
+fn action_result(invoke: ActionInvoke, text: String) -> Event {
+    Event::ActionResult(ActionResult {
+        invocation_id: invoke.invocation_id,
+        action_id: invoke.action_id,
+        output: ActionOutput::Text { text },
+    })
+}
+
+fn action_error(invoke: ActionInvoke, message: String) -> Event {
+    Event::ActionError(ActionError {
+        invocation_id: invoke.invocation_id,
+        action_id: invoke.action_id,
+        message,
+        details: None,
+    })
+}
+
 fn safe_field(value: &str) -> String {
     value
         .chars()
@@ -583,10 +819,39 @@ fn safe_multiline(value: &str) -> String {
         .join(" ")
 }
 
+fn safe_display_line(value: &str) -> String {
+    safe_log_value(value, MAX_DISPLAY_LINE_CHARS)
+}
+
+fn safe_log_value(value: &str, max_chars: usize) -> String {
+    let collapsed = value
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    truncate_chars(&collapsed, max_chars)
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for (index, c) in value.chars().enumerate() {
+        if max_chars < index + 1 {
+            out.push_str("...");
+            break;
+        }
+        out.push(c);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::calendar::config::{CalendarAccountConfig, CalendarBackendConfig};
+    use crate::calendar::config::{
+        CalendarAccountConfig, CalendarBackendConfig, CalendarSelectionConfig,
+    };
 
     #[test]
     fn list_accounts_reports_enabled_configured_accounts() {
@@ -607,8 +872,10 @@ mod tests {
             }],
         };
         let config = cfg.validate().expect("valid calendar config");
+        let temp = tempfile::TempDir::new().expect("tempdir");
         let engine = Engine {
             config,
+            state: StateStore::open(temp.path().join("state")).expect("state"),
             google: GoogleBackend::new(BTreeMap::new()),
             ics_feed: IcsFeedBackend::new(BTreeMap::new()),
         };
@@ -617,6 +884,59 @@ mod tests {
             engine.list_accounts(),
             "format: id flags backend default_calendar timezone display_name\nwork enabled google - UTC Work_Calendar"
         );
+    }
+
+    #[test]
+    fn calendar_log_records_tool_reads_and_action_lists_them() {
+        // Calendar entries contain sensitive schedule metadata. Tool reads need
+        // an audit trail that the user can review without exposing event bodies.
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let engine = test_engine(temp.path());
+
+        let output = engine
+            .dispatch(&command_args(
+                "list_calendars",
+                vec![("account", CborValue::Text("feed".to_owned()))],
+            ))
+            .expect("list calendars");
+        assert!(output.contains("format: account calendar flags backend display_name"));
+
+        let log = engine.action_log_last(10).expect("log output");
+
+        assert!(log.contains("Last 1 calendar log entry(s):"), "{log}");
+        assert!(log.contains("kind=tool"), "{log}");
+        assert!(log.contains("command=list_calendars"), "{log}");
+        assert!(log.contains("status=ok"), "{log}");
+        assert!(log.contains("account=feed"), "{log}");
+        assert!(log.contains("items=1"), "{log}");
+    }
+
+    #[test]
+    fn calendar_log_records_failed_write_attempts_without_payloads() {
+        // Write commands are still unsupported, but attempts should be visible
+        // in the audit log before mutation approval plumbing is added.
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let engine = test_engine(temp.path());
+
+        let err = engine
+            .dispatch(&command_args(
+                "create_event",
+                vec![
+                    ("account", CborValue::Text("feed".to_owned())),
+                    ("calendar", CborValue::Text("main".to_owned())),
+                    ("title", CborValue::Text("private title".to_owned())),
+                ],
+            ))
+            .expect_err("writes are unavailable");
+        assert!(err.contains("not available"), "{err}");
+
+        let log = engine.action_log_last(10).expect("log output");
+
+        assert!(log.contains("command=create_event"), "{log}");
+        assert!(log.contains("status=error"), "{log}");
+        assert!(log.contains("account=feed"), "{log}");
+        assert!(log.contains("calendar=main"), "{log}");
+        assert!(!log.contains("private title"), "{log}");
     }
 
     #[test]
@@ -700,5 +1020,47 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.contains("requires exactly one"), "{err}");
+    }
+
+    fn test_engine(root: &std::path::Path) -> Engine {
+        let cfg = CalendarExtensionConfig {
+            enable: true,
+            accounts: vec![CalendarAccountConfig {
+                id: "feed".to_owned(),
+                enable: true,
+                display_name: Some("Feed".to_owned()),
+                backend: Some(CalendarBackendConfig::IcsFeed {
+                    url_secret: None,
+                    url: Some("https://example.test/calendar.ics".to_owned()),
+                }),
+                calendars: CalendarSelectionConfig {
+                    default: Some("main".to_owned()),
+                    allow: vec!["main".to_owned()],
+                },
+                timezone: Some("UTC".to_owned()),
+            }],
+        };
+        Engine {
+            config: cfg.validate().expect("valid config"),
+            state: StateStore::open(root.join("state")).expect("state"),
+            google: GoogleBackend::new(BTreeMap::new()),
+            ics_feed: IcsFeedBackend::new(BTreeMap::new()),
+        }
+    }
+
+    fn command_args(command: &str, args: Vec<(&str, CborValue)>) -> CborValue {
+        cbor_map(vec![
+            ("command", CborValue::Text(command.to_owned())),
+            ("args", cbor_map(args)),
+        ])
+    }
+
+    fn cbor_map(entries: Vec<(&str, CborValue)>) -> CborValue {
+        CborValue::Map(
+            entries
+                .into_iter()
+                .map(|(key, value)| (CborValue::Text(key.to_owned()), value))
+                .collect(),
+        )
     }
 }

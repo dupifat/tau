@@ -210,6 +210,8 @@ The `calendar.accounts[*].backend.type: google` backend uses the native Google C
 
 For Google accounts, `calendars.allow` entries are exact Google calendar IDs; use `primary` for Google's primary-calendar alias. Display summaries are not access-control identifiers. Use narrow Google scopes such as `https://www.googleapis.com/auth/calendar.calendarlist.readonly` plus `https://www.googleapis.com/auth/calendar.events.readonly` for read-only accounts unless you are testing future write support.
 
+Calendar tool reads and unsupported write attempts append sanitized audit entries to `logs/calendar.jsonl` under the extension state directory. Review them with `/calendar log last [number]`. Entries include command, status, account, calendar, event id, time bounds, and result counts; they do not persist event titles or descriptions.
+
 Create the secret value as raw UTF-8 text. Despite the `.yaml` suffix, the secret file is read as trimmed text, not as a structured YAML document.
 
 ```sh

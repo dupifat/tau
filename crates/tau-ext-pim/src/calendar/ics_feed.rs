@@ -5,12 +5,12 @@ use std::time::Duration;
 use tau_proto::SecretValue;
 use time::format_description::well_known::Rfc3339;
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
+use url::Url;
 
 use super::config::{ValidatedAccount, ValidatedBackendConfig};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_ICS_BYTES: u64 = 2 * 1024 * 1024;
-const SYNTHETIC_CALENDAR_ID: &str = "main";
 
 /// Read-only iCalendar feed backend.
 pub struct IcsFeedBackend {
@@ -51,6 +51,8 @@ pub struct IcsEvent {
     pub end_utc: Option<OffsetDateTime>,
     /// Event status.
     pub status: Option<String>,
+    /// Whether `CLASS` marks this event private/confidential.
+    pub private: bool,
     /// Organizer value.
     pub organizer: Option<String>,
     /// Attendee values.
@@ -196,15 +198,6 @@ pub fn parse_rfc3339_bound(
         .transpose()
 }
 
-/// Return the default synthetic calendar id for feed accounts.
-pub fn default_calendar_id(account: &ValidatedAccount) -> Option<&str> {
-    account
-        .default_calendar
-        .as_deref()
-        .or_else(|| account.allowed_calendars.first().map(String::as_str))
-        .or(Some(SYNTHETIC_CALENDAR_ID))
-}
-
 fn normalize_feed_url(url: &str) -> Result<String, String> {
     let trimmed = url.trim();
     if trimmed.is_empty() {
@@ -213,13 +206,25 @@ fn normalize_feed_url(url: &str) -> Result<String, String> {
     if trimmed.chars().any(|c| c.is_control()) {
         return Err("iCalendar feed URL must not contain control characters".to_owned());
     }
-    if let Some(rest) = trimmed.strip_prefix("webcal://") {
-        return Ok(format!("https://{rest}"));
+    let normalized;
+    let candidate = if let Some(rest) = trimmed.strip_prefix("webcal://") {
+        normalized = format!("https://{rest}");
+        normalized.as_str()
+    } else {
+        trimmed
+    };
+    let parsed = Url::parse(candidate)
+        .map_err(|error| format!("iCalendar feed URL must be absolute: {error}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("iCalendar feed URL must use https://, http://, or webcal://".to_owned());
     }
-    if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
-        return Ok(trimmed.to_owned());
+    if parsed.host_str().is_none() {
+        return Err("iCalendar feed URL must include a host".to_owned());
     }
-    Err("iCalendar feed URL must use https://, http://, or webcal://".to_owned())
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("iCalendar feed URL must not include credentials".to_owned());
+    }
+    Ok(candidate.to_owned())
 }
 
 fn ensure_calendar_allowed(account: &ValidatedAccount, calendar: &str) -> Result<(), String> {
@@ -287,6 +292,7 @@ fn parse_event(lines: &[String]) -> Option<IcsEvent> {
     let mut status = None;
     let mut organizer = None;
     let mut attendees = Vec::new();
+    let mut private = false;
     let mut recurring = false;
     let mut duration_unparsed = false;
 
@@ -306,6 +312,11 @@ fn parse_event(lines: &[String]) -> Option<IcsEvent> {
                 duration_unparsed = true;
             }
             "STATUS" => status = Some(unescape_text(&property.value)),
+            "CLASS" => {
+                let value = property.value.trim();
+                private = value.eq_ignore_ascii_case("PRIVATE")
+                    || value.eq_ignore_ascii_case("CONFIDENTIAL");
+            }
             "ORGANIZER" => organizer = Some(unescape_text(&property.value)),
             "ATTENDEE" => attendees.push(unescape_text(&property.value)),
             "RRULE" | "RDATE" | "EXDATE" | "RECURRENCE-ID" => recurring = true,
@@ -331,6 +342,7 @@ fn parse_event(lines: &[String]) -> Option<IcsEvent> {
         start_utc: start.utc,
         end_utc: end.utc,
         status,
+        private,
         organizer,
         attendees,
         recurring,
@@ -539,6 +551,7 @@ mod tests {
                 },
                 ..Default::default()
             }],
+            ..Default::default()
         };
         let config = cfg.validate().expect("valid config");
         let account = config.accounts.get("feed").expect("feed account");

@@ -14,7 +14,9 @@ mod tool;
 
 pub use actions::calendar_action_schema;
 pub use config::{
-    CalendarAccountConfig, CalendarBackendConfig, CalendarExtensionConfig, CalendarSelectionConfig,
+    CalendarAccountConfig, CalendarBackendConfig, CalendarExtensionConfig, CalendarPolicyConfig,
+    CalendarReadPolicyConfig, CalendarSelectionConfig, CalendarWritePolicyConfig,
+    DescriptionPolicy, PrivateEventsPolicy,
 };
 pub use google::GoogleBackend;
 pub use ics_feed::IcsFeedBackend;

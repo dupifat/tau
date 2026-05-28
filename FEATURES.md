@@ -272,15 +272,18 @@ can ask again. `/email in approve`, `/email in deny`, and `/email out approve`
 accept multiple ids. Agent access and mutation activity is appended as JSONL and
 can be reviewed with `/email log last [number]`.
 
-The same extension also owns the initial `calendar` tool and `/calendar` action
-schema. Read-only `ics_feed` accounts can list calendars, list events, read event
+The same extension also owns the `calendar` tool and `/calendar` action schema.
+Read-only `ics_feed` accounts can list calendars, list events, read event
 details, and return free/busy blocks from bounded iCalendar feeds. Google
 Calendar accounts using user-provided OAuth refresh-token secrets support the
-same read/free-busy operations through the native Calendar API. Calendar tool
-reads and unsupported write attempts are logged to `logs/calendar.jsonl` and can
-be reviewed with `/calendar log last [number]`. Calendar writes remain pending.
-The legacy `std-email` built-in remains as an alias for existing email-only
-configs.
+same read/free-busy operations plus create, update, delete, and invite-response
+mutations through the native Calendar API. Calendar writes are queued for
+`/calendar change` approval by default, require ETags for existing events, and
+use provider conditional requests to avoid stale overwrites. Calendar reads and
+write requests are logged to `logs/calendar.jsonl` and can be reviewed with
+`/calendar log last [number]`. Private calendar events default to busy-only
+model output. The legacy `std-email` built-in remains as an alias for existing
+email-only configs.
 
 ### `provider-builtin` — Built-in provider backend
 

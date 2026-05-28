@@ -7,13 +7,12 @@ use tau_proto::{
 };
 
 use super::config::{
-    CalendarExtensionConfig, ValidatedAccount, ValidatedBackendConfig, ValidatedConfig,
+    CalendarExtensionConfig, DescriptionPolicy, PrivateEventsPolicy, ValidatedAccount,
+    ValidatedBackendConfig, ValidatedConfig, ValidatedPolicy,
 };
-use super::google::{GoogleBackend, GoogleEvent};
-use super::ics_feed::{
-    IcsEvent, IcsFeedBackend, TimeRange, default_calendar_id, parse_rfc3339_bound,
-};
-use super::state::{CalendarLogEntry, StateStore};
+use super::google::{GoogleBackend, GoogleEvent, GoogleEventWrite};
+use super::ics_feed::{IcsEvent, IcsFeedBackend, TimeRange, parse_rfc3339_bound};
+use super::state::{CalendarChangeApproval, CalendarLogEntry, StateStore};
 use super::tool::{CalendarArgs, CalendarCommand, ToolInvocation};
 
 const LIST_ACCOUNTS_FORMAT: &str =
@@ -28,6 +27,10 @@ const CALENDAR_LOG_MAX_LIMIT: usize = 200;
 const MAX_LOG_FIELD_CHARS: usize = 512;
 const MAX_LOG_REASON_CHARS: usize = 512;
 const MAX_DISPLAY_LINE_CHARS: usize = 256;
+const MAX_EVENT_FIELD_CHARS: usize = 512;
+const MAX_EVENT_DESCRIPTION_BYTES: usize = 64 * 1024;
+const MAX_EVENT_DESCRIPTION_LINES: usize = 1000;
+const MAX_ATTENDEE_CHARS: usize = 320;
 
 /// Runtime state for the calendar module.
 pub struct RuntimeState {
@@ -44,7 +47,7 @@ impl Default for RuntimeState {
 
 enum ConfigState {
     Unconfigured,
-    Configured(Engine),
+    Configured(Box<Engine>),
     Rejected { reason: String },
 }
 
@@ -75,7 +78,7 @@ impl RuntimeState {
         });
         match result {
             Ok(engine) => {
-                self.config_state = ConfigState::Configured(engine);
+                self.config_state = ConfigState::Configured(Box::new(engine));
                 Ok(())
             }
             Err(message) => {
@@ -125,6 +128,20 @@ enum BackendEvent {
     Google(GoogleEvent),
 }
 
+enum CalendarMutationResult {
+    Event(Box<GoogleEvent>),
+    Deleted,
+}
+
+impl CalendarMutationResult {
+    fn event_id(&self) -> Option<&str> {
+        match self {
+            Self::Event(event) => Some(&event.id),
+            Self::Deleted => None,
+        }
+    }
+}
+
 impl Engine {
     fn dispatch(&self, arguments: &CborValue) -> Result<String, String> {
         let invocation: ToolInvocation = arguments
@@ -140,11 +157,7 @@ impl Engine {
             | CalendarCommand::UpdateEvent
             | CalendarCommand::DeleteEvent
             | CalendarCommand::RespondInvite => {
-                invocation.args.note_reserved_write_fields();
-                Err(format!(
-                    "calendar command `{}` is not available for read-only backends yet",
-                    command_name(invocation.command)
-                ))
+                self.submit_change(invocation.command, &invocation.args)
             }
         };
         self.append_calendar_log_for_invocation(&invocation, &result);
@@ -157,11 +170,16 @@ impl Engine {
                 parse_log_limit(argv).and_then(|limit| self.action_log_last(limit))
             }
             "calendar.change.list" => {
-                require_no_args(argv).map(|()| "no pending calendar changes".to_owned())
+                require_no_args(argv).and_then(|()| self.action_change_list())
             }
-            "calendar.change.open" | "calendar.change.approve" | "calendar.change.deny" => {
-                require_one_arg(argv)?;
-                Err("calendar change approvals are not implemented yet".to_owned())
+            "calendar.change.open" => {
+                require_one_arg(argv).and_then(|id| self.action_change_open(id))
+            }
+            "calendar.change.approve" => {
+                require_change_ids(argv).and_then(|ids| self.action_change_approve_many(&ids))
+            }
+            "calendar.change.deny" => {
+                require_change_ids(argv).and_then(|ids| self.action_change_deny_many(&ids))
             }
             _ => Err(format!("unknown calendar action `{action_id}`")),
         }
@@ -177,6 +195,110 @@ impl Engine {
             lines.push(format_calendar_log_entry(entry));
         }
         Ok(lines.join("\n"))
+    }
+
+    fn action_change_list(&self) -> Result<String, String> {
+        let changes = self.state.list_pending_changes()?;
+        if changes.is_empty() {
+            return Ok("No pending calendar changes.".to_owned());
+        }
+        let mut lines = vec![format!("{} pending calendar change(s):", changes.len())];
+        for change in changes {
+            lines.push(format_change_summary(&change));
+        }
+        Ok(lines.join("\n"))
+    }
+
+    fn action_change_open(&self, id: &str) -> Result<String, String> {
+        let change = self.state.pending_change_by_id(id)?;
+        Ok(format_change_detail(&change))
+    }
+
+    fn action_change_approve_many(&self, ids: &[String]) -> Result<String, String> {
+        if ids.len() == 1 {
+            return self.action_change_approve(&ids[0]);
+        }
+        let mut lines = vec![format!("Approving {} calendar change(s):", ids.len())];
+        let mut errors = Vec::new();
+        for id in ids {
+            match self.action_change_approve(id) {
+                Ok(message) => lines.push(message),
+                Err(error) => {
+                    lines.push(format!(
+                        "Failed calendar change {id}: {}",
+                        safe_display_line(&error)
+                    ));
+                    errors.push(id.clone());
+                }
+            }
+        }
+        let output = lines.join("\n");
+        if errors.is_empty() {
+            Ok(output)
+        } else {
+            Err(output)
+        }
+    }
+
+    fn action_change_approve(&self, id: &str) -> Result<String, String> {
+        if self.state.change_pending_exists(id)? {
+            let pending = self.state.pending_change_by_id(id)?;
+            self.validate_persisted_change(&pending)?;
+            let change = self.state.claim_change(id)?;
+            self.validate_persisted_change(&change)?;
+            let result = self.execute_change(&change)?;
+            let result_event_id = result.event_id();
+            return match self.state.complete_change(id, result_event_id) {
+                Ok(()) => Ok(format_mutation_result("Applied", id, &change, &result)),
+                Err(error) => Ok(format!(
+                    "Applied calendar change {id}, but failed to record approval: {}",
+                    safe_display_line(&error)
+                )),
+            };
+        }
+        if self.state.change_sending_exists(id)? {
+            return Err(format!(
+                "Calendar change {id} is already being applied or needs manual recovery."
+            ));
+        }
+        let approved = self.state.approved_change_by_id(id)?;
+        Ok(format!(
+            "Calendar change {id} is already approved/applied. command={} account={} calendar={}",
+            safe_display_line(&approved.command),
+            safe_display_line(&approved.account),
+            safe_display_line(&approved.calendar)
+        ))
+    }
+
+    fn action_change_deny_many(&self, ids: &[String]) -> Result<String, String> {
+        if ids.len() == 1 {
+            return self.action_change_deny(&ids[0]);
+        }
+        let mut lines = vec![format!("Denying {} calendar change(s):", ids.len())];
+        let mut errors = Vec::new();
+        for id in ids {
+            match self.action_change_deny(id) {
+                Ok(message) => lines.push(message),
+                Err(error) => {
+                    lines.push(format!(
+                        "Failed calendar change {id}: {}",
+                        safe_display_line(&error)
+                    ));
+                    errors.push(id.clone());
+                }
+            }
+        }
+        let output = lines.join("\n");
+        if errors.is_empty() {
+            Ok(output)
+        } else {
+            Err(output)
+        }
+    }
+
+    fn action_change_deny(&self, id: &str) -> Result<String, String> {
+        self.state.deny_change(id)?;
+        Ok(format!("Denied calendar change {id}."))
     }
 
     fn append_calendar_log_for_invocation(
@@ -256,7 +378,7 @@ impl Engine {
         args.calendar.clone().or_else(|| {
             account_id
                 .and_then(|id| self.config.accounts.get(id))
-                .and_then(default_calendar_id)
+                .and_then(default_calendar_id_for_account)
                 .map(str::to_owned)
         })
     }
@@ -290,6 +412,7 @@ impl Engine {
     }
 
     fn list_calendars(&self, args: &CalendarArgs) -> Result<String, String> {
+        reject_cursor(args)?;
         let mut lines = vec![LIST_CALENDARS_FORMAT.to_owned()];
         if !self.config.enable {
             return Ok(lines.join("\n"));
@@ -338,6 +461,7 @@ impl Engine {
     }
 
     fn list_events(&self, args: &CalendarArgs) -> Result<String, String> {
+        reject_cursor(args)?;
         let limit = normalized_limit(args.limit)?;
         let range = parse_range(args)?;
         let account = self.single_account(args.account.as_deref())?;
@@ -345,12 +469,18 @@ impl Engine {
         let events = self.events_for_account(account, calendar, range, limit)?;
         let mut lines = vec![LIST_EVENTS_FORMAT.to_owned()];
         for event in events {
-            lines.push(format_event_line(account, calendar, &event));
+            lines.push(format_event_line(
+                &self.config.policy,
+                account,
+                calendar,
+                &event,
+            ));
         }
         Ok(lines.join("\n"))
     }
 
     fn read_event(&self, args: &CalendarArgs) -> Result<String, String> {
+        reject_cursor(args)?;
         let event_id = required_arg(args.event_id.as_deref(), "event_id")?;
         let account = self.single_account(args.account.as_deref())?;
         let calendar = self.calendar_arg(account, args.calendar.as_deref())?;
@@ -369,10 +499,16 @@ impl Engine {
                 ));
             }
         };
-        Ok(format_event_detail(account, calendar, &event))
+        Ok(format_event_detail(
+            &self.config.policy,
+            account,
+            calendar,
+            &event,
+        ))
     }
 
     fn free_busy(&self, args: &CalendarArgs) -> Result<String, String> {
+        reject_cursor(args)?;
         let limit = normalized_limit(args.limit)?;
         let range = parse_range(args)?;
         let account = self.single_account(args.account.as_deref())?;
@@ -380,9 +516,192 @@ impl Engine {
         let events = self.events_for_account(account, calendar, range, limit)?;
         let mut lines = vec![FREE_BUSY_FORMAT.to_owned()];
         for event in events {
-            lines.push(format_free_busy_line(account, calendar, &event));
+            lines.push(format_free_busy_line(
+                &self.config.policy,
+                account,
+                calendar,
+                &event,
+            ));
         }
         Ok(lines.join("\n"))
+    }
+
+    fn submit_change(
+        &self,
+        command: CalendarCommand,
+        args: &CalendarArgs,
+    ) -> Result<String, String> {
+        let change = self.build_change(command, args)?;
+        if self.config.policy.write.require_approval {
+            let id = self.state.pending_change(&change)?;
+            return Ok(format_change_queued(&id, &change));
+        }
+        let result = self.execute_change(&change)?;
+        Ok(format_mutation_result(
+            "Applied", "direct", &change, &result,
+        ))
+    }
+
+    fn build_change(
+        &self,
+        command: CalendarCommand,
+        args: &CalendarArgs,
+    ) -> Result<CalendarChangeApproval, String> {
+        let account = self.single_account(args.account.as_deref())?;
+        if args.cursor.is_some() {
+            return Err("cursor is not supported for calendar writes yet".to_owned());
+        }
+        reject_read_range_args_for_write(args)?;
+        let calendar = self.calendar_arg(account, args.calendar.as_deref())?;
+        self.ensure_calendar_allowed(account, calendar)?;
+        if !matches!(
+            &account.backend,
+            Some(ValidatedBackendConfig::Google { .. })
+        ) {
+            return Err(format!(
+                "calendar account `{}` backend `{}` does not support calendar writes",
+                account.id,
+                account.backend_kind()
+            ));
+        }
+        let mut change =
+            CalendarChangeApproval::pending(command_name(command), &account.id, calendar);
+        match command {
+            CalendarCommand::CreateEvent => {
+                reject_read_only_write_target(args)?;
+                change.title = Some(required_text(args.title.as_deref(), "title")?);
+                let (start, end) = required_time_pair(args.start.as_deref(), args.end.as_deref())?;
+                change.start = Some(start);
+                change.end = Some(end);
+                change.description = optional_description(args.description.as_deref())?;
+                change.location = optional_line(args.location.as_deref(), "location", true)?;
+                change.timezone = optional_timezone(args.timezone.as_deref())?;
+                if change.timezone.is_some() && change.start.is_none() {
+                    return Err("timezone updates require start and end".to_owned());
+                }
+                change.attendees = optional_attendees(
+                    args.attendees.as_deref(),
+                    self.config.policy.write.max_attendees,
+                )?;
+            }
+            CalendarCommand::UpdateEvent => {
+                change.event_id = Some(required_text(args.event_id.as_deref(), "event_id")?);
+                change.etag = Some(required_text(args.etag.as_deref(), "etag")?);
+                change.title = optional_line(args.title.as_deref(), "title", false)?;
+                change.description = optional_description(args.description.as_deref())?;
+                change.location = optional_line(args.location.as_deref(), "location", true)?;
+                match (args.start.as_deref(), args.end.as_deref()) {
+                    (Some(_), Some(_)) => {
+                        let (start, end) =
+                            required_time_pair(args.start.as_deref(), args.end.as_deref())?;
+                        change.start = Some(start);
+                        change.end = Some(end);
+                    }
+                    (None, None) => {}
+                    _ => return Err("start and end must be provided together".to_owned()),
+                }
+                change.timezone = optional_timezone(args.timezone.as_deref())?;
+                change.attendees = optional_attendees(
+                    args.attendees.as_deref(),
+                    self.config.policy.write.max_attendees,
+                )?;
+                if !change_has_update_payload(&change) {
+                    return Err("update_event requires at least one field to update".to_owned());
+                }
+                if args.response.is_some() {
+                    return Err("response is only valid for respond_invite".to_owned());
+                }
+            }
+            CalendarCommand::DeleteEvent => {
+                change.event_id = Some(required_text(args.event_id.as_deref(), "event_id")?);
+                change.etag = Some(required_text(args.etag.as_deref(), "etag")?);
+                reject_payload_fields_for_delete(args)?;
+            }
+            CalendarCommand::RespondInvite => {
+                change.event_id = Some(required_text(args.event_id.as_deref(), "event_id")?);
+                change.etag = Some(required_text(args.etag.as_deref(), "etag")?);
+                change.response = Some(required_response(args.response.as_deref())?);
+                reject_payload_fields_for_response(args)?;
+            }
+            CalendarCommand::ListAccounts
+            | CalendarCommand::ListCalendars
+            | CalendarCommand::ListEvents
+            | CalendarCommand::ReadEvent
+            | CalendarCommand::FreeBusy => unreachable!("read commands are not calendar changes"),
+        }
+        Ok(change)
+    }
+
+    fn validate_persisted_change(&self, change: &CalendarChangeApproval) -> Result<(), String> {
+        let account = self.account_by_id(&change.account)?;
+        self.ensure_calendar_allowed(account, &change.calendar)?;
+        if !matches!(
+            &account.backend,
+            Some(ValidatedBackendConfig::Google { .. })
+        ) {
+            return Err(format!(
+                "calendar account `{}` backend `{}` does not support calendar writes",
+                account.id,
+                account.backend_kind()
+            ));
+        }
+        if let Some(attendees) = &change.attendees
+            && self.config.policy.write.max_attendees < attendees.len()
+        {
+            return Err("calendar change has too many attendees for current policy".to_owned());
+        }
+        validate_change_shape(change)
+    }
+
+    fn execute_change(
+        &self,
+        change: &CalendarChangeApproval,
+    ) -> Result<CalendarMutationResult, String> {
+        let account = self.account_by_id(&change.account)?;
+        self.ensure_calendar_allowed(account, &change.calendar)?;
+        match change.command.as_str() {
+            "create_event" => {
+                let event = self.google.create_event(
+                    account,
+                    &change.calendar,
+                    &google_write_from_change(change),
+                )?;
+                Ok(CalendarMutationResult::Event(Box::new(event)))
+            }
+            "update_event" => {
+                let event_id = required_change_field(change.event_id.as_deref(), "event_id")?;
+                let etag = required_change_field(change.etag.as_deref(), "etag")?;
+                let event = self.google.update_event(
+                    account,
+                    &change.calendar,
+                    event_id,
+                    etag,
+                    &google_write_from_change(change),
+                )?;
+                Ok(CalendarMutationResult::Event(Box::new(event)))
+            }
+            "delete_event" => {
+                let event_id = required_change_field(change.event_id.as_deref(), "event_id")?;
+                let etag = required_change_field(change.etag.as_deref(), "etag")?;
+                self.google
+                    .delete_event(account, &change.calendar, event_id, etag)?;
+                Ok(CalendarMutationResult::Deleted)
+            }
+            "respond_invite" => {
+                let event_id = required_change_field(change.event_id.as_deref(), "event_id")?;
+                let etag = required_change_field(change.etag.as_deref(), "etag")?;
+                let response = required_change_field(change.response.as_deref(), "response")?;
+                let event = self.google.respond_invite(
+                    account,
+                    &change.calendar,
+                    event_id,
+                    etag,
+                    response,
+                )?;
+                Ok(CalendarMutationResult::Event(Box::new(event)))
+            }
+            other => Err(format!("unsupported calendar change command `{other}`")),
+        }
     }
 
     fn events_for_account(
@@ -465,7 +784,7 @@ impl Engine {
         if let Some(calendar) = calendar {
             return Ok(calendar);
         }
-        let Some(calendar) = default_calendar_id(account) else {
+        let Some(calendar) = default_calendar_id_for_account(account) else {
             return Err(format!(
                 "calendar is required for account `{}` because no default calendar is configured",
                 account.id
@@ -473,6 +792,39 @@ impl Engine {
         };
         Ok(calendar)
     }
+
+    fn ensure_calendar_allowed(
+        &self,
+        account: &ValidatedAccount,
+        calendar: &str,
+    ) -> Result<(), String> {
+        if account
+            .allowed_calendars
+            .iter()
+            .any(|allowed| allowed == calendar)
+        {
+            return Ok(());
+        }
+        Err(format!(
+            "calendar `{calendar}` is not allowed for account `{}`",
+            account.id
+        ))
+    }
+}
+
+fn default_calendar_id_for_account(account: &ValidatedAccount) -> Option<&str> {
+    account.default_calendar.as_deref().or_else(|| {
+        account
+            .allowed_calendars
+            .first()
+            .map(String::as_str)
+            .or(match &account.backend {
+                Some(ValidatedBackendConfig::IcsFeed { .. }) => Some("main"),
+                Some(ValidatedBackendConfig::Google { .. })
+                | Some(ValidatedBackendConfig::Caldav { .. })
+                | None => None,
+            })
+    })
 }
 
 fn parse_range(args: &CalendarArgs) -> Result<TimeRange, String> {
@@ -499,6 +851,270 @@ fn required_arg<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str, Strin
     match value {
         Some(value) if !value.trim().is_empty() => Ok(value),
         _ => Err(format!("{name} is required")),
+    }
+}
+
+fn reject_cursor(args: &CalendarArgs) -> Result<(), String> {
+    if args.cursor.is_some() {
+        return Err("calendar cursor pagination is not implemented yet".to_owned());
+    }
+    Ok(())
+}
+
+fn required_text(value: Option<&str>, name: &str) -> Result<String, String> {
+    let value = required_arg(value, name)?;
+    validate_line(value, name, false)?;
+    Ok(value.to_owned())
+}
+
+fn required_change_field<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str, String> {
+    match value {
+        Some(value) if !value.trim().is_empty() => Ok(value),
+        _ => Err(format!("calendar change is missing {name}")),
+    }
+}
+
+fn optional_line(
+    value: Option<&str>,
+    name: &str,
+    allow_empty: bool,
+) -> Result<Option<String>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    validate_line(value, name, allow_empty)?;
+    Ok(Some(value.to_owned()))
+}
+
+fn optional_description(value: Option<&str>) -> Result<Option<String>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if MAX_EVENT_DESCRIPTION_BYTES < value.len()
+        || MAX_EVENT_DESCRIPTION_LINES < value.lines().count()
+        || value.chars().any(|ch| {
+            (ch.is_control() && ch != '\n' && ch != '\r' && ch != '\t')
+                || is_unsafe_format_control(ch)
+        })
+    {
+        return Err("description is too large or contains unsafe characters".to_owned());
+    }
+    Ok(Some(value.to_owned()))
+}
+
+fn optional_timezone(value: Option<&str>) -> Result<Option<String>, String> {
+    optional_line(value, "timezone", false)
+}
+
+fn validate_line(value: &str, name: &str, allow_empty: bool) -> Result<(), String> {
+    if (!allow_empty && value.trim().is_empty())
+        || MAX_EVENT_FIELD_CHARS < value.chars().count()
+        || value
+            .chars()
+            .any(|ch| ch.is_control() || is_unsafe_format_control(ch))
+    {
+        return Err(format!("{name} is too large or contains unsafe characters"));
+    }
+    Ok(())
+}
+
+fn optional_attendees(
+    value: Option<&[String]>,
+    max_attendees: usize,
+) -> Result<Option<Vec<String>>, String> {
+    let Some(attendees) = value else {
+        return Ok(None);
+    };
+    if max_attendees < attendees.len() {
+        return Err(format!("too many attendees; maximum is {max_attendees}"));
+    }
+    for attendee in attendees {
+        validate_attendee(attendee)?;
+    }
+    Ok(Some(attendees.to_vec()))
+}
+
+fn validate_attendee(value: &str) -> Result<(), String> {
+    if value.trim().is_empty()
+        || MAX_ATTENDEE_CHARS < value.chars().count()
+        || value.matches('@').count() != 1
+        || value
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_whitespace() || is_unsafe_format_control(ch))
+    {
+        return Err("attendee email address is invalid".to_owned());
+    }
+    Ok(())
+}
+
+fn required_time_pair(start: Option<&str>, end: Option<&str>) -> Result<(String, String), String> {
+    let start = required_text(start, "start")?;
+    let end = required_text(end, "end")?;
+    validate_time_pair(&start, &end)?;
+    Ok((start, end))
+}
+
+fn validate_time_pair(start: &str, end: &str) -> Result<(), String> {
+    let start_date = parse_tool_date(start);
+    let end_date = parse_tool_date(end);
+    match (start_date, end_date) {
+        (Some(start), Some(end)) => {
+            if !is_date_before(start, end) {
+                return Err("event start must be before event end".to_owned());
+            }
+            Ok(())
+        }
+        (None, None) => {
+            let start =
+                time::OffsetDateTime::parse(start, &time::format_description::well_known::Rfc3339)
+                    .map_err(|error| format!("start must be RFC3339 or YYYY-MM-DD: {error}"))?;
+            let end =
+                time::OffsetDateTime::parse(end, &time::format_description::well_known::Rfc3339)
+                    .map_err(|error| format!("end must be RFC3339 or YYYY-MM-DD: {error}"))?;
+            if !is_datetime_before(start, end) {
+                return Err("event start must be before event end".to_owned());
+            }
+            Ok(())
+        }
+        _ => Err(
+            "event start and end must both be all-day dates or both be RFC3339 date-times"
+                .to_owned(),
+        ),
+    }
+}
+
+fn parse_tool_date(value: &str) -> Option<time::Date> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10
+        || bytes.get(4) != Some(&b'-')
+        || bytes.get(7) != Some(&b'-')
+        || !bytes[..4].iter().all(u8::is_ascii_digit)
+        || !bytes[5..7].iter().all(u8::is_ascii_digit)
+        || !bytes[8..].iter().all(u8::is_ascii_digit)
+    {
+        return None;
+    }
+    let year = value[0..4].parse::<i32>().ok()?;
+    let month = time::Month::try_from(value[5..7].parse::<u8>().ok()?).ok()?;
+    let day = value[8..10].parse::<u8>().ok()?;
+    time::Date::from_calendar_date(year, month, day).ok()
+}
+
+fn is_date_before(left: time::Date, right: time::Date) -> bool {
+    left < right
+}
+
+fn is_datetime_before(left: time::OffsetDateTime, right: time::OffsetDateTime) -> bool {
+    left < right
+}
+
+fn required_response(value: Option<&str>) -> Result<String, String> {
+    let response = required_arg(value, "response")?;
+    if !matches!(response, "accepted" | "tentative" | "declined") {
+        return Err("response must be accepted, tentative, or declined".to_owned());
+    }
+    Ok(response.to_owned())
+}
+
+fn reject_read_only_write_target(args: &CalendarArgs) -> Result<(), String> {
+    if args.event_id.is_some() || args.etag.is_some() || args.response.is_some() {
+        return Err("create_event does not accept event_id, etag, or response".to_owned());
+    }
+    Ok(())
+}
+
+fn reject_read_range_args_for_write(args: &CalendarArgs) -> Result<(), String> {
+    if args.time_min.is_some() || args.time_max.is_some() || args.limit.is_some() {
+        return Err("calendar writes do not accept time_min, time_max, or limit".to_owned());
+    }
+    Ok(())
+}
+
+fn reject_payload_fields_for_delete(args: &CalendarArgs) -> Result<(), String> {
+    if args.title.is_some()
+        || args.description.is_some()
+        || args.location.is_some()
+        || args.start.is_some()
+        || args.end.is_some()
+        || args.timezone.is_some()
+        || args.attendees.is_some()
+        || args.response.is_some()
+    {
+        return Err("delete_event accepts only account, calendar, event_id, and etag".to_owned());
+    }
+    Ok(())
+}
+
+fn reject_payload_fields_for_response(args: &CalendarArgs) -> Result<(), String> {
+    if args.title.is_some()
+        || args.description.is_some()
+        || args.location.is_some()
+        || args.start.is_some()
+        || args.end.is_some()
+        || args.timezone.is_some()
+        || args.attendees.is_some()
+    {
+        return Err(
+            "respond_invite accepts only account, calendar, event_id, etag, and response"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn change_has_update_payload(change: &CalendarChangeApproval) -> bool {
+    change.title.is_some()
+        || change.description.is_some()
+        || change.location.is_some()
+        || change.start.is_some()
+        || change.end.is_some()
+        || change.attendees.is_some()
+}
+
+fn validate_change_shape(change: &CalendarChangeApproval) -> Result<(), String> {
+    match change.command.as_str() {
+        "create_event" => {
+            required_change_field(change.title.as_deref(), "title")?;
+            let start = required_change_field(change.start.as_deref(), "start")?;
+            let end = required_change_field(change.end.as_deref(), "end")?;
+            validate_time_pair(start, end)
+        }
+        "update_event" => {
+            required_change_field(change.event_id.as_deref(), "event_id")?;
+            required_change_field(change.etag.as_deref(), "etag")?;
+            if !change_has_update_payload(change) {
+                return Err("update_event requires at least one field to update".to_owned());
+            }
+            if let (Some(start), Some(end)) = (change.start.as_deref(), change.end.as_deref()) {
+                validate_time_pair(start, end)?;
+            } else if change.start.is_some() || change.end.is_some() || change.timezone.is_some() {
+                return Err("start and end must be provided together for time updates".to_owned());
+            }
+            Ok(())
+        }
+        "delete_event" => {
+            required_change_field(change.event_id.as_deref(), "event_id")?;
+            required_change_field(change.etag.as_deref(), "etag")?;
+            Ok(())
+        }
+        "respond_invite" => {
+            required_change_field(change.event_id.as_deref(), "event_id")?;
+            required_change_field(change.etag.as_deref(), "etag")?;
+            required_response(change.response.as_deref()).map(|_| ())
+        }
+        other => Err(format!("unsupported calendar change command `{other}`")),
+    }
+}
+
+fn google_write_from_change(change: &CalendarChangeApproval) -> GoogleEventWrite<'_> {
+    GoogleEventWrite {
+        title: change.title.as_deref(),
+        description: change.description.as_deref(),
+        location: change.location.as_deref(),
+        start: change.start.as_deref(),
+        end: change.end.as_deref(),
+        timezone: change.timezone.as_deref(),
+        attendees: change.attendees.as_deref(),
     }
 }
 
@@ -536,6 +1152,25 @@ fn require_one_arg(argv: &[String]) -> Result<&str, String> {
         [] => Err("missing required action argument".to_owned()),
         _ => Err("too many action arguments".to_owned()),
     }
+}
+
+fn require_change_ids(argv: &[String]) -> Result<Vec<String>, String> {
+    let raw = require_one_arg(argv)?;
+    let ids = raw
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if ids.is_empty() {
+        return Err("missing required action argument".to_owned());
+    }
+    for id in &ids {
+        if id.parse::<u64>().ok().filter(|value| 0 < *value).is_none()
+            || !id.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(format!("invalid calendar change id `{id}`"));
+        }
+    }
+    Ok(ids)
 }
 
 fn calendar_log_item_count(command: CalendarCommand, text: &str) -> Option<u64> {
@@ -580,7 +1215,12 @@ fn push_log_field(fields: &mut Vec<String>, name: &str, value: Option<&str>) {
     }
 }
 
-fn format_event_line(account: &ValidatedAccount, calendar: &str, event: &BackendEvent) -> String {
+fn format_event_line(
+    policy: &ValidatedPolicy,
+    account: &ValidatedAccount,
+    calendar: &str,
+    event: &BackendEvent,
+) -> String {
     let status = event_status(event).unwrap_or("-");
     format!(
         "{} {} {} {} {} {} {} {}",
@@ -589,13 +1229,14 @@ fn format_event_line(account: &ValidatedAccount, calendar: &str, event: &Backend
         safe_field(event_id(event)),
         safe_field(event_start(event)),
         safe_field(event_end(event)),
-        event_flags(event),
+        event_flags(policy, event),
         safe_field(status),
-        safe_field(event_summary(event))
+        safe_field(event_summary_for_policy(policy, event))
     )
 }
 
 fn format_free_busy_line(
+    policy: &ValidatedPolicy,
     account: &ValidatedAccount,
     calendar: &str,
     event: &BackendEvent,
@@ -607,11 +1248,16 @@ fn format_free_busy_line(
         safe_field(event_id(event)),
         safe_field(event_start(event)),
         safe_field(event_end(event)),
-        event_flags(event)
+        event_flags(policy, event)
     )
 }
 
-fn format_event_detail(account: &ValidatedAccount, calendar: &str, event: &BackendEvent) -> String {
+fn format_event_detail(
+    policy: &ValidatedPolicy,
+    account: &ValidatedAccount,
+    calendar: &str,
+    event: &BackendEvent,
+) -> String {
     let mut lines = vec![
         "format: key value".to_owned(),
         format!("account {}", safe_field(&account.id)),
@@ -619,8 +1265,11 @@ fn format_event_detail(account: &ValidatedAccount, calendar: &str, event: &Backe
         format!("event_id {}", safe_field(event_id(event))),
         format!("start {}", safe_field(event_start(event))),
         format!("end {}", safe_field(event_end(event))),
-        format!("flags {}", event_flags(event)),
-        format!("summary {}", safe_field(event_summary(event))),
+        format!("flags {}", event_flags(policy, event)),
+        format!(
+            "summary {}",
+            safe_field(event_summary_for_policy(policy, event))
+        ),
     ];
     if let Some(uid) = event_uid(event) {
         lines.push(format!("uid {}", safe_field(uid)));
@@ -631,18 +1280,20 @@ fn format_event_detail(account: &ValidatedAccount, calendar: &str, event: &Backe
     if let Some(status) = event_status(event) {
         lines.push(format!("status {}", safe_field(status)));
     }
-    if let Some(location) = event_location(event) {
-        lines.push(format!("location {}", safe_field(location)));
-    }
-    if let Some(organizer) = event_organizer(event) {
-        lines.push(format!("organizer {}", safe_field(organizer)));
-    }
-    let attendees = event_attendees(event);
-    if !attendees.is_empty() {
-        lines.push(format!("attendees {}", safe_field(&attendees.join(","))));
-    }
-    if let Some(description) = event_description(event) {
-        lines.push(format!("description {}", safe_multiline(description)));
+    if !event_private_busy_only(policy, event) {
+        if let Some(location) = event_location(event) {
+            lines.push(format!("location {}", safe_field(location)));
+        }
+        if let Some(organizer) = event_organizer(event) {
+            lines.push(format!("organizer {}", safe_field(organizer)));
+        }
+        let attendees = event_attendees(event);
+        if !attendees.is_empty() {
+            lines.push(format!("attendees {}", safe_field(&attendees.join(","))));
+        }
+        if let Some(description) = event_description_for_policy(policy, event) {
+            lines.push(format!("description {}", safe_multiline(description)));
+        }
     }
     lines.join("\n")
 }
@@ -675,10 +1326,27 @@ fn event_summary(event: &BackendEvent) -> &str {
     }
 }
 
-fn event_description(event: &BackendEvent) -> Option<&str> {
-    match event {
-        BackendEvent::Ics(event) => event.description.as_deref(),
-        BackendEvent::Google(event) => event.description.as_deref(),
+fn event_summary_for_policy<'a>(policy: &ValidatedPolicy, event: &'a BackendEvent) -> &'a str {
+    if event_private_busy_only(policy, event) {
+        "(private)"
+    } else {
+        event_summary(event)
+    }
+}
+
+fn event_description_for_policy<'a>(
+    policy: &ValidatedPolicy,
+    event: &'a BackendEvent,
+) -> Option<&'a str> {
+    if event_private_busy_only(policy, event) {
+        return None;
+    }
+    match policy.read.descriptions {
+        DescriptionPolicy::Always => match event {
+            BackendEvent::Ics(event) => event.description.as_deref(),
+            BackendEvent::Google(event) => event.description.as_deref(),
+        },
+        DescriptionPolicy::ApprovedOnly | DescriptionPolicy::Omit => None,
     }
 }
 
@@ -724,8 +1392,24 @@ fn event_attendees(event: &BackendEvent) -> &[String] {
     }
 }
 
-fn event_flags(event: &BackendEvent) -> String {
+fn event_is_private(event: &BackendEvent) -> bool {
+    match event {
+        BackendEvent::Ics(event) => event.private,
+        BackendEvent::Google(event) => event.visibility.as_deref() == Some("private"),
+    }
+}
+
+fn event_private_busy_only(policy: &ValidatedPolicy, event: &BackendEvent) -> bool {
+    policy.read.private_events == PrivateEventsPolicy::BusyOnly && event_is_private(event)
+}
+
+fn event_flags(policy: &ValidatedPolicy, event: &BackendEvent) -> String {
     let mut flags = vec!["read_only"];
+    if event_private_busy_only(policy, event) {
+        flags.push("private_busy_only");
+    } else if event_is_private(event) {
+        flags.push("private");
+    }
     match event {
         BackendEvent::Ics(event) => {
             if event.recurring {
@@ -739,9 +1423,103 @@ fn event_flags(event: &BackendEvent) -> String {
             if event.recurring {
                 flags.push("recurring");
             }
+            if event.transparency.as_deref() == Some("transparent") {
+                flags.push("transparent");
+            }
+            if let Some(response) = &event.self_response_status
+                && response == "declined"
+            {
+                flags.push("self_declined");
+            }
         }
     }
     flags.join(",")
+}
+
+fn format_change_queued(id: &str, change: &CalendarChangeApproval) -> String {
+    format!(
+        "approval_required\nmessage Calendar change pending approval.\napproval_id {}\ncommand {}\naccount {}\ncalendar {}",
+        safe_field(id),
+        safe_field(&change.command),
+        safe_field(&change.account),
+        safe_field(&change.calendar)
+    )
+}
+
+fn format_change_summary(change: &CalendarChangeApproval) -> String {
+    let title = change.title.as_deref().unwrap_or("-");
+    let event_id = change.event_id.as_deref().unwrap_or("-");
+    let start = change.start.as_deref().unwrap_or("-");
+    format!(
+        "{} command={} account={} calendar={} event_id={} start={} title={}",
+        safe_display_line(&change.id),
+        safe_display_line(&change.command),
+        safe_display_line(&change.account),
+        safe_display_line(&change.calendar),
+        safe_display_line(event_id),
+        safe_display_line(start),
+        safe_display_line(title)
+    )
+}
+
+fn format_change_detail(change: &CalendarChangeApproval) -> String {
+    let mut lines = vec![
+        format!("Calendar change {}", safe_display_line(&change.id)),
+        format!("status: {}", safe_display_line(&change.status)),
+        format!("command: {}", safe_display_line(&change.command)),
+        format!("account: {}", safe_display_line(&change.account)),
+        format!("calendar: {}", safe_display_line(&change.calendar)),
+        format!("reason: {}", safe_display_line(&change.reason)),
+    ];
+    push_change_detail(&mut lines, "event_id", change.event_id.as_deref());
+    push_change_detail(&mut lines, "etag", change.etag.as_deref());
+    push_change_detail(&mut lines, "title", change.title.as_deref());
+    push_change_detail(&mut lines, "location", change.location.as_deref());
+    push_change_detail(&mut lines, "start", change.start.as_deref());
+    push_change_detail(&mut lines, "end", change.end.as_deref());
+    push_change_detail(&mut lines, "timezone", change.timezone.as_deref());
+    if let Some(attendees) = &change.attendees {
+        lines.push(format!(
+            "attendees: {}",
+            safe_display_line(&attendees.join(", "))
+        ));
+    }
+    push_change_detail(&mut lines, "response", change.response.as_deref());
+    if let Some(description) = &change.description {
+        lines.push(format!("description:\n{}", safe_display_text(description)));
+    }
+    lines.join("\n")
+}
+
+fn push_change_detail(lines: &mut Vec<String>, name: &str, value: Option<&str>) {
+    if let Some(value) = value {
+        lines.push(format!("{name}: {}", safe_display_line(value)));
+    }
+}
+
+fn format_mutation_result(
+    verb: &str,
+    id: &str,
+    change: &CalendarChangeApproval,
+    result: &CalendarMutationResult,
+) -> String {
+    match result {
+        CalendarMutationResult::Event(event) => format!(
+            "{verb} calendar change {id}. command={} account={} calendar={} event_id={} etag={}",
+            safe_display_line(&change.command),
+            safe_display_line(&change.account),
+            safe_display_line(&change.calendar),
+            safe_display_line(&event.id),
+            safe_display_line(event.etag.as_deref().unwrap_or("-"))
+        ),
+        CalendarMutationResult::Deleted => format!(
+            "{verb} calendar change {id}. command={} account={} calendar={} event_id={}",
+            safe_display_line(&change.command),
+            safe_display_line(&change.account),
+            safe_display_line(&change.calendar),
+            safe_display_line(change.event_id.as_deref().unwrap_or("-"))
+        ),
+    }
 }
 
 fn command_name(command: CalendarCommand) -> &'static str {
@@ -800,38 +1578,99 @@ fn action_error(invoke: ActionInvoke, message: String) -> Event {
 }
 
 fn safe_field(value: &str) -> String {
-    value
+    let field = value
         .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| {
+            if c.is_control() || is_unsafe_format_control(c) {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
-        .join("_")
+        .join("_");
+    truncate_chars(&field, MAX_DISPLAY_LINE_CHARS)
 }
 
 fn safe_multiline(value: &str) -> String {
-    value
+    let collapsed = value
         .chars()
-        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .map(|c| {
+            if c == '\n' || c == '\r' || c.is_control() || is_unsafe_format_control(c) {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" ");
+    truncate_chars(&collapsed, MAX_EVENT_FIELD_CHARS)
 }
 
 fn safe_display_line(value: &str) -> String {
     safe_log_value(value, MAX_DISPLAY_LINE_CHARS)
 }
 
+fn safe_display_text(value: &str) -> String {
+    let mut out = String::new();
+    for (index, ch) in value.chars().enumerate() {
+        if MAX_EVENT_FIELD_CHARS < index + 1 {
+            out.push('…');
+            break;
+        }
+        push_escaped_char(&mut out, ch, true);
+    }
+    out
+}
+
 fn safe_log_value(value: &str, max_chars: usize) -> String {
     let collapsed = value
         .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| {
+            if c.is_control() || is_unsafe_format_control(c) {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
     truncate_chars(&collapsed, max_chars)
+}
+
+fn is_unsafe_format_control(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{061c}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{feff}'
+    )
+}
+
+fn push_escaped_char(out: &mut String, ch: char, multiline: bool) {
+    match ch {
+        '\n' if multiline => out.push('\n'),
+        '\n' => out.push_str("\\n"),
+        '\r' => out.push_str("\\r"),
+        '\t' => out.push_str("\\t"),
+        '\u{1b}' => out.push_str("\\e"),
+        '\u{7f}' => out.push_str("\\x7f"),
+        ch if (ch as u32) <= 0x1f || (0x80..=0x9f).contains(&(ch as u32)) => {
+            out.push_str(&format!("\\u{{{:04x}}}", ch as u32));
+        }
+        ch if is_unsafe_format_control(ch) => {
+            out.push_str(&format!("\\u{{{:04x}}}", ch as u32));
+        }
+        ch => out.push(ch),
+    }
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {
@@ -850,7 +1689,8 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use crate::calendar::config::{
-        CalendarAccountConfig, CalendarBackendConfig, CalendarSelectionConfig,
+        CalendarAccountConfig, CalendarBackendConfig, CalendarSelectionConfig, ValidatedReadPolicy,
+        ValidatedWritePolicy,
     };
 
     #[test]
@@ -870,6 +1710,7 @@ mod tests {
                 calendars: Default::default(),
                 timezone: Some("UTC".to_owned()),
             }],
+            ..Default::default()
         };
         let config = cfg.validate().expect("valid calendar config");
         let temp = tempfile::TempDir::new().expect("tempdir");
@@ -928,7 +1769,7 @@ mod tests {
                 ],
             ))
             .expect_err("writes are unavailable");
-        assert!(err.contains("not available"), "{err}");
+        assert!(err.contains("does not support calendar writes"), "{err}");
 
         let log = engine.action_log_last(10).expect("log output");
 
@@ -937,6 +1778,126 @@ mod tests {
         assert!(log.contains("account=feed"), "{log}");
         assert!(log.contains("calendar=main"), "{log}");
         assert!(!log.contains("private title"), "{log}");
+    }
+
+    #[test]
+    fn google_writes_queue_pending_calendar_changes() {
+        // Calendar writes can send attendee notifications or alter the user's
+        // schedule, so the default policy persists a pending change for review
+        // instead of calling Google immediately.
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let cfg = CalendarExtensionConfig {
+            enable: true,
+            accounts: vec![CalendarAccountConfig {
+                id: "google".to_owned(),
+                enable: true,
+                backend: Some(CalendarBackendConfig::Google {
+                    client_id_secret: "client".to_owned(),
+                    client_secret_secret: None,
+                    refresh_token_secret: "refresh".to_owned(),
+                    api_base: None,
+                }),
+                calendars: CalendarSelectionConfig {
+                    default: Some("primary".to_owned()),
+                    allow: vec!["primary".to_owned()],
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let engine = Engine {
+            config: cfg.validate().expect("valid config"),
+            state: StateStore::open(temp.path().join("state")).expect("state"),
+            google: GoogleBackend::new(BTreeMap::new()),
+            ics_feed: IcsFeedBackend::new(BTreeMap::new()),
+        };
+
+        let output = engine
+            .dispatch(&command_args(
+                "create_event",
+                vec![
+                    ("account", CborValue::Text("google".to_owned())),
+                    ("calendar", CborValue::Text("primary".to_owned())),
+                    ("title", CborValue::Text("Team Sync".to_owned())),
+                    ("start", CborValue::Text("2026-05-28T12:00:00Z".to_owned())),
+                    ("end", CborValue::Text("2026-05-28T13:00:00Z".to_owned())),
+                    (
+                        "attendees",
+                        CborValue::Array(vec![CborValue::Text("a@example.com".to_owned())]),
+                    ),
+                ],
+            ))
+            .expect("queued write");
+
+        assert!(output.contains("approval_required"), "{output}");
+        assert!(output.contains("approval_id 1"), "{output}");
+        let list = engine.action_change_list().expect("change list");
+        assert!(list.contains("command=create_event"), "{list}");
+        assert!(list.contains("title=Team Sync"), "{list}");
+        let open = engine.action_change_open("1").expect("change open");
+        assert!(open.contains("attendees: a@example.com"), "{open}");
+        assert_eq!(
+            engine.action_change_deny("1"),
+            Ok("Denied calendar change 1.".to_owned())
+        );
+    }
+
+    #[test]
+    fn private_event_details_are_busy_only_by_default() {
+        // Provider-private events should not leak summaries or descriptions to
+        // the model unless policy explicitly opts into details.
+        let account = ValidatedAccount {
+            id: "google".to_owned(),
+            enable: true,
+            display_name: None,
+            backend: Some(ValidatedBackendConfig::Google {
+                client_id_secret: "client".to_owned(),
+                client_secret_secret: None,
+                refresh_token_secret: "refresh".to_owned(),
+                api_base: None,
+            }),
+            default_calendar: Some("primary".to_owned()),
+            allowed_calendars: vec!["primary".to_owned()],
+            timezone: Some("UTC".to_owned()),
+        };
+        let event = BackendEvent::Google(GoogleEvent {
+            id: "evt".to_owned(),
+            etag: Some("abc".to_owned()),
+            i_cal_uid: None,
+            summary: "Private title".to_owned(),
+            description: Some("private body".to_owned()),
+            location: Some("Secret room".to_owned()),
+            start: "2026-05-28T12:00:00Z".to_owned(),
+            end: "2026-05-28T13:00:00Z".to_owned(),
+            status: Some("confirmed".to_owned()),
+            visibility: Some("private".to_owned()),
+            transparency: None,
+            organizer: Some("org@example.com".to_owned()),
+            attendees: vec!["a@example.com".to_owned()],
+            self_response_status: None,
+            recurring: false,
+        });
+        let policy = ValidatedPolicy {
+            read: ValidatedReadPolicy {
+                private_events: PrivateEventsPolicy::BusyOnly,
+                descriptions: DescriptionPolicy::ApprovedOnly,
+            },
+            write: ValidatedWritePolicy {
+                require_approval: true,
+                max_attendees: 50,
+            },
+        };
+
+        let detail = format_event_detail(&policy, &account, "primary", &event);
+
+        assert!(detail.contains("summary (private)"), "{detail}");
+        assert!(
+            detail.contains("flags read_only,private_busy_only"),
+            "{detail}"
+        );
+        assert!(!detail.contains("Private title"), "{detail}");
+        assert!(!detail.contains("private body"), "{detail}");
+        assert!(!detail.contains("Secret room"), "{detail}");
     }
 
     #[test]
@@ -967,13 +1928,26 @@ mod tests {
             start: "2026-05-28T12:00:00Z".to_owned(),
             end: "2026-05-28T13:00:00Z".to_owned(),
             status: Some("confirmed".to_owned()),
+            visibility: None,
+            transparency: None,
             organizer: Some("org@example.com".to_owned()),
             attendees: vec!["a@example.com".to_owned(), "b@example.com".to_owned()],
+            self_response_status: None,
             recurring: true,
         });
+        let policy = ValidatedPolicy {
+            read: ValidatedReadPolicy {
+                private_events: PrivateEventsPolicy::BusyOnly,
+                descriptions: DescriptionPolicy::Always,
+            },
+            write: ValidatedWritePolicy {
+                require_approval: true,
+                max_attendees: 50,
+            },
+        };
 
         assert_eq!(
-            format_event_detail(&account, "primary", &event),
+            format_event_detail(&policy, &account, "primary", &event),
             "format: key value\naccount google\ncalendar primary\nevent_id evt\nstart 2026-05-28T12:00:00Z\nend 2026-05-28T13:00:00Z\nflags read_only,recurring\nsummary Team_Sync\nuid uid@example.com\netag abc\nstatus confirmed\nlocation Room_1\norganizer org@example.com\nattendees a@example.com,b@example.com\ndescription line 1 line 2"
         );
     }
@@ -992,6 +1966,7 @@ mod tests {
                     ..Default::default()
                 },
             ],
+            ..Default::default()
         };
 
         let err = match cfg.validate() {
@@ -1013,6 +1988,7 @@ mod tests {
                 }),
                 ..Default::default()
             }],
+            ..Default::default()
         };
 
         let err = match cfg.validate() {
@@ -1039,6 +2015,7 @@ mod tests {
                 },
                 timezone: Some("UTC".to_owned()),
             }],
+            ..Default::default()
         };
         Engine {
             config: cfg.validate().expect("valid config"),

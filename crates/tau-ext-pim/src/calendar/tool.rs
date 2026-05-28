@@ -76,30 +76,12 @@ pub(crate) struct CalendarArgs {
     pub(crate) response: Option<String>,
 }
 
-impl CalendarArgs {
-    /// Touch arguments that are reserved for future write backends.
-    pub(crate) fn note_reserved_write_fields(&self) {
-        let _ = (
-            &self.etag,
-            &self.cursor,
-            &self.title,
-            &self.description,
-            &self.location,
-            &self.start,
-            &self.end,
-            &self.timezone,
-            &self.attendees,
-            &self.response,
-        );
-    }
-}
-
 /// Return the model-visible calendar tool specification.
 pub fn calendar_tool_spec() -> ToolSpec {
     ToolSpec {
         name: tau_proto::ToolName::new(TOOL_NAME),
         model_visible_name: None,
-        description: Some("Controlled calendar access through configured accounts. Commands: list_accounts, list_calendars, list_events, read_event, free_busy, create_event, update_event, delete_event, respond_invite. Calendar writes and invitation responses require writable backends and are expected to require user approval. Use explicit RFC3339 timestamps and IANA timezones; do not pass natural-language dates.".to_owned()),
+        description: Some("Controlled calendar access through configured accounts. Commands: list_accounts, list_calendars, list_events, read_event, free_busy, create_event, update_event, delete_event, respond_invite. Google calendar mutations are queued for user approval by default and require explicit account/calendar targets plus etag for existing events. ICS feed accounts are read-only. Use explicit RFC3339 timestamps or YYYY-MM-DD all-day dates and IANA timezones; do not pass natural-language dates.".to_owned()),
         tool_type: tau_proto::ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
@@ -111,7 +93,7 @@ pub fn calendar_tool_spec() -> ToolSpec {
                 },
                 "args": {
                     "type": "object",
-                    "description": "Command arguments. list_accounts takes no arguments. Other commands generally require account/calendar once more than one target is configured. Mutations require event_id and etag when targeting an existing event.",
+                    "description": "Command arguments. list_accounts takes no arguments. Other commands generally require account/calendar once more than one target is configured. Mutations for existing events require event_id and etag for stale-write protection.",
                     "properties": {
                         "account": {"type": "string", "description": "Configured calendar account id."},
                         "calendar": {"type": "string", "description": "Calendar id within the account."},
@@ -124,8 +106,8 @@ pub fn calendar_tool_spec() -> ToolSpec {
                         "title": {"type": "string"},
                         "description": {"type": "string"},
                         "location": {"type": "string"},
-                        "start": {"type": "string"},
-                        "end": {"type": "string"},
+                        "start": {"type": "string", "description": "RFC3339 date-time or YYYY-MM-DD all-day start."},
+                        "end": {"type": "string", "description": "RFC3339 date-time or YYYY-MM-DD all-day exclusive end."},
                         "timezone": {"type": "string"},
                         "attendees": {"type": "array", "items": {"type": "string"}},
                         "response": {"type": "string", "enum": ["accepted", "tentative", "declined"]}

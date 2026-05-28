@@ -138,6 +138,10 @@ extensions:
     secrets:
       mail_password: {}
       personal_calendar_ics_url: {}
+      google_calendar_client_id: {}
+      google_calendar_client_secret:
+        optional: true
+      google_calendar_refresh_token: {}
     config:
       email:
         enable: true
@@ -189,9 +193,16 @@ extensions:
               default: main
               allow:
                 - main
+        policy:
+          read:
+            private_events: busy_only
+            descriptions: approved_only
+          write:
+            require_approval: true
+            max_attendees: 50
 ```
 
-The `calendar.accounts[*].backend.type: google` backend uses the native Google Calendar API for read-only operations. It currently expects user-provided OAuth secrets, declared under `extensions.std-pim.secrets` and referenced by name:
+The `calendar.accounts[*].backend.type: google` backend uses the native Google Calendar API for reads and user-approved writes. It currently expects user-provided OAuth secrets, declared under `extensions.std-pim.secrets` and referenced by name:
 
 ```yaml
 - id: google-calendar
@@ -208,9 +219,9 @@ The `calendar.accounts[*].backend.type: google` backend uses the native Google C
       - primary
 ```
 
-For Google accounts, `calendars.allow` entries are exact Google calendar IDs; use `primary` for Google's primary-calendar alias. Display summaries are not access-control identifiers. Use narrow Google scopes such as `https://www.googleapis.com/auth/calendar.calendarlist.readonly` plus `https://www.googleapis.com/auth/calendar.events.readonly` for read-only accounts unless you are testing future write support.
+For Google accounts, `calendars.allow` entries are exact Google calendar IDs; use `primary` for Google's primary-calendar alias. Display summaries are not access-control identifiers. Use narrow Google scopes such as `https://www.googleapis.com/auth/calendar.calendarlist.readonly` plus `https://www.googleapis.com/auth/calendar.events.readonly` for read-only accounts. Use `https://www.googleapis.com/auth/calendar.events` when enabling create/update/delete/RSVP support.
 
-Calendar tool reads and unsupported write attempts append sanitized audit entries to `logs/calendar.jsonl` under the extension state directory. Review them with `/calendar log last [number]`. Entries include command, status, account, calendar, event id, time bounds, and result counts; they do not persist event titles or descriptions.
+Calendar tool reads and write requests append sanitized audit entries to `logs/calendar.jsonl` under the extension state directory. Review them with `/calendar log last [number]`. Entries include command, status, account, calendar, event id, time bounds, and result counts; they do not persist event titles or descriptions. Pending calendar mutations are stored separately for `/calendar change` review.
 
 Create the secret value as raw UTF-8 text. Despite the `.yaml` suffix, the secret file is read as trimmed text, not as a structured YAML document.
 
@@ -218,8 +229,10 @@ Create the secret value as raw UTF-8 text. Despite the `.yaml` suffix, the secre
 mkdir -p ~/.local/state/tau/secrets
 printf '%s\n' 'app-password-or-token' > ~/.local/state/tau/secrets/mail_password.yaml
 printf '%s\n' 'https://example.com/private-calendar.ics' > ~/.local/state/tau/secrets/personal_calendar_ics_url.yaml
-chmod 600 ~/.local/state/tau/secrets/mail_password.yaml
-chmod 600 ~/.local/state/tau/secrets/personal_calendar_ics_url.yaml
+printf '%s\n' 'google-oauth-client-id' > ~/.local/state/tau/secrets/google_calendar_client_id.yaml
+printf '%s\n' 'google-oauth-client-secret' > ~/.local/state/tau/secrets/google_calendar_client_secret.yaml
+printf '%s\n' 'google-oauth-refresh-token' > ~/.local/state/tau/secrets/google_calendar_refresh_token.yaml
+chmod 600 ~/.local/state/tau/secrets/*.yaml
 ```
 
 For one-shot startup, an environment variable also works. The suffix is normalized to the secret name.
@@ -263,6 +276,20 @@ The model-visible tool name is `email`. Commands are selected through the `comma
 
 Use `list_accounts` to inspect configured account ids; normal single-account use can omit `account`.
 
+The model-visible tool name for calendars is `calendar`. Commands are selected through the `command` argument:
+
+- `list_accounts` — returns configured calendar accounts.
+- `list_calendars` — returns calendars visible through configured accounts.
+- `list_events` — lists bounded event metadata for one account/calendar.
+- `read_event` — reads one event by `event_id`; Google events include `etag` for safe writes.
+- `free_busy` — returns busy blocks without descriptions.
+- `create_event` — queues or applies a Google event create request.
+- `update_event` — queues or applies a Google event patch; requires `event_id` and `etag`.
+- `delete_event` — queues or applies a Google event delete; requires `event_id` and `etag`.
+- `respond_invite` — queues or applies an RSVP response; requires `event_id`, `etag`, and `response`.
+
+Calendar writes target Google accounts only. The default write policy queues `/calendar change` approvals; ICS feed accounts remain read-only. `start` and `end` accept RFC3339 date-times or `YYYY-MM-DD` all-day dates.
+
 
 ## User approval actions
 
@@ -278,6 +305,14 @@ The extension publishes `/email` actions for review:
 - `/email out open <id>` — inspect an outgoing draft, including Bcc.
 - `/email out approve <id> [id...]` — send the approved draft(s).
 - `/email out whitelist <pattern>` — persist an outgoing recipient allow pattern, if state policy extensions are enabled.
+
+The extension also publishes `/calendar` actions:
+
+- `/calendar log last [number]` — show recent calendar access and mutation log entries; defaults to 20.
+- `/calendar change list` — list pending calendar mutations.
+- `/calendar change open <id>` — inspect a pending calendar mutation.
+- `/calendar change approve <id> [id...]` — apply approved Google calendar mutation(s).
+- `/calendar change deny <id> [id...]` — deny pending calendar mutation(s).
 
 
 ## Tracing

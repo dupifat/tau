@@ -10,6 +10,14 @@ pub fn calendar_action_schema() -> ActionSchema {
             kind: ActionArgKind::String,
         }
     }
+    fn rest_string_arg(name: &str, description: &str) -> ActionArg {
+        ActionArg {
+            name: name.to_owned(),
+            description: description.to_owned(),
+            required: true,
+            kind: ActionArgKind::RestString,
+        }
+    }
     fn optional_integer_arg(name: &str, description: &str) -> ActionArg {
         ActionArg {
             name: name.to_owned(),
@@ -65,16 +73,16 @@ pub fn calendar_action_schema() -> ActionSchema {
                         },
                         ActionCommand {
                             name: "approve".to_owned(),
-                            description: "Approve a pending calendar change".to_owned(),
+                            description: "Approve one or more pending calendar changes".to_owned(),
                             action_id: Some("calendar.change.approve".to_owned()),
-                            args: vec![string_arg("id", "Pending change id")],
+                            args: vec![rest_string_arg("ids", "Pending change id(s)")],
                             children: Vec::new(),
                         },
                         ActionCommand {
                             name: "deny".to_owned(),
-                            description: "Deny a pending calendar change".to_owned(),
+                            description: "Deny one or more pending calendar changes".to_owned(),
                             action_id: Some("calendar.change.deny".to_owned()),
-                            args: vec![string_arg("id", "Pending change id")],
+                            args: vec![rest_string_arg("ids", "Pending change id(s)")],
                             children: Vec::new(),
                         },
                     ],

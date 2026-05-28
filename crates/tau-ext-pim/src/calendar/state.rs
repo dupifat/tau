@@ -9,6 +9,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 const LOG_SCHEMA: u32 = 1;
+const CHANGE_SCHEMA: u32 = 1;
+const CHANGE_KIND: &str = "calendar_change";
+const CHANGE_APPROVAL_KIND: &str = "calendar-change";
+const MAX_CHANGE_FIELD_CHARS: usize = 512;
+const MAX_DESCRIPTION_BYTES: usize = 64 * 1024;
+const MAX_DESCRIPTION_LINES: usize = 1000;
+const MAX_ATTENDEES_HARD: usize = 200;
 
 /// One persisted calendar audit log entry.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -70,6 +77,88 @@ impl CalendarLogEntry {
     }
 }
 
+/// One persisted calendar mutation approval.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct CalendarChangeApproval {
+    /// Approval schema version.
+    pub(crate) schema: u32,
+    /// Opaque stable approval ID.
+    pub(crate) id: String,
+    /// Approval kind.
+    pub(crate) kind: String,
+    /// Approval status: pending, sending, approved, or denied.
+    pub(crate) status: String,
+    /// Calendar tool command name.
+    pub(crate) command: String,
+    /// Configured account id.
+    pub(crate) account: String,
+    /// Calendar id.
+    pub(crate) calendar: String,
+    /// Target event id for update, delete, and invite response commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) event_id: Option<String>,
+    /// Provider ETag used for stale-write protection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) etag: Option<String>,
+    /// Event title for create/update commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) title: Option<String>,
+    /// Event description for create/update commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) description: Option<String>,
+    /// Event location for create/update commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) location: Option<String>,
+    /// Event start as RFC3339 date-time or all-day date.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) start: Option<String>,
+    /// Event end as RFC3339 date-time or all-day exclusive date.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) end: Option<String>,
+    /// IANA timezone for date-time values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) timezone: Option<String>,
+    /// Attendee email addresses. `None` means leave existing attendees
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) attendees: Option<Vec<String>>,
+    /// Invitation response for respond_invite commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) response: Option<String>,
+    /// Reason this change requires approval.
+    pub(crate) reason: String,
+    /// Provider event id after a successful approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) result_event_id: Option<String>,
+}
+
+impl CalendarChangeApproval {
+    /// Build a pending schema-v1 calendar change approval.
+    pub(crate) fn pending(command: &str, account: &str, calendar: &str) -> Self {
+        Self {
+            schema: CHANGE_SCHEMA,
+            id: String::new(),
+            kind: CHANGE_KIND.to_owned(),
+            status: "pending".to_owned(),
+            command: command.to_owned(),
+            account: account.to_owned(),
+            calendar: calendar.to_owned(),
+            event_id: None,
+            etag: None,
+            title: None,
+            description: None,
+            location: None,
+            start: None,
+            end: None,
+            timezone: None,
+            attendees: None,
+            response: None,
+            reason: "user_approval_required".to_owned(),
+            result_event_id: None,
+        }
+    }
+}
+
 /// Calendar module persistent state under the extension state directory.
 pub(crate) struct StateStore {
     state_dir: PathBuf,
@@ -80,6 +169,14 @@ impl StateStore {
     pub(crate) fn open(state_dir: PathBuf) -> Result<Self, String> {
         create_private_dir_all(&state_dir)?;
         create_private_dir_all(&state_dir.join("logs"))?;
+        for status in ["pending", "sending", "approved", "denied"] {
+            create_private_dir_all(
+                &state_dir
+                    .join("approvals")
+                    .join(CHANGE_APPROVAL_KIND)
+                    .join(status),
+            )?;
+        }
         Ok(Self { state_dir })
     }
 
@@ -128,9 +225,394 @@ impl StateStore {
         Ok(entries.into_iter().collect())
     }
 
+    /// Load pending calendar changes in deterministic order.
+    pub(crate) fn list_pending_changes(&self) -> Result<Vec<CalendarChangeApproval>, String> {
+        self.list_change_approvals("pending")
+    }
+
+    /// Load one pending calendar change by id.
+    pub(crate) fn pending_change_by_id(&self, id: &str) -> Result<CalendarChangeApproval, String> {
+        self.load_change_approval("pending", id)
+    }
+
+    /// Load one approved calendar change by id.
+    pub(crate) fn approved_change_by_id(&self, id: &str) -> Result<CalendarChangeApproval, String> {
+        self.load_change_approval("approved", id)
+    }
+
+    /// Return an existing pending calendar change approval or create it.
+    pub(crate) fn pending_change(
+        &self,
+        request: &CalendarChangeApproval,
+    ) -> Result<String, String> {
+        let mut validated_request = request.clone();
+        if validated_request.id.is_empty() {
+            validated_request.id = "1".to_owned();
+        }
+        validate_calendar_change_approval(&validated_request, "pending", None)?;
+        loop {
+            for approval in self.list_pending_changes()? {
+                if calendar_change_matches(&approval, request) {
+                    return Ok(approval.id);
+                }
+            }
+            let mut request = request.clone();
+            request.id = self.next_change_id()?;
+            let path = self.change_path("pending", &request.id)?;
+            match atomic_json_create_new(&path, &request) {
+                Ok(()) => return Ok(request.id),
+                Err(CreateNewJsonError::AlreadyExists) => continue,
+                Err(CreateNewJsonError::Other(message)) => return Err(message),
+            }
+        }
+    }
+
+    /// Return true if a pending calendar change exists.
+    pub(crate) fn change_pending_exists(&self, id: &str) -> Result<bool, String> {
+        Ok(self.change_path("pending", id)?.exists())
+    }
+
+    /// Return true if a sending calendar change exists.
+    pub(crate) fn change_sending_exists(&self, id: &str) -> Result<bool, String> {
+        Ok(self.change_path("sending", id)?.exists())
+    }
+
+    /// Claim one pending calendar change for execution.
+    pub(crate) fn claim_change(&self, id: &str) -> Result<CalendarChangeApproval, String> {
+        let approval = self.pending_change_by_id(id)?;
+        let mut sending = approval.clone();
+        sending.status = "sending".to_owned();
+        let sending_path = self.change_path("sending", id)?;
+        match atomic_json_create_new(&sending_path, &sending) {
+            Ok(()) => {}
+            Err(CreateNewJsonError::AlreadyExists) => {
+                return Err(format!("calendar change `{id}` is already being applied"));
+            }
+            Err(CreateNewJsonError::Other(message)) => return Err(message),
+        }
+        let pending_path = self.change_path("pending", id)?;
+        if let Err(error) = fs::remove_file(&pending_path) {
+            let _ = fs::remove_file(&sending_path);
+            return Err(error.to_string());
+        }
+        Ok(approval)
+    }
+
+    /// Mark a claimed calendar change as approved after successful execution.
+    pub(crate) fn complete_change(
+        &self,
+        id: &str,
+        result_event_id: Option<&str>,
+    ) -> Result<(), String> {
+        let mut approval = self.load_change_approval("sending", id)?;
+        approval.status = "approved".to_owned();
+        approval.result_event_id = result_event_id.map(safe_persisted_line);
+        let approved_path = self.change_path("approved", id)?;
+        match atomic_json_create_new(&approved_path, &approval) {
+            Ok(()) | Err(CreateNewJsonError::AlreadyExists) => {}
+            Err(CreateNewJsonError::Other(message)) => return Err(message),
+        }
+        fs::remove_file(self.change_path("sending", id)?).map_err(|error| error.to_string())
+    }
+
+    /// Deny a pending calendar change.
+    pub(crate) fn deny_change(&self, id: &str) -> Result<(), String> {
+        self.move_pending_change(id, "denied")
+    }
+
+    fn list_change_approvals(&self, status: &str) -> Result<Vec<CalendarChangeApproval>, String> {
+        let dir = self.change_dir(status);
+        let mut paths = fs::read_dir(&dir)
+            .map_err(|error| format!("failed to read {}: {error}", dir.display()))?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.path())
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        paths.sort();
+        paths
+            .into_iter()
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+            .map(|path| {
+                let approval: CalendarChangeApproval =
+                    serde_json::from_slice(&read_sensitive_file(&path)?)
+                        .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
+                validate_calendar_change_approval(&approval, status, None)?;
+                Ok(approval)
+            })
+            .collect()
+    }
+
+    fn load_change_approval(
+        &self,
+        status: &str,
+        id: &str,
+    ) -> Result<CalendarChangeApproval, String> {
+        let path = self.change_path(status, id)?;
+        if !path.exists() {
+            return Err(format!("calendar change `{id}` not found"));
+        }
+        let approval: CalendarChangeApproval = serde_json::from_slice(&read_sensitive_file(&path)?)
+            .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
+        validate_calendar_change_approval(&approval, status, Some(id))?;
+        Ok(approval)
+    }
+
+    fn move_pending_change(&self, id: &str, new_status: &str) -> Result<(), String> {
+        validate_change_id(id)?;
+        let from = self.change_path("pending", id)?;
+        let to = self.change_path(new_status, id)?;
+        if from.exists() {
+            let mut record: serde_json::Value =
+                serde_json::from_slice(&read_sensitive_file(&from)?)
+                    .map_err(|error| format!("failed to parse {}: {error}", from.display()))?;
+            validate_change_record(&record, "pending", id)?;
+            record["status"] = serde_json::Value::String(new_status.to_owned());
+            match atomic_json_create_new(&to, &record) {
+                Ok(()) | Err(CreateNewJsonError::AlreadyExists) => {}
+                Err(CreateNewJsonError::Other(message)) => return Err(message),
+            }
+            match fs::remove_file(&from) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error.to_string()),
+            }
+        } else if to.exists() {
+            Ok(())
+        } else {
+            Err(format!("calendar change `{id}` not found"))
+        }
+    }
+
     fn calendar_log_path(&self) -> PathBuf {
         self.state_dir.join("logs").join("calendar.jsonl")
     }
+
+    fn change_dir(&self, status: &str) -> PathBuf {
+        self.state_dir
+            .join("approvals")
+            .join(CHANGE_APPROVAL_KIND)
+            .join(status)
+    }
+
+    fn change_path(&self, status: &str, id: &str) -> Result<PathBuf, String> {
+        validate_change_id(id)?;
+        Ok(self.change_dir(status).join(format!("{id}.json")))
+    }
+
+    fn next_change_id(&self) -> Result<String, String> {
+        let mut max_id = 0_u64;
+        for status in ["pending", "sending", "approved", "denied"] {
+            let dir = self.change_dir(status);
+            for entry in fs::read_dir(&dir)
+                .map_err(|error| format!("failed to read {}: {error}", dir.display()))?
+            {
+                let path = entry.map_err(|error| error.to_string())?.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                    continue;
+                }
+                let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                    continue;
+                };
+                if let Ok(id) = stem.parse::<u64>()
+                    && max_id < id
+                {
+                    max_id = id;
+                }
+            }
+        }
+        Ok((max_id + 1).to_string())
+    }
+}
+
+fn validate_calendar_change_approval(
+    approval: &CalendarChangeApproval,
+    expected_status: &str,
+    expected_id: Option<&str>,
+) -> Result<(), String> {
+    if approval.schema != CHANGE_SCHEMA {
+        return Err(format!(
+            "calendar change `{}` has unsupported schema",
+            approval.id
+        ));
+    }
+    validate_change_id(&approval.id)?;
+    if let Some(expected_id) = expected_id
+        && approval.id != expected_id
+    {
+        return Err(format!(
+            "calendar change `{expected_id}` has mismatched embedded id"
+        ));
+    }
+    if approval.kind != CHANGE_KIND {
+        return Err(format!(
+            "calendar change `{}` has mismatched embedded kind",
+            approval.id
+        ));
+    }
+    if approval.status != expected_status {
+        return Err(format!(
+            "calendar change `{}` has mismatched embedded status",
+            approval.id
+        ));
+    }
+    if !matches!(
+        approval.command.as_str(),
+        "create_event" | "update_event" | "delete_event" | "respond_invite"
+    ) || !is_safe_persisted_line(&approval.command, MAX_CHANGE_FIELD_CHARS)
+        || !is_safe_persisted_line(&approval.account, MAX_CHANGE_FIELD_CHARS)
+        || !is_safe_persisted_line(&approval.calendar, MAX_CHANGE_FIELD_CHARS)
+        || !is_safe_persisted_line(&approval.reason, MAX_CHANGE_FIELD_CHARS)
+    {
+        return Err(format!(
+            "calendar change `{}` contains unsafe metadata",
+            approval.id
+        ));
+    }
+    validate_optional_line(approval.event_id.as_ref(), "event_id")?;
+    validate_optional_line(approval.etag.as_ref(), "etag")?;
+    validate_optional_line(approval.title.as_ref(), "title")?;
+    validate_optional_multiline(approval.description.as_ref(), "description")?;
+    validate_optional_line(approval.location.as_ref(), "location")?;
+    validate_optional_line(approval.start.as_ref(), "start")?;
+    validate_optional_line(approval.end.as_ref(), "end")?;
+    validate_optional_line(approval.timezone.as_ref(), "timezone")?;
+    validate_optional_line(approval.response.as_ref(), "response")?;
+    validate_optional_line(approval.result_event_id.as_ref(), "result_event_id")?;
+    if let Some(attendees) = &approval.attendees {
+        if MAX_ATTENDEES_HARD < attendees.len() {
+            return Err("calendar change contains too many attendees".to_owned());
+        }
+        for attendee in attendees {
+            if !is_safe_persisted_line(attendee, MAX_CHANGE_FIELD_CHARS) {
+                return Err("calendar change contains an unsafe attendee".to_owned());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_optional_line(value: Option<&String>, field: &str) -> Result<(), String> {
+    if let Some(value) = value
+        && !is_safe_persisted_line(value, MAX_CHANGE_FIELD_CHARS)
+    {
+        return Err(format!(
+            "calendar change field `{field}` contains unsafe text"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_optional_multiline(value: Option<&String>, field: &str) -> Result<(), String> {
+    if let Some(value) = value
+        && !is_safe_persisted_multiline(value)
+    {
+        return Err(format!(
+            "calendar change field `{field}` contains unsafe text"
+        ));
+    }
+    Ok(())
+}
+
+fn calendar_change_matches(left: &CalendarChangeApproval, right: &CalendarChangeApproval) -> bool {
+    left.command == right.command
+        && left.account == right.account
+        && left.calendar == right.calendar
+        && left.event_id == right.event_id
+        && left.etag == right.etag
+        && left.title == right.title
+        && left.description == right.description
+        && left.location == right.location
+        && left.start == right.start
+        && left.end == right.end
+        && left.timezone == right.timezone
+        && left.attendees == right.attendees
+        && left.response == right.response
+}
+
+fn validate_change_record(
+    record: &serde_json::Value,
+    expected_status: &str,
+    id: &str,
+) -> Result<(), String> {
+    if record.get("schema").and_then(serde_json::Value::as_u64) != Some(u64::from(CHANGE_SCHEMA)) {
+        return Err(format!("calendar change `{id}` has unsupported schema"));
+    }
+    let field = |name: &str| record.get(name).and_then(serde_json::Value::as_str);
+    if field("id") != Some(id) {
+        return Err(format!("calendar change `{id}` has mismatched embedded id"));
+    }
+    if field("kind") != Some(CHANGE_KIND) {
+        return Err(format!(
+            "calendar change `{id}` has mismatched embedded kind"
+        ));
+    }
+    if field("status") != Some(expected_status) {
+        return Err(format!(
+            "calendar change `{id}` has mismatched embedded status"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_change_id(id: &str) -> Result<(), String> {
+    let Ok(value) = id.parse::<u64>() else {
+        return Err(format!("invalid calendar change id `{id}`"));
+    };
+    if value == 0 || id.contains(['/', '\\', '\0']) || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!("invalid calendar change id `{id}`"));
+    }
+    Ok(())
+}
+
+fn safe_persisted_line(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_control() || is_unsafe_format_control(ch) {
+                ' '
+            } else {
+                ch
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_safe_persisted_line(value: &str, max_chars: usize) -> bool {
+    value.chars().count() <= max_chars
+        && !value
+            .chars()
+            .any(|ch| ch.is_control() || is_unsafe_format_control(ch))
+}
+
+fn is_safe_persisted_multiline(value: &str) -> bool {
+    value.len() <= MAX_DESCRIPTION_BYTES
+        && value.lines().count() <= MAX_DESCRIPTION_LINES
+        && !value.chars().any(|ch| {
+            (ch.is_control() && ch != '\n' && ch != '\r' && ch != '\t')
+                || is_unsafe_format_control(ch)
+        })
+}
+
+fn is_unsafe_format_control(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{061c}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{feff}'
+    )
+}
+
+#[derive(Debug)]
+enum CreateNewJsonError {
+    AlreadyExists,
+    Other(String),
 }
 
 fn current_unix_millis() -> u64 {
@@ -153,6 +635,16 @@ fn read_sensitive_file(path: &Path) -> Result<Vec<u8>, String> {
 fn open_private_append(path: &Path) -> Result<fs::File, std::io::Error> {
     let mut options = fs::OpenOptions::new();
     options.create(true).append(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options.open(path)?;
+    chmod_private_file_handle(&file)?;
+    Ok(file)
+}
+
+fn create_private_file(path: &Path) -> Result<fs::File, std::io::Error> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(0o600);
     let file = options.open(path)?;
@@ -192,6 +684,51 @@ fn chmod_private_file_handle(_file: &fs::File) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+fn temp_json_path(parent: &Path, path: &Path) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    parent.join(format!(
+        ".{}.tmp-{}-{nonce}",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("state"),
+        std::process::id()
+    ))
+}
+
+fn write_json_temp<T: Serialize>(path: &Path, value: &T) -> Result<PathBuf, String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "state path has no parent".to_owned())?;
+    create_private_dir_all(parent)?;
+    let tmp = temp_json_path(parent, path);
+    let bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
+    {
+        let mut file = create_private_file(&tmp).map_err(|error| error.to_string())?;
+        file.write_all(&bytes).map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+    }
+    Ok(tmp)
+}
+
+fn atomic_json_create_new<T: Serialize>(path: &Path, value: &T) -> Result<(), CreateNewJsonError> {
+    let tmp = write_json_temp(path, value).map_err(CreateNewJsonError::Other)?;
+    match fs::hard_link(&tmp, path) {
+        Ok(()) => {
+            let _ = fs::remove_file(&tmp);
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = fs::remove_file(&tmp);
+            Err(CreateNewJsonError::AlreadyExists)
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&tmp);
+            Err(CreateNewJsonError::Other(error.to_string()))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,6 +758,35 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].command, "free_busy");
+    }
+
+    #[test]
+    fn pending_calendar_changes_are_deduplicated_and_private() {
+        // Calendar mutations can notify attendees, so they are persisted for
+        // explicit user review and identical repeated tool calls reuse one id.
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let state = StateStore::open(temp.path().join("state")).expect("state");
+        let mut change = CalendarChangeApproval::pending("create_event", "google", "primary");
+        change.title = Some("Team sync".to_owned());
+        change.start = Some("2026-05-28T12:00:00Z".to_owned());
+        change.end = Some("2026-05-28T13:00:00Z".to_owned());
+
+        let first = state.pending_change(&change).expect("pending change");
+        let second = state.pending_change(&change).expect("same pending change");
+
+        assert_eq!(first, second);
+        let pending = state.list_pending_changes().expect("pending list");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].title.as_deref(), Some("Team sync"));
+        #[cfg(unix)]
+        assert_eq!(
+            file_mode(
+                &temp
+                    .path()
+                    .join("state/approvals/calendar-change/pending/1.json")
+            ),
+            0o600
+        );
     }
 
     #[cfg(unix)]

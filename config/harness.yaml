@@ -63,6 +63,12 @@
 #     secrets:
 #       personal_mail_password: {}        # required by default
 #       personal_calendar_ics_url: {}
+#       google_calendar_client_id:
+#         optional: true
+#       google_calendar_client_secret:
+#         optional: true
+#       google_calendar_refresh_token:
+#         optional: true
 #       backup_mail_password:
 #         optional: true                  # omit when no value is configured
 #     config:
@@ -90,4 +96,22 @@
 #             calendars:
 #               default: main
 #               allow: [main]
-{}
+#           # Google read/write support uses OAuth refresh-token secrets and
+#           # queues mutations under /calendar change by default.
+#           - id: google-calendar
+#             enable: false
+#             backend:
+#               type: google
+#               client_id_secret: google_calendar_client_id
+#               client_secret_secret: google_calendar_client_secret
+#               refresh_token_secret: google_calendar_refresh_token
+#             calendars:
+#               default: primary
+#               allow: [primary]
+#         policy:
+#           read:
+#             private_events: busy_only
+#             descriptions: approved_only
+#           write:
+#             require_approval: true
+#             max_attendees: 50

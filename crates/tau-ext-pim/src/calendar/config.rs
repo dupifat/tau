@@ -11,6 +11,8 @@ pub struct CalendarExtensionConfig {
     pub enable: bool,
     /// Configured calendar accounts.
     pub accounts: Vec<CalendarAccountConfig>,
+    /// Calendar read/write policy.
+    pub policy: CalendarPolicyConfig,
 }
 
 /// One configured calendar account.
@@ -75,6 +77,80 @@ pub struct CalendarSelectionConfig {
     pub allow: Vec<String>,
 }
 
+/// Calendar data exposure and mutation policy.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CalendarPolicyConfig {
+    /// Read-side privacy policy.
+    pub read: CalendarReadPolicyConfig,
+    /// Write-side approval policy.
+    pub write: CalendarWritePolicyConfig,
+}
+
+/// Calendar read privacy policy.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CalendarReadPolicyConfig {
+    /// How events marked private are exposed to the model.
+    pub private_events: PrivateEventsPolicy,
+    /// Whether event descriptions are exposed by `read_event`.
+    pub descriptions: DescriptionPolicy,
+}
+
+impl Default for CalendarReadPolicyConfig {
+    fn default() -> Self {
+        Self {
+            private_events: PrivateEventsPolicy::BusyOnly,
+            descriptions: DescriptionPolicy::ApprovedOnly,
+        }
+    }
+}
+
+/// Policy for events flagged private by the provider/feed.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivateEventsPolicy {
+    /// Expose only time and busy/private flags.
+    #[default]
+    BusyOnly,
+    /// Expose configured event detail fields.
+    Details,
+}
+
+/// Policy for model-visible event descriptions.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum DescriptionPolicy {
+    /// Do not expose descriptions through the model tool unless a later
+    /// approval flow is added.
+    #[default]
+    ApprovedOnly,
+    /// Always expose descriptions for readable events.
+    Always,
+    /// Never expose descriptions.
+    Omit,
+}
+
+/// Calendar write approval policy.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CalendarWritePolicyConfig {
+    /// Whether model-requested calendar mutations must be queued for user
+    /// approval before provider APIs are called.
+    pub require_approval: bool,
+    /// Maximum attendees accepted on one create/update request.
+    pub max_attendees: u32,
+}
+
+impl Default for CalendarWritePolicyConfig {
+    fn default() -> Self {
+        Self {
+            require_approval: true,
+            max_attendees: 50,
+        }
+    }
+}
+
 /// Validated calendar configuration.
 pub struct ValidatedConfig {
     /// Whether calendar access is enabled.
@@ -83,6 +159,32 @@ pub struct ValidatedConfig {
     pub accounts: BTreeMap<String, ValidatedAccount>,
     /// Account IDs in configuration order for deterministic display.
     pub account_order: Vec<String>,
+    /// Validated calendar privacy and write policy.
+    pub policy: ValidatedPolicy,
+}
+
+/// Validated calendar privacy and write policy.
+pub struct ValidatedPolicy {
+    /// Read-side privacy policy.
+    pub read: ValidatedReadPolicy,
+    /// Write-side approval policy.
+    pub write: ValidatedWritePolicy,
+}
+
+/// Validated calendar read privacy policy.
+pub struct ValidatedReadPolicy {
+    /// How events marked private are exposed to the model.
+    pub private_events: PrivateEventsPolicy,
+    /// Whether event descriptions are exposed by `read_event`.
+    pub descriptions: DescriptionPolicy,
+}
+
+/// Validated calendar write policy.
+pub struct ValidatedWritePolicy {
+    /// Whether model-requested calendar mutations must be queued for approval.
+    pub require_approval: bool,
+    /// Maximum attendees accepted on one create/update request.
+    pub max_attendees: usize,
 }
 
 /// Validated calendar account configuration.
@@ -150,6 +252,17 @@ impl CalendarExtensionConfig {
             validate_calendar_patterns(&account.calendars.allow)?;
             if let Some(default) = &account.calendars.default {
                 validate_calendar_pattern(default)?;
+                if !account
+                    .calendars
+                    .allow
+                    .iter()
+                    .any(|allowed| allowed == default)
+                {
+                    return Err(format!(
+                        "calendar account `{}` default calendar `{default}` must also be listed in calendars.allow",
+                        account.id
+                    ));
+                }
             }
             let id = account.id.clone();
             account_order.push(id.clone());
@@ -159,6 +272,28 @@ impl CalendarExtensionConfig {
             enable: self.enable,
             accounts,
             account_order,
+            policy: self.policy.validate()?,
+        })
+    }
+}
+
+impl CalendarPolicyConfig {
+    fn validate(self) -> Result<ValidatedPolicy, String> {
+        if self.write.max_attendees == 0 {
+            return Err("calendar policy write.max_attendees must be positive".to_owned());
+        }
+        if 200 < self.write.max_attendees {
+            return Err("calendar policy write.max_attendees must be <= 200".to_owned());
+        }
+        Ok(ValidatedPolicy {
+            read: ValidatedReadPolicy {
+                private_events: self.read.private_events,
+                descriptions: self.read.descriptions,
+            },
+            write: ValidatedWritePolicy {
+                require_approval: self.write.require_approval,
+                max_attendees: self.write.max_attendees as usize,
+            },
         })
     }
 }
@@ -251,8 +386,13 @@ fn normalize_backend_url(field: &str, value: &str) -> Result<String, String> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err(format!("{field} must use http:// or https://"));
     }
-    if url.host_str().is_none() {
+    let Some(host) = url.host_str() else {
         return Err(format!("{field} must include a host"));
+    };
+    if url.scheme() == "http" && !is_loopback_host(host) {
+        return Err(format!(
+            "{field} may use http:// only for localhost or loopback test proxies"
+        ));
     }
     if !url.username().is_empty() || url.password().is_some() {
         return Err(format!("{field} must not include credentials"));
@@ -261,6 +401,13 @@ fn normalize_backend_url(field: &str, value: &str) -> Result<String, String> {
         return Err(format!("{field} must not include query or fragment"));
     }
     Ok(trimmed.trim_end_matches('/').to_owned())
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host == "[::1]"
 }
 
 fn validate_secret_name(field: &str, value: &str) -> Result<(), String> {
@@ -310,6 +457,7 @@ mod tests {
                 backend: Some(google_backend_with_api_base("https://proxy.example/api///")),
                 ..Default::default()
             }],
+            ..Default::default()
         };
 
         let config = cfg.validate().expect("api base validates");
@@ -328,6 +476,7 @@ mod tests {
                 )),
                 ..Default::default()
             }],
+            ..Default::default()
         };
         let err = match cfg.validate() {
             Ok(_) => panic!("query must be rejected"),
@@ -352,6 +501,7 @@ mod tests {
                 }),
                 ..Default::default()
             }],
+            ..Default::default()
         };
 
         let err = match cfg.validate() {
@@ -359,6 +509,37 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.contains("may only contain"), "{err}");
+    }
+
+    #[test]
+    fn google_config_allows_http_only_for_loopback_api_base() {
+        // A non-HTTPS API base receives bearer tokens; keep plain HTTP limited
+        // to local test proxies.
+        let cfg = CalendarExtensionConfig {
+            enable: true,
+            accounts: vec![CalendarAccountConfig {
+                id: "google".to_owned(),
+                backend: Some(google_backend_with_api_base("http://127.0.0.1:8080/api")),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        cfg.validate().expect("loopback http validates");
+
+        let cfg = CalendarExtensionConfig {
+            enable: true,
+            accounts: vec![CalendarAccountConfig {
+                id: "google".to_owned(),
+                backend: Some(google_backend_with_api_base("http://proxy.example/api")),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let err = match cfg.validate() {
+            Ok(_) => panic!("non-loopback http must be rejected"),
+            Err(err) => err,
+        };
+        assert!(err.contains("loopback"), "{err}");
     }
 
     fn google_backend_with_api_base(api_base: &str) -> CalendarBackendConfig {

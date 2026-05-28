@@ -54,7 +54,7 @@
 #     enable: false
 #   test-dummy:
 #     enable: true
-#   std-email:
+#   std-pim:
 #     enable: true
 #     # Secret names may contain ASCII letters, digits, '.', '_' and '-'.
 #     # Values come from <state_dir>/secrets/<name>.yaml or one-shot
@@ -65,16 +65,17 @@
 #       backup_mail_password:
 #         optional: true                  # omit when no value is configured
 #     config:
-#       enable: true
-#       accounts:
-#         - id: personal
-#           enable: true
-#           from: "Me <me@example.com>"
-#           imap: { host: imap.example.com, login: me@example.com }
-#           smtp: { host: smtp.example.com, login: me@example.com }
-#           auth:
-#             method: password
-#             # Replace legacy auth.password_env/auth.command/password_command
-#             # with auth.password_secret plus the declaration above.
-#             password_secret: personal_mail_password
+#       email:
+#         enable: true
+#         accounts:
+#           - id: personal
+#             enable: true
+#             from: "Me <me@example.com>"
+#             imap: { host: imap.example.com, login: me@example.com }
+#             smtp: { host: smtp.example.com, login: me@example.com }
+#             auth:
+#               method: password
+#               # Replace legacy auth.password_env/auth.command/password_command
+#               # with auth.password_secret plus the declaration above.
+#               password_secret: personal_mail_password
 {}

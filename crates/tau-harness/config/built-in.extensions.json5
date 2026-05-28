@@ -39,6 +39,13 @@
         config: {},
     },
     {
+        name: "std-pim",
+        suffix: ["ext", "ext-pim"],
+        role: "tool",
+        enable: false,
+        config: {},
+    },
+    {
         name: "std-email",
         suffix: ["ext", "ext-pim"],
         role: "tool",

@@ -76,9 +76,10 @@ variables (suffixes are lowercased; use portable names with ASCII letters,
 digits, `.`, `_`, and `-`). Environment secrets are removed from the harness
 environment after startup and values are sent only to that extension during the
 Configure handshake. Secret entries are required by default; set
-`optional: true` to allow startup without a value. For `std-email`, migrate old
+`optional: true` to allow startup without a value. For `std-pim`, migrate old
 `auth.password_env`, `auth.command`, and `auth.password_command` settings to
-`auth.password_secret` plus `extensions.std-email.secrets`.
+`auth.password_secret` plus `extensions.std-pim.secrets`; the legacy `std-email`
+alias accepts the same secret declaration shape.
 
 ### Model parameters: effort, verbosity, thinking summary, service tier
 
@@ -255,9 +256,9 @@ apply only to that role. Fragments are ordered by priority with extension- and
 tool-provided fragments, so global style instructions, role guidance, and
 tool-specific instructions share one prompt assembly path.
 
-### `std-email` — controlled IMAP/SMTP access
+### `std-pim` — controlled email and calendar surface
 
-The email extension exposes one `email` tool for configured mail accounts. It can
+The PIM extension exposes the existing `email` tool for configured mail accounts. It can
 list folders, recent messages by IMAP internal date with `list_recent`, raw
 UID-ordered pages with `list_by_uid`, read approved or policy-allowed content,
 request full read approval with `request_full`, send mail through approval gates, and safely
@@ -270,6 +271,12 @@ persists exact read denials as `none` access, but explicit `request_full` calls
 can ask again. `/email in approve`, `/email in deny`, and `/email out approve`
 accept multiple ids. Agent access and mutation activity is appended as JSONL and
 can be reviewed with `/email log last [number]`.
+
+The same extension also owns the initial `calendar` tool and `/calendar` action
+schema. Calendar backends are intentionally still pending; the current surface
+establishes config/routing boundaries before read-only ICS and Google Calendar
+support are wired in. The legacy `std-email` built-in remains as an alias for
+existing email-only configs.
 
 ### `provider-builtin` — Built-in provider backend
 

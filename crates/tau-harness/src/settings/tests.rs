@@ -59,6 +59,7 @@ fn builtins() -> Vec<BuiltinExtension> {
             true,
             serde_json::json!({}),
         ),
+        builtin("std-pim", "ext-pim", "tool", false, serde_json::json!({})),
         builtin("std-email", "ext-pim", "tool", false, serde_json::json!({})),
     ]
 }
@@ -82,14 +83,38 @@ fn resolve_extensions_builtin_can_start_disabled() {
     let s = HarnessSettings::built_in();
     let resolved = resolve_extensions(&s, builtins()).expect("resolve");
     assert!(resolved.iter().all(|e| e.name != "test-dummy"));
+    assert!(resolved.iter().all(|e| e.name != "std-pim"));
     assert!(resolved.iter().all(|e| e.name != "std-email"));
 }
 
 #[test]
+fn resolve_extensions_enables_disabled_std_pim_builtin() {
+    // The standard PIM extension ships disabled. A user opt-in should keep the
+    // built-in tau subcommand suffix and place the entry at its built-in order
+    // position.
+    let mut s = HarnessSettings::built_in();
+    s.extensions.insert(
+        "std-pim".into(),
+        ExtensionEntry {
+            enable: Some(true),
+            ..Default::default()
+        },
+    );
+    let resolved = resolve_extensions(&s, builtins()).expect("resolve");
+    let pim = resolved
+        .iter()
+        .find(|e| e.name == "std-pim")
+        .expect("std-pim enabled");
+    assert_eq!(pim.command, "tau");
+    assert_eq!(pim.args, vec!["ext", "ext-pim"]);
+    assert_eq!(pim.role.as_deref(), Some("tool"));
+}
+
+#[test]
 fn resolve_extensions_enables_disabled_std_email_builtin() {
-    // The standard email extension ships disabled. A user opt-in should keep
-    // the built-in tau subcommand suffix and place the entry at its built-in
-    // order position.
+    // The legacy standard email extension ships disabled. A user opt-in should
+    // keep the built-in tau subcommand suffix and place the entry at its
+    // built-in order position.
     let mut s = HarnessSettings::built_in();
     s.extensions.insert(
         "std-email".into(),
@@ -280,6 +305,7 @@ fn resolve_extensions_empty_entry_does_not_re_enable_disabled_builtin() {
         .insert("test-dummy".into(), ExtensionEntry::default());
     let resolved = resolve_extensions(&s, builtins()).expect("resolve");
     assert!(resolved.iter().all(|e| e.name != "test-dummy"));
+    assert!(resolved.iter().all(|e| e.name != "std-pim"));
     assert!(resolved.iter().all(|e| e.name != "std-email"));
 }
 
@@ -371,20 +397,23 @@ fn built_in_extensions_yaml_parses() {
 }
 
 #[test]
-fn built_in_extensions_json5_contains_disabled_std_email() {
+fn built_in_extensions_json5_contains_disabled_std_pim_and_email_alias() {
     // Guard the real embedded JSON5, not the local test fixture, so the
-    // disabled-by-default email extension keeps the documented tau ext suffix
-    // and tool role when future built-ins are edited.
-    let email = built_in_extension_defs()
-        .iter()
-        .find(|def| def.name == "std-email")
-        .expect("std-email built-in");
-    assert!(!email.enable);
-    assert_eq!(
-        email.suffix.as_deref(),
-        Some(["ext".to_owned(), "ext-pim".to_owned()].as_slice())
-    );
-    assert_eq!(email.role.as_deref(), Some("tool"));
+    // disabled-by-default PIM extension and legacy email alias keep the
+    // documented tau ext suffix and tool role when future built-ins are edited.
+    let defs = built_in_extension_defs();
+    for name in ["std-pim", "std-email"] {
+        let extension = defs
+            .iter()
+            .find(|def| def.name == name)
+            .expect("built-in extension");
+        assert!(!extension.enable);
+        assert_eq!(
+            extension.suffix.as_deref(),
+            Some(["ext".to_owned(), "ext-pim".to_owned()].as_slice())
+        );
+        assert_eq!(extension.role.as_deref(), Some("tool"));
+    }
 }
 
 #[test]

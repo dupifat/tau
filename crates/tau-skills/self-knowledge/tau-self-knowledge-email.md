@@ -1,12 +1,12 @@
 ---
 name: tau-self-knowledge-email
-description: Use this skill when the user asks how to configure Tau's standard email extension, std-email/tau-ext-pim, mail accounts, IMAP/SMTP, email approvals, incoming authentication, DKIM, Authentication-Results, or email security policy.
+description: Use this skill when the user asks how to configure Tau's standard PIM/email extension, std-pim/std-email/tau-ext-pim, mail accounts, IMAP/SMTP, email approvals, incoming authentication, DKIM, Authentication-Results, or email security policy.
 advertise: false
 ---
 
-# Tau std-email configuration
+# Tau std-pim email configuration
 
-Tau's built-in email extension is named `std-email`. It runs `tau ext ext-pim`, registers the model-visible `email` tool, and publishes `/email` approval/denial actions.
+Tau's preferred built-in PIM extension is named `std-pim`. It runs `tau ext ext-pim`, registers the model-visible `email` tool, and publishes `/email` approval/denial actions. The legacy `std-email` built-in alias remains for old email-only configs; do not enable both names together.
 
 Use this skill when helping a user configure email. Do not include personal addresses, server names, passwords, authserv-ids, or message contents unless the user explicitly provided them for that answer.
 
@@ -15,8 +15,8 @@ Use this skill when helping a user configure email. Do not include personal addr
 
 Start from fail-closed settings:
 
-- Keep `extensions.std-email.enable: true` only when the user really wants mail access.
-- Set the extension's internal `config.enable: true`; it is false by default.
+- Keep `extensions.std-pim.enable: true` only when the user really wants PIM access. Legacy `extensions.std-email.enable: true` still works for old email-only configs.
+- Set the email module's `config.email.enable: true`; it is false by default.
 - Set each account's `enable: true`; accounts are disabled by default.
 - Keep `policy.incoming_auth.require: true`; this is the default and should normally stay true.
 - Keep `policy.incoming_auth.allow_dmarc_only: false`; the default requires aligned DKIM.
@@ -33,55 +33,56 @@ Put this in `~/.config/tau/harness.yaml` or a file under `~/.config/tau/harness.
 
 ```yaml
 extensions:
-  std-email:
+  std-pim:
     enable: true
     secrets:
       mail_password: {}
     config:
-      enable: true
-      accounts:
-        - id: work
-          enable: true
-          display_name: Work mail
-          from: Alice Example <alice@example.com>
-          imap:
-            host: imap.example.com
-            port: 993
-            tls: required
-            login: alice@example.com
-          smtp:
-            host: smtp.example.com
-            port: 587
-            tls: start_tls
-            login: alice@example.com
-          auth:
-            method: password
-            password_secret: mail_password
-          folders:
-            allow:
-              - INBOX
-      policy:
-        incoming_allow:
-          - alice@example.com
-          - '*@trusted.example'
-        incoming_auth:
-          require: true
-          trusted_authserv_ids:
-            - mx.example.com
-          allow_dmarc_only: false
-        outgoing_allow:
-          - alice@example.com
-          - '*@trusted.example'
-        allow_state_policy_extensions: true
+      email:
+        enable: true
+        accounts:
+          - id: work
+            enable: true
+            display_name: Work mail
+            from: Alice Example <alice@example.com>
+            imap:
+              host: imap.example.com
+              port: 993
+              tls: required
+              login: alice@example.com
+            smtp:
+              host: smtp.example.com
+              port: 587
+              tls: start_tls
+              login: alice@example.com
+            auth:
+              method: password
+              password_secret: mail_password
+            folders:
+              allow:
+                - INBOX
+        policy:
+          incoming_allow:
+            - alice@example.com
+            - '*@trusted.example'
+          incoming_auth:
+            require: true
+            trusted_authserv_ids:
+              - mx.example.com
+            allow_dmarc_only: false
+          outgoing_allow:
+            - alice@example.com
+            - '*@trusted.example'
+          allow_state_policy_extensions: true
 ```
 
 Important fields:
 
-- Built-in extension name: `std-email`.
+- Preferred built-in extension name: `std-pim`; legacy alias: `std-email`.
 - Model-visible tool name: `email`.
 - IMAP default: port 993 with `tls: required`.
 - SMTP default: port 587 with `tls: start_tls`.
-- Password auth requires `auth.password_secret` and a matching declaration under `extensions.std-email.secrets`.
+- Password auth requires `auth.password_secret` and a matching declaration under `extensions.std-pim.secrets`.
 - `auth.method: none` is only for SMTP-only or relay-style setups; IMAP requires password auth.
 - OAuth and command-based password sources are not implemented or are rejected.
 
@@ -92,7 +93,7 @@ Declare the secret name in config:
 
 ```yaml
 extensions:
-  std-email:
+  std-pim:
     secrets:
       mail_password: {}
 ```
@@ -193,9 +194,9 @@ Whitelist actions:
 
 ## Troubleshooting
 
-If the extension is unavailable, check both enable flags: `extensions.std-email.enable` and `extensions.std-email.config.enable`.
+If the extension is unavailable, check both enable flags: `extensions.std-pim.enable` and `extensions.std-pim.config.email.enable`.
 
-If startup reports a missing secret, confirm the secret is declared under `extensions.std-email.secrets` and that the secret file or `TAU_SECRET_*` variable uses the same normalized name.
+If startup reports a missing secret, confirm the secret is declared under `extensions.std-pim.secrets` and that the secret file or `TAU_SECRET_*` variable uses the same normalized name.
 
 If all incoming reads require approval, inspect raw message headers and configure `trusted_authserv_ids` for the trusted provider's authserv-id. With `incoming_auth.require: true` and no trusted authserv-id, fail-closed approval is expected.
 

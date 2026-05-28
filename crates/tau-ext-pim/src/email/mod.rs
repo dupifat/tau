@@ -569,7 +569,7 @@ fn validate_auth_config(
     }
     if matches!(config.method, AuthMethod::Password) && config.password_secret.is_none() {
         return Err(format!(
-            "account `{account_id}` auth.password_secret is required for password auth; declare the secret under extensions.std-email.secrets and set auth.password_secret to that name"
+            "account `{account_id}` auth.password_secret is required for password auth; declare the secret under the enabled extension's secrets and set auth.password_secret to that name"
         ));
     }
     if let Some(secret) = &config.password_secret
@@ -594,7 +594,7 @@ fn inactive_auth_config(config: Option<AuthConfig>) -> Option<ValidatedAuthConfi
 
 fn migration_error(account_id: &str, field: &str) -> String {
     format!(
-        "account `{account_id}` {field} is no longer supported; declare the password under extensions.std-email.secrets and set auth.password_secret to that secret name"
+        "account `{account_id}` {field} is no longer supported; declare the password under the enabled extension's secrets and set auth.password_secret to that secret name"
     )
 }
 
@@ -670,7 +670,7 @@ fn validate_config_secrets(
             })?;
             if !secrets.contains_key(secret) {
                 return Err(format!(
-                    "account `{}` auth.password_secret `{secret}` was not provided in Configure.secrets; declare it under extensions.std-email.secrets",
+                    "account `{}` auth.password_secret `{secret}` was not provided in Configure.secrets; declare it under the enabled extension's secrets",
                     account.id
                 ));
             }
@@ -4344,8 +4344,9 @@ fn allow_record(pattern: &str, note: &str) -> Result<StatePattern, String> {
     })
 }
 
+/// Runtime state for the email module.
 #[derive(Default)]
-struct RuntimeState {
+pub struct RuntimeState {
     config_state: ConfigState,
 }
 
@@ -4360,8 +4361,30 @@ enum ConfigState {
 }
 
 impl RuntimeState {
-    fn configure(&mut self, configure: tau_proto::Configure) -> Result<(), String> {
+    /// Configure the email module from harness-supplied extension config.
+    pub fn configure(&mut self, configure: tau_proto::Configure) -> Result<(), String> {
         match self.try_configure(configure) {
+            Ok(engine) => {
+                self.config_state = ConfigState::Configured(Box::new(engine));
+                Ok(())
+            }
+            Err(message) => {
+                self.config_state = ConfigState::Rejected {
+                    reason: message.clone(),
+                };
+                Err(message)
+            }
+        }
+    }
+
+    /// Configure the email module from an already-decoded email config.
+    pub fn configure_with_config(
+        &mut self,
+        cfg: EmailExtensionConfig,
+        state_dir: Option<PathBuf>,
+        secrets: BTreeMap<String, tau_proto::SecretValue>,
+    ) -> Result<(), String> {
+        match self.try_configure_with_config(cfg, state_dir, secrets) {
             Ok(engine) => {
                 self.config_state = ConfigState::Configured(Box::new(engine));
                 Ok(())
@@ -4380,12 +4403,20 @@ impl RuntimeState {
         configure: tau_proto::Configure,
     ) -> Result<Engine<RealEmailBackend>, String> {
         let cfg: EmailExtensionConfig = tau_extension::parse_config(&configure.config)?;
-        let state_dir = configure
-            .state_dir
-            .ok_or_else(|| "email extension requires Configure.state_dir".to_owned())?;
+        self.try_configure_with_config(cfg, configure.state_dir, configure.secrets)
+    }
+
+    fn try_configure_with_config(
+        &self,
+        cfg: EmailExtensionConfig,
+        state_dir: Option<PathBuf>,
+        secrets: BTreeMap<String, tau_proto::SecretValue>,
+    ) -> Result<Engine<RealEmailBackend>, String> {
+        let state_dir =
+            state_dir.ok_or_else(|| "email extension requires Configure.state_dir".to_owned())?;
         let config = cfg.validate()?;
-        validate_config_secrets(&config, &configure.secrets)?;
-        let backend = RealEmailBackend::new(&config, configure.secrets)?;
+        validate_config_secrets(&config, &secrets)?;
+        let backend = RealEmailBackend::new(&config, secrets)?;
         Ok(Engine {
             config,
             state: StateStore::open(state_dir)?,
@@ -4393,7 +4424,8 @@ impl RuntimeState {
         })
     }
 
-    fn dispatch(&mut self, invoke: ToolStarted) -> Event {
+    /// Dispatch a model-visible `email` tool invocation.
+    pub fn dispatch(&mut self, invoke: ToolStarted) -> Event {
         match &mut self.config_state {
             ConfigState::Configured(engine) => match parse_command(&invoke.arguments) {
                 Ok(command) => finish_tool_result(invoke, engine.dispatch(command)),
@@ -4424,7 +4456,8 @@ impl RuntimeState {
         }
     }
 
-    fn dispatch_action(&mut self, invoke: ActionInvoke) -> Event {
+    /// Dispatch a user `/email` action invocation.
+    pub fn dispatch_action(&mut self, invoke: ActionInvoke) -> Event {
         let result = match &mut self.config_state {
             ConfigState::Configured(engine) => {
                 engine.dispatch_action(&invoke.action_id, &invoke.argv)
@@ -4460,7 +4493,8 @@ fn ack_log_event<W: Write>(
     writer.flush().map_err(tau_proto::EncodeError::Io)
 }
 
-fn email_tool_spec() -> ToolSpec {
+/// Return the model-visible email tool specification.
+pub fn email_tool_spec() -> ToolSpec {
     ToolSpec {
         name: tau_proto::ToolName::new(TOOL_NAME),
         model_visible_name: None,
@@ -4505,7 +4539,8 @@ fn email_tool_spec() -> ToolSpec {
     }
 }
 
-fn email_prompt_fragment() -> PromptFragment {
+/// Return the prompt fragment that teaches the model email tool policy.
+pub fn email_prompt_fragment() -> PromptFragment {
     PromptFragment::new(
         "email.instructions",
         PromptPriority::new(120),
@@ -4513,7 +4548,8 @@ fn email_prompt_fragment() -> PromptFragment {
     )
 }
 
-fn email_action_schema() -> ActionSchema {
+/// Return the `/email` action schema.
+pub fn email_action_schema() -> ActionSchema {
     fn string_arg(name: &str, description: &str) -> ActionArg {
         ActionArg {
             name: name.to_owned(),

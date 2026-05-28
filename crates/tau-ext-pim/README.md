@@ -2,7 +2,7 @@
 
 `tau-ext-pim` is Tau's standard personal information management extension. It currently exposes the model-visible `email` tool for controlled IMAP reads and SMTP sends through configured accounts, plus `/email` slash actions for user review and approvals.
 
-The built-in extension name is `std-email`. It is disabled by default and must be explicitly enabled in `harness.yaml`.
+The preferred built-in extension name is `std-pim`. The legacy `std-email` alias remains for existing email-only configs. Both are disabled by default and must be explicitly enabled in `harness.yaml`; enable only one of them.
 
 
 ## Security model and hardening
@@ -11,8 +11,8 @@ Email is hostile input. Message bodies, subjects, display names, addresses, MIME
 
 ### Default stance
 
-- The built-in `std-email` extension is disabled by default.
-- The extension's own `config.enable` flag is also false by default.
+- The built-in `std-pim` extension is disabled by default.
+- Each module's own `enable` flag is also false by default.
 - Accounts are disabled unless `account.enable: true` is set.
 - Folder visibility is deny-by-default: if `folders.allow` is empty, no folders are visible or selectable.
 - Incoming sender allow policy is empty by default.
@@ -112,7 +112,7 @@ policy:
 
 ### Secrets and credentials
 
-Passwords are delivered through Tau extension secrets. Declare each secret under `extensions.std-email.secrets`, then reference it with `auth.password_secret` in the account. Secrets are sent only to the `std-email` extension during configuration and are never returned by the tool.
+Passwords are delivered through Tau extension secrets. Declare each secret under the enabled extension's `secrets`, then reference it with `auth.password_secret` in the account. Secrets are sent only to the enabled extension instance during configuration and are never returned by the tool.
 
 Deprecated password sources such as `auth.password_env`, `auth.command`, `auth.password_command`, and OAuth command placeholders are rejected. This avoids leaking credentials through child-process arguments, inherited environments, logs, or model-visible config.
 
@@ -129,51 +129,54 @@ Expose only the folders the agent actually needs. A narrow allowlist such as `IN
 
 ## Configuration
 
-Put configuration in `~/.config/tau/harness.yaml` or a drop-in under `~/.config/tau/harness.d/`.
+Put configuration in `~/.config/tau/harness.yaml` or a drop-in under `~/.config/tau/harness.d/`. Existing `std-email` configs with the old top-level email shape are still accepted as a compatibility path, but do not enable `std-pim` and `std-email` together.
 
 ```yaml
 extensions:
-  std-email:
+  std-pim:
     enable: true
     secrets:
       mail_password: {}
     config:
-      enable: true
-      accounts:
-        - id: work
-          enable: true
-          display_name: Work mail
-          from: Alice Example <alice@example.com>
-          imap:
-            host: imap.example.com
-            port: 993
-            tls: required
-            login: alice@example.com
-          smtp:
-            host: smtp.example.com
-            port: 587
-            tls: start_tls
-            login: alice@example.com
-          auth:
-            method: password
-            password_secret: mail_password
-          folders:
-            allow:
-              - INBOX
-              - Archive/*
-      policy:
-        incoming_allow:
-          - alice@example.com
-          - '*@trusted.example'
-        incoming_auth:
-          require: true
-          trusted_authserv_ids:
-            - mx.example.com
-          allow_dmarc_only: false
-        outgoing_allow:
-          - alice@example.com
-          - '*@trusted.example'
-        allow_state_policy_extensions: true
+      email:
+        enable: true
+        accounts:
+          - id: work
+            enable: true
+            display_name: Work mail
+            from: Alice Example <alice@example.com>
+            imap:
+              host: imap.example.com
+              port: 993
+              tls: required
+              login: alice@example.com
+            smtp:
+              host: smtp.example.com
+              port: 587
+              tls: start_tls
+              login: alice@example.com
+            auth:
+              method: password
+              password_secret: mail_password
+            folders:
+              allow:
+                - INBOX
+                - Archive/*
+        policy:
+          incoming_allow:
+            - alice@example.com
+            - '*@trusted.example'
+          incoming_auth:
+            require: true
+            trusted_authserv_ids:
+              - mx.example.com
+            allow_dmarc_only: false
+          outgoing_allow:
+            - alice@example.com
+            - '*@trusted.example'
+          allow_state_policy_extensions: true
+      calendar:
+        enable: false
 ```
 
 Create the secret value as raw UTF-8 text. Despite the `.yaml` suffix, the secret file is read as trimmed text, not as a structured YAML document.

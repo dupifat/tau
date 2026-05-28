@@ -8,8 +8,8 @@ use tau_harness::SessionLaunchStatus;
 use tau_proto::{
     AgentPromptTerminated, ClientKind, ContentPart, ContextItem, ContextRole, Event, EventName,
     EventSelector, Frame, FrameReader, FrameWriter, Hello, Message, PROTOCOL_VERSION,
-    PromptOriginator, ProviderResponseFinished, ProviderResponseUpdated, ProviderStopReason,
-    Subscribe, UiPromptSubmitted,
+    PromptOriginator, ProviderResponseFinished, ProviderResponseUpdated, Subscribe,
+    UiPromptSubmitted,
 };
 
 use crate::CliError;
@@ -223,13 +223,11 @@ impl OneShotOutput {
         if finished.stop_reason.requests_tool_calls() {
             return false;
         }
-        if finished.stop_reason != ProviderStopReason::Compaction {
-            self.final_response =
-                assistant_text_from_output_items(&finished.output_items).or_else(|| {
-                    self.response_by_prompt
-                        .remove(finished.agent_prompt_id.as_str())
-                });
-        }
+        self.final_response =
+            assistant_text_from_output_items(&finished.output_items).or_else(|| {
+                self.response_by_prompt
+                    .remove(finished.agent_prompt_id.as_str())
+            });
         true
     }
 
@@ -333,6 +331,7 @@ mod tests {
             agent_prompt_id: "sp-tool".into(),
             agent_id: "main".into(),
             stop_reason: ProviderStopReason::ToolCalls,
+            error: None,
             originator: PromptOriginator::User,
             ..ProviderResponseFinished::default()
         }));
@@ -365,6 +364,7 @@ mod tests {
             agent_prompt_id: "sp-final".into(),
             agent_id: "main".into(),
             stop_reason: ProviderStopReason::EndTurn,
+            error: None,
             originator: PromptOriginator::User,
             ..ProviderResponseFinished::default()
         }));

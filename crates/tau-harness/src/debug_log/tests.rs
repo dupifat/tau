@@ -24,6 +24,7 @@ fn published_line_preserves_enriched_token_usage() {
         agent_id: "main".into(),
         output_items: Vec::new(),
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
+        error: None,
         originator: PromptOriginator::User,
         usage: Some(ProviderTokenUsage {
             model: Some(model),

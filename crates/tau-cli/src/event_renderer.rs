@@ -3132,7 +3132,12 @@ impl EventRenderer {
         self.main_agent_turn_active = true;
         if finished.output_items.is_empty() {
             self.finish_prompt_tool_summary();
-            self.render_empty_provider_response_placeholder();
+            self.render_provider_response_placeholder(
+                finished
+                    .error
+                    .as_deref()
+                    .unwrap_or("(provider returned an empty response)"),
+            );
             return;
         }
         let tool_calls = tool_calls_from_output_items(&finished.output_items);
@@ -3145,17 +3150,13 @@ impl EventRenderer {
         self.handle.redraw();
     }
 
-    fn render_empty_provider_response_placeholder(&mut self) {
+    fn render_provider_response_placeholder(&mut self, text: &str) {
         use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
 
         self.handle.print_output(
-            "agent-response-empty",
-            themed_block(
-                &self.theme,
-                names::AGENT_RESPONSE,
-                "(provider returned an empty response)",
-            ),
+            "agent-response-placeholder",
+            themed_block(&self.theme, names::AGENT_RESPONSE, text),
         );
     }
 

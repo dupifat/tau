@@ -446,6 +446,7 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
             }),
         ],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         backend: None,
@@ -1154,6 +1155,7 @@ fn old_prompt_call_gets_tau_internal_unavailable_error() {
             arguments: CborValue::Map(Vec::new()),
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         backend: None,
@@ -1354,6 +1356,7 @@ fn unavailable_tool_is_reported_without_crashing() {
             arguments: CborValue::Map(Vec::new()),
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         backend: None,
@@ -1415,6 +1418,7 @@ fn disconnected_tool_completes_pending_call() {
                 arguments: CborValue::Map(Vec::new()),
             })],
             stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+            error: None,
             usage: None,
             originator: tau_proto::PromptOriginator::User,
             backend: None,
@@ -1556,6 +1560,7 @@ fn disconnected_tool_is_removed_cleanly() {
             arguments: CborValue::Map(Vec::new()),
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         backend: None,
@@ -1740,6 +1745,7 @@ fn role_disabled_tool_is_reported_without_dispatch() {
             arguments: CborValue::Map(Vec::new()),
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -1942,6 +1948,7 @@ fn unavailable_tool_name_does_not_panic_and_surfaces_error() {
             arguments: CborValue::Map(Vec::new()),
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -2060,6 +2067,7 @@ fn empty_tool_call_id_rejects_response_before_commit() {
             }),
         ],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -2137,6 +2145,7 @@ fn cancel_after_agent_thinking_terminalizes_tool_calls_before_dispatch() {
             }),
         ],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
         originator: tau_proto::PromptOriginator::User,
         usage: None,
         backend: None,
@@ -2198,6 +2207,7 @@ fn cancel_during_tools_terminalizes_inflight_calls() {
             }),
         ],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
         originator: tau_proto::PromptOriginator::User,
         usage: None,
         backend: None,

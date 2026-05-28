@@ -352,7 +352,10 @@ fn direct_prompt_request_with_missing_backend_is_acknowledged_and_closed() {
             frame,
             Frame::Event(Event::ProviderResponseFinished(finished))
                 if finished.agent_prompt_id.as_str() == "sp-1"
-                    && finished.stop_reason == ProviderStopReason::EndTurn
+                    && finished.stop_reason == ProviderStopReason::Error
+                    && finished.output_items.is_empty()
+                    && finished.error.as_deref()
+                        == Some("cannot resolve provider backend for: chatgpt/gpt-5.5")
         )
     });
     let ack = frames.iter().position(|frame| {

@@ -501,6 +501,7 @@ fn seed_assistant_tool_round(h: &mut Harness, cid: &crate::AgentId, calls: &[(&s
                 })
                 .collect(),
             stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+            error: None,
             usage: None,
             originator: tau_proto::PromptOriginator::User,
             backend: None,

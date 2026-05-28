@@ -786,6 +786,7 @@ fn finish_success(
         agent_id: prompt.agent_id.clone(),
         output_items: state.output_items(),
         stop_reason: state.stop_reason,
+        error: None,
         originator: prompt.originator.clone(),
         usage: state.usage(),
         backend: Some(backend_descriptor(provider)),
@@ -803,8 +804,9 @@ fn finish_error(
     ProviderResponseFinished {
         agent_prompt_id: agent_prompt_id.clone(),
         agent_id: prompt.agent_id.clone(),
-        output_items: vec![assistant_text_item(format!("LLM error: {error}"))],
+        output_items: Vec::new(),
         stop_reason: ProviderStopReason::Error,
+        error: Some(format!("LLM error: {error}")),
         originator: prompt.originator.clone(),
         usage: None,
         backend: Some(backend_descriptor(provider)),

@@ -78,27 +78,6 @@ fn stream_connection(
     (connection, reader)
 }
 
-fn assistant_text_from_output_items(output_items: &[ContextItem]) -> String {
-    output_items
-        .iter()
-        .filter_map(|item| match item {
-            ContextItem::Message(MessageItem {
-                role: ContextRole::Assistant,
-                content,
-                ..
-            }) => Some(
-                content
-                    .iter()
-                    .map(|part| match part {
-                        ContentPart::Text { text } => text.as_str(),
-                    })
-                    .collect::<String>(),
-            ),
-            _ => None,
-        })
-        .collect()
-}
-
 /// End-to-end vertical slice: real OpenAI provider and `tau-ext-shell`
 /// processes wired through a `tau-core` bus, asserting the protocol
 /// handshake and a no-model provider response. Lives here (rather than
@@ -270,7 +249,9 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
             break r;
         }
     };
-    assert!(assistant_text_from_output_items(&response.output_items).contains("no model"));
+    assert_eq!(response.stop_reason, tau_proto::ProviderStopReason::Error);
+    assert_eq!(response.error.as_deref(), Some("no model specified"));
+    assert!(response.output_items.is_empty());
     assert!(
         response
             .output_items

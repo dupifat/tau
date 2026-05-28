@@ -583,6 +583,7 @@ fn finished_response(
         agent_id: "main".into(),
         output_items,
         stop_reason,
+        error: None,
         originator: tau_proto::PromptOriginator::User,
         usage: None,
         backend: None,
@@ -1873,6 +1874,7 @@ fn model_status_shows_main_tool_usage_before_context() {
             arguments: CborValue::Map(Vec::new()),
         })],
         stop_reason: ProviderStopReason::ToolCalls,
+        error: None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-subagents".into(),
             query_id: "q1".to_owned(),
@@ -3100,6 +3102,27 @@ fn render_empty_provider_response_placeholder_without_context_item() {
     sync(&handle);
 
     assert!(vt.screen_contains(80, "(provider returned an empty response)"));
+}
+
+#[test]
+fn render_provider_error_from_non_context_field() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+    let mut finished = finished_response("sp-error", Vec::new());
+    finished.stop_reason = ProviderStopReason::Error;
+    finished.error = Some("LLM error: boom".to_owned());
+
+    // Regression: provider/runtime failures should be visible to the user but
+    // must not be represented as assistant output_items that replay into the
+    // next prompt.
+    renderer.handle(&Event::ProviderResponseFinished(finished));
+    sync(&handle);
+
+    assert!(vt.screen_contains(80, "LLM error: boom"));
 }
 
 #[test]

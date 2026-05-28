@@ -382,6 +382,7 @@ fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
                 arguments: CborValue::Map(Vec::new()),
             })],
             stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+            error: None,
             usage: None,
             originator: tau_proto::PromptOriginator::User,
             backend: None,

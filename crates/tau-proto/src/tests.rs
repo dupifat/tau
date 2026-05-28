@@ -201,6 +201,7 @@ fn representative_events() -> Vec<Event> {
                 phase: None,
             })],
             stop_reason: ProviderStopReason::EndTurn,
+            error: None,
             usage: None,
             originator: PromptOriginator::User,
 
@@ -613,6 +614,7 @@ fn execution_events_use_provider_wire_family() {
                 agent_prompt_id: "sp-1".into(),
                 agent_id: "engineer_abcd1234".into(),
                 stop_reason: ProviderStopReason::EndTurn,
+                error: None,
                 originator: PromptOriginator::User,
                 ..ProviderResponseFinished::default()
             }),

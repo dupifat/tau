@@ -1074,8 +1074,9 @@ fn simple_finished(
     ProviderResponseFinished {
         agent_prompt_id,
         agent_id,
-        output_items: vec![common::assistant_text_item(text)],
-        stop_reason: ProviderStopReason::EndTurn,
+        output_items: Vec::new(),
+        stop_reason: ProviderStopReason::Error,
+        error: Some(text.into()),
         originator,
         usage: None,
         backend: None,
@@ -1086,11 +1087,6 @@ fn simple_finished(
 
 fn stop_reason_from_output_items(output_items: &[ContextItem]) -> ProviderStopReason {
     if output_items
-        .iter()
-        .any(|item| matches!(item, ContextItem::Compaction(_)))
-    {
-        ProviderStopReason::Compaction
-    } else if output_items
         .iter()
         .any(|item| matches!(item, ContextItem::ToolCall(_)))
     {
@@ -1654,6 +1650,7 @@ fn finish_stream<W: Write>(
         agent_prompt_id: agent_prompt_id.into(),
         agent_id: prompt.agent_id.clone(),
         stop_reason: stop_reason_from_output_items(&output_items),
+        error: None,
         output_items,
         originator: prompt.originator.clone(),
         usage,
@@ -1679,8 +1676,9 @@ fn finish_error<W: Write>(
     let finished = ProviderResponseFinished {
         agent_prompt_id: agent_prompt_id.into(),
         agent_id: prompt.agent_id.clone(),
-        output_items: vec![common::assistant_text_item(format!("LLM error: {error}"))],
+        output_items: Vec::new(),
         stop_reason: ProviderStopReason::Error,
+        error: Some(format!("LLM error: {error}")),
         originator: prompt.originator.clone(),
         usage: None,
         backend: Some(backend.clone()),

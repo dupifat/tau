@@ -2377,9 +2377,7 @@ pub enum ProviderStopReason {
     ToolCalls,
     /// The model stopped because the provider output-token cap was reached.
     Length,
-    /// The response represents a compaction window rather than a normal turn.
-    Compaction,
-    /// The turn ended with an error message synthesized by Tau.
+    /// The turn ended with a provider/runtime error.
     Error,
 }
 
@@ -2402,6 +2400,11 @@ pub struct ProviderResponseFinished {
     pub output_items: Vec<ContextItem>,
     /// Why the provider stopped this turn.
     pub stop_reason: ProviderStopReason,
+    /// Human-readable provider/runtime error detail for clients to display.
+    /// This is not assistant output and must not be replayed into future
+    /// provider prompts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     /// Echo of [`AgentPromptCreated::originator`]. The provider must
     /// copy this from the prompt; the harness routes the response
     /// based on it.

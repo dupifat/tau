@@ -288,6 +288,8 @@ The model-visible tool name for calendars is `calendar`. Commands are selected t
 - `delete_event` — queues or applies a Google event delete; requires `event_id` and `etag`.
 - `respond_invite` — queues or applies an RSVP response; requires `event_id`, `etag`, and `response`.
 
+Calendar results use the same `ok`, `command`, `status`, `data` envelope as email. Line-style data includes `data.format` and sanitized text arrays (`accounts`, `calendars`, `events`, `event`, or `busy`).
+
 Calendar writes target Google accounts only. The default write policy queues `/calendar change` approvals; ICS feed accounts remain read-only. `start` and `end` accept RFC3339 date-times or `YYYY-MM-DD` all-day dates.
 
 

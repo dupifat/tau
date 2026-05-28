@@ -81,7 +81,7 @@ pub fn calendar_tool_spec() -> ToolSpec {
     ToolSpec {
         name: tau_proto::ToolName::new(TOOL_NAME),
         model_visible_name: None,
-        description: Some("Controlled calendar access through configured accounts. Commands: list_accounts, list_calendars, list_events, read_event, free_busy, create_event, update_event, delete_event, respond_invite. Google calendar mutations are queued for user approval by default and require explicit account/calendar targets plus etag for existing events. ICS feed accounts are read-only. Use explicit RFC3339 timestamps or YYYY-MM-DD all-day dates and IANA timezones; do not pass natural-language dates.".to_owned()),
+        description: Some("Controlled calendar access through configured accounts. Commands: list_accounts, list_calendars, list_events, read_event, free_busy, create_event, update_event, delete_event, respond_invite. Results use the email-style ok/command/status/data envelope; list/detail data includes a format field and sanitized line arrays. Google calendar mutations are queued for user approval by default and require explicit account/calendar targets plus etag for existing events. ICS feed accounts are read-only. Use explicit RFC3339 timestamps or YYYY-MM-DD all-day dates and IANA timezones; do not pass natural-language dates.".to_owned()),
         tool_type: tau_proto::ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",

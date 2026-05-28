@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use tau_proto::{
     ActionError, ActionInvoke, ActionOutput, ActionResult, CborValue, Event, SecretValue,
-    ToolError, ToolResult, ToolStarted,
+    ToolDisplay, ToolDisplayStats, ToolDisplayStatus, ToolError, ToolResult, ToolStarted,
 };
 
 use super::config::{
@@ -15,11 +15,11 @@ use super::ics_feed::{IcsEvent, IcsFeedBackend, TimeRange, parse_rfc3339_bound};
 use super::state::{CalendarChangeApproval, CalendarLogEntry, StateStore};
 use super::tool::{CalendarArgs, CalendarCommand, ToolInvocation};
 
-const LIST_ACCOUNTS_FORMAT: &str =
-    "format: id flags backend default_calendar timezone display_name";
-const LIST_CALENDARS_FORMAT: &str = "format: account calendar flags backend display_name";
-const LIST_EVENTS_FORMAT: &str = "format: account calendar event_id start end flags status summary";
-const FREE_BUSY_FORMAT: &str = "format: account calendar event_id start end flags";
+const LIST_ACCOUNTS_FORMAT: &str = "id flags backend default_calendar timezone display_name";
+const LIST_CALENDARS_FORMAT: &str = "account calendar flags backend display_name";
+const LIST_EVENTS_FORMAT: &str = "account calendar event_id start end flags status summary...";
+const FREE_BUSY_FORMAT: &str = "account calendar event_id start end flags";
+const EVENT_DETAIL_FORMAT: &str = "key value...";
 const DEFAULT_EVENT_LIMIT: u32 = 50;
 const MAX_EVENT_LIMIT: u32 = 100;
 const CALENDAR_LOG_DEFAULT_LIMIT: usize = 20;
@@ -94,15 +94,18 @@ impl RuntimeState {
     pub fn dispatch(&mut self, invoke: ToolStarted) -> Event {
         let result = match &self.config_state {
             ConfigState::Configured(engine) => engine.dispatch(&invoke.arguments),
-            ConfigState::Unconfigured => Err("calendar module has not been configured".to_owned()),
-            ConfigState::Rejected { reason } => Err(format!(
-                "calendar module configuration was rejected: {reason}"
-            )),
+            ConfigState::Unconfigured => error_envelope(
+                None,
+                "configuration_error",
+                "calendar module has not been configured",
+            ),
+            ConfigState::Rejected { reason } => error_envelope(
+                None,
+                "configuration_error",
+                &format!("calendar module configuration was rejected: {reason}"),
+            ),
         };
-        match result {
-            Ok(text) => tool_result(invoke, text),
-            Err(message) => tool_error(invoke, message),
-        }
+        finish_tool_result(invoke, result)
     }
 
     /// Dispatch a user `/calendar` action invocation.
@@ -143,11 +146,19 @@ impl CalendarMutationResult {
 }
 
 impl Engine {
-    fn dispatch(&self, arguments: &CborValue) -> Result<String, String> {
-        let invocation: ToolInvocation = arguments
-            .deserialized()
-            .map_err(|error| format!("invalid calendar tool arguments: {error}"))?;
-        let result = match invocation.command {
+    fn dispatch(&self, arguments: &CborValue) -> CborValue {
+        let invocation: ToolInvocation = match arguments.deserialized() {
+            Ok(invocation) => invocation,
+            Err(error) => {
+                return error_envelope(
+                    None,
+                    "invalid_input",
+                    &format!("invalid calendar tool arguments: {error}"),
+                );
+            }
+        };
+        let command = invocation.command;
+        let result = match command {
             CalendarCommand::ListAccounts => Ok(self.list_accounts()),
             CalendarCommand::ListCalendars => self.list_calendars(&invocation.args),
             CalendarCommand::ListEvents => self.list_events(&invocation.args),
@@ -156,10 +167,9 @@ impl Engine {
             CalendarCommand::CreateEvent
             | CalendarCommand::UpdateEvent
             | CalendarCommand::DeleteEvent
-            | CalendarCommand::RespondInvite => {
-                self.submit_change(invocation.command, &invocation.args)
-            }
-        };
+            | CalendarCommand::RespondInvite => self.submit_change(command, &invocation.args),
+        }
+        .unwrap_or_else(|message| calendar_error_envelope(Some(command_name(command)), &message));
         self.append_calendar_log_for_invocation(&invocation, &result);
         result
     }
@@ -301,11 +311,7 @@ impl Engine {
         Ok(format!("Denied calendar change {id}."))
     }
 
-    fn append_calendar_log_for_invocation(
-        &self,
-        invocation: &ToolInvocation,
-        result: &Result<String, String>,
-    ) {
+    fn append_calendar_log_for_invocation(&self, invocation: &ToolInvocation, result: &CborValue) {
         let Some(entry) = self.calendar_log_entry(invocation, result) else {
             return;
         };
@@ -317,15 +323,15 @@ impl Engine {
     fn calendar_log_entry(
         &self,
         invocation: &ToolInvocation,
-        result: &Result<String, String>,
+        result: &CborValue,
     ) -> Option<CalendarLogEntry> {
         if invocation.command == CalendarCommand::ListAccounts {
             return None;
         }
         let args = &invocation.args;
-        let status = if result.is_ok() { "ok" } else { "error" };
+        let status = calendar_log_status(result);
         let account = self.log_account(args);
-        let mut entry = CalendarLogEntry::tool(command_name(invocation.command), status);
+        let mut entry = CalendarLogEntry::tool(command_name(invocation.command), &status);
         entry.account = account
             .as_deref()
             .map(|value| safe_log_value(value, MAX_LOG_FIELD_CHARS));
@@ -345,13 +351,8 @@ impl Engine {
             .as_deref()
             .map(|value| safe_log_value(value, MAX_LOG_FIELD_CHARS));
         entry.limit = args.limit;
-        entry.item_count = result
-            .as_ref()
-            .ok()
-            .and_then(|text| calendar_log_item_count(invocation.command, text));
-        entry.reason = result
-            .as_ref()
-            .err()
+        entry.item_count = calendar_log_item_count(invocation.command, result);
+        entry.reason = calendar_log_error_message(result)
             .map(|reason| safe_log_value(reason, MAX_LOG_REASON_CHARS));
         Some(entry)
     }
@@ -383,103 +384,122 @@ impl Engine {
         })
     }
 
-    fn list_accounts(&self) -> String {
-        let mut lines = vec![LIST_ACCOUNTS_FORMAT.to_owned()];
-        if !self.config.enable {
-            return lines.join("\n");
-        }
-        for account_id in &self.config.account_order {
-            let Some(account) = self.config.accounts.get(account_id) else {
-                continue;
-            };
-            if !account.enable {
-                continue;
+    fn list_accounts(&self) -> CborValue {
+        let mut rows = Vec::new();
+        if self.config.enable {
+            for account_id in &self.config.account_order {
+                let Some(account) = self.config.accounts.get(account_id) else {
+                    continue;
+                };
+                if !account.enable {
+                    continue;
+                }
+                let default_calendar = account.default_calendar.as_deref().unwrap_or("-");
+                let timezone = account.timezone.as_deref().unwrap_or("-");
+                let display_name = account.display_name.as_deref().unwrap_or("-");
+                rows.push(format!(
+                    "{} {} {} {} {} {}",
+                    safe_field(&account.id),
+                    "enabled",
+                    safe_field(account.backend_kind()),
+                    safe_field(default_calendar),
+                    safe_field(timezone),
+                    safe_field(display_name)
+                ));
             }
-            let default_calendar = account.default_calendar.as_deref().unwrap_or("-");
-            let timezone = account.timezone.as_deref().unwrap_or("-");
-            let display_name = account.display_name.as_deref().unwrap_or("-");
-            lines.push(format!(
-                "{} {} {} {} {} {}",
-                safe_field(&account.id),
-                "enabled",
-                safe_field(account.backend_kind()),
-                safe_field(default_calendar),
-                safe_field(timezone),
-                safe_field(display_name)
-            ));
         }
-        lines.join("\n")
+        ok_envelope(
+            "list_accounts",
+            "ok",
+            cbor_map(vec![
+                ("format", CborValue::Text(LIST_ACCOUNTS_FORMAT.to_owned())),
+                ("accounts", line_array(rows)),
+            ]),
+        )
     }
 
-    fn list_calendars(&self, args: &CalendarArgs) -> Result<String, String> {
+    fn list_calendars(&self, args: &CalendarArgs) -> Result<CborValue, String> {
         reject_cursor(args)?;
-        let mut lines = vec![LIST_CALENDARS_FORMAT.to_owned()];
-        if !self.config.enable {
-            return Ok(lines.join("\n"));
-        }
-        let accounts = self.accounts_for_read(args.account.as_deref())?;
-        for account in accounts {
-            match &account.backend {
-                Some(ValidatedBackendConfig::IcsFeed { .. }) => {
-                    for calendar in self.ics_feed.list_calendars(account) {
-                        let flags = if calendar.read_only {
-                            "read_only"
-                        } else {
-                            "writable"
-                        };
-                        lines.push(format!(
-                            "{} {} {} {} {}",
-                            safe_field(&account.id),
-                            safe_field(&calendar.id),
-                            flags,
-                            safe_field(account.backend_kind()),
-                            safe_field(&calendar.display_name)
-                        ));
+        let mut rows = Vec::new();
+        if self.config.enable {
+            let accounts = self.accounts_for_read(args.account.as_deref())?;
+            for account in accounts {
+                match &account.backend {
+                    Some(ValidatedBackendConfig::IcsFeed { .. }) => {
+                        for calendar in self.ics_feed.list_calendars(account) {
+                            let flags = if calendar.read_only {
+                                "read_only"
+                            } else {
+                                "writable"
+                            };
+                            rows.push(format!(
+                                "{} {} {} {} {}",
+                                safe_field(&account.id),
+                                safe_field(&calendar.id),
+                                flags,
+                                safe_field(account.backend_kind()),
+                                safe_field(&calendar.display_name)
+                            ));
+                        }
                     }
-                }
-                Some(ValidatedBackendConfig::Google { .. }) => {
-                    for calendar in self.google.list_calendars(account)? {
-                        let flags = if calendar.read_only {
-                            "read_only"
-                        } else {
-                            "writable"
-                        };
-                        lines.push(format!(
-                            "{} {} {} {} {}",
-                            safe_field(&account.id),
-                            safe_field(&calendar.id),
-                            flags,
-                            safe_field(account.backend_kind()),
-                            safe_field(&calendar.summary)
-                        ));
+                    Some(ValidatedBackendConfig::Google { .. }) => {
+                        for calendar in self.google.list_calendars(account)? {
+                            let flags = if calendar.read_only {
+                                "read_only"
+                            } else {
+                                "writable"
+                            };
+                            rows.push(format!(
+                                "{} {} {} {} {}",
+                                safe_field(&account.id),
+                                safe_field(&calendar.id),
+                                flags,
+                                safe_field(account.backend_kind()),
+                                safe_field(&calendar.summary)
+                            ));
+                        }
                     }
+                    Some(ValidatedBackendConfig::Caldav { .. }) | None => {}
                 }
-                Some(ValidatedBackendConfig::Caldav { .. }) | None => {}
             }
         }
-        Ok(lines.join("\n"))
+        Ok(ok_envelope(
+            "list_calendars",
+            "ok",
+            cbor_map(vec![
+                ("format", CborValue::Text(LIST_CALENDARS_FORMAT.to_owned())),
+                ("calendars", line_array(rows)),
+            ]),
+        ))
     }
 
-    fn list_events(&self, args: &CalendarArgs) -> Result<String, String> {
+    fn list_events(&self, args: &CalendarArgs) -> Result<CborValue, String> {
         reject_cursor(args)?;
         let limit = normalized_limit(args.limit)?;
         let range = parse_range(args)?;
         let account = self.single_account(args.account.as_deref())?;
         let calendar = self.calendar_arg(account, args.calendar.as_deref())?;
         let events = self.events_for_account(account, calendar, range, limit)?;
-        let mut lines = vec![LIST_EVENTS_FORMAT.to_owned()];
+        let mut rows = Vec::new();
         for event in events {
-            lines.push(format_event_line(
+            rows.push(format_event_line(
                 &self.config.policy,
                 account,
                 calendar,
                 &event,
             ));
         }
-        Ok(lines.join("\n"))
+        Ok(ok_envelope(
+            "list_events",
+            "ok",
+            cbor_map(vec![
+                ("format", CborValue::Text(LIST_EVENTS_FORMAT.to_owned())),
+                ("events", line_array(rows)),
+            ]),
+        ))
     }
 
-    fn read_event(&self, args: &CalendarArgs) -> Result<String, String> {
+    fn read_event(&self, args: &CalendarArgs) -> Result<CborValue, String> {
         reject_cursor(args)?;
         let event_id = required_arg(args.event_id.as_deref(), "event_id")?;
         let account = self.single_account(args.account.as_deref())?;
@@ -499,47 +519,62 @@ impl Engine {
                 ));
             }
         };
-        Ok(format_event_detail(
-            &self.config.policy,
-            account,
-            calendar,
-            &event,
+        Ok(ok_envelope(
+            "read_event",
+            "ok",
+            cbor_map(vec![
+                ("format", CborValue::Text(EVENT_DETAIL_FORMAT.to_owned())),
+                (
+                    "event",
+                    line_array(format_event_detail(
+                        &self.config.policy,
+                        account,
+                        calendar,
+                        &event,
+                    )),
+                ),
+            ]),
         ))
     }
 
-    fn free_busy(&self, args: &CalendarArgs) -> Result<String, String> {
+    fn free_busy(&self, args: &CalendarArgs) -> Result<CborValue, String> {
         reject_cursor(args)?;
         let limit = normalized_limit(args.limit)?;
         let range = parse_range(args)?;
         let account = self.single_account(args.account.as_deref())?;
         let calendar = self.calendar_arg(account, args.calendar.as_deref())?;
         let events = self.events_for_account(account, calendar, range, limit)?;
-        let mut lines = vec![FREE_BUSY_FORMAT.to_owned()];
+        let mut rows = Vec::new();
         for event in events {
-            lines.push(format_free_busy_line(
+            rows.push(format_free_busy_line(
                 &self.config.policy,
                 account,
                 calendar,
                 &event,
             ));
         }
-        Ok(lines.join("\n"))
+        Ok(ok_envelope(
+            "free_busy",
+            "ok",
+            cbor_map(vec![
+                ("format", CborValue::Text(FREE_BUSY_FORMAT.to_owned())),
+                ("busy", line_array(rows)),
+            ]),
+        ))
     }
 
     fn submit_change(
         &self,
         command: CalendarCommand,
         args: &CalendarArgs,
-    ) -> Result<String, String> {
+    ) -> Result<CborValue, String> {
         let change = self.build_change(command, args)?;
         if self.config.policy.write.require_approval {
             let id = self.state.pending_change(&change)?;
             return Ok(format_change_queued(&id, &change));
         }
         let result = self.execute_change(&change)?;
-        Ok(format_mutation_result(
-            "Applied", "direct", &change, &result,
-        ))
+        Ok(format_mutation_result_envelope("direct", &change, &result))
     }
 
     fn build_change(
@@ -1173,11 +1208,15 @@ fn require_change_ids(argv: &[String]) -> Result<Vec<String>, String> {
     Ok(ids)
 }
 
-fn calendar_log_item_count(command: CalendarCommand, text: &str) -> Option<u64> {
+fn calendar_log_item_count(command: CalendarCommand, result: &CborValue) -> Option<u64> {
+    if cbor_bool_field(result, "ok") != Some(true) {
+        return None;
+    }
+    let data = cbor_field(result, "data")?;
     match command {
-        CalendarCommand::ListCalendars
-        | CalendarCommand::ListEvents
-        | CalendarCommand::FreeBusy => Some(text.lines().skip(1).count() as u64),
+        CalendarCommand::ListCalendars => cbor_array_len(data, "calendars"),
+        CalendarCommand::ListEvents => cbor_array_len(data, "events"),
+        CalendarCommand::FreeBusy => cbor_array_len(data, "busy"),
         CalendarCommand::ReadEvent => Some(1),
         CalendarCommand::ListAccounts
         | CalendarCommand::CreateEvent
@@ -1257,9 +1296,8 @@ fn format_event_detail(
     account: &ValidatedAccount,
     calendar: &str,
     event: &BackendEvent,
-) -> String {
+) -> Vec<String> {
     let mut lines = vec![
-        "format: key value".to_owned(),
         format!("account {}", safe_field(&account.id)),
         format!("calendar {}", safe_field(calendar)),
         format!("event_id {}", safe_field(event_id(event))),
@@ -1295,7 +1333,7 @@ fn format_event_detail(
             lines.push(format!("description {}", safe_multiline(description)));
         }
     }
-    lines.join("\n")
+    lines
 }
 
 fn event_id(event: &BackendEvent) -> &str {
@@ -1436,13 +1474,25 @@ fn event_flags(policy: &ValidatedPolicy, event: &BackendEvent) -> String {
     flags.join(",")
 }
 
-fn format_change_queued(id: &str, change: &CalendarChangeApproval) -> String {
-    format!(
-        "approval_required\nmessage Calendar change pending approval.\napproval_id {}\ncommand {}\naccount {}\ncalendar {}",
-        safe_field(id),
-        safe_field(&change.command),
-        safe_field(&change.account),
-        safe_field(&change.calendar)
+fn format_change_queued(id: &str, change: &CalendarChangeApproval) -> CborValue {
+    ok_envelope(
+        &change.command,
+        "approval_required",
+        cbor_map(vec![
+            (
+                "message",
+                CborValue::Text("Calendar change pending approval.".to_owned()),
+            ),
+            ("approval_id", CborValue::Text(safe_display_line(id))),
+            (
+                "account",
+                CborValue::Text(safe_display_line(&change.account)),
+            ),
+            (
+                "calendar",
+                CborValue::Text(safe_display_line(&change.calendar)),
+            ),
+        ]),
     )
 }
 
@@ -1522,6 +1572,60 @@ fn format_mutation_result(
     }
 }
 
+fn format_mutation_result_envelope(
+    id: &str,
+    change: &CalendarChangeApproval,
+    result: &CalendarMutationResult,
+) -> CborValue {
+    let mut entries = vec![
+        (
+            "message",
+            CborValue::Text(format!(
+                "Calendar change {}.",
+                mutation_result_status(&change.command, result)
+            )),
+        ),
+        ("change_id", CborValue::Text(safe_display_line(id))),
+        (
+            "account",
+            CborValue::Text(safe_display_line(&change.account)),
+        ),
+        (
+            "calendar",
+            CborValue::Text(safe_display_line(&change.calendar)),
+        ),
+    ];
+    match result {
+        CalendarMutationResult::Event(event) => {
+            entries.push(("event_id", CborValue::Text(safe_display_line(&event.id))));
+            if let Some(etag) = &event.etag {
+                entries.push(("etag", CborValue::Text(safe_display_line(etag))));
+            }
+        }
+        CalendarMutationResult::Deleted => {
+            entries.push((
+                "event_id",
+                CborValue::Text(safe_display_line(change.event_id.as_deref().unwrap_or("-"))),
+            ));
+        }
+    }
+    ok_envelope(
+        &change.command,
+        mutation_result_status(&change.command, result),
+        cbor_map(entries),
+    )
+}
+
+fn mutation_result_status(command: &str, result: &CalendarMutationResult) -> &'static str {
+    match (command, result) {
+        (_, CalendarMutationResult::Deleted) => "deleted",
+        ("create_event", CalendarMutationResult::Event(_)) => "created",
+        ("update_event", CalendarMutationResult::Event(_)) => "updated",
+        ("respond_invite", CalendarMutationResult::Event(_)) => "responded",
+        _ => "applied",
+    }
+}
+
 fn command_name(command: CalendarCommand) -> &'static str {
     match command {
         CalendarCommand::ListAccounts => "list_accounts",
@@ -1536,26 +1640,32 @@ fn command_name(command: CalendarCommand) -> &'static str {
     }
 }
 
-fn tool_result(invoke: ToolStarted, result: String) -> Event {
+fn finish_tool_result(invoke: ToolStarted, result: CborValue) -> Event {
+    if cbor_bool_field(&result, "ok") == Some(false) {
+        return tool_error(invoke, result);
+    }
+    let display = success_display(&result);
     Event::ToolResult(ToolResult {
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,
-        result: CborValue::Text(result),
+        result,
         kind: tau_proto::ToolResultKind::Final,
-        display: None,
+        display: Some(display),
         originator: tau_proto::PromptOriginator::User,
     })
 }
 
-fn tool_error(invoke: ToolStarted, message: String) -> Event {
+fn tool_error(invoke: ToolStarted, details: CborValue) -> Event {
+    let message = calendar_error_message(&details);
+    let display = error_display(&invoke.arguments, &details, &message);
     Event::ToolError(ToolError {
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,
-        message,
-        details: None,
-        display: None,
+        message: message.clone(),
+        details: Some(details),
+        display: Some(display),
         originator: tau_proto::PromptOriginator::User,
     })
 }
@@ -1577,6 +1687,241 @@ fn action_error(invoke: ActionInvoke, message: String) -> Event {
     })
 }
 
+fn ok_envelope(command: &str, status: &str, data: CborValue) -> CborValue {
+    cbor_map(vec![
+        ("ok", CborValue::Bool(true)),
+        ("command", CborValue::Text(command.to_owned())),
+        ("status", CborValue::Text(status.to_owned())),
+        ("data", data),
+    ])
+}
+
+fn error_envelope(command: Option<&str>, code: &str, message: &str) -> CborValue {
+    cbor_map(vec![
+        ("ok", CborValue::Bool(false)),
+        (
+            "command",
+            command
+                .map(|command| CborValue::Text(command.to_owned()))
+                .unwrap_or(CborValue::Null),
+        ),
+        (
+            "error",
+            cbor_map(vec![
+                ("code", CborValue::Text(code.to_owned())),
+                ("message", CborValue::Text(safe_display_line(message))),
+                ("details", cbor_map(Vec::new())),
+            ]),
+        ),
+    ])
+}
+
+fn calendar_error_envelope(command: Option<&str>, message: &str) -> CborValue {
+    error_envelope(command, calendar_error_code(message), message)
+}
+
+fn calendar_error_code(message: &str) -> &'static str {
+    if message.starts_with("Google Calendar API")
+        || message.starts_with("Google token response")
+        || message.starts_with("Google create event response")
+        || message.starts_with("Google update event response")
+        || message.starts_with("Google invite response")
+        || message.starts_with("refreshing Google access token")
+        || message.starts_with("fetching iCalendar feed")
+        || message.starts_with("reading iCalendar feed")
+        || message.starts_with("iCalendar feed returned HTTP")
+    {
+        "network_error"
+    } else if message.starts_with("Google calendar secret")
+        || message.contains("missing url_secret")
+        || message.contains("has not been configured")
+    {
+        "configuration_error"
+    } else if message.starts_with("serializing Google Calendar request") {
+        "internal_error"
+    } else {
+        "invalid_input"
+    }
+}
+
+fn calendar_error_message(details: &CborValue) -> String {
+    let message = cbor_nested_text_field(details, "error", "message")
+        .unwrap_or("invalid calendar tool request");
+    let Some(code) = cbor_nested_text_field(details, "error", "code") else {
+        return message.to_owned();
+    };
+    match cbor_text_field(details, "command") {
+        Some(command) => format!(
+            "calendar {} failed ({code}): {message}",
+            safe_display_line(command)
+        ),
+        None => format!("calendar failed ({code}): {message}"),
+    }
+}
+
+fn calendar_log_status(result: &CborValue) -> String {
+    cbor_text_field(result, "status")
+        .or_else(|| cbor_nested_text_field(result, "error", "code"))
+        .unwrap_or("unknown")
+        .to_owned()
+}
+
+fn calendar_log_error_message(result: &CborValue) -> Option<&str> {
+    if cbor_bool_field(result, "ok") == Some(false) {
+        cbor_nested_text_field(result, "error", "message")
+    } else {
+        None
+    }
+}
+
+fn success_display(result: &CborValue) -> ToolDisplay {
+    let command = cbor_text_field(result, "command").unwrap_or("calendar");
+    let status_text = cbor_text_field(result, "status").unwrap_or("ok");
+    let data = cbor_field(result, "data");
+    ToolDisplay {
+        args: calendar_display_args(command, data).unwrap_or_default(),
+        stats: calendar_display_stats(command, data),
+        info_chips: calendar_display_info(command, data),
+        status: ToolDisplayStatus::Success,
+        status_text: status_text.to_owned(),
+        ..Default::default()
+    }
+}
+
+fn error_display(arguments: &CborValue, details: &CborValue, message: &str) -> ToolDisplay {
+    let command = cbor_text_field(details, "command").unwrap_or("calendar");
+    ToolDisplay {
+        args: invocation_display_args(arguments).unwrap_or_else(|| safe_display_line(command)),
+        status: ToolDisplayStatus::Error,
+        status_text: message.to_owned(),
+        ..Default::default()
+    }
+}
+
+fn calendar_display_args(command: &str, _data: Option<&CborValue>) -> Option<String> {
+    Some(safe_display_line(command))
+}
+
+fn calendar_display_stats(command: &str, data: Option<&CborValue>) -> ToolDisplayStats {
+    let Some(data) = data else {
+        return ToolDisplayStats::default();
+    };
+    match command {
+        "list_accounts" => line_array_stats(data, "accounts"),
+        "list_calendars" => line_array_stats(data, "calendars"),
+        "list_events" => line_array_stats(data, "events"),
+        "read_event" => line_array_stats(data, "event"),
+        "free_busy" => line_array_stats(data, "busy"),
+        _ => ToolDisplayStats::default(),
+    }
+}
+
+fn calendar_display_info(command: &str, data: Option<&CborValue>) -> Vec<String> {
+    let Some(data) = data else {
+        return Vec::new();
+    };
+    let mut chips = Vec::new();
+    match command {
+        "list_accounts" => push_count_chip(&mut chips, cbor_array_len(data, "accounts"), "account"),
+        "list_calendars" => {
+            push_count_chip(&mut chips, cbor_array_len(data, "calendars"), "calendar")
+        }
+        "list_events" => push_count_chip(&mut chips, cbor_array_len(data, "events"), "event"),
+        "free_busy" => push_count_chip(&mut chips, cbor_array_len(data, "busy"), "busy block"),
+        _ => {}
+    }
+    chips
+}
+
+fn invocation_display_args(arguments: &CborValue) -> Option<String> {
+    let command = cbor_text_field(arguments, "command")?;
+    Some(safe_display_line(command))
+}
+
+fn line_array(rows: Vec<String>) -> CborValue {
+    CborValue::Array(rows.into_iter().map(CborValue::Text).collect())
+}
+
+fn line_array_stats(data: &CborValue, field: &str) -> ToolDisplayStats {
+    let Some(lines) = cbor_array_field(data, field) else {
+        return ToolDisplayStats::default();
+    };
+    let line_count = lines.len() as u64;
+    let byte_count = lines
+        .iter()
+        .filter_map(|line| match line {
+            CborValue::Text(text) => Some(text.len() as u64),
+            _ => None,
+        })
+        .sum();
+    ToolDisplayStats {
+        matches: Some(line_count),
+        lines: (0 < line_count).then_some(line_count),
+        bytes: (0 < line_count).then_some(byte_count),
+    }
+}
+
+fn push_count_chip(chips: &mut Vec<String>, count: Option<u64>, singular: &str) {
+    let Some(count) = count else {
+        return;
+    };
+    let suffix = if count == 1 {
+        singular.to_owned()
+    } else {
+        format!("{singular}s")
+    };
+    chips.push(format!("{count} {suffix}"));
+}
+
+fn cbor_map(entries: Vec<(&str, CborValue)>) -> CborValue {
+    CborValue::Map(
+        entries
+            .into_iter()
+            .map(|(key, value)| (CborValue::Text(key.to_owned()), value))
+            .collect(),
+    )
+}
+
+fn cbor_field<'a>(value: &'a CborValue, field: &str) -> Option<&'a CborValue> {
+    let CborValue::Map(entries) = value else {
+        return None;
+    };
+    entries.iter().find_map(|(key, value)| match key {
+        CborValue::Text(key) if key == field => Some(value),
+        _ => None,
+    })
+}
+
+fn cbor_text_field<'a>(value: &'a CborValue, field: &str) -> Option<&'a str> {
+    match cbor_field(value, field) {
+        Some(CborValue::Text(value)) => Some(value.as_str()),
+        _ => None,
+    }
+}
+
+fn cbor_bool_field(value: &CborValue, field: &str) -> Option<bool> {
+    match cbor_field(value, field) {
+        Some(CborValue::Bool(value)) => Some(*value),
+        _ => None,
+    }
+}
+
+fn cbor_array_len(value: &CborValue, field: &str) -> Option<u64> {
+    cbor_array_field(value, field).map(|values| values.len() as u64)
+}
+
+fn cbor_array_field<'a>(value: &'a CborValue, field: &str) -> Option<&'a [CborValue]> {
+    match cbor_field(value, field) {
+        Some(CborValue::Array(values)) => Some(values),
+        _ => None,
+    }
+}
+
+fn cbor_nested_text_field<'a>(value: &'a CborValue, outer: &str, inner: &str) -> Option<&'a str> {
+    let nested = cbor_field(value, outer)?;
+    cbor_text_field(nested, inner)
+}
+
 fn safe_field(value: &str) -> String {
     let field = value
         .chars()
@@ -1591,7 +1936,12 @@ fn safe_field(value: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join("_");
-    truncate_chars(&field, MAX_DISPLAY_LINE_CHARS)
+    let field = truncate_chars(&field, MAX_DISPLAY_LINE_CHARS);
+    if field.is_empty() {
+        "-".to_owned()
+    } else {
+        field
+    }
 }
 
 fn safe_multiline(value: &str) -> String {
@@ -1608,7 +1958,12 @@ fn safe_multiline(value: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    truncate_chars(&collapsed, MAX_EVENT_FIELD_CHARS)
+    let collapsed = truncate_chars(&collapsed, MAX_EVENT_FIELD_CHARS);
+    if collapsed.is_empty() {
+        "-".to_owned()
+    } else {
+        collapsed
+    }
 }
 
 fn safe_display_line(value: &str) -> String {
@@ -1721,9 +2076,15 @@ mod tests {
             ics_feed: IcsFeedBackend::new(BTreeMap::new()),
         };
 
+        let output = engine.list_accounts();
+        let data = cbor_field(&output, "data").expect("data");
+
+        assert_eq!(cbor_text_field(&output, "command"), Some("list_accounts"));
+        assert_eq!(cbor_text_field(&output, "status"), Some("ok"));
+        assert_eq!(cbor_text_field(data, "format"), Some(LIST_ACCOUNTS_FORMAT));
         assert_eq!(
-            engine.list_accounts(),
-            "format: id flags backend default_calendar timezone display_name\nwork enabled google - UTC Work_Calendar"
+            line_payload(data, "accounts"),
+            "work enabled google - UTC Work_Calendar"
         );
     }
 
@@ -1734,13 +2095,12 @@ mod tests {
         let temp = tempfile::TempDir::new().expect("tempdir");
         let engine = test_engine(temp.path());
 
-        let output = engine
-            .dispatch(&command_args(
-                "list_calendars",
-                vec![("account", CborValue::Text("feed".to_owned()))],
-            ))
-            .expect("list calendars");
-        assert!(output.contains("format: account calendar flags backend display_name"));
+        let output = engine.dispatch(&command_args(
+            "list_calendars",
+            vec![("account", CborValue::Text("feed".to_owned()))],
+        ));
+        let data = cbor_field(&output, "data").expect("data");
+        assert_eq!(cbor_text_field(data, "format"), Some(LIST_CALENDARS_FORMAT));
 
         let log = engine.action_log_last(10).expect("log output");
 
@@ -1759,22 +2119,25 @@ mod tests {
         let temp = tempfile::TempDir::new().expect("tempdir");
         let engine = test_engine(temp.path());
 
-        let err = engine
-            .dispatch(&command_args(
-                "create_event",
-                vec![
-                    ("account", CborValue::Text("feed".to_owned())),
-                    ("calendar", CborValue::Text("main".to_owned())),
-                    ("title", CborValue::Text("private title".to_owned())),
-                ],
-            ))
-            .expect_err("writes are unavailable");
-        assert!(err.contains("does not support calendar writes"), "{err}");
+        let err = engine.dispatch(&command_args(
+            "create_event",
+            vec![
+                ("account", CborValue::Text("feed".to_owned())),
+                ("calendar", CborValue::Text("main".to_owned())),
+                ("title", CborValue::Text("private title".to_owned())),
+            ],
+        ));
+        assert_eq!(cbor_bool_field(&err, "ok"), Some(false));
+        let err_text = calendar_error_message(&err);
+        assert!(
+            err_text.contains("does not support calendar writes"),
+            "{err_text}"
+        );
 
         let log = engine.action_log_last(10).expect("log output");
 
         assert!(log.contains("command=create_event"), "{log}");
-        assert!(log.contains("status=error"), "{log}");
+        assert!(log.contains("status=invalid_input"), "{log}");
         assert!(log.contains("account=feed"), "{log}");
         assert!(log.contains("calendar=main"), "{log}");
         assert!(!log.contains("private title"), "{log}");
@@ -1812,25 +2175,27 @@ mod tests {
             ics_feed: IcsFeedBackend::new(BTreeMap::new()),
         };
 
-        let output = engine
-            .dispatch(&command_args(
-                "create_event",
-                vec![
-                    ("account", CborValue::Text("google".to_owned())),
-                    ("calendar", CborValue::Text("primary".to_owned())),
-                    ("title", CborValue::Text("Team Sync".to_owned())),
-                    ("start", CborValue::Text("2026-05-28T12:00:00Z".to_owned())),
-                    ("end", CborValue::Text("2026-05-28T13:00:00Z".to_owned())),
-                    (
-                        "attendees",
-                        CborValue::Array(vec![CborValue::Text("a@example.com".to_owned())]),
-                    ),
-                ],
-            ))
-            .expect("queued write");
+        let output = engine.dispatch(&command_args(
+            "create_event",
+            vec![
+                ("account", CborValue::Text("google".to_owned())),
+                ("calendar", CborValue::Text("primary".to_owned())),
+                ("title", CborValue::Text("Team Sync".to_owned())),
+                ("start", CborValue::Text("2026-05-28T12:00:00Z".to_owned())),
+                ("end", CborValue::Text("2026-05-28T13:00:00Z".to_owned())),
+                (
+                    "attendees",
+                    CborValue::Array(vec![CborValue::Text("a@example.com".to_owned())]),
+                ),
+            ],
+        ));
+        let data = cbor_field(&output, "data").expect("data");
 
-        assert!(output.contains("approval_required"), "{output}");
-        assert!(output.contains("approval_id 1"), "{output}");
+        assert_eq!(
+            cbor_text_field(&output, "status"),
+            Some("approval_required")
+        );
+        assert_eq!(cbor_text_field(data, "approval_id"), Some("1"));
         let list = engine.action_change_list().expect("change list");
         assert!(list.contains("command=create_event"), "{list}");
         assert!(list.contains("title=Team Sync"), "{list}");
@@ -1888,7 +2253,7 @@ mod tests {
             },
         };
 
-        let detail = format_event_detail(&policy, &account, "primary", &event);
+        let detail = format_event_detail(&policy, &account, "primary", &event).join("\n");
 
         assert!(detail.contains("summary (private)"), "{detail}");
         assert!(
@@ -1947,8 +2312,8 @@ mod tests {
         };
 
         assert_eq!(
-            format_event_detail(&policy, &account, "primary", &event),
-            "format: key value\naccount google\ncalendar primary\nevent_id evt\nstart 2026-05-28T12:00:00Z\nend 2026-05-28T13:00:00Z\nflags read_only,recurring\nsummary Team_Sync\nuid uid@example.com\netag abc\nstatus confirmed\nlocation Room_1\norganizer org@example.com\nattendees a@example.com,b@example.com\ndescription line 1 line 2"
+            format_event_detail(&policy, &account, "primary", &event).join("\n"),
+            "account google\ncalendar primary\nevent_id evt\nstart 2026-05-28T12:00:00Z\nend 2026-05-28T13:00:00Z\nflags read_only,recurring\nsummary Team_Sync\nuid uid@example.com\netag abc\nstatus confirmed\nlocation Room_1\norganizer org@example.com\nattendees a@example.com,b@example.com\ndescription line 1 line 2"
         );
     }
 
@@ -2039,5 +2404,17 @@ mod tests {
                 .map(|(key, value)| (CborValue::Text(key.to_owned()), value))
                 .collect(),
         )
+    }
+
+    fn line_payload(data: &CborValue, field: &str) -> String {
+        cbor_array_field(data, field)
+            .expect("line array")
+            .iter()
+            .map(|value| match value {
+                CborValue::Text(value) => value.as_str(),
+                _ => panic!("line array contains non-text value"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }

@@ -67,7 +67,9 @@ use crate::prompt::{
 };
 use crate::secrets::{load_secret_sources, resolve_extension_secrets};
 use crate::settings::{Config, load_harness_settings_or_warn};
-use crate::tool_turn::{ForegroundAction, PendingToolInvocation, ToolTurnMachine};
+use crate::tool_turn::{
+    ForegroundAction, PendingToolInvocation, ToolTurnLockScope, ToolTurnMachine,
+};
 use crate::turn::{PromptSubmission, TurnState};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -8482,6 +8484,7 @@ impl Harness {
             AgentToolCall,
             tau_proto::ToolExecutionMode,
             BackgroundSupport,
+            ToolTurnLockScope,
         )> = Vec::new();
         if requested_tool_calls {
             normalized_calls = tool_calls
@@ -8491,7 +8494,8 @@ impl Harness {
                     let mode = self.resolve_tool_execution_mode_for_call(&call);
                     let background_support =
                         self.resolve_tool_background_support(call.name.as_str());
-                    (call, mode, background_support)
+                    let lock_scope = self.resolve_tool_turn_lock_scope(call.name.as_str());
+                    (call, mode, background_support, lock_scope)
                 })
                 .collect();
             let mut normalized_calls_iter = normalized_calls.iter();
@@ -8500,7 +8504,7 @@ impl Harness {
                 .into_iter()
                 .map(|item| match item {
                     ContextItem::ToolCall(_) => {
-                        let (call, _, _) = normalized_calls_iter
+                        let (call, _, _, _) = normalized_calls_iter
                             .next()
                             .expect("tool-call normalization count should match output items");
                         ContextItem::ToolCall(ToolCallItem {
@@ -8515,7 +8519,7 @@ impl Harness {
                 .collect();
             tool_calls = normalized_calls
                 .iter()
-                .map(|(call, _, _)| call.clone())
+                .map(|(call, _, _, _)| call.clone())
                 .collect();
         }
 
@@ -8683,9 +8687,9 @@ impl Harness {
             // `input[N].call_id: empty string`. Fix it at the boundary.
             let remaining_calls: Vec<ToolCallId> = normalized_calls
                 .iter()
-                .map(|(call, _, _)| call.id.clone())
+                .map(|(call, _, _, _)| call.id.clone())
                 .collect();
-            for (call, _, _) in &normalized_calls {
+            for (call, _, _, _) in &normalized_calls {
                 self.pending_tools.insert(
                     call.id.clone(),
                     PendingTool {
@@ -8709,9 +8713,9 @@ impl Harness {
             // Enqueue in the order the agent emitted them. Dispatch is done by
             // `drain_pending_tool_invocations`, which respects the execution
             // mode ordering rules.
-            for (call, mode, background_support) in normalized_calls {
+            for (call, mode, background_support, lock_scope) in normalized_calls {
                 self.tool_turn
-                    .push(cid.clone(), call, mode, background_support);
+                    .push(cid.clone(), call, mode, background_support, lock_scope);
             }
             self.drain_pending_tool_invocations()?;
         } else {
@@ -8825,6 +8829,15 @@ impl Harness {
         self.resolve_tool_execution_mode(call.name.as_str())
     }
 
+    fn resolve_tool_turn_lock_scope(&self, name: &str) -> ToolTurnLockScope {
+        self.registry
+            .resolve_provider(name)
+            .filter(|provider| provider.tool.name.as_str() == "delegate")
+            .map_or(ToolTurnLockScope::Normal, |_| {
+                ToolTurnLockScope::DelegateLauncher
+            })
+    }
+
     /// Drain scheduler-selected tool invocations into harness side effects.
     fn drain_pending_tool_invocations(&mut self) -> Result<(), HarnessError> {
         while let Some(next) = self.tool_turn.next_dispatchable().cloned() {
@@ -8840,6 +8853,7 @@ impl Harness {
                     invocation,
                     execution_mode: _,
                     background_support: _,
+                    lock_scope: _,
                 },
                 foreground_action,
             )) = self.tool_turn.pop_dispatchable(Instant::now())

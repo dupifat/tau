@@ -8282,6 +8282,92 @@ fn delegate_parent_tool_scheduling_ignores_delegate_execution_mode_argument() {
     h.shutdown().expect("shutdown");
 }
 
+/// Regression for `tau-agent-ral6kd`: a parent `delegate` call is only a
+/// side-agent launcher. It must not keep an exclusive normal tool from the same
+/// agent turn queued behind it; delegate execution-mode locking happens in the
+/// start-agent scheduler after the launcher reaches the built-in handler.
+#[test]
+fn delegate_launcher_does_not_block_same_turn_exclusive_tool() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    h.selected_model = Some("test/model".into());
+    let _ = connect_test_tool(&mut h, "conn-delegate");
+    h.registry.register(
+        "conn-delegate",
+        ToolSpec {
+            name: ToolName::new("delegate"),
+            model_visible_name: None,
+            description: None,
+            parameters: None,
+            tool_type: tau_proto::ToolType::Function,
+            format: None,
+            enabled_by_default: true,
+            execution_mode: ToolExecutionMode::Shared,
+            background_support: None,
+        },
+    );
+    let _ = connect_test_tool(&mut h, "conn-write");
+    h.registry.register(
+        "conn-write",
+        ToolSpec {
+            name: ToolName::new("write"),
+            model_visible_name: None,
+            description: None,
+            parameters: None,
+            tool_type: tau_proto::ToolType::Function,
+            format: None,
+            enabled_by_default: true,
+            execution_mode: ToolExecutionMode::Exclusive,
+            background_support: None,
+        },
+    );
+
+    let cid = ensure_test_user_agent(&mut h);
+    let spid: AgentPromptId = "sp-main".into();
+    seed_agent_thinking(&mut h, &cid, "sp-main");
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: spid,
+        agent_id: "main".into(),
+        output_items: vec![
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "delegate-call".into(),
+                name: ToolName::new("delegate"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+            }),
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "write-call".into(),
+                name: ToolName::new("write"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+            }),
+        ],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("main response");
+
+    assert_eq!(
+        h.tool_turn
+            .in_flight_mode(&ToolCallId::from("delegate-call")),
+        Some(&ToolExecutionMode::Shared),
+    );
+    assert_eq!(
+        h.tool_turn.pending_len(),
+        0,
+        "exclusive write must not remain queued behind the delegate launcher",
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Exclusive tool serialization is scoped to the owning conversation,
 /// not process-global. Two independent sub-agents may both need to run
 /// exclusive work; making them wait on each other would unnecessarily

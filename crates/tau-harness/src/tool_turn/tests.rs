@@ -17,7 +17,29 @@ fn call(id: &str) -> AgentToolCall {
 }
 
 fn push(machine: &mut ToolTurnMachine, cid: &AgentId, id: &str, mode: ToolExecutionMode) {
-    machine.push(cid.clone(), call(id), mode, BackgroundSupport::Never);
+    machine.push(
+        cid.clone(),
+        call(id),
+        mode,
+        BackgroundSupport::Never,
+        ToolTurnLockScope::Normal,
+    );
+}
+
+fn push_scoped(
+    machine: &mut ToolTurnMachine,
+    cid: &AgentId,
+    id: &str,
+    mode: ToolExecutionMode,
+    lock_scope: ToolTurnLockScope,
+) {
+    machine.push(
+        cid.clone(),
+        call(id),
+        mode,
+        BackgroundSupport::Never,
+        lock_scope,
+    );
 }
 
 fn pop_id(machine: &mut ToolTurnMachine) -> Option<String> {
@@ -267,6 +289,7 @@ fn instant_background_completes_foreground_but_remains_running() {
         call("bg"),
         ToolExecutionMode::Exclusive,
         BackgroundSupport::Instant,
+        ToolTurnLockScope::Normal,
     );
 
     let (pending, action) = machine.pop_dispatchable(Instant::now()).expect("dispatch");
@@ -298,6 +321,7 @@ fn min_foreground_deadline_backgrounds_once_when_due() {
         call("slow"),
         ToolExecutionMode::Shared,
         BackgroundSupport::MinForegroundSeconds(5),
+        ToolTurnLockScope::Normal,
     );
     let (_, action) = machine.pop_dispatchable(start).expect("dispatch");
     assert_eq!(action, ForegroundAction::None);
@@ -328,12 +352,14 @@ fn never_background_has_no_deadline() {
         call("never"),
         ToolExecutionMode::Exclusive,
         BackgroundSupport::Never,
+        ToolTurnLockScope::Normal,
     );
     machine.push(
         conv,
         call("behind"),
         ToolExecutionMode::Shared,
         BackgroundSupport::Never,
+        ToolTurnLockScope::Normal,
     );
     let (_, action) = machine.pop_dispatchable(Instant::now()).expect("dispatch");
     assert_eq!(action, ForegroundAction::None);
@@ -341,10 +367,62 @@ fn never_background_has_no_deadline() {
     assert_eq!(pop_id(&mut machine), None);
 }
 
-/// Backgrounding closes the model-visible foreground, but the real call
+/// Delegate parent calls are only launchers. Once their foreground placeholder
+/// is published, delegate-vs-delegate locking is handled by the start-agent
+/// scheduler, so the launcher must not hold the parent tool-turn lane.
+#[test]
+fn backgrounded_delegate_launcher_does_not_block_normal_exclusive_call() {
+    let mut machine = ToolTurnMachine::default();
+    let conv = cid("conv");
+    push_scoped(
+        &mut machine,
+        &conv,
+        "delegate",
+        ToolExecutionMode::Shared,
+        ToolTurnLockScope::DelegateLauncher,
+    );
+    push(&mut machine, &conv, "write", ToolExecutionMode::Exclusive);
+
+    assert_eq!(pop_id(&mut machine).as_deref(), Some("delegate"));
+    assert!(machine.mark_backgrounded(&"delegate".into()));
+    assert_eq!(pop_id(&mut machine).as_deref(), Some("write"));
+}
+
+/// A normal blocked call must not become a FIFO barrier for a later delegate
+/// launcher in the same conversation. The launcher will background itself and
+/// let start-agent scheduling decide when the sub-agent may actually run.
+#[test]
+fn delegate_launcher_is_not_skipped_behind_blocked_normal_call() {
+    let mut machine = ToolTurnMachine::default();
+    let conv = cid("conv");
+    push(&mut machine, &conv, "shared", ToolExecutionMode::Shared);
+    push(&mut machine, &conv, "write", ToolExecutionMode::Exclusive);
+    push_scoped(
+        &mut machine,
+        &conv,
+        "delegate",
+        ToolExecutionMode::Shared,
+        ToolTurnLockScope::DelegateLauncher,
+    );
+
+    assert_eq!(pop_id(&mut machine).as_deref(), Some("shared"));
+    assert_eq!(pop_id(&mut machine).as_deref(), Some("delegate"));
+    assert_eq!(machine.pending_len(), 1);
+    assert_eq!(
+        machine
+            .pending(0)
+            .expect("pending call at index 0")
+            .invocation
+            .id
+            .as_str(),
+        "write"
+    );
+}
+
+/// Backgrounding closes the model-visible foreground, but a normal real call
 /// still holds its execution-mode lane until the actual result arrives.
-/// Without this, a long-running update shell command could be backgrounded
-/// and a second update could start while it is still mutating state.
+/// Without this, a long-running update command could be backgrounded and a
+/// second update could start while it is still mutating state.
 #[test]
 fn backgrounded_update_still_blocks_incompatible_calls_until_real_completion() {
     let mut machine = ToolTurnMachine::default();
@@ -354,18 +432,21 @@ fn backgrounded_update_still_blocks_incompatible_calls_until_real_completion() {
         call("update"),
         ToolExecutionMode::Update,
         BackgroundSupport::Instant,
+        ToolTurnLockScope::Normal,
     );
     machine.push(
         conv.clone(),
         call("shared"),
         ToolExecutionMode::Shared,
         BackgroundSupport::Never,
+        ToolTurnLockScope::Normal,
     );
     machine.push(
         conv,
         call("second-update"),
         ToolExecutionMode::Update,
         BackgroundSupport::Never,
+        ToolTurnLockScope::Normal,
     );
 
     machine.pop_dispatchable(Instant::now()).expect("dispatch");
@@ -388,6 +469,7 @@ fn late_background_completion_clears_actual_running_once() {
         call("late"),
         ToolExecutionMode::Shared,
         BackgroundSupport::Instant,
+        ToolTurnLockScope::Normal,
     );
     machine.pop_dispatchable(Instant::now()).expect("dispatch");
     assert!(machine.mark_backgrounded(&"late".into()));

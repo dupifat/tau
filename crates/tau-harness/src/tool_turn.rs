@@ -14,6 +14,18 @@ use tau_proto::{AgentId, BackgroundSupport, ToolCallId, ToolExecutionMode, ToolN
 
 use crate::harness::AgentToolCall;
 
+/// Which scheduler lane a tool invocation participates in.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum ToolTurnLockScope {
+    /// Normal tool calls use execution-mode compatibility within their owning
+    /// conversation until their real result arrives.
+    Normal,
+    /// A `delegate` parent tool call only launches and tracks a side agent.
+    /// Delegate execution-mode locking happens in the start-agent scheduler, so
+    /// the parent launcher must not block normal tools or other launchers here.
+    DelegateLauncher,
+}
+
 /// A tool call emitted by an agent response but not yet completed.
 #[derive(Clone, Debug)]
 pub(crate) struct PendingToolInvocation {
@@ -25,6 +37,7 @@ pub(crate) struct PendingToolInvocation {
     pub(crate) execution_mode: ToolExecutionMode,
     /// Foreground/background support resolved at enqueue time.
     pub(crate) background_support: BackgroundSupport,
+    pub(crate) lock_scope: ToolTurnLockScope,
 }
 
 /// Pure queue and in-flight state for tool dispatch during agent turns.
@@ -51,6 +64,7 @@ struct InFlightToolInvocation {
     foreground_pending: bool,
     backgrounded: bool,
     foreground_deadline: Option<Instant>,
+    lock_scope: ToolTurnLockScope,
 }
 
 impl ToolTurnMachine {
@@ -61,6 +75,7 @@ impl ToolTurnMachine {
         invocation: AgentToolCall,
         execution_mode: ToolExecutionMode,
         background_support: BackgroundSupport,
+        lock_scope: ToolTurnLockScope,
     ) {
         self.pending_tool_invocations
             .push_back(PendingToolInvocation {
@@ -68,6 +83,7 @@ impl ToolTurnMachine {
                 invocation,
                 execution_mode,
                 background_support,
+                lock_scope,
             });
     }
 
@@ -108,6 +124,7 @@ impl ToolTurnMachine {
                 foreground_pending: true,
                 backgrounded: false,
                 foreground_deadline: None,
+                lock_scope: ToolTurnLockScope::Normal,
             },
         );
     }
@@ -295,23 +312,30 @@ impl ToolTurnMachine {
                 foreground_pending,
                 backgrounded,
                 foreground_deadline,
+                lock_scope: pending.lock_scope,
             },
         );
         action
     }
 
     fn next_dispatchable_index(&self) -> Option<usize> {
-        let mut blocked_convs: HashSet<&AgentId> = HashSet::new();
+        let mut blocked_scopes: HashSet<(&AgentId, ToolTurnLockScope)> = HashSet::new();
         for (idx, pending) in self.pending_tool_invocations.iter().enumerate() {
-            if blocked_convs.contains(&pending.conversation_id) {
+            if blocked_scopes.iter().any(|(conversation_id, scope)| {
+                *conversation_id == &pending.conversation_id
+                    && pending_scope_conflicts(pending.lock_scope, *scope)
+            }) {
                 continue;
             }
-            let compatible = !self
-                .has_incompatible_in_flight_for(&pending.conversation_id, pending.execution_mode);
+            let compatible = !self.has_incompatible_in_flight_for(
+                &pending.conversation_id,
+                pending.execution_mode,
+                pending.lock_scope,
+            );
             if compatible {
                 return Some(idx);
             }
-            blocked_convs.insert(&pending.conversation_id);
+            blocked_scopes.insert((&pending.conversation_id, pending.lock_scope));
         }
         None
     }
@@ -320,14 +344,23 @@ impl ToolTurnMachine {
         &self,
         conversation_id: &AgentId,
         execution_mode: ToolExecutionMode,
+        lock_scope: ToolTurnLockScope,
     ) -> bool {
         self.in_flight_tool_execution_modes
             .values()
             .any(|in_flight| {
                 &in_flight.conversation_id == conversation_id
+                    && pending_scope_conflicts(lock_scope, in_flight.lock_scope)
                     && !execution_mode.can_overlap_with(in_flight.execution_mode)
             })
     }
+}
+
+const fn pending_scope_conflicts(pending: ToolTurnLockScope, active: ToolTurnLockScope) -> bool {
+    matches!(
+        (pending, active),
+        (ToolTurnLockScope::Normal, ToolTurnLockScope::Normal)
+    )
 }
 
 #[cfg(test)]

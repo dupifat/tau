@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
+use url::Url;
 
 /// Top-level calendar module configuration.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -44,8 +45,14 @@ pub enum CalendarBackendConfig {
     },
     /// Native Google Calendar API backend.
     Google {
-        /// Named OAuth profile holding Google tokens.
-        oauth_profile: Option<String>,
+        /// Secret containing the OAuth client id.
+        client_id_secret: String,
+        /// Optional secret containing the OAuth client secret.
+        client_secret_secret: Option<String>,
+        /// Secret containing a Google OAuth refresh token.
+        refresh_token_secret: String,
+        /// Optional Google Calendar API base URL for tests or proxies.
+        api_base: Option<String>,
     },
     /// Generic CalDAV backend.
     Caldav {
@@ -64,7 +71,7 @@ pub enum CalendarBackendConfig {
 pub struct CalendarSelectionConfig {
     /// Default calendar id used when a safe command can omit `calendar`.
     pub default: Option<String>,
-    /// Calendar ids or names the agent may see. Empty means none.
+    /// Calendar ids the agent may see. Empty means none.
     pub allow: Vec<String>,
 }
 
@@ -90,7 +97,7 @@ pub struct ValidatedAccount {
     pub backend: Option<ValidatedBackendConfig>,
     /// Default calendar id.
     pub default_calendar: Option<String>,
-    /// Allowed calendar ids or names.
+    /// Allowed calendar ids.
     pub allowed_calendars: Vec<String>,
     /// Default IANA timezone.
     pub timezone: Option<String>,
@@ -107,8 +114,14 @@ pub enum ValidatedBackendConfig {
     },
     /// Native Google Calendar API backend.
     Google {
-        /// Named OAuth profile holding Google tokens.
-        oauth_profile: Option<String>,
+        /// Secret containing the OAuth client id.
+        client_id_secret: String,
+        /// Optional secret containing the OAuth client secret.
+        client_secret_secret: Option<String>,
+        /// Secret containing a Google OAuth refresh token.
+        refresh_token_secret: String,
+        /// Optional Google Calendar API base URL for tests or proxies.
+        api_base: Option<String>,
     },
     /// Generic CalDAV backend.
     Caldav {
@@ -157,8 +170,26 @@ impl ValidatedAccount {
                 validate_ics_feed_source(url_secret.as_deref(), url.as_deref())?;
                 Some(ValidatedBackendConfig::IcsFeed { url_secret, url })
             }
-            Some(CalendarBackendConfig::Google { oauth_profile }) => {
-                Some(ValidatedBackendConfig::Google { oauth_profile })
+            Some(CalendarBackendConfig::Google {
+                client_id_secret,
+                client_secret_secret,
+                refresh_token_secret,
+                api_base,
+            }) => {
+                validate_secret_name("google client_id_secret", &client_id_secret)?;
+                validate_secret_name("google refresh_token_secret", &refresh_token_secret)?;
+                if let Some(secret) = &client_secret_secret {
+                    validate_secret_name("google client_secret_secret", secret)?;
+                }
+                let api_base = api_base
+                    .map(|api_base| normalize_backend_url("google api_base", &api_base))
+                    .transpose()?;
+                Some(ValidatedBackendConfig::Google {
+                    client_id_secret,
+                    client_secret_secret,
+                    refresh_token_secret,
+                    api_base,
+                })
             }
             Some(CalendarBackendConfig::Caldav {
                 url,
@@ -207,6 +238,46 @@ fn validate_ics_feed_source(url_secret: Option<&str>, url: Option<&str>) -> Resu
     }
 }
 
+fn normalize_backend_url(field: &str, value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{field} must not be empty"));
+    }
+    if trimmed.chars().any(|c| c.is_control()) {
+        return Err(format!("{field} must not contain control characters"));
+    }
+    let url =
+        Url::parse(trimmed).map_err(|error| format!("{field} must be an absolute URL: {error}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!("{field} must use http:// or https://"));
+    }
+    if url.host_str().is_none() {
+        return Err(format!("{field} must include a host"));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(format!("{field} must not include credentials"));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(format!("{field} must not include query or fragment"));
+    }
+    Ok(trimmed.trim_end_matches('/').to_owned())
+}
+
+fn validate_secret_name(field: &str, value: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Err(format!("{field} must not be empty"));
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return Err(format!(
+            "{field} may only contain ASCII letters, digits, '_', '-', '.'"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_calendar_patterns(patterns: &[String]) -> Result<(), String> {
     for pattern in patterns {
         validate_calendar_pattern(pattern)?;
@@ -222,4 +293,80 @@ fn validate_calendar_pattern(value: &str) -> Result<(), String> {
         return Err("calendar id pattern must not contain control characters".to_owned());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn google_config_normalizes_api_base_and_rejects_query_fragments() {
+        // The backend appends fixed API paths and query strings, so accepting a
+        // configured query or fragment would create ambiguous request targets.
+        let cfg = CalendarExtensionConfig {
+            enable: true,
+            accounts: vec![CalendarAccountConfig {
+                id: "google".to_owned(),
+                backend: Some(google_backend_with_api_base("https://proxy.example/api///")),
+                ..Default::default()
+            }],
+        };
+
+        let config = cfg.validate().expect("api base validates");
+        let account = config.accounts.get("google").expect("google account");
+        let Some(ValidatedBackendConfig::Google { api_base, .. }) = &account.backend else {
+            panic!("google backend expected");
+        };
+        assert_eq!(api_base.as_deref(), Some("https://proxy.example/api"));
+
+        let cfg = CalendarExtensionConfig {
+            enable: true,
+            accounts: vec![CalendarAccountConfig {
+                id: "google".to_owned(),
+                backend: Some(google_backend_with_api_base(
+                    "https://proxy.example/api?x=1",
+                )),
+                ..Default::default()
+            }],
+        };
+        let err = match cfg.validate() {
+            Ok(_) => panic!("query must be rejected"),
+            Err(err) => err,
+        };
+        assert!(err.contains("query or fragment"), "{err}");
+    }
+
+    #[test]
+    fn google_config_rejects_unsafe_secret_names() {
+        // Secret names are looked up in the harness-provided map, not shell
+        // expanded paths. Keep them narrow to avoid surprising config meanings.
+        let cfg = CalendarExtensionConfig {
+            enable: true,
+            accounts: vec![CalendarAccountConfig {
+                id: "google".to_owned(),
+                backend: Some(CalendarBackendConfig::Google {
+                    client_id_secret: "../client".to_owned(),
+                    client_secret_secret: None,
+                    refresh_token_secret: "refresh".to_owned(),
+                    api_base: None,
+                }),
+                ..Default::default()
+            }],
+        };
+
+        let err = match cfg.validate() {
+            Ok(_) => panic!("path-like secret must be rejected"),
+            Err(err) => err,
+        };
+        assert!(err.contains("may only contain"), "{err}");
+    }
+
+    fn google_backend_with_api_base(api_base: &str) -> CalendarBackendConfig {
+        CalendarBackendConfig::Google {
+            client_id_secret: "client".to_owned(),
+            client_secret_secret: None,
+            refresh_token_secret: "refresh".to_owned(),
+            api_base: Some(api_base.to_owned()),
+        }
+    }
 }

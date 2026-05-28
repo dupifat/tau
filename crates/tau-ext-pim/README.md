@@ -191,6 +191,25 @@ extensions:
                 - main
 ```
 
+The `calendar.accounts[*].backend.type: google` backend uses the native Google Calendar API for read-only operations. It currently expects user-provided OAuth secrets, declared under `extensions.std-pim.secrets` and referenced by name:
+
+```yaml
+- id: google-calendar
+  enable: true
+  display_name: Google Calendar
+  backend:
+    type: google
+    client_id_secret: google_calendar_client_id
+    client_secret_secret: google_calendar_client_secret # optional for PKCE-style clients
+    refresh_token_secret: google_calendar_refresh_token
+  calendars:
+    default: primary
+    allow:
+      - primary
+```
+
+For Google accounts, `calendars.allow` entries are exact Google calendar IDs; use `primary` for Google's primary-calendar alias. Display summaries are not access-control identifiers. Use narrow Google scopes such as `https://www.googleapis.com/auth/calendar.calendarlist.readonly` plus `https://www.googleapis.com/auth/calendar.events.readonly` for read-only accounts unless you are testing future write support.
+
 Create the secret value as raw UTF-8 text. Despite the `.yaml` suffix, the secret file is read as trimmed text, not as a structured YAML document.
 
 ```sh

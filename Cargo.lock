@@ -2406,6 +2406,7 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "ureq",
+ "url",
  "webpki-roots",
 ]
 

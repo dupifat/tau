@@ -275,8 +275,10 @@ can be reviewed with `/email log last [number]`.
 The same extension also owns the initial `calendar` tool and `/calendar` action
 schema. Read-only `ics_feed` accounts can list calendars, list events, read event
 details, and return free/busy blocks from bounded iCalendar feeds. Google
-Calendar support remains pending. The legacy `std-email` built-in remains as an
-alias for existing email-only configs.
+Calendar accounts using user-provided OAuth refresh-token secrets support the
+same read/free-busy operations through the native Calendar API. Calendar writes
+remain pending. The legacy `std-email` built-in remains as an alias for existing
+email-only configs.
 
 ### `provider-builtin` — Built-in provider backend
 

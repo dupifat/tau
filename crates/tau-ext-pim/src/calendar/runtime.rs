@@ -6,6 +6,7 @@ use super::actions;
 use super::config::{
     CalendarExtensionConfig, ValidatedAccount, ValidatedBackendConfig, ValidatedConfig,
 };
+use super::google::{GoogleBackend, GoogleEvent};
 use super::ics_feed::{
     IcsEvent, IcsFeedBackend, TimeRange, default_calendar_id, parse_rfc3339_bound,
 };
@@ -40,6 +41,7 @@ enum ConfigState {
 
 struct Engine {
     config: ValidatedConfig,
+    google: GoogleBackend,
     ics_feed: IcsFeedBackend,
 }
 
@@ -54,6 +56,7 @@ impl RuntimeState {
             Ok(config) => {
                 self.config_state = ConfigState::Configured(Engine {
                     config,
+                    google: GoogleBackend::new(secrets.clone()),
                     ics_feed: IcsFeedBackend::new(secrets),
                 });
                 Ok(())
@@ -86,6 +89,11 @@ impl RuntimeState {
     pub fn dispatch_action(&mut self, invoke: tau_proto::ActionInvoke) -> Event {
         actions::dispatch_action(invoke)
     }
+}
+
+enum BackendEvent {
+    Ics(IcsEvent),
+    Google(GoogleEvent),
 }
 
 impl Engine {
@@ -147,22 +155,42 @@ impl Engine {
         }
         let accounts = self.accounts_for_read(args.account.as_deref())?;
         for account in accounts {
-            if let Some(ValidatedBackendConfig::IcsFeed { .. }) = &account.backend {
-                for calendar in self.ics_feed.list_calendars(account) {
-                    let flags = if calendar.read_only {
-                        "read_only"
-                    } else {
-                        "writable"
-                    };
-                    lines.push(format!(
-                        "{} {} {} {} {}",
-                        safe_field(&account.id),
-                        safe_field(&calendar.id),
-                        flags,
-                        safe_field(account.backend_kind()),
-                        safe_field(&calendar.display_name)
-                    ));
+            match &account.backend {
+                Some(ValidatedBackendConfig::IcsFeed { .. }) => {
+                    for calendar in self.ics_feed.list_calendars(account) {
+                        let flags = if calendar.read_only {
+                            "read_only"
+                        } else {
+                            "writable"
+                        };
+                        lines.push(format!(
+                            "{} {} {} {} {}",
+                            safe_field(&account.id),
+                            safe_field(&calendar.id),
+                            flags,
+                            safe_field(account.backend_kind()),
+                            safe_field(&calendar.display_name)
+                        ));
+                    }
                 }
+                Some(ValidatedBackendConfig::Google { .. }) => {
+                    for calendar in self.google.list_calendars(account)? {
+                        let flags = if calendar.read_only {
+                            "read_only"
+                        } else {
+                            "writable"
+                        };
+                        lines.push(format!(
+                            "{} {} {} {} {}",
+                            safe_field(&account.id),
+                            safe_field(&calendar.id),
+                            flags,
+                            safe_field(account.backend_kind()),
+                            safe_field(&calendar.summary)
+                        ));
+                    }
+                }
+                Some(ValidatedBackendConfig::Caldav { .. }) | None => {}
             }
         }
         Ok(lines.join("\n"))
@@ -187,9 +215,12 @@ impl Engine {
         let calendar = self.calendar_arg(account, args.calendar.as_deref())?;
         let event = match &account.backend {
             Some(ValidatedBackendConfig::IcsFeed { .. }) => {
-                self.ics_feed.read_event(account, calendar, event_id)?
+                BackendEvent::Ics(self.ics_feed.read_event(account, calendar, event_id)?)
             }
-            Some(_) | None => {
+            Some(ValidatedBackendConfig::Google { .. }) => {
+                BackendEvent::Google(self.google.read_event(account, calendar, event_id)?)
+            }
+            Some(ValidatedBackendConfig::Caldav { .. }) | None => {
                 return Err(format!(
                     "calendar account `{}` backend `{}` does not support read_event yet",
                     account.id,
@@ -208,15 +239,7 @@ impl Engine {
         let events = self.events_for_account(account, calendar, range, limit)?;
         let mut lines = vec![FREE_BUSY_FORMAT.to_owned()];
         for event in events {
-            lines.push(format!(
-                "{} {} {} {} {} {}",
-                safe_field(&account.id),
-                safe_field(calendar),
-                safe_field(&event.id),
-                safe_field(&event.start),
-                safe_field(&event.end),
-                event_flags(&event)
-            ));
+            lines.push(format_free_busy_line(account, calendar, &event));
         }
         Ok(lines.join("\n"))
     }
@@ -227,12 +250,21 @@ impl Engine {
         calendar: &str,
         range: TimeRange,
         limit: usize,
-    ) -> Result<Vec<IcsEvent>, String> {
+    ) -> Result<Vec<BackendEvent>, String> {
         match &account.backend {
-            Some(ValidatedBackendConfig::IcsFeed { .. }) => {
-                self.ics_feed.list_events(account, calendar, range, limit)
-            }
-            Some(_) | None => Err(format!(
+            Some(ValidatedBackendConfig::IcsFeed { .. }) => Ok(self
+                .ics_feed
+                .list_events(account, calendar, range, limit)?
+                .into_iter()
+                .map(BackendEvent::Ics)
+                .collect()),
+            Some(ValidatedBackendConfig::Google { .. }) => Ok(self
+                .google
+                .list_events(account, calendar, range, limit)?
+                .into_iter()
+                .map(BackendEvent::Google)
+                .collect()),
+            Some(ValidatedBackendConfig::Caldav { .. }) | None => Err(format!(
                 "calendar account `{}` backend `{}` does not support event reads yet",
                 account.id,
                 account.backend_kind()
@@ -329,61 +361,166 @@ fn required_arg<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str, Strin
     }
 }
 
-fn format_event_line(account: &ValidatedAccount, calendar: &str, event: &IcsEvent) -> String {
-    let status = event.status.as_deref().unwrap_or("-");
+fn format_event_line(account: &ValidatedAccount, calendar: &str, event: &BackendEvent) -> String {
+    let status = event_status(event).unwrap_or("-");
     format!(
         "{} {} {} {} {} {} {} {}",
         safe_field(&account.id),
         safe_field(calendar),
-        safe_field(&event.id),
-        safe_field(&event.start),
-        safe_field(&event.end),
+        safe_field(event_id(event)),
+        safe_field(event_start(event)),
+        safe_field(event_end(event)),
         event_flags(event),
         safe_field(status),
-        safe_field(&event.summary)
+        safe_field(event_summary(event))
     )
 }
 
-fn format_event_detail(account: &ValidatedAccount, calendar: &str, event: &IcsEvent) -> String {
+fn format_free_busy_line(
+    account: &ValidatedAccount,
+    calendar: &str,
+    event: &BackendEvent,
+) -> String {
+    format!(
+        "{} {} {} {} {} {}",
+        safe_field(&account.id),
+        safe_field(calendar),
+        safe_field(event_id(event)),
+        safe_field(event_start(event)),
+        safe_field(event_end(event)),
+        event_flags(event)
+    )
+}
+
+fn format_event_detail(account: &ValidatedAccount, calendar: &str, event: &BackendEvent) -> String {
     let mut lines = vec![
         "format: key value".to_owned(),
         format!("account {}", safe_field(&account.id)),
         format!("calendar {}", safe_field(calendar)),
-        format!("event_id {}", safe_field(&event.id)),
-        format!("uid {}", safe_field(&event.uid)),
-        format!("start {}", safe_field(&event.start)),
-        format!("end {}", safe_field(&event.end)),
+        format!("event_id {}", safe_field(event_id(event))),
+        format!("start {}", safe_field(event_start(event))),
+        format!("end {}", safe_field(event_end(event))),
         format!("flags {}", event_flags(event)),
-        format!("summary {}", safe_field(&event.summary)),
+        format!("summary {}", safe_field(event_summary(event))),
     ];
-    if let Some(status) = &event.status {
+    if let Some(uid) = event_uid(event) {
+        lines.push(format!("uid {}", safe_field(uid)));
+    }
+    if let Some(etag) = event_etag(event) {
+        lines.push(format!("etag {}", safe_field(etag)));
+    }
+    if let Some(status) = event_status(event) {
         lines.push(format!("status {}", safe_field(status)));
     }
-    if let Some(location) = &event.location {
+    if let Some(location) = event_location(event) {
         lines.push(format!("location {}", safe_field(location)));
     }
-    if let Some(organizer) = &event.organizer {
+    if let Some(organizer) = event_organizer(event) {
         lines.push(format!("organizer {}", safe_field(organizer)));
     }
-    if !event.attendees.is_empty() {
-        lines.push(format!(
-            "attendees {}",
-            safe_field(&event.attendees.join(","))
-        ));
+    let attendees = event_attendees(event);
+    if !attendees.is_empty() {
+        lines.push(format!("attendees {}", safe_field(&attendees.join(","))));
     }
-    if let Some(description) = &event.description {
+    if let Some(description) = event_description(event) {
         lines.push(format!("description {}", safe_multiline(description)));
     }
     lines.join("\n")
 }
 
-fn event_flags(event: &IcsEvent) -> String {
-    let mut flags = vec!["read_only"];
-    if event.recurring {
-        flags.push("recurring_unexpanded");
+fn event_id(event: &BackendEvent) -> &str {
+    match event {
+        BackendEvent::Ics(event) => &event.id,
+        BackendEvent::Google(event) => &event.id,
     }
-    if event.time_unparsed {
-        flags.push("time_unparsed");
+}
+
+fn event_uid(event: &BackendEvent) -> Option<&str> {
+    match event {
+        BackendEvent::Ics(event) => Some(&event.uid),
+        BackendEvent::Google(event) => event.i_cal_uid.as_deref(),
+    }
+}
+
+fn event_etag(event: &BackendEvent) -> Option<&str> {
+    match event {
+        BackendEvent::Ics(_) => None,
+        BackendEvent::Google(event) => event.etag.as_deref(),
+    }
+}
+
+fn event_summary(event: &BackendEvent) -> &str {
+    match event {
+        BackendEvent::Ics(event) => &event.summary,
+        BackendEvent::Google(event) => &event.summary,
+    }
+}
+
+fn event_description(event: &BackendEvent) -> Option<&str> {
+    match event {
+        BackendEvent::Ics(event) => event.description.as_deref(),
+        BackendEvent::Google(event) => event.description.as_deref(),
+    }
+}
+
+fn event_location(event: &BackendEvent) -> Option<&str> {
+    match event {
+        BackendEvent::Ics(event) => event.location.as_deref(),
+        BackendEvent::Google(event) => event.location.as_deref(),
+    }
+}
+
+fn event_start(event: &BackendEvent) -> &str {
+    match event {
+        BackendEvent::Ics(event) => &event.start,
+        BackendEvent::Google(event) => &event.start,
+    }
+}
+
+fn event_end(event: &BackendEvent) -> &str {
+    match event {
+        BackendEvent::Ics(event) => &event.end,
+        BackendEvent::Google(event) => &event.end,
+    }
+}
+
+fn event_status(event: &BackendEvent) -> Option<&str> {
+    match event {
+        BackendEvent::Ics(event) => event.status.as_deref(),
+        BackendEvent::Google(event) => event.status.as_deref(),
+    }
+}
+
+fn event_organizer(event: &BackendEvent) -> Option<&str> {
+    match event {
+        BackendEvent::Ics(event) => event.organizer.as_deref(),
+        BackendEvent::Google(event) => event.organizer.as_deref(),
+    }
+}
+
+fn event_attendees(event: &BackendEvent) -> &[String] {
+    match event {
+        BackendEvent::Ics(event) => &event.attendees,
+        BackendEvent::Google(event) => &event.attendees,
+    }
+}
+
+fn event_flags(event: &BackendEvent) -> String {
+    let mut flags = vec!["read_only"];
+    match event {
+        BackendEvent::Ics(event) => {
+            if event.recurring {
+                flags.push("recurring_unexpanded");
+            }
+            if event.time_unparsed {
+                flags.push("time_unparsed");
+            }
+        }
+        BackendEvent::Google(event) => {
+            if event.recurring {
+                flags.push("recurring");
+            }
+        }
     }
     flags.join(",")
 }
@@ -460,7 +597,10 @@ mod tests {
                 enable: true,
                 display_name: Some("Work Calendar".to_owned()),
                 backend: Some(CalendarBackendConfig::Google {
-                    oauth_profile: Some("work".to_owned()),
+                    client_id_secret: "google_client_id".to_owned(),
+                    client_secret_secret: None,
+                    refresh_token_secret: "google_refresh_token".to_owned(),
+                    api_base: None,
                 }),
                 calendars: Default::default(),
                 timezone: Some("UTC".to_owned()),
@@ -469,12 +609,52 @@ mod tests {
         let config = cfg.validate().expect("valid calendar config");
         let engine = Engine {
             config,
+            google: GoogleBackend::new(BTreeMap::new()),
             ics_feed: IcsFeedBackend::new(BTreeMap::new()),
         };
 
         assert_eq!(
             engine.list_accounts(),
             "format: id flags backend default_calendar timezone display_name\nwork enabled google - UTC Work_Calendar"
+        );
+    }
+
+    #[test]
+    fn google_event_details_include_etag_for_future_safe_writes() {
+        // Google read responses expose ETags that callers must preserve once
+        // write support exists. Keep the read-only detail format carrying it.
+        let account = ValidatedAccount {
+            id: "google".to_owned(),
+            enable: true,
+            display_name: None,
+            backend: Some(ValidatedBackendConfig::Google {
+                client_id_secret: "client".to_owned(),
+                client_secret_secret: None,
+                refresh_token_secret: "refresh".to_owned(),
+                api_base: None,
+            }),
+            default_calendar: Some("primary".to_owned()),
+            allowed_calendars: vec!["primary".to_owned()],
+            timezone: Some("UTC".to_owned()),
+        };
+        let event = BackendEvent::Google(GoogleEvent {
+            id: "evt".to_owned(),
+            etag: Some("abc".to_owned()),
+            i_cal_uid: Some("uid@example.com".to_owned()),
+            summary: "Team Sync".to_owned(),
+            description: Some("line 1\nline 2".to_owned()),
+            location: Some("Room 1".to_owned()),
+            start: "2026-05-28T12:00:00Z".to_owned(),
+            end: "2026-05-28T13:00:00Z".to_owned(),
+            status: Some("confirmed".to_owned()),
+            organizer: Some("org@example.com".to_owned()),
+            attendees: vec!["a@example.com".to_owned(), "b@example.com".to_owned()],
+            recurring: true,
+        });
+
+        assert_eq!(
+            format_event_detail(&account, "primary", &event),
+            "format: key value\naccount google\ncalendar primary\nevent_id evt\nstart 2026-05-28T12:00:00Z\nend 2026-05-28T13:00:00Z\nflags read_only,recurring\nsummary Team_Sync\nuid uid@example.com\netag abc\nstatus confirmed\nlocation Room_1\norganizer org@example.com\nattendees a@example.com,b@example.com\ndescription line 1 line 2"
         );
     }
 

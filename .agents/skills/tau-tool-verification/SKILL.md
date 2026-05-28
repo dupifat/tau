@@ -154,17 +154,9 @@ Use this plan when asked to verify ext-shell directory locking, `dir_lock`, or t
 
 Create a fresh scratch tree in `/tmp`, such as `/tmp/tau-dir-lock-verification.*`, with at least these directories: `root/a`, `root/a/child`, `root/b`, and `other`. Put small files in `root/a/file.txt` and `root/b/file.txt`. Use unique nonces in file contents and messages. Never run destructive shell commands outside the scratch tree.
 
-Run the first check with default ext-shell config and confirm `dir_lock` is disabled or unavailable by default. Then start a fresh Tau session with ext-shell config like:
+Run the first check with default ext-shell config and confirm `dir_lock` is enabled by default. Also start a fresh Tau session with ext-shell config `dir_lock: { enable: false }` and confirm the tool is disabled and mutating tools no longer wait on directory locks. Use explicit `dir_lock: { enable: true }` only when you need to override a previously disabled test config.
 
-```json5
-"core-shell": {
-  config: {
-    dir_lock: { enable: true },
-  },
-},
-```
-
-When the config is enabled, verify all of these behaviors:
+When locking is enabled, verify all of these behaviors:
 
 * `dir_lock` accepts only `command: update` and `command: unlock` with an existing directory.
 * Directories are canonicalized before locking. Relative paths, `.` components, and symlinked directories should report or behave as the canonical absolute directory.
@@ -181,7 +173,7 @@ When the config is enabled, verify all of these behaviors:
 
 #### Phase 1: basic manual lock behavior
 
-With `dir_lock.enable` true, call `dir_lock update` on a relative path like `root/a/../a`. Expect success and a canonical absolute directory in the result/display. Call `dir_lock unlock` for the same path. Expect success.
+With default config or `dir_lock.enable` true, call `dir_lock update` on a relative path like `root/a/../a`. Expect success and a canonical absolute directory in the result/display. Call `dir_lock unlock` for the same path. Expect success.
 
 Call `dir_lock update` on a missing directory and on `root/a/file.txt`. Expect tool errors. Then call `dir_lock update` twice on `root/a`. Start a delegate that tries to `write` `root/a/child/blocked.txt` and reports to `user` after it succeeds. The delegate should wait. Call `dir_lock unlock` once from the original agent; the delegate should still wait. Call `dir_lock unlock` a second time; the delegate should complete. A third `unlock` should error.
 
@@ -231,7 +223,7 @@ Also test session shutdown if practical: locks from the old session must not aff
 
 Report concise but complete findings:
 
-* Whether `dir_lock` was disabled by default and enabled by config.
+* Whether `dir_lock` was enabled by default and could be disabled by config.
 * Exact outputs or errors for canonicalization, missing directory, non-directory, double unlock, and wrong-owner unlock.
 * Whether reference counting required the matching number of unlocks.
 * Whether reads stayed unblocked.

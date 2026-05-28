@@ -7,7 +7,7 @@ This note documents the move of filesystem update coordination out of `delegate`
 
 - `tau-ext-shell` owns directory update locking with an optional `dir_lock` tool.
 - The tool name is `dir_lock`; Tau tool names do not allow hyphens.
-- `dir_lock` is registered disabled by default. Setting ext-shell config `dir_lock.enable = true` enables the handler, re-registers the tool as enabled by default, and makes mutating ext-shell tools participate in locking.
+- `dir_lock` is registered enabled by default. Setting ext-shell config `dir_lock.enable = false` disables the handler, re-registers the tool as disabled by default, and opts mutating ext-shell tools out of locking.
 - `delegate` sub-agents are independent agents. A parent agent lock does not automatically cover a delegate.
 - The harness no longer enforces tool or start-agent update/exclusive scheduling. Protocol `execution_mode` fields remain as legacy metadata for compatibility.
 
@@ -32,7 +32,7 @@ Manual locks are released when ext-shell observes `SessionAgentUnloaded` for the
 
 ## Automatic locking for ext-shell tools
 
-When `dir_lock.enable` is true, these mutating tools acquire automatic update locks before running:
+When `dir_lock.enable` is true (the default), these mutating tools acquire automatic update locks before running:
 
 - `write`: locks the target file parent. If parents are missing, it locks the deepest existing ancestor so existing `write` behavior remains intact.
 - `edit`: locks the canonical parent of the existing file, following a final symlink to the real edited file.

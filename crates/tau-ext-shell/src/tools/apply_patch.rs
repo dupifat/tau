@@ -58,7 +58,7 @@ pub(crate) fn lock_directories(arguments: &CborValue) -> Result<Vec<PathBuf>, To
                     let dest_abs = resolve_path(&cwd, move_path);
                     dirs.push(crate::dir_lock::canonical_write_lock_dir(&dest_abs)?);
                 } else {
-                    dirs.push(crate::dir_lock::canonical_existing_file_parent(&abs)?);
+                    dirs.push(crate::dir_lock::canonical_update_lock_dir(&abs)?);
                 }
             }
         }

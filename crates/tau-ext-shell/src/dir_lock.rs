@@ -355,7 +355,7 @@ pub(crate) fn dispatch_dir_lock_tool(
             tx,
             tool_error(
                 &invoke,
-                "dir_lock is disabled; enable ext-shell config `dir_lock.enable` to use it"
+                "dir_lock is disabled; set ext-shell config `dir_lock.enable` to true to use it"
                     .to_owned(),
                 None,
             ),
@@ -585,6 +585,24 @@ pub(crate) fn canonical_existing_file_parent(path: &Path) -> Result<PathBuf, Too
         ))
         .with_args(path.display().to_string())
     })
+}
+
+/// Canonical lock directory for an apply_patch in-place update.
+///
+/// Existing final symlinks are followed because `fs::write` updates their
+/// target. Missing files and directories lock the canonical requested parent so
+/// apply_patch can preserve its normal partial-failure behavior.
+pub(crate) fn canonical_update_lock_dir(path: &Path) -> Result<PathBuf, ToolFailure> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => canonical_existing_file_parent(path),
+        Ok(_) => canonical_path_parent(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => canonical_path_parent(path),
+        Err(error) => Err(ToolFailure::from(format!(
+            "failed to stat file {}: {error}",
+            path.display()
+        ))
+        .with_args(path.display().to_string())),
+    }
 }
 
 /// Canonical parent for a path whose final component may be removed or

@@ -83,6 +83,7 @@ where
     });
     #[cfg(not(any(test, feature = "echo-agent")))]
     let echo_tool: Option<ToolSpec> = None;
+    let mut config = ExtConfig::default();
     let tools = echo_tool.into_iter().chain([
         ToolSpec {
             name: tau_proto::ToolName::new(READ_TOOL_NAME),
@@ -238,7 +239,7 @@ where
             execution_mode: ToolExecutionMode::Shared,
             background_support: None,
         },
-        dir_lock_tool_spec(false),
+        dir_lock_tool_spec(config.dir_lock.enable),
         ToolSpec {
             name: tau_proto::ToolName::new(GREP_TOOL_NAME),
             model_visible_name: None,
@@ -482,8 +483,6 @@ where
         Ok(())
     });
 
-    let mut config = ExtConfig::default();
-
     // Reader loop: dispatch each owned tool invocation to a worker thread.
     // ToolStarted is a subscribed event-log delivery, so it arrives as a
     // LogEvent and must be acked after processing like other subscribed events.
@@ -617,7 +616,7 @@ fn dir_lock_tool_spec(enabled_by_default: bool) -> ToolSpec {
         name: tau_proto::ToolName::new(DIR_LOCK_TOOL_NAME),
         model_visible_name: None,
         description: Some(
-            "Optionally acquire or release an ext-shell directory update lock. Disabled by default; enable ext-shell config `dir_lock.enable` before use. Commands are `update` and `unlock`, and `directory` must be an existing directory."
+            "Acquire or release an ext-shell directory update lock. Enabled by default; set ext-shell config `dir_lock.enable` to false to opt out. Commands are `update` and `unlock`, and `directory` must be an existing directory."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,

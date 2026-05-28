@@ -226,16 +226,16 @@ an `echo` tool for testing. The shell command and any wrapper prefix are configu
         PAGER: "cat",
       },
     },
-    // Optional advisory directory update locks for mutating ext-shell tools.
+    // Advisory directory update locks are enabled by default; set false to opt out.
     dir_lock: { enable: true },
   },
 },
 ```
 
-When `dir_lock.enable` is true, the optional `dir_lock` tool can manually lock
-an existing directory for updates, and `write`, `edit`, `apply_patch`, `shell`,
-and `gpt_shell` acquire matching automatic locks before mutating. Reads remain
-unblocked; user `!` commands are outside this agent-tool lock path.
+When `dir_lock.enable` is true (the default), the `dir_lock` tool can manually
+lock an existing directory for updates, and `write`, `edit`, `apply_patch`,
+`shell`, and `gpt_shell` acquire matching automatic locks before mutating. Reads
+remain unblocked; user `!` commands are outside this agent-tool lock path.
 
 Tau also discovers project and user agent context from conventional paths. It
 loads `AGENTS.md` from `$HOME/.agents/`, from each current-working-directory

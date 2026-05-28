@@ -12,12 +12,19 @@ pub(crate) struct ExtConfig {
     pub(crate) dir_lock: DirLockConfig,
 }
 
-#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct DirLockConfig {
-    /// Enables the optional agent-visible `dir_lock` tool and makes mutating
-    /// ext-shell tools participate in directory update locking.
+    /// Controls the agent-visible `dir_lock` tool and whether mutating
+    /// ext-shell tools participate in directory update locking. Enabled by
+    /// default; set to false to opt out.
     pub(crate) enable: bool,
+}
+
+impl Default for DirLockConfig {
+    fn default() -> Self {
+        Self { enable: true }
+    }
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]

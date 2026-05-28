@@ -318,7 +318,7 @@ fn shell_tool_cancel_request_stops_running_command_quickly() {
 }
 
 #[test]
-fn startup_registers_dir_lock_disabled_by_default() {
+fn startup_registers_dir_lock_enabled_by_default() {
     let (mut reader, mut writer) = spawn_extension();
 
     let mut found_dir_lock = false;
@@ -331,7 +331,7 @@ fn startup_registers_dir_lock_disabled_by_default() {
             continue;
         };
         if register.tool.name == DIR_LOCK_TOOL_NAME {
-            assert!(!register.tool.enabled_by_default);
+            assert!(register.tool.enabled_by_default);
             assert_eq!(
                 register.tool.execution_mode,
                 tau_proto::ToolExecutionMode::Shared
@@ -348,15 +348,15 @@ fn startup_registers_dir_lock_disabled_by_default() {
 }
 
 #[test]
-fn dir_lock_config_re_registers_tool_enabled_by_default() {
+fn dir_lock_config_re_registers_tool_disabled_when_config_false() {
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
-    send_dir_lock_config(&mut writer, true);
+    send_dir_lock_config(&mut writer, false);
 
     loop {
         match reader.read_event().expect("read") {
             Some(Event::ToolRegister(register)) if register.tool.name == DIR_LOCK_TOOL_NAME => {
-                assert!(register.tool.enabled_by_default);
+                assert!(!register.tool.enabled_by_default);
                 break;
             }
             Some(_) => continue,
@@ -371,10 +371,21 @@ fn dir_lock_config_re_registers_tool_enabled_by_default() {
 }
 
 #[test]
-fn dir_lock_tool_is_disabled_without_config() {
+fn dir_lock_tool_can_be_disabled_by_config() {
     let tempdir = TempDir::new().expect("tempdir");
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
+    send_dir_lock_config(&mut writer, false);
+    loop {
+        match reader.read_event().expect("read") {
+            Some(Event::ToolRegister(register)) if register.tool.name == DIR_LOCK_TOOL_NAME => {
+                assert!(!register.tool.enabled_by_default);
+                break;
+            }
+            Some(_) => continue,
+            None => panic!("extension closed before dir_lock disable registration"),
+        }
+    }
 
     writer
         .write_event(&tool_started(
@@ -413,8 +424,6 @@ fn dir_lock_blocks_conflicting_write_until_unlock() {
     let write_path = lock_dir.join("file.txt");
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
-    send_dir_lock_config(&mut writer, true);
-
     writer
         .write_event(&tool_started(
             "lock-root",

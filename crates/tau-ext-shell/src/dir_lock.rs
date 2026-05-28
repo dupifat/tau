@@ -54,6 +54,7 @@ struct ManualLock {
 #[derive(Clone, Debug)]
 struct AutomaticLock {
     id: u64,
+    owner: AgentId,
     dirs: Vec<PathBuf>,
 }
 
@@ -334,19 +335,28 @@ impl LockState {
     fn can_bypass_queue(&self, owner: &AgentId, dirs: &[PathBuf], kind: WaitKind) -> bool {
         match kind {
             WaitKind::Manual => false,
-            WaitKind::Automatic => dirs.iter().all(|dir| {
-                self.manual
-                    .iter()
-                    .any(|lock| &lock.owner == owner && dir.starts_with(&lock.dir))
-            }),
+            WaitKind::Automatic => self.manual_covers(owner, dirs),
         }
     }
 
-    fn has_conflict(&self, owner: &AgentId, dirs: &[PathBuf], kind: WaitKind) -> bool {
-        if self.automatic.iter().any(|lock| {
-            lock.dirs
+    fn manual_covers(&self, owner: &AgentId, dirs: &[PathBuf]) -> bool {
+        dirs.iter().all(|dir| {
+            self.manual
                 .iter()
-                .any(|active| dirs.iter().any(|dir| paths_overlap(active, dir)))
+                .any(|lock| &lock.owner == owner && dir.starts_with(&lock.dir))
+        })
+    }
+
+    fn has_conflict(&self, owner: &AgentId, dirs: &[PathBuf], kind: WaitKind) -> bool {
+        let manual_reentry = kind == WaitKind::Automatic && self.manual_covers(owner, dirs);
+        if self.automatic.iter().any(|lock| {
+            let same_owner_reentry =
+                manual_reentry && &lock.owner == owner && self.manual_covers(owner, &lock.dirs);
+            !same_owner_reentry
+                && lock
+                    .dirs
+                    .iter()
+                    .any(|active| dirs.iter().any(|dir| paths_overlap(active, dir)))
         }) {
             return true;
         }
@@ -377,10 +387,10 @@ impl LockState {
         }
     }
 
-    fn add_auto(&mut self, _owner: AgentId, dirs: Vec<PathBuf>) -> u64 {
+    fn add_auto(&mut self, owner: AgentId, dirs: Vec<PathBuf>) -> u64 {
         let id = self.next_auto_id;
         self.next_auto_id += 1;
-        self.automatic.push(AutomaticLock { id, dirs });
+        self.automatic.push(AutomaticLock { id, owner, dirs });
         id
     }
 }
@@ -928,7 +938,7 @@ mod tests {
             })
         );
 
-        let guard = manager
+        let first_guard = manager
             .acquire_auto(
                 "auto-a".into(),
                 "agent-a".into(),
@@ -936,7 +946,53 @@ mod tests {
                 || {},
             )
             .expect("same-owner automatic tool reentry");
+
+        // Same-owner automatic tools under a held manual lock are part of the
+        // same writer critical section. They must not wait on an earlier
+        // automatic call from that same agent, or a long-running shell would
+        // deadlock follow-up writes by the lock owner.
+        let second_guard = manager
+            .acquire_auto(
+                "auto-a-second".into(),
+                "agent-a".into(),
+                vec![path("/repo/a/child")],
+                || panic!("same-owner automatic reentry should not wait"),
+            )
+            .expect("same-owner automatic tool reentry with active automatic lock");
+        drop(second_guard);
+        drop(first_guard);
+    }
+
+    #[test]
+    fn same_owner_automatic_locks_still_serialize_without_manual_lock() {
+        let manager = DirLockManager::default();
+        let guard = manager
+            .acquire_auto(
+                "auto-a".into(),
+                "agent-a".into(),
+                vec![path("/repo/a")],
+                || {},
+            )
+            .expect("first automatic lock");
+
+        // Reentry is tied to an explicit manual lock. Without one, overlapping
+        // automatic tools still serialize even when they come from the same
+        // agent.
+        let second = std::thread::spawn({
+            let manager = manager.clone();
+            move || {
+                manager.acquire_auto(
+                    "auto-a-second".into(),
+                    "agent-a".into(),
+                    vec![path("/repo/a/child")],
+                    || {},
+                )
+            }
+        });
+        wait_until(|| manager.inner.state.lock().expect("state").waiters.len() == 1);
         drop(guard);
+        let second_guard = second.join().expect("second").expect("second acquired");
+        drop(second_guard);
     }
 
     fn wait_until(mut predicate: impl FnMut() -> bool) {

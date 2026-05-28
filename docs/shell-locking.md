@@ -25,7 +25,7 @@ All `directory` values are canonicalized before use. Missing paths or non-direct
 
 Conflicts are based on path ancestry: a lock conflicts when either directory contains the other. Reads do not participate.
 
-The wait queue is FIFO. If the front waiter is blocked, later waiters do not jump ahead. Same-owner reentry is allowed so an agent holding a manual lock can keep using mutating tools under that lock without deadlocking itself.
+The wait queue is FIFO. If the front waiter is blocked, later waiters do not jump ahead. Same-owner automatic reentry is allowed so an agent holding a manual lock can keep using mutating tools under that lock without deadlocking itself. A repeated manual `dir_lock update` still errors.
 
 Manual locks are released when ext-shell observes `SessionAgentUnloaded` for the owning agent, and all manual locks are released on `SessionShutdown`. The extension also publishes a UI action `/shell-dir-force-unlock DIRECTORY` that canonicalizes an existing directory and force-releases all overlapping manual locks, regardless of owner. It does not cancel or release automatic locks held by currently running tools.
 
@@ -39,7 +39,7 @@ When `dir_lock.enable` is true (the default), these mutating tools acquire autom
 - `apply_patch`: parses the patch and locks all touched source and destination directories as one FIFO request.
 - `shell` and `gpt_shell`: lock the canonical `cwd`, or the extension process cwd when `cwd` is omitted.
 
-Automatic locks are held only for the tool invocation duration. They serialize with manual locks and with other automatic mutating calls. Lock waiters do not consume the ext-shell worker semaphore; the semaphore is acquired only after the lock is granted.
+Automatic locks are held only for the tool invocation duration. They serialize with manual locks and with other automatic mutating calls. When the calling agent already owns a covering manual lock, automatic calls under that lock reenter the same writer section and do not wait on same-owner automatic calls; other agents remain blocked until the manual lock is released and all active automatic calls finish. Lock waiters do not consume the ext-shell worker semaphore; the semaphore is acquired only after the lock is granted.
 
 `read`, `grep`, `find`, and `ls` remain free to run while update locks are held. User `!` shell commands are UI commands, not agent tool calls, and are intentionally excluded.
 

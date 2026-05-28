@@ -772,6 +772,132 @@ fn dir_lock_update_errors_when_same_agent_already_holds_overlapping_lock() {
 }
 
 #[test]
+fn same_agent_write_reenters_manual_lock_while_shell_auto_lock_is_active() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let lock_dir = tempdir.path().to_path_buf();
+    let write_path = lock_dir.join("while-shell-runs.txt");
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+
+    writer
+        .write_event(&tool_started(
+            "lock-root",
+            DIR_LOCK_TOOL_NAME,
+            cbor_text_map(vec![
+                ("command", "update"),
+                ("directory", &lock_dir.display().to_string()),
+            ]),
+            "agent-a",
+        ))
+        .expect("dir_lock update");
+    writer.flush().expect("flush lock");
+    loop {
+        match reader.read_event().expect("read") {
+            Some(Event::ToolResult(result)) if result.call_id.as_str() == "lock-root" => break,
+            Some(_) => continue,
+            None => panic!("extension closed before lock result"),
+        }
+    }
+
+    writer
+        .write_event(&tool_started(
+            "same-agent-shell",
+            SHELL_TOOL_NAME,
+            cbor_text_map(vec![
+                ("command", "sleep 1; printf shell-done"),
+                ("cwd", &lock_dir.display().to_string()),
+            ]),
+            "agent-a",
+        ))
+        .expect("same-agent shell");
+    writer.flush().expect("flush shell");
+    loop {
+        match reader.read_event().expect("read") {
+            Some(Event::ToolProgress(progress))
+                if progress.call_id.as_str() == "same-agent-shell" =>
+            {
+                break;
+            }
+            Some(Event::ToolResult(result)) if result.call_id.as_str() == "same-agent-shell" => {
+                panic!("shell completed before test write could be issued: {result:?}");
+            }
+            Some(_) => continue,
+            None => panic!("extension closed before shell progress"),
+        }
+    }
+
+    writer
+        .write_event(&tool_started(
+            "same-agent-write",
+            WRITE_TOOL_NAME,
+            cbor_text_map(vec![
+                ("path", &write_path.display().to_string()),
+                ("content", "hello"),
+            ]),
+            "agent-a",
+        ))
+        .expect("same-agent write");
+    writer.flush().expect("flush write");
+
+    loop {
+        match reader.read_event().expect("read") {
+            Some(Event::ToolResult(result)) if result.call_id.as_str() == "same-agent-write" => {
+                assert_eq!(
+                    fs::read_to_string(&write_path).expect("same-agent write file"),
+                    "hello"
+                );
+                break;
+            }
+            Some(Event::ToolProgress(progress))
+                if progress.call_id.as_str() == "same-agent-write" =>
+            {
+                panic!("same-agent write waited on its own active automatic lock: {progress:?}");
+            }
+            Some(Event::ToolResult(result)) if result.call_id.as_str() == "same-agent-shell" => {
+                panic!("same-agent write was blocked until shell finished: {result:?}");
+            }
+            Some(_) => continue,
+            None => panic!("extension closed before same-agent write result"),
+        }
+    }
+
+    loop {
+        match reader.read_event().expect("read") {
+            Some(Event::ToolResult(result)) if result.call_id.as_str() == "same-agent-shell" => {
+                break;
+            }
+            Some(_) => continue,
+            None => panic!("extension closed before shell result"),
+        }
+    }
+
+    writer
+        .write_event(&tool_started(
+            "unlock-root",
+            DIR_LOCK_TOOL_NAME,
+            cbor_text_map(vec![
+                ("command", "unlock"),
+                ("directory", &lock_dir.display().to_string()),
+            ]),
+            "agent-a",
+        ))
+        .expect("dir_lock unlock");
+    writer.flush().expect("flush unlock");
+    loop {
+        match reader.read_event().expect("read") {
+            Some(Event::ToolResult(result)) if result.call_id.as_str() == "unlock-root" => break,
+            Some(_) => continue,
+            None => panic!("extension closed before unlock result"),
+        }
+    }
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+#[test]
 fn startup_registers_shell_schemas_with_cwd_and_timeout_minimum() {
     // The model-visible schema must advertise the implemented working-directory
     // argument and reject negative timeouts before invocation. Directory update

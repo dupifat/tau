@@ -162,7 +162,7 @@ When locking is enabled, verify all of these behaviors:
 * Directories are canonicalized before locking. Relative paths, `.` components, and symlinked directories should report or behave as the canonical absolute directory.
 * Missing directories and regular files are rejected before any lock is acquired.
 * Manual locks are owner-scoped by `agent_id`; a different agent cannot unlock them.
-* Repeated `update` by the same agent on the same canonical directory, an ancestor, or a child is an error. Same-agent automatic writer reentry under a manual lock should still complete.
+* Repeated `update` by the same agent on the same canonical directory, an ancestor, or a child is an error. Same-agent automatic writer reentry under a manual lock should still complete, including while another same-agent mutating tool under that lock is still running.
 * Ancestor and child directories conflict both ways. Sibling directories do not conflict unless a blocked FIFO waiter is ahead of them.
 * Reads stay free: `read`, `grep`, `find`, and `ls` complete while an update lock is held.
 * Mutating tools participate when enabled: `write`, `edit`, `apply_patch`, `shell`, and `gpt_shell` wait on conflicting locks.
@@ -178,7 +178,7 @@ With default config or `dir_lock.enable` true, call `dir_lock update` on a relat
 
 Call `dir_lock update` on a missing directory and on `root/a/file.txt`. Expect tool errors. Then call `dir_lock update` twice on `root/a` from the same agent. The second update should error and mention the already-held lock. Also call `dir_lock update root/a/child` and `dir_lock update root` from that same agent while `root/a` is held; both should error. Start a delegate that tries to `write` `root/a/child/blocked.txt` and reports to `user` after it succeeds. The delegate should wait. Call `dir_lock unlock` once from the original agent; the delegate should complete. A second `unlock` should error.
 
-Also verify same-owner reentry: while the original agent holds `root/a`, run a same-agent `write` or `edit` inside `root/a`. It should complete instead of deadlocking on its own manual lock.
+Also verify same-owner reentry: while the original agent holds `root/a`, run a same-agent `write` or `edit` inside `root/a`. It should complete instead of deadlocking on its own manual lock. Then start a same-agent `shell` in `root/a` that sleeps briefly before exiting; while that shell is still running, run another same-agent `write` inside `root/a`. The write should complete before the shell exits and should not emit directory-lock waiting progress.
 
 #### Phase 2: reads remain unblocked
 
@@ -206,7 +206,7 @@ Use separate agents so owner reentry does not hide conflicts. Verify these cases
 * Agent A holds `root/a`; Agent B mutates `root/b`. B should not wait when no earlier FIFO waiter blocks the queue.
 * Agent A holds `root/a`; Agent B tries `dir_lock update root`; Agent C then tries `dir_lock update other`. C should not acquire before B, even though `other` is independent. After A unlocks, B should acquire first; C may acquire immediately after B is dequeued if it does not conflict.
 
-The FIFO check is the starvation guard. If C completes before B while B is already queued at the front, record it as a bug.
+The FIFO check is the starvation guard. If C completes before B while B is already queued at the front, record it as a bug. Do not wait on later independent mutating tools before releasing the front blocked lock unless you intentionally want to observe head-of-line blocking; strict FIFO will park them too.
 
 #### Phase 5: user force-unlock action
 
@@ -232,7 +232,7 @@ Report concise but complete findings:
 
 * Whether `dir_lock` was enabled by default and could be disabled by config.
 * Exact outputs or errors for canonicalization, missing directory, non-directory, same-agent double update, double unlock, and wrong-owner unlock.
-* Whether same-agent automatic writer reentry still worked while manual double updates errored.
+* Whether same-agent automatic writer reentry still worked while manual double updates errored, including reentry while a same-agent shell under the manual lock was still running.
 * Whether reads stayed unblocked.
 * For each mutating tool, whether it waited on the expected directory and completed only after unlock.
 * Whether waiting UI/status showed the blocked directory, whether `dir_lock` failures showed the target directory, and whether auto-background plus `wait` behaved normally.

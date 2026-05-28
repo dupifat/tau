@@ -6,23 +6,29 @@ extensions: {}
 roleGroups:
   engineer:
     promptFragments:
-      - name: manager.instructions
-        priority: 5
+      - name: engineer.instructions
+        priority: 15
         text: |-
-            Trust the `<instructions>`. When sent they always contain a carefully researched detailed plan. Do not waste time second guessing them. Focus on following them immediately and implementation details.
+          Trust the `<instructions>`. When sent they contain a carefully researched plan. Do not waste time second guessing them. Follow them and focus on implementation details and your role in accomplishing them.
     roles:
-      senior-engineer:
-        enable: true
-        description: Capable individual contributor. Good default for most tasks.
-        effort: medium
       junior-engineer:
         enable: true
         description: Lower-reasoning but fast individual contributor. Best for straightforward coding tasks.
         effort: low
+      senior-engineer:
+        enable: true
+        description: Capable individual contributor. Good default for most tasks.
+        effort: medium
       staff-engineer:
         enable: true
         description: Slow and expensive individual contributor using maximum reasoning. Best used only for hardest engineering problems.
         effort: xhigh
+        promptFragments:
+          - name: staff-engineer.instructions
+            priority: 5
+            text: |-
+              You are a careful and deliberate thinker. You analyze problems, dig deep and consider alternative approaches. Quality and technical excellence are your main focus.
+
   manager:
     roles:
       manager:

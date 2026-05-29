@@ -21,6 +21,7 @@ use std::io;
 
 use tau_term_screen::screen::Screen;
 use tau_term_screen::style::StyledText;
+use tau_term_screen::truncate_to_width;
 
 pub use crate::error::PickerError;
 pub use crate::item::PickerItem;
@@ -124,8 +125,9 @@ fn render(
     let visible = terminal_height.saturating_sub(1).max(1);
     let (start, end) = visible_window(items.len(), selected, visible);
 
+    let width = screen.width();
     let mut lines = Vec::with_capacity(end - start + 1);
-    lines.push(StyledText::from(format!("? {prompt}")).to_cells());
+    lines.push(StyledText::from(truncate_to_width(&format!("? {prompt}"), width)).to_cells());
     for (idx, item) in items.iter().enumerate().take(end).skip(start) {
         let marker = if !item.enabled {
             'X'
@@ -134,7 +136,8 @@ fn render(
         } else {
             ' '
         };
-        lines.push(StyledText::from(format!("{marker} {}", item.label)).to_cells());
+        let line = truncate_to_width(&format!("{marker} {}", item.label), width);
+        lines.push(StyledText::from(line).to_cells());
     }
     let cursor_row = selected - start + 1;
     screen.update(writer, &lines, (cursor_row, 0))

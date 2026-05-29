@@ -57,6 +57,41 @@ fn long_candidates_are_truncated_to_one_terminal_row() {
     let text = block_text(&block);
 
     assert_eq!(text.lines().count(), 1);
-    assert!(UnicodeWidthStr::width(text.as_str()) <= 24);
+    assert!(display_width(text.as_str()) <= 24);
     assert!(text.contains('…'));
+}
+
+#[test]
+fn emoji_candidates_are_truncated_by_grapheme_width() {
+    let view = CompletionView {
+        candidates: vec![Candidate {
+            label: "⚠️x".to_owned(),
+            description: "👩‍💻x".to_owned(),
+            replacement: String::new(),
+        }],
+        selected: None,
+    };
+    let block = render_menu_block(&view, &Theme::builtin(), 6, 24);
+    let text = block_text(&block);
+
+    assert_eq!(text.lines().count(), 1);
+    assert!(display_width(text.as_str()) <= 6, "{text:?}");
+    assert!(text.contains('…'));
+}
+
+#[test]
+fn very_narrow_completion_menu_does_not_wrap() {
+    let view = CompletionView {
+        candidates: vec![Candidate {
+            label: "abcdef".to_owned(),
+            description: "description".to_owned(),
+            replacement: String::new(),
+        }],
+        selected: None,
+    };
+    let block = render_menu_block(&view, &Theme::builtin(), 3, 24);
+    let text = block_text(&block);
+
+    assert_eq!(text.lines().count(), 1);
+    assert!(display_width(text.as_str()) <= 3, "{text:?}");
 }

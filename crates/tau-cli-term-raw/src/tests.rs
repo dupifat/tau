@@ -1693,6 +1693,65 @@ fn multiline_buffer_vertical_cursor_motion_uses_visual_lines() {
     assert_eq!(down, text.len());
 }
 
+/// Prompt cursor math must use the same grapheme-aware widths as rendering, or
+/// input containing emoji will visibly drift from the cursor position.
+#[test]
+fn prompt_cursor_math_counts_emoji_graphemes() {
+    let width = 4;
+    let left_cols = 2;
+    let text = "⚠️";
+
+    let (row, col) = buffer_position_for_byte(text, text.len(), width, left_cols);
+    assert_eq!((row, col), (1, 0));
+    assert_eq!(
+        byte_offset_for_buffer_position(text, 1, 0, width, left_cols),
+        text.len()
+    );
+}
+
+/// CRLF is one Unicode grapheme cluster, but prompt layout should treat it as a
+/// single line break, matching pasted-text normalization and block rendering.
+#[test]
+fn prompt_cursor_math_treats_crlf_as_newline() {
+    let text = "a\r\nb";
+    assert_eq!(buffer_position_for_byte(text, text.len(), 10, 2), (1, 1));
+    assert_eq!(
+        byte_offset_for_buffer_position(text, 1, 1, 10, 2),
+        text.len()
+    );
+}
+
+/// Inverse cursor mapping must mirror prompt pending-wrap handling. A newline
+/// immediately after an exact-width row consumes the pending wrap; it must not
+/// capture targets that visually belong to the following text row.
+#[test]
+fn byte_offset_after_exact_width_newline_uses_following_text() {
+    let text = "abcdefgh\nZ";
+    assert_eq!(buffer_position_for_byte(text, text.len(), 10, 2), (1, 1));
+    assert_eq!(
+        byte_offset_for_buffer_position(text, 1, 1, 10, 2),
+        text.len()
+    );
+}
+
+/// Horizontal editing movement should treat complex emoji as one grapheme
+/// cluster so cursor movement and deletion cannot split their byte sequences.
+#[test]
+fn prompt_boundaries_move_by_grapheme_cluster() {
+    for grapheme in ["⚠️", "👩‍💻", "👍🏽", "a\u{0301}"] {
+        assert_eq!(
+            next_char_boundary(grapheme, 0),
+            grapheme.len(),
+            "{grapheme:?}"
+        );
+        assert_eq!(
+            prev_char_boundary(grapheme, grapheme.len()),
+            0,
+            "{grapheme:?}"
+        );
+    }
+}
+
 // Regression guard for prompt-input cursor wrapping. The final-column case is
 // prompt-only cursor behavior, not generic block wrapping behavior.
 #[test]

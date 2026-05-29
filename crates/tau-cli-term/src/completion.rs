@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use tau_cli_term_raw::{Candidate, CompletionView, Span, StyledBlock, StyledText};
+use tau_term_screen::{display_width, truncate_to_width};
 use tau_themes::Theme;
-use unicode_width::UnicodeWidthStr;
 
 use crate::resolve;
 
@@ -520,31 +520,6 @@ fn visible_candidate_range(view: &CompletionView, max_rows: usize) -> std::ops::
     start..start + max_rows
 }
 
-fn truncate_to_width(text: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-    if UnicodeWidthStr::width(text) <= max_width {
-        return text.to_owned();
-    }
-    if max_width == 1 {
-        return "…".to_owned();
-    }
-
-    let mut out = String::new();
-    let mut width = 0;
-    for ch in text.chars() {
-        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if max_width - 1 < width + ch_width {
-            break;
-        }
-        width += ch_width;
-        out.push(ch);
-    }
-    out.push('…');
-    out
-}
-
 struct MenuLineParts {
     label: String,
     padding: usize,
@@ -556,10 +531,14 @@ fn menu_line_parts(
     max_label_width: usize,
     terminal_width: usize,
 ) -> MenuLineParts {
-    let inner_width = terminal_width.max(1).saturating_sub(4);
+    let inner_width = if terminal_width < 4 {
+        terminal_width.max(1)
+    } else {
+        terminal_width.max(1).saturating_sub(4)
+    };
     let label_budget = max_label_width.min(inner_width);
     let label = truncate_to_width(&candidate.label, label_budget);
-    let label_width = UnicodeWidthStr::width(label.as_str());
+    let label_width = display_width(label.as_str());
     let remaining = inner_width.saturating_sub(label_width);
 
     let mut padding = 0;
@@ -592,7 +571,7 @@ fn render_menu_block_with_max_rows(
     let visible = visible_candidate_range(view, max_rows);
     let max_label_width = view.candidates[visible.clone()]
         .iter()
-        .map(|c| UnicodeWidthStr::width(c.label.as_str()))
+        .map(|c| display_width(c.label.as_str()))
         .max()
         .unwrap_or(0);
 
@@ -606,7 +585,9 @@ fn render_menu_block_with_max_rows(
         let is_selected = view.selected == Some(i);
         let parts = menu_line_parts(candidate, max_label_width, terminal_width);
 
-        let line_text = if parts.description.is_empty() {
+        let line_text = if terminal_width < 4 {
+            truncate_to_width(&parts.label, terminal_width)
+        } else if parts.description.is_empty() {
             format!("  {}  ", parts.label)
         } else {
             format!(
@@ -618,7 +599,9 @@ fn render_menu_block_with_max_rows(
             )
         };
 
-        if is_selected {
+        if terminal_width < 4 {
+            spans.push(Span::plain(line_text));
+        } else if is_selected {
             spans.push(Span::new(line_text, selected_style));
         } else {
             spans.push(Span::plain("  "));

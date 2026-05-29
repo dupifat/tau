@@ -27,11 +27,45 @@ use crossterm::cursor::{MoveToColumn, MoveUp};
 use crossterm::style::{Attribute, Print, SetAttribute, SetBackgroundColor, SetForegroundColor};
 use crossterm::terminal::{self, ClearType};
 
-use crate::style::{Align, Cell, Style, StyledBlock, StyledText, push_cell_with_context};
+use crate::style::{
+    Align, Cell, Style, StyledBlock, StyledText, is_line_break_grapheme, push_grapheme_cells,
+    visit_styled_graphemes,
+};
 
 /// Column width of a cell slice (sum of individual display widths).
 fn cols(cells: &[Cell]) -> usize {
     cells.iter().map(|c| c.col_width()).sum()
+}
+
+fn repaint_prefix_for_cluster_boundary(
+    mut common_prefix: usize,
+    actual: &[Cell],
+    desired: &[Cell],
+) -> usize {
+    if common_prefix == actual.len() && common_prefix == desired.len() {
+        return common_prefix;
+    }
+
+    while 0 < common_prefix {
+        let next_is_continuation = actual
+            .get(common_prefix)
+            .is_some_and(|cell| cell.col_width() == 0)
+            || desired
+                .get(common_prefix)
+                .is_some_and(|cell| cell.col_width() == 0);
+        let prev_is_continuation = actual
+            .get(common_prefix - 1)
+            .is_some_and(|cell| cell.col_width() == 0)
+            || desired
+                .get(common_prefix - 1)
+                .is_some_and(|cell| cell.col_width() == 0);
+        if !next_is_continuation && !prev_is_continuation {
+            break;
+        }
+        common_prefix -= 1;
+    }
+
+    common_prefix
 }
 
 /// Virtual screen state with diff-based updates.
@@ -108,6 +142,8 @@ impl Screen {
                 .zip(desired_slice.iter())
                 .take_while(|(a, d)| a == d)
                 .count();
+            let common_prefix =
+                repaint_prefix_for_cluster_boundary(common_prefix, actual_slice, desired_slice);
 
             let is_last_desired = row == desired_count - 1;
             let actual_wider = cols(actual_slice) > cols(desired_slice);
@@ -453,18 +489,16 @@ pub fn layout_lines(
 
     // Split into logical lines at newlines.
     let mut logical_lines: Vec<Vec<Cell>> = vec![Vec::new()];
-    for span in content.spans() {
-        for ch in span.text.chars() {
-            if ch == '\n' {
-                logical_lines.push(Vec::new());
-            } else {
-                let line = logical_lines
-                    .last_mut()
-                    .expect("logical_lines always has at least one entry");
-                push_cell_with_context(line, ch, span.style);
-            }
+    visit_styled_graphemes(content.spans(), |grapheme, style| {
+        if is_line_break_grapheme(grapheme) {
+            logical_lines.push(Vec::new());
+        } else {
+            let line = logical_lines
+                .last_mut()
+                .expect("logical_lines always has at least one entry");
+            push_grapheme_cells(line, grapheme, style);
         }
-    }
+    });
 
     if !preserve_last_newline
         && logical_lines.len() > 1

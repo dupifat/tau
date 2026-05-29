@@ -6,17 +6,101 @@
 //! in the data model.
 
 pub use crossterm::style::Color;
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-const EMOJI_VARIATION_SELECTOR: char = '\u{fe0f}';
+/// Display width of a string in terminal columns, measured by grapheme cluster.
+pub fn display_width(text: &str) -> usize {
+    UnicodeSegmentation::graphemes(text, true)
+        .map(UnicodeWidthStr::width)
+        .sum()
+}
 
-pub(crate) fn push_cell_with_context(cells: &mut Vec<Cell>, ch: char, style: Style) {
-    if ch == EMOJI_VARIATION_SELECTOR {
-        if let Some(prev) = cells.last_mut() {
-            prev.width = prev.width.max(2);
+/// Returns a string that fits within `max_width` terminal columns, appending an
+/// ellipsis when truncation is needed.
+pub fn truncate_to_width(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if display_width(text) <= max_width {
+        return text.to_owned();
+    }
+    if max_width == 1 {
+        return "…".to_owned();
+    }
+
+    let mut out = String::new();
+    let mut width = 0;
+    let prefix_width = max_width - 1;
+    for grapheme in UnicodeSegmentation::graphemes(text, true) {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if prefix_width < width + grapheme_width {
+            break;
+        }
+        width += grapheme_width;
+        out.push_str(grapheme);
+    }
+    out.push('…');
+    out
+}
+
+/// Returns the previous grapheme-cluster boundary before `pos`.
+pub fn previous_grapheme_boundary(text: &str, pos: usize) -> usize {
+    let pos = pos.min(text.len());
+    UnicodeSegmentation::grapheme_indices(text, true)
+        .map(|(idx, _)| idx)
+        .take_while(|idx| *idx < pos)
+        .last()
+        .unwrap_or(0)
+}
+
+/// Returns the next grapheme-cluster boundary after `pos`.
+pub fn next_grapheme_boundary(text: &str, pos: usize) -> usize {
+    if text.len() <= pos {
+        return text.len();
+    }
+    for (idx, grapheme) in UnicodeSegmentation::grapheme_indices(text, true) {
+        let end = idx + grapheme.len();
+        if pos < end {
+            return end;
         }
     }
-    cells.push(Cell::new(ch, style));
+    text.len()
+}
+
+pub(crate) fn is_line_break_grapheme(grapheme: &str) -> bool {
+    matches!(grapheme, "\n" | "\r\n" | "\r")
+}
+
+pub(crate) fn push_grapheme_cells(cells: &mut Vec<Cell>, grapheme: &str, style: Style) {
+    let grapheme_width = UnicodeWidthStr::width(grapheme);
+    for (idx, ch) in grapheme.chars().enumerate() {
+        let width = if idx == 0 { grapheme_width } else { 0 };
+        cells.push(Cell::new(ch, style).with_width(width));
+    }
+}
+
+pub(crate) fn visit_styled_graphemes(spans: &[Span], mut f: impl FnMut(&str, Style)) {
+    let mut text = String::new();
+    let mut char_styles = Vec::new();
+    for span in spans {
+        for ch in span.text.chars() {
+            char_styles.push((text.len(), span.style));
+            text.push(ch);
+        }
+    }
+
+    let mut style_idx = 0;
+    for (byte, grapheme) in UnicodeSegmentation::grapheme_indices(text.as_str(), true) {
+        while style_idx + 1 < char_styles.len() && char_styles[style_idx + 1].0 <= byte {
+            style_idx += 1;
+        }
+        let style = char_styles
+            .get(style_idx)
+            .map(|(_, style)| *style)
+            .unwrap_or_default();
+        f(grapheme, style);
+    }
 }
 
 /// Visual attributes for a single character cell.
@@ -144,13 +228,14 @@ impl StyledText {
 
     /// Total display width in terminal columns.
     ///
-    /// Wide characters (emoji, CJK) count as 2 columns.
+    /// Wide characters and emoji grapheme clusters count as terminal columns,
+    /// not Unicode scalar values.
     pub fn char_count(&self) -> usize {
-        self.spans
-            .iter()
-            .flat_map(|s| s.text.chars())
-            .map(|ch| ch.width().unwrap_or(0))
-            .sum()
+        let mut text = String::new();
+        for span in &self.spans {
+            text.push_str(&span.text);
+        }
+        display_width(&text)
     }
 
     /// Returns `true` if there is no text content.
@@ -161,13 +246,11 @@ impl StyledText {
     /// Converts to a flat sequence of [`Cell`]s (newlines excluded).
     pub fn to_cells(&self) -> Vec<Cell> {
         let mut cells = Vec::new();
-        for span in &self.spans {
-            for ch in span.text.chars() {
-                if ch != '\n' {
-                    push_cell_with_context(&mut cells, ch, span.style);
-                }
+        visit_styled_graphemes(&self.spans, |grapheme, style| {
+            if !is_line_break_grapheme(grapheme) {
+                push_grapheme_cells(&mut cells, grapheme, style);
             }
-        }
+        });
         cells
     }
 }

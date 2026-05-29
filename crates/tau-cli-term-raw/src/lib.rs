@@ -25,7 +25,11 @@ use crossterm::event::{
 use crossterm::style::Print;
 use crossterm::{QueueableCommand, terminal};
 pub use tau_term_screen::{Align, BlockId, Cell, Color, Span, Style, StyledBlock, StyledText};
-use tau_term_screen::{Screen, emit_styled_cells, layout_block, layout_lines};
+use tau_term_screen::{
+    Screen, display_width, emit_styled_cells, layout_block, layout_lines, next_grapheme_boundary,
+    previous_grapheme_boundary,
+};
+use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CursorShape {
@@ -2721,31 +2725,13 @@ fn normalize_paste_text(text: String) -> String {
     normalized
 }
 
+fn is_prompt_line_break(grapheme: &str) -> bool {
+    matches!(grapheme, "\n" | "\r\n" | "\r")
+}
+
 fn initial_buffer_position(initial_cols: usize, width: usize) -> (usize, usize) {
     let width = width.max(1);
     (initial_cols / width, initial_cols % width)
-}
-
-fn advance_buffer_position(row: &mut usize, col: &mut usize, ch: char, width: usize) {
-    use unicode_width::UnicodeWidthChar;
-
-    let width = width.max(1);
-    if ch == '\n' {
-        *row += 1;
-        *col = 0;
-        return;
-    }
-
-    let char_width = ch.width().unwrap_or(0);
-    if 0 < *col && width < *col + char_width {
-        *row += 1;
-        *col = 0;
-    }
-    *col += char_width;
-    if width <= *col {
-        *row += *col / width;
-        *col %= width;
-    }
 }
 
 fn buffer_position_for_byte(
@@ -2758,11 +2744,17 @@ fn buffer_position_for_byte(
     let mut pos = initial_buffer_position(initial_cols, width);
     let mut pending_exact_wrap = false;
 
-    for (byte, ch) in s.char_indices() {
-        if byte_pos <= byte {
+    for (byte, grapheme) in UnicodeSegmentation::grapheme_indices(s, true) {
+        if byte_pos <= byte || byte_pos < byte + grapheme.len() {
             break;
         }
-        advance_prompt_cursor_position(&mut pos.0, &mut pos.1, &mut pending_exact_wrap, ch, width);
+        advance_prompt_cursor_position(
+            &mut pos.0,
+            &mut pos.1,
+            &mut pending_exact_wrap,
+            grapheme,
+            width,
+        );
     }
 
     pos
@@ -2772,13 +2764,11 @@ fn advance_prompt_cursor_position(
     row: &mut usize,
     col: &mut usize,
     pending_exact_wrap: &mut bool,
-    ch: char,
+    grapheme: &str,
     width: usize,
 ) {
-    use unicode_width::UnicodeWidthChar;
-
     let width = width.max(1);
-    if ch == '\n' {
+    if is_prompt_line_break(grapheme) {
         if *pending_exact_wrap {
             // A printable character exactly filled the previous visual row, so
             // the cursor is already at column 0 of this row. An explicit newline
@@ -2793,16 +2783,16 @@ fn advance_prompt_cursor_position(
     }
 
     *pending_exact_wrap = false;
-    let char_width = ch.width().unwrap_or(0);
-    if 0 < *col && width < *col + char_width {
+    let grapheme_width = display_width(grapheme);
+    if 0 < *col && width < *col + grapheme_width {
         *row += 1;
         *col = 0;
     }
-    *col += char_width;
+    *col += grapheme_width;
     if width <= *col {
         *row += *col / width;
         *col %= width;
-        *pending_exact_wrap = char_width != 0 && *col == 0;
+        *pending_exact_wrap = grapheme_width != 0 && *col == 0;
     }
 }
 
@@ -2818,45 +2808,44 @@ fn byte_offset_for_buffer_position(
     initial_cols: usize,
 ) -> usize {
     let mut row_col = initial_buffer_position(initial_cols, width);
+    let mut pending_exact_wrap = false;
 
-    for (byte, ch) in s.char_indices() {
+    for (byte, grapheme) in UnicodeSegmentation::grapheme_indices(s, true) {
         let (row, col) = row_col;
         if target_row < row || (target_row == row && target_col <= col) {
             return byte;
         }
-        if ch == '\n' {
-            if target_row == row {
-                return byte;
-            }
-            advance_buffer_position(&mut row_col.0, &mut row_col.1, ch, width);
-            continue;
+        if is_prompt_line_break(grapheme) && !pending_exact_wrap && target_row == row {
+            return byte;
         }
 
         let mut next = row_col;
-        advance_buffer_position(&mut next.0, &mut next.1, ch, width);
-        if target_row < next.0 || (target_row == next.0 && target_col <= next.1) {
-            return byte + ch.len_utf8();
+        let mut next_pending_exact_wrap = pending_exact_wrap;
+        advance_prompt_cursor_position(
+            &mut next.0,
+            &mut next.1,
+            &mut next_pending_exact_wrap,
+            grapheme,
+            width,
+        );
+        if !is_prompt_line_break(grapheme)
+            && (target_row < next.0 || (target_row == next.0 && target_col <= next.1))
+        {
+            return byte + grapheme.len();
         }
         row_col = next;
+        pending_exact_wrap = next_pending_exact_wrap;
     }
 
     s.len()
 }
 
 fn prev_char_boundary(s: &str, pos: usize) -> usize {
-    let mut p = pos.saturating_sub(1);
-    while p > 0 && !s.is_char_boundary(p) {
-        p -= 1;
-    }
-    p
+    previous_grapheme_boundary(s, pos)
 }
 
 fn next_char_boundary(s: &str, pos: usize) -> usize {
-    let mut p = pos + 1;
-    while p < s.len() && !s.is_char_boundary(p) {
-        p += 1;
-    }
-    p
+    next_grapheme_boundary(s, pos)
 }
 
 #[cfg(test)]

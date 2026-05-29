@@ -2336,10 +2336,10 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "tau-cli-term-raw",
+ "tau-term-screen",
  "tau-themes",
  "tempfile",
  "tracing",
- "unicode-width",
  "which",
 ]
 
@@ -2352,7 +2352,7 @@ dependencies = [
  "tau-blocking-notify-channel",
  "tau-term-screen",
  "tracing",
- "unicode-width",
+ "unicode-segmentation",
  "vt100",
 ]
 
@@ -2641,6 +2641,7 @@ version = "0.1.0"
 dependencies = [
  "bon",
  "crossterm",
+ "unicode-segmentation",
  "unicode-width",
  "vt100",
 ]
@@ -2904,6 +2905,12 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-segmentation"
+version = "1.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9629274872b2bfaf8d66f5f15725007f635594914870f65218920345aa11aa8c"
 
 [[package]]
 name = "unicode-width"

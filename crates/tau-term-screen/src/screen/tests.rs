@@ -130,6 +130,50 @@ fn layout_counts_emoji_variation_selector_as_wide() {
     assert_eq!(cols(&lines[0]), 7);
 }
 
+/// Complex emoji sequences must be measured as grapheme clusters. Counting each
+/// Unicode scalar separately would wrap these examples into extra rows.
+#[test]
+fn layout_counts_emoji_grapheme_sequences_as_clusters() {
+    for emoji in ["👩‍💻", "👍🏽"] {
+        let lines = layout_lines()
+            .content(&StyledText::from(emoji))
+            .width(2)
+            .call();
+        assert_eq!(line_chars(&lines), vec![emoji]);
+        assert_eq!(cols(&lines[0]), 2);
+    }
+}
+
+/// CRLF and bare carriage returns must be treated as line separators before
+/// cell emission; otherwise raw control characters would be printed inside a
+/// modeled row.
+#[test]
+fn layout_treats_crlf_as_newline() {
+    let crlf_lines = layout_lines()
+        .content(&StyledText::from("a\r\nb"))
+        .width(80)
+        .call();
+    assert_eq!(line_chars(&crlf_lines), vec!["a", "b"]);
+
+    let cr_lines = layout_lines()
+        .content(&StyledText::from("a\rb"))
+        .width(80)
+        .call();
+    assert_eq!(line_chars(&cr_lines), vec!["a", "b"]);
+}
+
+/// Grapheme segmentation has to cross span boundaries. Styled renderers often
+/// split text by syntax/style, and an emoji variation sequence may straddle
+/// that split.
+#[test]
+fn layout_counts_split_span_emoji_as_one_grapheme() {
+    let styled = StyledText::from(vec![Span::plain("⚠"), Span::plain("️")]);
+    let lines = layout_lines().content(&styled).width(2).call();
+    assert_eq!(line_chars(&lines), vec!["⚠️"]);
+    assert_eq!(cols(&lines[0]), 2);
+    assert_eq!(styled.char_count(), 2);
+}
+
 /// Guards the style-to-cell conversion path so styled spans keep their
 /// attributes after layout.
 #[test]
@@ -343,6 +387,32 @@ fn cursor_moves_without_changing_content() {
     assert_eq!(t.cursor(), (0, 2));
 }
 
+/// Updating a grapheme with zero-width continuations must repaint from the
+/// cluster start, not from the continuation column. Otherwise changing `á` to
+/// `a` can leave the old combining mark attached on real terminals.
+#[test]
+fn changing_combining_mark_repaints_cluster_start() {
+    let mut screen = Screen::new(10);
+    let first = layout_lines()
+        .content(&StyledText::from("a\u{0301}"))
+        .width(10)
+        .call();
+    let second = layout_lines()
+        .content(&StyledText::from("a"))
+        .width(10)
+        .call();
+
+    let mut buf = Vec::new();
+    screen.update(&mut buf, &first, (0, 1)).expect("render ok");
+    buf.clear();
+    screen.update(&mut buf, &second, (0, 1)).expect("render ok");
+    let rendered = String::from_utf8(buf).expect("screen output should be utf8-ish ANSI");
+    assert!(
+        rendered.contains('a'),
+        "expected update to repaint base cell, got {rendered:?}"
+    );
+}
+
 /// Shrinking a line must erase the old suffix so previous prompt characters do
 /// not remain visible.
 #[test]
@@ -527,11 +597,7 @@ fn build_prompt_layout(
 
     desired.extend(input_lines);
 
-    let cursor_cols: usize = left
-        .chars()
-        .chain(input.chars())
-        .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0))
-        .sum();
+    let cursor_cols = crate::style::display_width(&format!("{left}{input}"));
     let cursor_row = above_row_count + cursor_cols / width;
     let cursor_col = cursor_cols % width;
 

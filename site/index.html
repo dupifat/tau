@@ -27,6 +27,9 @@
       --blue: #268bd2;
       --cyan: #2aa198;
       --green: #859900;
+      --obsidian: #050505;
+      --panel: #0d0d0d;
+      --border-subtle: #222222;
     }
 
     *,
@@ -43,21 +46,33 @@
 
     body {
       font-family: "IBM Plex Mono", "JetBrains Mono", "Fira Code", "Source Code Pro", ui-monospace, monospace;
-      background: var(--base03);
+      background: linear-gradient(180deg, #061618 0, var(--obsidian) 34rem);
       color: var(--base0);
       line-height: 1.7;
       -webkit-font-smoothing: antialiased;
     }
 
     a {
-      color: var(--cyan);
+      color: #ffd166;
       text-decoration: none;
       font-weight: 900;
       transition: color 0.2s;
     }
 
+    a:not(.btn-primary):not(.btn-secondary):not(.logo-link):not(.demo-link) {
+      background-image: linear-gradient(currentColor, currentColor);
+      background-position: 0 100%;
+      background-repeat: no-repeat;
+      background-size: 0 1px;
+      transition: color 0.2s, background-size 0.2s;
+    }
+
     a:hover {
-      color: var(--blue);
+      color: #ffd166;
+    }
+
+    a:not(.btn-primary):not(.btn-secondary):not(.logo-link):not(.demo-link):hover {
+      background-size: 100% 1px;
     }
 
     /* Header */
@@ -65,16 +80,18 @@
       display: flex;
       justify-content: space-between;
       align-items: center;
-      max-width: 860px;
+      max-width: 1120px;
       margin: 0 auto;
-      padding: 1.5rem 2rem;
+      padding: 1.25rem 2rem;
+      background: transparent;
+      border-bottom: 1px solid rgb(34 34 34 / 0.75);
     }
 
     .logo-link {
       display: flex;
       align-items: center;
       gap: 0.75rem;
-      color: var(--base1);
+      color: #ffffff;
       font-size: 1rem;
       font-weight: 700;
       letter-spacing: 0.05em;
@@ -113,7 +130,7 @@
 
     /* Hero */
     .hero {
-      max-width: 860px;
+      max-width: 1120px;
       margin: 0 auto;
       padding: 6rem 2rem 4rem;
       text-align: center;
@@ -140,11 +157,130 @@
 
     .hero p {
       font-size: 1rem;
-      color: var(--base01);
-      max-width: 540px;
+      color: var(--base1);
+      max-width: 620px;
       margin: 0 auto 2rem;
     }
 
+
+    .terminal-preview {
+      max-width: 860px;
+      margin: 3rem auto 0;
+      padding: 0.5rem;
+      background: var(--panel);
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      box-shadow: 0 24px 80px rgb(0 0 0 / 0.35);
+      text-align: left;
+    }
+
+    .terminal-titlebar {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.25rem 0.5rem 0.65rem;
+      color: var(--base01);
+      font-size: 0.8rem;
+    }
+
+    .terminal-dot {
+      width: 0.65rem;
+      height: 0.65rem;
+      border-radius: 999px;
+      background: var(--base01);
+      opacity: 0.55;
+    }
+
+    .terminal-title {
+      margin-left: 0.75rem;
+    }
+
+    .terminal-body {
+      min-height: 20rem;
+      margin: 0;
+      padding: 1.25rem;
+      background: var(--base03);
+      border: 1px solid var(--border-subtle);
+      color: var(--base1);
+      overflow-x: auto;
+      font: inherit;
+      font-size: 0.9rem;
+      line-height: 1.45;
+    }
+
+    .terminal-row {
+      min-height: 1.45em;
+      white-space: pre;
+    }
+
+    .terminal-split {
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      white-space: nowrap;
+    }
+
+    .terminal-left,
+    .terminal-right {
+      min-width: 0;
+    }
+
+    .terminal-left {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .terminal-right {
+      flex: none;
+      text-align: right;
+    }
+
+    .term-white {
+      color: #eee8d5;
+    }
+
+    .term-bold {
+      font-weight: 700;
+    }
+
+    .term-dim {
+      color: #3f555c;
+    }
+
+    .term-placeholder {
+      color: #3f555c;
+      font-style: italic;
+    }
+
+    .term-cursor {
+      color: #eee8d5;
+      font-weight: 700;
+    }
+
+    .term-blue {
+      color: #268bd2;
+    }
+
+    .term-cyan {
+      color: #2aa198;
+    }
+
+    .term-green {
+      color: #859900;
+    }
+
+    .term-yellow {
+      color: #b58900;
+    }
+
+    .term-dark-yellow {
+      color: #8a6d00;
+    }
+
+    .term-user {
+      color: #eee8d5;
+      font-weight: 700;
+    }
 
     .hero-cta {
       display: inline-flex;
@@ -183,9 +319,9 @@
 
     /* Sections */
     section {
-      max-width: 860px;
+      max-width: 1120px;
       margin: 0 auto;
-      padding: 3rem 2rem;
+      padding: 3.5rem 2rem;
     }
 
     section h2 {
@@ -207,8 +343,8 @@
 
     .divider {
       border: none;
-      border-top: 1px solid var(--base02);
-      max-width: 860px;
+      border-top: 1px solid var(--border-subtle);
+      max-width: 1120px;
       margin: 0 auto;
     }
 
@@ -221,7 +357,8 @@
     }
 
     .feature {
-      background: var(--base02);
+      background: var(--panel);
+      border: 1px solid var(--border-subtle);
       border-radius: 6px;
       padding: 1.5rem;
     }
@@ -253,7 +390,8 @@
     }
 
     .arch-diagram {
-      background: var(--base02);
+      background: var(--panel);
+      border: 1px solid var(--border-subtle);
       border-radius: 6px;
       padding: 1.5rem 2rem;
       margin-top: 1.5rem;
@@ -294,7 +432,7 @@
     /* Status */
     .status-badge {
       display: inline-block;
-      background: var(--base02);
+      background: var(--panel);
       color: var(--yellow);
       font-size: 1rem;
       font-weight: 700;
@@ -305,24 +443,36 @@
     }
 
     .demo-link {
-      display: inline-block;
+      display: block;
       margin-top: 1rem;
+      text-align: center;
+    }
+
+    .demo-link img {
+      display: block;
+      margin-left: auto;
+      margin-right: auto;
     }
 
     /* Philosophy */
     .philosophy-list {
       list-style: none;
-      margin-top: 1rem;
+      margin: 1.7em 0;
     }
 
     .philosophy-list li {
-      padding: 0.5rem 0;
-      border-bottom: 1px solid var(--base02);
+      position: relative;
+      padding: 0 0 0 1.25rem;
       font-size: 1rem;
     }
 
-    .philosophy-list li:last-child {
-      border-bottom: none;
+    .philosophy-list li::before {
+      content: "○";
+      position: absolute;
+      left: 0;
+      color: var(--cyan);
+      font-weight: 400;
+      line-height: inherit;
     }
 
     .philosophy-list .keyword {
@@ -343,7 +493,8 @@
       align-items: center;
       gap: 0.4rem;
       padding: 0.5rem 1rem;
-      background: var(--base02);
+      background: var(--panel);
+      border: 1px solid var(--border-subtle);
       border-radius: 4px;
       font-size: 1rem;
       color: var(--base1);
@@ -357,7 +508,7 @@
 
     /* Footer */
     footer {
-      max-width: 860px;
+      max-width: 1120px;
       margin: 0 auto;
       padding: 2rem;
       text-align: center;
@@ -430,7 +581,7 @@
 
   <div class="hero">
     <div class="hero-logo">
-      <svg viewBox="0 0 800 800" fill="var(--yellow)">
+      <svg viewBox="0 0 800 800" fill="#ffffff">
         <path d="M194.63 165.29H605.38V282.65H429.34V517.36H546.70V634.72H311.99V282.65H194.63Z" />
       </svg>
     </div>
@@ -444,6 +595,39 @@
       <a class="btn-primary" href="https://app.radicle.xyz/nodes/radicle.dpc.pw/rad:z3ToHcxKefTYxZEoCoDXmddUkK3a4">View on Radicle</a>
       <a class="btn-secondary" href="https://github.com/dpc/tau">View on GitHub</a>
       <a class="btn-secondary" href="#architecture">Learn more</a>
+    </div>
+    <div class="terminal-preview" aria-label="Tau terminal preview">
+      <div class="terminal-titlebar">
+        <span class="terminal-dot"></span>
+        <span class="terminal-dot"></span>
+        <span class="terminal-dot"></span>
+        <span class="terminal-title">dpc@ren$ tau</span>
+      </div>
+      <div class="terminal-body">
+        <div class="terminal-row"><span class="term-white term-bold">dpc@ren$</span> tau</div>
+        <div class="terminal-row"><span class="term-white">▝▜▛▀</span> <span class="term-white term-bold">tau</span> <span class="term-dim">0.1.0 (b2bd736)</span></div>
+        <div class="terminal-row"> <span class="term-white">▐▙▖</span> <span class="term-dark-yellow">Complete revolution.</span></div>
+        <div class="terminal-row"><span class="term-dim">ui dir: </span><span class="term-blue">~/.local/state/tau/uis/ui-1780072952202-ingsgi/</span></div>
+        <div class="terminal-row"><span class="term-dim">extension std-notifications </span><span class="term-green">ready</span></div>
+        <div class="terminal-row"><span class="term-dim">extension core-shell </span><span class="term-green">ready</span></div>
+        <div class="terminal-row"><span class="term-dim">extension test-dummy </span><span class="term-green">ready</span></div>
+        <div class="terminal-row"><span class="term-dim">extension std-websearch </span><span class="term-green">ready</span></div>
+        <div class="terminal-row"><span class="term-dim">extension provider-builtin </span><span class="term-green">ready</span></div>
+        <div class="terminal-row"><span class="term-dim">session dir: </span><span class="term-blue">~/.local/state/tau/sessions/tau-agent-3lxhjh/</span><span class="term-white"> new</span></div>
+        <div class="terminal-row"><span class="term-dim">loaded: </span><span class="term-blue">~/agent/AGENTS.md</span><span class="term-dim"> 15L, 753B</span></div>
+        <div class="terminal-row"><span class="term-dim">loaded: </span><span class="term-blue">~/lab/tau-agent/AGENTS.md</span><span class="term-dim"> 48L, 2.9kB</span></div>
+        <div class="terminal-row"><span class="term-user">⬤ hi</span></div>
+        <div class="terminal-row"><span class="term-dim">agent context </span><span class="term-green">ready</span></div>
+        <div class="terminal-row"><span class="term-blue">hi.</span></div>
+        <div class="terminal-row terminal-split">
+          <span class="terminal-left"><span class="term-dim">◯ </span><span class="term-cursor">|</span><span class="term-placeholder">Write a message to </span><span class="term-dark-yellow">senior-engineer_a8</span><span class="term-placeholder">...</span></span>
+          <span class="terminal-right term-dim">~/lab/tau-agent</span>
+        </div>
+        <div class="terminal-row terminal-split">
+          <span class="terminal-left term-cyan">@tau-agent-3lxhjh @senior-engineer_a8</span>
+          <span class="terminal-right"><span class="term-blue">@1</span> <span class="term-yellow">#4.3k/258.4k</span></span>
+        </div>
+      </div>
     </div>
   </div>
 

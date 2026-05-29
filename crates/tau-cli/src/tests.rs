@@ -1818,7 +1818,7 @@ fn model_status_shows_context_window_until_usage_is_known() {
         .into_iter()
         .find(|row| row.contains("+engineer"))
         .expect("status row");
-    assert!(status_row.ends_with("#?/200k"));
+    assert!(status_row.ends_with("#-/200k"));
 }
 
 #[test]
@@ -1857,7 +1857,7 @@ fn focused_agent_context_usage_event_replaces_unknown_context_window() {
         .find(|row| row.contains("@main"))
         .expect("status row");
     assert!(status_row.ends_with("#12k/200k"));
-    assert!(!status_row.contains("#?/200k"));
+    assert!(!status_row.contains("#-/200k"));
 }
 
 #[test]

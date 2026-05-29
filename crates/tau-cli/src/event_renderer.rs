@@ -1945,8 +1945,8 @@ impl EventRenderer {
         Some(match (counter.complete, counter.total) {
             (Some(complete), Some(total)) => format!("{complete}/{total}"),
             (Some(complete), None) => complete.to_string(),
-            (None, Some(total)) => format!("?/{total}"),
-            (None, None) => "?".to_owned(),
+            (None, Some(total)) => format!("-/{total}"),
+            (None, None) => "-".to_owned(),
         })
     }
 
@@ -2108,7 +2108,7 @@ impl EventRenderer {
             }
             (Some(percent), _, None) => Some(format!("{percent}%")),
             (None, Some(input), None) => Some(format_token_count(input)),
-            (None, None, Some(window)) => Some(format!("?/{}", format_token_count(window))),
+            (None, None, Some(window)) => Some(format!("-/{}", format_token_count(window))),
             (None, None, None) => None,
         }
     }

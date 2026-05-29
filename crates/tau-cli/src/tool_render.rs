@@ -650,20 +650,20 @@ fn format_progress_counter(counter: &tau_proto::ProgressCounter) -> ToolSuffixSe
         tau_proto::ProgressUnit::Count => match (counter.complete, counter.total) {
             (Some(c), Some(t)) => format!("{c}/{t}"),
             (Some(c), None) => c.to_string(),
-            (None, Some(t)) => format!("?/{t}"),
-            (None, None) => "?".to_owned(),
+            (None, Some(t)) => format!("-/{t}"),
+            (None, None) => "-".to_owned(),
         },
         tau_proto::ProgressUnit::Percent => match (counter.complete, counter.total) {
             (Some(p), Some(t)) => format!("{p}%/{}", format_token_count(t)),
             (Some(p), None) => format!("{p}%"),
-            (None, Some(t)) => format!("?%/{}", format_token_count(t)),
-            (None, None) => "?%".to_owned(),
+            (None, Some(t)) => format!("-%/{}", format_token_count(t)),
+            (None, None) => "-%".to_owned(),
         },
         tau_proto::ProgressUnit::Tokens => match (counter.complete, counter.total) {
             (Some(c), Some(t)) => format!("{}/{}", format_token_count(c), format_token_count(t)),
             (Some(c), None) => format_token_count(c),
-            (None, Some(t)) => format!("?/{}", format_token_count(t)),
-            (None, None) => "?".to_owned(),
+            (None, Some(t)) => format!("-/{}", format_token_count(t)),
+            (None, None) => "-".to_owned(),
         },
     };
     match counter.label.as_deref() {

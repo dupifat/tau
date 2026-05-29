@@ -10,10 +10,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tau_proto::{
     AgentPromptId, ContentPart, ContextItem, ContextRole, Event, Frame, FrameWriter, ModelId,
-    ModelName, ProviderBackend, ProviderBackendKind, ProviderBackendTransport, ProviderModelInfo,
-    ProviderName, ProviderResponseFinished, ProviderResponseUpdated, ProviderStopReason,
-    ProviderTokenUsage, ThinkingSummary, ToolCallItem, ToolChoice, ToolDefinition,
-    ToolResponseHeader, ToolResultStatus, ToolType,
+    ModelName, OpaqueProviderItem, ProviderBackend, ProviderBackendKind, ProviderBackendTransport,
+    ProviderModelInfo, ProviderName, ProviderResponseFinished, ProviderResponseUpdated,
+    ProviderStopReason, ProviderTokenUsage, ThinkingSummary, ToolCallItem, ToolChoice,
+    ToolDefinition, ToolResponseHeader, ToolResultStatus, ToolType,
 };
 
 const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
@@ -297,6 +297,7 @@ impl std::fmt::Display for LlmError {
 struct StreamState {
     text: String,
     thinking: String,
+    reasoning: String,
     pending_content: String,
     in_think_tag: bool,
     tool_calls: HashMap<usize, ToolCallAccumulator>,
@@ -311,6 +312,7 @@ impl StreamState {
         Self {
             text: String::new(),
             thinking: String::new(),
+            reasoning: String::new(),
             pending_content: String::new(),
             in_think_tag: false,
             tool_calls: HashMap::new(),
@@ -323,8 +325,21 @@ impl StreamState {
 
     fn output_items(&self) -> Vec<ContextItem> {
         let mut items = Vec::new();
+        let has_tool_calls = self.tool_calls.values().any(|call| !call.name.is_empty());
         if !self.text.is_empty() {
+            if !has_tool_calls && let Some(item) = reasoning_context_item(&self.reasoning) {
+                items.push(item);
+            }
             items.push(assistant_text_item(self.text.clone()));
+        }
+        if has_tool_calls && let Some(item) = reasoning_context_item(&self.reasoning) {
+            items.push(item);
+        }
+        if self.text.is_empty()
+            && !has_tool_calls
+            && let Some(item) = reasoning_context_item(&self.reasoning)
+        {
+            items.push(item);
         }
         let mut tool_calls = self.tool_calls.iter().collect::<Vec<_>>();
         tool_calls.sort_by_key(|(index, _)| **index);
@@ -479,8 +494,9 @@ fn build_request(
             "content": prompt.system_prompt,
         }));
     }
+    let mut pending_reasoning = None;
     for item in &prompt.context_items {
-        append_context_item(item, &mut messages);
+        append_context_item(item, &mut messages, &mut pending_reasoning);
     }
     let tools = prompt
         .tools
@@ -648,6 +664,19 @@ fn maybe_debug_write_provider_http_error(
     }
 }
 
+fn reasoning_context_item(reasoning: &str) -> Option<ContextItem> {
+    if reasoning.is_empty() {
+        return None;
+    }
+    let item = serde_json::json!({
+        "type": "chat_completions_reasoning",
+        "reasoning_content": reasoning,
+    });
+    Some(ContextItem::Reasoning(OpaqueProviderItem(json_to_cbor(
+        &item,
+    ))))
+}
+
 fn output_token_cap_fields(provider: &ResolvedProvider) -> (Option<u32>, Option<u32>) {
     if provider.max_output_tokens == 0
         || provider.extra_body.contains_key("max_tokens")
@@ -662,7 +691,11 @@ fn output_token_cap_fields(provider: &ResolvedProvider) -> (Option<u32>, Option<
     }
 }
 
-fn append_context_item(item: &ContextItem, messages: &mut Vec<serde_json::Value>) {
+fn append_context_item(
+    item: &ContextItem,
+    messages: &mut Vec<serde_json::Value>,
+    pending_reasoning: &mut Option<String>,
+) {
     match item {
         ContextItem::Message(message) => {
             let text = message_text(message);
@@ -672,13 +705,18 @@ fn append_context_item(item: &ContextItem, messages: &mut Vec<serde_json::Value>
             if text.is_empty() {
                 return;
             }
-            messages.push(serde_json::json!({
-                "role": role_wire(&message.role),
+            let role = role_wire(&message.role);
+            let mut item = serde_json::json!({
+                "role": role,
                 "content": text,
-            }));
+            });
+            if role == "assistant" {
+                attach_pending_reasoning(&mut item, pending_reasoning);
+            }
+            messages.push(item);
         }
         ContextItem::ToolCall(call) => {
-            messages.push(serde_json::json!({
+            let mut item = serde_json::json!({
                 "role": "assistant",
                 "content": null,
                 "tool_calls": [{
@@ -689,7 +727,9 @@ fn append_context_item(item: &ContextItem, messages: &mut Vec<serde_json::Value>
                         "arguments": cbor_to_json(&call.arguments).to_string(),
                     }
                 }]
-            }));
+            });
+            attach_pending_reasoning(&mut item, pending_reasoning);
+            messages.push(item);
         }
         ContextItem::ToolResult(result) => {
             messages.push(serde_json::json!({
@@ -698,11 +738,56 @@ fn append_context_item(item: &ContextItem, messages: &mut Vec<serde_json::Value>
                 "content": tool_result_text(result.status.clone(), &result.output),
             }));
         }
-        ContextItem::Reasoning(_)
-        | ContextItem::CompactionTrigger
+        ContextItem::Reasoning(item) => {
+            if let Some(reasoning) = chat_completions_reasoning_text(item) {
+                append_pending_reasoning(pending_reasoning, reasoning);
+            }
+        }
+        ContextItem::CompactionTrigger
         | ContextItem::Compaction(_)
         | ContextItem::UnknownProviderItem(_) => {}
     }
+}
+
+fn append_pending_reasoning(pending_reasoning: &mut Option<String>, reasoning: String) {
+    if reasoning.is_empty() {
+        return;
+    }
+    if let Some(existing) = pending_reasoning {
+        existing.push_str(&reasoning);
+    } else {
+        *pending_reasoning = Some(reasoning);
+    }
+}
+
+fn attach_pending_reasoning(
+    message: &mut serde_json::Value,
+    pending_reasoning: &mut Option<String>,
+) {
+    let Some(reasoning) = pending_reasoning
+        .take()
+        .filter(|reasoning| !reasoning.is_empty())
+    else {
+        return;
+    };
+    if let Some(object) = message.as_object_mut() {
+        object.insert(
+            "reasoning_content".to_owned(),
+            serde_json::Value::String(reasoning),
+        );
+    }
+}
+
+fn chat_completions_reasoning_text(item: &OpaqueProviderItem) -> Option<String> {
+    let value = cbor_to_json(&item.0);
+    if value.get("type").and_then(|value| value.as_str()) != Some("chat_completions_reasoning") {
+        return None;
+    }
+    value
+        .get("reasoning_content")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 fn message_text(message: &tau_proto::MessageItem) -> String {
@@ -798,6 +883,7 @@ fn apply_event(
             && !reasoning.is_empty()
         {
             state.thinking.push_str(reasoning);
+            state.reasoning.push_str(reasoning);
             changed = true;
         }
     }
@@ -847,6 +933,7 @@ fn append_content_delta(state: &mut StreamState, content: &str) -> bool {
         if state.in_think_tag {
             if let Some(index) = state.pending_content.find("</think>") {
                 state.thinking.push_str(&state.pending_content[..index]);
+                state.reasoning.push_str(&state.pending_content[..index]);
                 state.pending_content.drain(..index + "</think>".len());
                 state.in_think_tag = false;
                 changed = true;
@@ -858,6 +945,7 @@ fn append_content_delta(state: &mut StreamState, content: &str) -> bool {
                 return changed;
             }
             state.thinking.push_str(&state.pending_content[..emit_len]);
+            state.reasoning.push_str(&state.pending_content[..emit_len]);
             state.pending_content.drain(..emit_len);
             return true;
         }
@@ -896,6 +984,7 @@ fn flush_pending_content(state: &mut StreamState, on_update: &mut impl FnMut(&st
     }
     if state.in_think_tag {
         state.thinking.push_str(&state.pending_content);
+        state.reasoning.push_str(&state.pending_content);
     } else {
         state.text.push_str(&state.pending_content);
     }

@@ -103,6 +103,88 @@ fn tool_result_text_uses_structured_status_headers() {
 }
 
 #[test]
+fn reasoning_content_is_persisted_and_replayed_with_tool_call() {
+    // Local reasoning Chat Completions servers may require the assistant's
+    // reasoning_content to be replayed on the assistant tool-call message that
+    // precedes tool results. Dropping it can break tool-call continuation after
+    // the tool response is appended.
+    let mut state = StreamState::new();
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{
+                "delta": { "reasoning_content": "need current date" },
+                "finish_reason": null
+            }]
+        }),
+        &mut |_, _| {},
+    );
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-1",
+                        "type": "function",
+                        "function": { "name": "shell", "arguments": "{\"command\":\"date\"}" }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }),
+        &mut |_, _| {},
+    );
+    let items = state.output_items();
+    assert!(matches!(items[0], ContextItem::Reasoning(_)));
+    assert!(matches!(items[1], ContextItem::ToolCall(_)));
+
+    let mut replay = prompt();
+    replay.context_items = items;
+    let provider = provider();
+    let request = build_request(&resolved_provider(&provider), &provider.models[0], &replay);
+    let json = serde_json::to_value(request).expect("request json");
+
+    assert_eq!(json["messages"][0]["role"], "assistant");
+    assert_eq!(
+        json["messages"][0]["reasoning_content"],
+        "need current date"
+    );
+    assert_eq!(
+        json["messages"][0]["tool_calls"][0]["function"]["name"],
+        "shell"
+    );
+}
+
+#[test]
+fn think_tags_are_persisted_as_reasoning_content() {
+    // Some local servers expose reasoning inside content with <think> tags
+    // instead of a dedicated reasoning_content delta. Preserve the hidden text
+    // for replay while keeping it out of visible assistant content.
+    let mut state = StreamState::new();
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{
+                "delta": { "content": "<think>secret plan</think>visible" },
+                "finish_reason": "stop"
+            }]
+        }),
+        &mut |_, _| {},
+    );
+    let items = state.output_items();
+    assert!(matches!(items[0], ContextItem::Reasoning(_)));
+    let ContextItem::Message(message) = &items[1] else {
+        panic!("expected visible assistant message");
+    };
+    assert!(matches!(
+        &message.content[0],
+        ContentPart::Text { text } if text == "visible"
+    ));
+}
+
+#[test]
 fn provider_config_rejects_unknown_fields() {
     // Chat Completions profiles are user-authored provider config. Unknown
     // fields should fail fast instead of silently disabling an intended setting.

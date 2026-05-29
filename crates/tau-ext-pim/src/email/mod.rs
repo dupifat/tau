@@ -4531,6 +4531,16 @@ pub fn email_tool_spec() -> ToolSpec {
                 }
             },
             "required": ["command"],
+            "allOf": [
+                {
+                    "if": {"properties": {"command": {"enum": ["read", "request_full", "mark_read", "mark_unread", "star", "unstar", "trash"]}}, "required": ["command"]},
+                    "then": {"required": ["args"], "properties": {"args": {"required": ["uid"]}}}
+                },
+                {
+                    "if": {"properties": {"command": {"const": "send"}}, "required": ["command"]},
+                    "then": {"required": ["args"], "properties": {"args": {"required": ["to", "subject", "body_text"]}}}
+                }
+            ],
             "additionalProperties": false
         })),
         format: None,

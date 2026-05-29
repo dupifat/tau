@@ -459,6 +459,18 @@ fn registers_single_email_tool() {
         parameters.pointer("/required").expect("required"),
         &serde_json::json!(["command"])
     );
+    assert_eq!(
+        parameters
+            .pointer("/allOf/0/then/properties/args/required")
+            .expect("uid target requirements"),
+        &serde_json::json!(["uid"])
+    );
+    assert_eq!(
+        parameters
+            .pointer("/allOf/1/then/properties/args/required")
+            .expect("send requirements"),
+        &serde_json::json!(["to", "subject", "body_text"])
+    );
 }
 
 #[test]

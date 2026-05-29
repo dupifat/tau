@@ -15,7 +15,7 @@ use super::ics_feed::TimeRange;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_DEVICE_CODE_URL: &str = "https://oauth2.googleapis.com/device/code";
-const GOOGLE_OAUTH_SCOPE: &str = "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.calendarlist.readonly";
+const GOOGLE_OAUTH_SCOPE: &str = "https://www.googleapis.com/auth/calendar";
 const GOOGLE_CALENDAR_API_BASE: &str = "https://www.googleapis.com/calendar/v3";
 const GOOGLE_SEND_UPDATES: &str = "all";
 const MAX_ERROR_BODY_BYTES: usize = 4096;

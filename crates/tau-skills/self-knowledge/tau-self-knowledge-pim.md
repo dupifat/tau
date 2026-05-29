@@ -70,7 +70,7 @@ Or for one startup, use `TAU_SECRET_<NAME>`, for example `TAU_SECRET_MAIL_PASSWO
 
 ## Google Calendar authorization
 
-For new Google Calendar configs, omit `refresh_token_secret` and use the device flow. Create a Google OAuth client of type `TVs and Limited Input devices`; desktop, web, Android, and iOS client IDs fail the device authorization start request with `invalid_client: Invalid client type`. Google may show both a client id and client secret for that client type. Configure both `client_id_secret` and `client_secret_secret`; the start request uses the client id, and the finish/token exchange can use the client secret.
+For new Google Calendar configs, omit `refresh_token_secret` and use the device flow. Create a Google OAuth client of type `TVs and Limited Input devices`; desktop, web, Android, and iOS client IDs fail the device authorization start request with `invalid_client: Invalid client type`. Google may show both a client id and client secret for that client type. Configure both `client_id_secret` and `client_secret_secret`; the start request uses the client id, and the finish/token exchange can use the client secret. The device flow requests the full Google Calendar scope because Google's device endpoint rejects some narrower Calendar scopes such as `https://www.googleapis.com/auth/calendar.events`.
 
 1. Start Tau with the `std-pim` config and the Google client id and client secret present.
 2. Run `/calendar auth google start <account>`.

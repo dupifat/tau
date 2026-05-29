@@ -678,6 +678,26 @@ fn skill_agent_context_and_fragment_are_staged_until_ready() {
 }
 
 #[test]
+fn startup_session_dir_is_reported_before_extension_ready() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let events = event_log_events(&h);
+    let session_dir = events
+        .iter()
+        .position(|event| matches!(event, Event::HarnessSessionDir(_)))
+        .expect("session dir event");
+    let extension_ready = events
+        .iter()
+        .position(|event| matches!(event, Event::ExtensionReady(_)))
+        .expect("extension ready event");
+
+    assert!(session_dir < extension_ready);
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
 fn agents_context_ready_staged_until_ready_and_queue_waits() {
     // AGENTS.md discovery and the matching context-ready acknowledgement are
     // startup context state. A queued user prompt must wait for Ready, then see

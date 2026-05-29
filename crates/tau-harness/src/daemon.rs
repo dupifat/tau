@@ -661,7 +661,6 @@ pub fn run_harness_daemon_with_internal_tools(
     tracing::debug!(target: "tau_harness::startup", socket_path = %daemon_dir.socket_path().display(), elapsed_ms = startup_started_at.elapsed().as_millis(), "bound daemon socket");
 
     let state_dir = tau_session_inspect::default_state_dir();
-    let sessions_dir = tau_config::settings::sessions_dir_of(&state_dir);
     let dirs = options.dirs.clone().unwrap_or_default();
     tracing::debug!(target: "tau_harness::startup", state_dir = %state_dir.display(), elapsed_ms = startup_started_at.elapsed().as_millis(), "constructing harness");
     let mut harness = Harness::from_config(
@@ -673,15 +672,6 @@ pub fn run_harness_daemon_with_internal_tools(
     )?;
     harness.install_internal_tool_handlers(internal_tool_handlers);
     tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "harness constructed");
-    harness.publish_event(
-        None,
-        Event::HarnessSessionDir(tau_proto::HarnessSessionDir {
-            session_id: eager_session_id.to_owned().into(),
-            path: sessions_dir.join(eager_session_id),
-            status: options.session_status.into(),
-        }),
-    );
-
     // Write marker AFTER extensions are ready.
     tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "writing daemon ready markers");
     daemon_dir.write_marker()?;

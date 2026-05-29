@@ -83,6 +83,17 @@ const SELF_KNOWLEDGE_UI_CONFIG: &str = include_str!("../../tau-config/config/bui
 const SELF_KNOWLEDGE_PIM_CONFIG: &str =
     include_str!("../../tau-ext-pim/config/self-knowledge.harness.yaml");
 
+fn session_dir_status_from_reason(
+    reason: tau_proto::SessionStartReason,
+) -> tau_proto::SessionDirStatus {
+    match reason {
+        tau_proto::SessionStartReason::Initial | tau_proto::SessionStartReason::New => {
+            tau_proto::SessionDirStatus::New
+        }
+        tau_proto::SessionStartReason::Resume => tau_proto::SessionDirStatus::Resumed,
+    }
+}
+
 pub(crate) fn background_completion_prompt(call_id: &ToolCallId) -> String {
     format!(
         "{} Tool call `{call_id}` is complete.",
@@ -1353,6 +1364,7 @@ impl Harness {
         ) {
             harness.rehydrate_agents_from_session();
         }
+        harness.publish_current_session_dir();
 
         for command in extension_connects {
             harness.queue_extension_connect(command)?;
@@ -1590,6 +1602,7 @@ impl Harness {
         ) {
             harness.rehydrate_agents_from_session();
         }
+        harness.publish_current_session_dir();
 
         for command in extension_connects {
             harness.queue_extension_connect(command)?;
@@ -6335,21 +6348,19 @@ impl Harness {
         // session is self-contained.
         let _ = self.enable_debug_log(&self.sessions_dir().join(new_session_id.as_str()));
         self.start_session_init(new_session_id.clone(), reason);
-        let session_status = match reason {
-            tau_proto::SessionStartReason::Initial | tau_proto::SessionStartReason::New => {
-                tau_proto::SessionDirStatus::New
-            }
-            tau_proto::SessionStartReason::Resume => tau_proto::SessionDirStatus::Resumed,
-        };
+        self.publish_current_session_dir();
+        Ok(())
+    }
+
+    fn publish_current_session_dir(&mut self) {
         self.publish_event(
             None,
             Event::HarnessSessionDir(tau_proto::HarnessSessionDir {
-                session_id: new_session_id.clone(),
-                path: self.sessions_dir().join(new_session_id.as_str()),
-                status: session_status,
+                session_id: self.current_session_id.clone(),
+                path: self.sessions_dir().join(self.current_session_id.as_str()),
+                status: session_dir_status_from_reason(self.current_session_start_reason),
             }),
         );
-        Ok(())
     }
 
     fn sessions_dir(&self) -> PathBuf {

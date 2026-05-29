@@ -172,14 +172,32 @@
 
 
     .terminal-preview {
+      position: relative;
+      isolation: isolate;
       max-width: 860px;
       margin: 3rem auto 0;
       padding: 0.5rem;
-      background: #181d20;
-      border: 1px solid #465154;
+      background: rgb(255 255 255 / 0.055);
+      border: 1px solid rgb(255 255 255 / 0.14);
       border-radius: 6px;
-      box-shadow: 0 24px 80px rgb(0 0 0 / 0.35);
+      box-shadow: 0 24px 80px rgb(0 0 0 / 0.36);
+      -webkit-backdrop-filter: blur(18px) saturate(130%);
+      backdrop-filter: blur(18px) saturate(130%);
       text-align: left;
+    }
+
+    .terminal-preview::before {
+      content: "";
+      position: absolute;
+      inset: -1.25rem;
+      z-index: -1;
+      border-radius: 12px;
+      background:
+        radial-gradient(circle at 18% 18%, rgb(42 161 152 / 0.34), transparent 32%),
+        radial-gradient(circle at 82% 8%, rgb(131 148 150 / 0.22), transparent 30%),
+        radial-gradient(circle at 55% 100%, rgb(38 139 210 / 0.2), transparent 36%);
+      filter: blur(22px);
+      opacity: 0.75;
     }
 
     .terminal-titlebar {
@@ -221,8 +239,8 @@
       min-height: 20rem;
       margin: 0;
       padding: 1.25rem;
-      background: #061618;
-      border: 1px solid #384346;
+      background: rgb(6 22 24);
+      border: 1px solid rgb(255 255 255 / 0.08);
       color: var(--base1);
       overflow-x: auto;
       font: inherit;

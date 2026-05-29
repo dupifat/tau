@@ -567,7 +567,7 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
         .find(|skill| skill.name == "tau-self-knowledge-pim")
         .expect("built-in pim skill");
     assert!(!pim.add_to_prompt);
-    assert!(pim.content.contains("__TAU_SELF_KNOWLEDGE_PIM_CONFIG__"));
+    assert!(pim.content.contains("{pim_config}"));
     assert!(pim.content.contains("Google Calendar authorization"));
 
     let source_code = skills

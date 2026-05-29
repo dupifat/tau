@@ -40,7 +40,7 @@ Calendar:
 `std-pim` nests module config under `config.email` and `config.calendar`.
 
 ```yaml
-__TAU_SELF_KNOWLEDGE_PIM_CONFIG__
+{pim_config}
 ```
 
 Important migration from old email-only config:

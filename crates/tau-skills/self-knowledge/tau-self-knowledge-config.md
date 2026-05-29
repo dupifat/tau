@@ -32,13 +32,13 @@ Tau layers these defaults underneath user config and `*.d/*.yaml` drop-ins.
 ### Harness defaults
 
 ```yaml
-__TAU_SELF_KNOWLEDGE_HARNESS_CONFIG__
+{harness_config}
 ```
 
 ### CLI UI defaults
 
 ```yaml
-__TAU_SELF_KNOWLEDGE_UI_CONFIG__
+{ui_config}
 ```
 
 ## Providers

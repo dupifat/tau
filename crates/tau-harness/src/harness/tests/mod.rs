@@ -138,16 +138,21 @@ fn minting_agent_ids_skips_persisted_agent_dirs() {
 }
 
 #[test]
-fn render_self_knowledge_content_inserts_config_defaults() {
-    let rendered = crate::harness::render_self_knowledge_content(std::borrow::Cow::Borrowed(
-        "__TAU_SELF_KNOWLEDGE_HARNESS_CONFIG__\n__TAU_SELF_KNOWLEDGE_UI_CONFIG__\n__TAU_SELF_KNOWLEDGE_PIM_CONFIG__",
-    ));
+fn render_self_knowledge_config_content_inserts_config_defaults() {
+    let rendered = crate::harness::render_self_knowledge_config_content();
 
-    assert!(!rendered.contains("__TAU_SELF_KNOWLEDGE_HARNESS_CONFIG__"));
-    assert!(!rendered.contains("__TAU_SELF_KNOWLEDGE_UI_CONFIG__"));
-    assert!(!rendered.contains("__TAU_SELF_KNOWLEDGE_PIM_CONFIG__"));
+    assert!(!rendered.contains("{harness_config}"));
+    assert!(!rendered.contains("{ui_config}"));
+    assert!(rendered.contains("${XDG_RUNTIME_DIR}/tau/<pid>/"));
     assert!(rendered.contains("session_retention_days: 60"));
     assert!(rendered.contains("show_thinking: true"));
+}
+
+#[test]
+fn render_self_knowledge_pim_content_inserts_config_defaults() {
+    let rendered = crate::harness::render_self_knowledge_pim_content();
+
+    assert!(!rendered.contains("{pim_config}"));
     assert!(rendered.contains("std-pim:"));
     assert!(rendered.contains("calendar:"));
 }

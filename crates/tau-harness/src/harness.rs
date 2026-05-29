@@ -75,9 +75,8 @@ const BUILT_IN_SKILLS_SOURCE_ID: &str = "harness:built-in-skills";
 const SELF_KNOWLEDGE_VERSION_TOKEN: &str = "__TAU_SELF_KNOWLEDGE_VERSION__";
 const SELF_KNOWLEDGE_HASH_TOKEN: &str = "__TAU_SELF_KNOWLEDGE_HASH__";
 const SELF_KNOWLEDGE_BUILD_DATE_TOKEN: &str = "__TAU_SELF_KNOWLEDGE_BUILD_DATE__";
-const SELF_KNOWLEDGE_HARNESS_CONFIG_TOKEN: &str = "__TAU_SELF_KNOWLEDGE_HARNESS_CONFIG__";
-const SELF_KNOWLEDGE_UI_CONFIG_TOKEN: &str = "__TAU_SELF_KNOWLEDGE_UI_CONFIG__";
-const SELF_KNOWLEDGE_PIM_CONFIG_TOKEN: &str = "__TAU_SELF_KNOWLEDGE_PIM_CONFIG__";
+const SELF_KNOWLEDGE_CONFIG_SKILL_NAME: &str = "tau-self-knowledge-config";
+const SELF_KNOWLEDGE_PIM_SKILL_NAME: &str = "tau-self-knowledge-pim";
 const SELF_KNOWLEDGE_HARNESS_CONFIG: &str =
     include_str!("../../tau-config/config/built-in.harness.yaml");
 const SELF_KNOWLEDGE_UI_CONFIG: &str = include_str!("../../tau-config/config/built-in.cli.yaml");
@@ -498,19 +497,45 @@ fn built_in_discovered_skills() -> HashMap<tau_proto::SkillName, DiscoveredSkill
     tau_skills::built_in_skills()
         .into_iter()
         .map(|skill| {
+            let content = render_built_in_self_knowledge_content(&skill.name, skill.content);
             (
                 tau_proto::SkillName::from(skill.name),
                 DiscoveredSkill {
                     source_id: BUILT_IN_SKILLS_SOURCE_ID.into(),
                     description: skill.description,
-                    source: DiscoveredSkillSource::BuiltIn {
-                        content: render_self_knowledge_content(skill.content),
-                    },
+                    source: DiscoveredSkillSource::BuiltIn { content },
                     add_to_prompt: skill.add_to_prompt,
                 },
             )
         })
         .collect()
+}
+
+fn render_built_in_self_knowledge_content(
+    skill_name: &str,
+    content: std::borrow::Cow<'static, str>,
+) -> std::borrow::Cow<'static, str> {
+    match skill_name {
+        SELF_KNOWLEDGE_CONFIG_SKILL_NAME => render_self_knowledge_config_content(),
+        SELF_KNOWLEDGE_PIM_SKILL_NAME => render_self_knowledge_pim_content(),
+        _ => render_self_knowledge_content(content),
+    }
+}
+
+fn render_self_knowledge_config_content() -> std::borrow::Cow<'static, str> {
+    std::borrow::Cow::Owned(format!(
+        include_str!("../../tau-skills/self-knowledge/tau-self-knowledge-config.md"),
+        XDG_RUNTIME_DIR = "{XDG_RUNTIME_DIR}",
+        harness_config = SELF_KNOWLEDGE_HARNESS_CONFIG,
+        ui_config = SELF_KNOWLEDGE_UI_CONFIG,
+    ))
+}
+
+fn render_self_knowledge_pim_content() -> std::borrow::Cow<'static, str> {
+    std::borrow::Cow::Owned(format!(
+        include_str!("../../tau-skills/self-knowledge/tau-self-knowledge-pim.md"),
+        pim_config = SELF_KNOWLEDGE_PIM_CONFIG,
+    ))
 }
 
 fn render_self_knowledge_content(
@@ -521,13 +546,7 @@ fn render_self_knowledge_content(
         content
             .replace(SELF_KNOWLEDGE_VERSION_TOKEN, env!("CARGO_PKG_VERSION"))
             .replace(SELF_KNOWLEDGE_HASH_TOKEN, &crate::version::build_revision())
-            .replace(SELF_KNOWLEDGE_BUILD_DATE_TOKEN, &last_modified)
-            .replace(
-                SELF_KNOWLEDGE_HARNESS_CONFIG_TOKEN,
-                SELF_KNOWLEDGE_HARNESS_CONFIG,
-            )
-            .replace(SELF_KNOWLEDGE_UI_CONFIG_TOKEN, SELF_KNOWLEDGE_UI_CONFIG)
-            .replace(SELF_KNOWLEDGE_PIM_CONFIG_TOKEN, SELF_KNOWLEDGE_PIM_CONFIG),
+            .replace(SELF_KNOWLEDGE_BUILD_DATE_TOKEN, &last_modified),
     )
 }
 

@@ -2572,8 +2572,10 @@ dependencies = [
  "dirs",
  "serde",
  "serde_json",
+ "tau-config",
  "tau-proto",
  "tau-provider",
+ "tracing",
  "ureq",
 ]
 

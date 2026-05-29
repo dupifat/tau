@@ -47,7 +47,8 @@ impl fmt::Display for SecretsError {
             }
             Self::MissingRequired { extension, secret } => write!(
                 f,
-                "required secret `{secret}` for extension `{extension}` is missing; create <state_dir>/secrets/{secret}.yaml or set TAU_SECRET_{}",
+                "required secret `{secret}` for extension `{extension}` is missing; create <state_dir>/secrets/{}.yaml or set TAU_SECRET_{}",
+                secret.to_ascii_lowercase(),
                 secret.to_ascii_uppercase()
             ),
             Self::Io { path, source } => {
@@ -151,8 +152,9 @@ fn resolve_one_secret(
     declaration: &ExtensionSecretEntry,
 ) -> Result<Option<SecretValue>, SecretsError> {
     validate_secret_name(name, format!("extension `{extension}` secrets"))?;
-    let file = read_file_secret(state_dir, name)?;
-    let value = sources.env.get(name).cloned().or(file);
+    let normalized_name = name.to_ascii_lowercase();
+    let file = read_file_secret(state_dir, &normalized_name)?;
+    let value = sources.env.get(&normalized_name).cloned().or(file);
     match value {
         Some(value) if !value.is_empty() => Ok(Some(SecretValue::new(value))),
         _ if declaration.optional => Ok(None),
@@ -255,6 +257,33 @@ mod tests {
         assert_eq!(
             resolved["std-email"]["mail_password"].expose_secret(),
             "env"
+        );
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn uppercase_configured_secret_name_matches_normalized_env() {
+        // Secret names in config and TAU_SECRET_* suffixes are treated
+        // case-insensitively, while the key handed to the extension stays as
+        // configured so extension config can reference the same spelling.
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let mut config = config_with_secret(false);
+        let extension = config.extensions.get_mut("std-email").expect("extension");
+        extension.secrets.clear();
+        extension.secrets.insert(
+            "GOOGLE_CALENDAR_CLIENT_ID".to_owned(),
+            ExtensionSecretEntry { optional: false },
+        );
+        // SAFETY: serialized test-only environment mutation.
+        unsafe { std::env::set_var("TAU_SECRET_GOOGLE_CALENDAR_CLIENT_ID", "client") };
+
+        let sources = load_secret_sources().expect("load sources");
+        let resolved = resolve_extension_secrets(&config, TempDir::new().unwrap().path(), &sources)
+            .expect("resolve secrets");
+
+        assert_eq!(
+            resolved["std-email"]["GOOGLE_CALENDAR_CLIENT_ID"].expose_secret(),
+            "client"
         );
     }
 

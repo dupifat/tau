@@ -183,24 +183,152 @@
       box-shadow: 0 24px 80px rgb(0 0 0 / 0.36);
       -webkit-backdrop-filter: blur(18px) saturate(130%);
       backdrop-filter: blur(18px) saturate(130%);
+      overflow: hidden;
       text-align: left;
     }
 
-    .terminal-preview::before {
-      content: "";
+    .terminal-blob {
       position: absolute;
-      inset: -1.25rem;
-      z-index: -1;
-      border-radius: 12px;
-      background:
-        radial-gradient(circle at 18% 18%, rgb(42 161 152 / 0.34), transparent 32%),
-        radial-gradient(circle at 82% 8%, rgb(131 148 150 / 0.22), transparent 30%),
-        radial-gradient(circle at 55% 100%, rgb(38 139 210 / 0.2), transparent 36%);
-      filter: blur(22px);
-      opacity: 0.75;
+      z-index: 0;
+      display: block;
+      border-radius: 999px;
+      filter: blur(54px);
+      opacity: 0.62;
+      pointer-events: none;
+      will-change: transform;
+    }
+
+    .terminal-blob-a {
+      top: -5rem;
+      left: -4rem;
+      width: 43rem;
+      height: 18rem;
+      background: radial-gradient(ellipse at center, rgb(42 161 152 / 0.33) 0%, rgb(42 161 152 / 0.23) 36%, rgb(42 161 152 / 0.13) 62%, transparent 84%);
+      animation: terminal-blob-a 4.9s ease-in-out infinite alternate;
+      animation-delay: -1.4s;
+    }
+
+    .terminal-blob-b {
+      top: -4rem;
+      right: -5rem;
+      width: 38rem;
+      height: 16rem;
+      background: radial-gradient(ellipse at center, rgb(147 161 161 / 0.19) 0%, rgb(147 161 161 / 0.13) 38%, rgb(147 161 161 / 0.06) 64%, transparent 86%);
+      animation: terminal-blob-b 6.6s ease-in-out infinite alternate-reverse;
+      animation-delay: -3.1s;
+    }
+
+    .terminal-blob-c {
+      left: -8rem;
+      bottom: -7.5rem;
+      width: 52rem;
+      height: 19rem;
+      background: radial-gradient(ellipse at center, rgb(38 139 210 / 0.42) 0%, rgb(38 139 210 / 0.27) 40%, rgb(38 139 210 / 0.14) 66%, transparent 86%);
+      animation: terminal-blob-c 7.9s ease-in-out infinite alternate;
+      animation-delay: -4.8s;
+    }
+
+    .terminal-blob-d {
+      top: 0.5rem;
+      right: 8%;
+      width: 36rem;
+      height: 14.5rem;
+      background: radial-gradient(ellipse at center, rgb(108 113 196 / 0.34) 0%, rgb(108 113 196 / 0.21) 40%, rgb(108 113 196 / 0.1) 66%, transparent 86%);
+      animation: terminal-blob-d 5.8s ease-in-out infinite alternate-reverse;
+      animation-delay: -2.6s;
+    }
+
+    .terminal-blob-e {
+      left: 30%;
+      bottom: -6.5rem;
+      width: 41rem;
+      height: 17rem;
+      background: radial-gradient(ellipse at center, rgb(133 153 0 / 0.4) 0%, rgb(133 153 0 / 0.25) 42%, rgb(133 153 0 / 0.13) 68%, transparent 88%);
+      animation: terminal-blob-e 7s ease-in-out infinite alternate;
+      animation-delay: -0.9s;
+    }
+
+    @keyframes terminal-blob-a {
+      0% {
+        transform: translate(-25.5rem, 5.1rem) rotate(-7deg);
+      }
+
+      45% {
+        transform: translate(30.6rem, -6.8rem) rotate(8deg);
+      }
+
+      100% {
+        transform: translate(10.2rem, 13.6rem) rotate(-3deg);
+      }
+    }
+
+    @keyframes terminal-blob-b {
+      0% {
+        transform: translate(20.4rem, 3.4rem) rotate(5deg);
+      }
+
+      55% {
+        transform: translate(-37.4rem, 23.8rem) rotate(-8deg);
+      }
+
+      100% {
+        transform: translate(-13.6rem, -5.1rem) rotate(2deg);
+      }
+    }
+
+    @keyframes terminal-blob-c {
+      0% {
+        transform: translate(17rem, -3.4rem) rotate(2deg);
+      }
+
+      50% {
+        transform: translate(-34rem, -11.9rem) rotate(-6deg);
+      }
+
+      100% {
+        transform: translate(30.6rem, -6.8rem) rotate(7deg);
+      }
+    }
+
+    @keyframes terminal-blob-d {
+      0% {
+        transform: translate(-27.2rem, -6.8rem) rotate(-5deg);
+      }
+
+      40% {
+        transform: translate(28.9rem, 11.9rem) rotate(7deg);
+      }
+
+      100% {
+        transform: translate(-34rem, 5.1rem) rotate(2deg);
+      }
+    }
+
+    @keyframes terminal-blob-e {
+      0% {
+        transform: translate(27.2rem, 3.4rem) rotate(5deg);
+      }
+
+      60% {
+        transform: translate(-28.9rem, -13.6rem) rotate(-7deg);
+      }
+
+      100% {
+        transform: translate(37.4rem, -6.8rem) rotate(3deg);
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .terminal-blob {
+        animation: none;
+        transform: none;
+        will-change: auto;
+      }
     }
 
     .terminal-titlebar {
+      position: relative;
+      z-index: 1;
       display: flex;
       align-items: center;
       gap: 0.5rem;
@@ -236,6 +364,8 @@
     }
 
     .terminal-body {
+      position: relative;
+      z-index: 1;
       min-height: 20rem;
       margin: 0;
       padding: 1.25rem;
@@ -650,6 +780,11 @@
       <a class="btn-secondary" href="#architecture">Learn more</a>
     </div>
     <div class="terminal-preview" aria-label="Tau terminal preview">
+      <span class="terminal-blob terminal-blob-a" aria-hidden="true"></span>
+      <span class="terminal-blob terminal-blob-b" aria-hidden="true"></span>
+      <span class="terminal-blob terminal-blob-c" aria-hidden="true"></span>
+      <span class="terminal-blob terminal-blob-d" aria-hidden="true"></span>
+      <span class="terminal-blob terminal-blob-e" aria-hidden="true"></span>
       <div class="terminal-titlebar">
         <span class="terminal-dot"></span>
         <span class="terminal-dot"></span>

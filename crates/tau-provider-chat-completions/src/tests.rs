@@ -158,6 +158,68 @@ fn reasoning_content_is_persisted_and_replayed_with_tool_call() {
 }
 
 #[test]
+fn replay_coalesces_assistant_text_and_tool_calls_in_stream_order() {
+    // A single Chat Completions assistant turn can contain reasoning, visible
+    // content, and multiple tool calls. Tau stores those as ordered context
+    // items, so replay must rebuild one assistant message instead of splitting
+    // the content and tool calls into separate turns.
+    let mut state = StreamState::new();
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "reasoning_content": "need two facts",
+                    "content": "I'll check.",
+                },
+                "finish_reason": null
+            }]
+        }),
+        &mut |_, _| {},
+    );
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 1,
+                        "id": "call-b",
+                        "type": "function",
+                        "function": { "name": "grep", "arguments": "{\"pattern\":\"b\"}" }
+                    }, {
+                        "index": 0,
+                        "id": "call-a",
+                        "type": "function",
+                        "function": { "name": "read", "arguments": "{\"path\":\"a\"}" }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }),
+        &mut |_, _| {},
+    );
+    let items = state.output_items();
+    assert!(matches!(items[0], ContextItem::Reasoning(_)));
+    assert!(matches!(items[1], ContextItem::Message(_)));
+    assert!(matches!(items[2], ContextItem::ToolCall(_)));
+    assert!(matches!(items[3], ContextItem::ToolCall(_)));
+
+    let mut replay = prompt();
+    replay.context_items = items;
+    let provider = provider();
+    let request = build_request(&resolved_provider(&provider), &provider.models[0], &replay);
+    let json = serde_json::to_value(request).expect("request json");
+
+    assert_eq!(json["messages"].as_array().expect("messages").len(), 1);
+    assert_eq!(json["messages"][0]["role"], "assistant");
+    assert_eq!(json["messages"][0]["content"], "I'll check.");
+    assert_eq!(json["messages"][0]["reasoning_content"], "need two facts");
+    assert_eq!(json["messages"][0]["tool_calls"][0]["id"], "call-b");
+    assert_eq!(json["messages"][0]["tool_calls"][1]["id"], "call-a");
+}
+
+#[test]
 fn think_tags_are_persisted_as_reasoning_content() {
     // Some local servers expose reasoning inside content with <think> tags
     // instead of a dedicated reasoning_content delta. Preserve the hidden text
@@ -308,7 +370,7 @@ fn non_empty_end_turn_is_accepted() {
     // A normal assistant text response should not be affected by the empty-turn
     // guard.
     let mut state = StreamState::new();
-    state.text = "done".to_owned();
+    state.append_assistant_text_delta("done");
 
     assert!(ensure_non_empty_end_turn(state).is_ok());
 }
@@ -319,14 +381,10 @@ fn tool_call_turn_is_accepted_without_text() {
     // parsed tool call is present.
     let mut state = StreamState::new();
     state.stop_reason = ProviderStopReason::ToolCalls;
-    state.tool_calls.insert(
-        0,
-        ToolCallAccumulator {
-            id: "call-1".to_owned(),
-            name: "shell".to_owned(),
-            arguments: "{}".to_owned(),
-        },
-    );
+    let call = state.tool_call_at_mut(0);
+    call.id = "call-1".to_owned();
+    call.name = "shell".to_owned();
+    call.arguments = "{}".to_owned();
 
     assert!(ensure_non_empty_end_turn(state).is_ok());
 }

@@ -297,10 +297,10 @@ impl std::fmt::Display for LlmError {
 struct StreamState {
     text: String,
     thinking: String,
-    reasoning: String,
+    output_items: Vec<OutputItemAccumulator>,
     pending_content: String,
     in_think_tag: bool,
-    tool_calls: HashMap<usize, ToolCallAccumulator>,
+    tool_call_output_indices: HashMap<usize, usize>,
     input_tokens: Option<u64>,
     cached_tokens: Option<u64>,
     output_tokens: Option<u64>,
@@ -312,10 +312,10 @@ impl StreamState {
         Self {
             text: String::new(),
             thinking: String::new(),
-            reasoning: String::new(),
+            output_items: Vec::new(),
             pending_content: String::new(),
             in_think_tag: false,
-            tool_calls: HashMap::new(),
+            tool_call_output_indices: HashMap::new(),
             input_tokens: None,
             cached_tokens: None,
             output_tokens: None,
@@ -324,38 +324,53 @@ impl StreamState {
     }
 
     fn output_items(&self) -> Vec<ContextItem> {
-        let mut items = Vec::new();
-        let has_tool_calls = self.tool_calls.values().any(|call| !call.name.is_empty());
-        if !self.text.is_empty() {
-            if !has_tool_calls && let Some(item) = reasoning_context_item(&self.reasoning) {
-                items.push(item);
-            }
-            items.push(assistant_text_item(self.text.clone()));
+        self.output_items
+            .iter()
+            .filter_map(OutputItemAccumulator::context_item)
+            .collect()
+    }
+
+    fn append_assistant_text_delta(&mut self, delta: &str) {
+        if delta.is_empty() {
+            return;
         }
-        if has_tool_calls && let Some(item) = reasoning_context_item(&self.reasoning) {
-            items.push(item);
+        self.text.push_str(delta);
+        if let Some(OutputItemAccumulator::Message(text)) = self.output_items.last_mut() {
+            text.push_str(delta);
+        } else {
+            self.output_items
+                .push(OutputItemAccumulator::Message(delta.to_owned()));
         }
-        if self.text.is_empty()
-            && !has_tool_calls
-            && let Some(item) = reasoning_context_item(&self.reasoning)
-        {
-            items.push(item);
+    }
+
+    fn append_reasoning_delta(&mut self, delta: &str) {
+        if delta.is_empty() {
+            return;
         }
-        let mut tool_calls = self.tool_calls.iter().collect::<Vec<_>>();
-        tool_calls.sort_by_key(|(index, _)| **index);
-        for (_, call) in tool_calls {
-            if !call.name.is_empty() {
-                items.push(ContextItem::ToolCall(ToolCallItem {
-                    call_id: call.id.clone().into(),
-                    name: tau_proto::ToolName::new(call.name.clone()),
-                    tool_type: ToolType::Function,
-                    arguments: serde_json::from_str::<serde_json::Value>(&call.arguments)
-                        .map(|value| json_to_cbor(&value))
-                        .unwrap_or(tau_proto::CborValue::Null),
-                }));
-            }
+        self.thinking.push_str(delta);
+        if let Some(OutputItemAccumulator::Reasoning(reasoning)) = self.output_items.last_mut() {
+            reasoning.push_str(delta);
+        } else {
+            self.output_items
+                .push(OutputItemAccumulator::Reasoning(delta.to_owned()));
         }
-        items
+    }
+
+    fn tool_call_at_mut(&mut self, stream_index: usize) -> &mut ToolCallAccumulator {
+        let output_index = *self
+            .tool_call_output_indices
+            .entry(stream_index)
+            .or_insert_with(|| {
+                let output_index = self.output_items.len();
+                self.output_items.push(OutputItemAccumulator::ToolCall(
+                    ToolCallAccumulator::default(),
+                ));
+                output_index
+            });
+        let OutputItemAccumulator::ToolCall(call) = &mut self.output_items[output_index] else {
+            unreachable!("tool-call slot was just initialized");
+        };
+        call
     }
 
     fn usage(&self) -> Option<ProviderTokenUsage> {
@@ -376,11 +391,31 @@ impl StreamState {
     }
 
     fn has_output_items(&self) -> bool {
-        !self.text.is_empty() || self.tool_calls.values().any(|call| !call.name.is_empty())
+        self.output_items.iter().any(|item| match item {
+            OutputItemAccumulator::Message(text) => !text.is_empty(),
+            OutputItemAccumulator::Reasoning(reasoning) => !reasoning.is_empty(),
+            OutputItemAccumulator::ToolCall(call) => !call.name.is_empty(),
+        })
     }
 
     fn is_empty_end_turn(&self) -> bool {
         self.stop_reason == ProviderStopReason::EndTurn && !self.has_output_items()
+    }
+}
+
+enum OutputItemAccumulator {
+    Message(String),
+    Reasoning(String),
+    ToolCall(ToolCallAccumulator),
+}
+
+impl OutputItemAccumulator {
+    fn context_item(&self) -> Option<ContextItem> {
+        match self {
+            Self::Message(text) => (!text.is_empty()).then(|| assistant_text_item(text.clone())),
+            Self::Reasoning(reasoning) => reasoning_context_item(reasoning),
+            Self::ToolCall(call) => call.context_item(),
+        }
     }
 }
 
@@ -389,6 +424,22 @@ struct ToolCallAccumulator {
     id: String,
     name: String,
     arguments: String,
+}
+
+impl ToolCallAccumulator {
+    fn context_item(&self) -> Option<ContextItem> {
+        if self.name.is_empty() {
+            return None;
+        }
+        Some(ContextItem::ToolCall(ToolCallItem {
+            call_id: self.id.clone().into(),
+            name: tau_proto::ToolName::new(self.name.clone()),
+            tool_type: ToolType::Function,
+            arguments: serde_json::from_str::<serde_json::Value>(&self.arguments)
+                .map(|value| json_to_cbor(&value))
+                .unwrap_or(tau_proto::CborValue::Null),
+        }))
+    }
 }
 
 fn chat_completions_stream(
@@ -716,20 +767,7 @@ fn append_context_item(
             messages.push(item);
         }
         ContextItem::ToolCall(call) => {
-            let mut item = serde_json::json!({
-                "role": "assistant",
-                "content": null,
-                "tool_calls": [{
-                    "id": call.call_id,
-                    "type": "function",
-                    "function": {
-                        "name": call.name,
-                        "arguments": cbor_to_json(&call.arguments).to_string(),
-                    }
-                }]
-            });
-            attach_pending_reasoning(&mut item, pending_reasoning);
-            messages.push(item);
+            append_tool_call_message(messages, pending_reasoning, call);
         }
         ContextItem::ToolResult(result) => {
             messages.push(serde_json::json!({
@@ -747,6 +785,42 @@ fn append_context_item(
         | ContextItem::Compaction(_)
         | ContextItem::UnknownProviderItem(_) => {}
     }
+}
+
+fn append_tool_call_message(
+    messages: &mut Vec<serde_json::Value>,
+    pending_reasoning: &mut Option<String>,
+    call: &ToolCallItem,
+) {
+    let tool_call = serde_json::json!({
+        "id": call.call_id,
+        "type": "function",
+        "function": {
+            "name": call.name,
+            "arguments": cbor_to_json(&call.arguments).to_string(),
+        }
+    });
+    if let Some(last) = messages.last_mut()
+        && last.get("role").and_then(|value| value.as_str()) == Some("assistant")
+        && last.get("tool_call_id").is_none()
+        && let Some(object) = last.as_object_mut()
+    {
+        attach_pending_reasoning_to_object(object, pending_reasoning);
+        let entry = object
+            .entry("tool_calls".to_owned())
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        if let Some(tool_calls) = entry.as_array_mut() {
+            tool_calls.push(tool_call);
+            return;
+        }
+    }
+    let mut item = serde_json::json!({
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [tool_call]
+    });
+    attach_pending_reasoning(&mut item, pending_reasoning);
+    messages.push(item);
 }
 
 fn append_pending_reasoning(pending_reasoning: &mut Option<String>, reasoning: String) {
@@ -771,11 +845,24 @@ fn attach_pending_reasoning(
         return;
     };
     if let Some(object) = message.as_object_mut() {
-        object.insert(
-            "reasoning_content".to_owned(),
-            serde_json::Value::String(reasoning),
-        );
+        attach_pending_reasoning_to_object(object, &mut Some(reasoning));
     }
+}
+
+fn attach_pending_reasoning_to_object(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    pending_reasoning: &mut Option<String>,
+) {
+    let Some(reasoning) = pending_reasoning
+        .take()
+        .filter(|reasoning| !reasoning.is_empty())
+    else {
+        return;
+    };
+    object.insert(
+        "reasoning_content".to_owned(),
+        serde_json::Value::String(reasoning),
+    );
 }
 
 fn chat_completions_reasoning_text(item: &OpaqueProviderItem) -> Option<String> {
@@ -860,12 +947,12 @@ fn apply_event(
     if let Some(error) = event.get("error")
         && let Some(message) = error.get("message").and_then(|m| m.as_str())
     {
+        let mut text = String::new();
         if !state.text.is_empty() {
-            state.text.push_str("\n\n");
+            text.push_str("\n\n");
         }
-        state
-            .text
-            .push_str(&format!("[OpenRouter Stream Error: {message}]"));
+        text.push_str(&format!("[OpenRouter Stream Error: {message}]"));
+        state.append_assistant_text_delta(&text);
         state.stop_reason = ProviderStopReason::Error;
         on_update(&state.text, thinking_for_update(state));
         return;
@@ -882,8 +969,7 @@ fn apply_event(
         if let Some(reasoning) = delta[key].as_str()
             && !reasoning.is_empty()
         {
-            state.thinking.push_str(reasoning);
-            state.reasoning.push_str(reasoning);
+            state.append_reasoning_delta(reasoning);
             changed = true;
         }
     }
@@ -898,7 +984,7 @@ fn apply_event(
     if let Some(tool_calls) = delta["tool_calls"].as_array() {
         for tool_call in tool_calls {
             let index = tool_call["index"].as_u64().unwrap_or(0) as usize;
-            let entry = state.tool_calls.entry(index).or_default();
+            let entry = state.tool_call_at_mut(index);
             if let Some(id) = tool_call["id"].as_str()
                 && !id.is_empty()
             {
@@ -932,8 +1018,8 @@ fn append_content_delta(state: &mut StreamState, content: &str) -> bool {
         }
         if state.in_think_tag {
             if let Some(index) = state.pending_content.find("</think>") {
-                state.thinking.push_str(&state.pending_content[..index]);
-                state.reasoning.push_str(&state.pending_content[..index]);
+                let reasoning = state.pending_content[..index].to_owned();
+                state.append_reasoning_delta(&reasoning);
                 state.pending_content.drain(..index + "</think>".len());
                 state.in_think_tag = false;
                 changed = true;
@@ -944,14 +1030,15 @@ fn append_content_delta(state: &mut StreamState, content: &str) -> bool {
             if emit_len == 0 {
                 return changed;
             }
-            state.thinking.push_str(&state.pending_content[..emit_len]);
-            state.reasoning.push_str(&state.pending_content[..emit_len]);
+            let reasoning = state.pending_content[..emit_len].to_owned();
+            state.append_reasoning_delta(&reasoning);
             state.pending_content.drain(..emit_len);
             return true;
         }
 
         if let Some(index) = state.pending_content.find("<think>") {
-            state.text.push_str(&state.pending_content[..index]);
+            let text = state.pending_content[..index].to_owned();
+            state.append_assistant_text_delta(&text);
             state.pending_content.drain(..index + "<think>".len());
             state.in_think_tag = true;
             changed = true;
@@ -962,7 +1049,8 @@ fn append_content_delta(state: &mut StreamState, content: &str) -> bool {
         if emit_len == 0 {
             return changed;
         }
-        state.text.push_str(&state.pending_content[..emit_len]);
+        let text = state.pending_content[..emit_len].to_owned();
+        state.append_assistant_text_delta(&text);
         state.pending_content.drain(..emit_len);
         return true;
     }
@@ -983,10 +1071,11 @@ fn flush_pending_content(state: &mut StreamState, on_update: &mut impl FnMut(&st
         return;
     }
     if state.in_think_tag {
-        state.thinking.push_str(&state.pending_content);
-        state.reasoning.push_str(&state.pending_content);
+        let reasoning = state.pending_content.clone();
+        state.append_reasoning_delta(&reasoning);
     } else {
-        state.text.push_str(&state.pending_content);
+        let text = state.pending_content.clone();
+        state.append_assistant_text_delta(&text);
     }
     state.pending_content.clear();
     on_update(&state.text, thinking_for_update(state));

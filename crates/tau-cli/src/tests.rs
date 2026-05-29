@@ -194,8 +194,9 @@ fn local_slash_commands_are_identified_for_history_rendering() {
     assert!(is_local_slash_command("/agent suspend"));
     assert!(is_local_slash_command("/agent resume worker-1"));
     assert!(is_local_slash_command("/agent new"));
+    assert!(is_local_slash_command("/new"));
+    assert!(is_local_slash_command("/new now"));
     assert!(is_local_slash_command("/session new"));
-    assert!(!is_local_slash_command("/new"));
     assert!(!is_local_slash_command("/unknown please answer"));
     assert!(!is_local_slash_command("hello /model engineer"));
 }

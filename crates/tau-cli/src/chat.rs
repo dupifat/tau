@@ -328,6 +328,7 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("/model", "Switch agent role (e.g. /model engineer)"),
     ("/agent", "Manage visible/suspended agent transcripts"),
+    ("/new", "Alias for /agent new"),
     ("/role", "Switch, create, edit, or delete an agent role"),
     (
         "/session",
@@ -1239,6 +1240,10 @@ impl<'a> TerminalInputSession<'a> {
             self.handle_agent_command(text);
             return true;
         }
+        if text == "/new" || text.starts_with("/new ") {
+            self.handle_new_alias(text);
+            return true;
+        }
         if text == "/set" || text.starts_with("/set ") {
             let output = &self.output;
             handle_set_command(text, &self.ctx.renderer_tx, &|message| {
@@ -1297,6 +1302,14 @@ impl<'a> TerminalInputSession<'a> {
                 "/agent <new|switch|suspend|resume> [agent_id]; use /agent switch <agent_id>",
             ),
         }
+    }
+
+    fn handle_new_alias(&self, text: &str) {
+        if text.trim() != "/new" {
+            self.output.system_info("/new");
+            return;
+        }
+        self.handle_agent_new(None);
     }
 
     fn selected_agent_id(&self) -> Option<String> {
@@ -1992,6 +2005,7 @@ pub(crate) fn is_local_slash_command(text: &str) -> bool {
             | "/fast"
             | "/provider-auth"
             | "/agent"
+            | "/new"
             | "/set"
             | "/role"
             | "/model"
@@ -2168,8 +2182,8 @@ mod role_cycle_tests {
 
     #[test]
     fn session_completer_offers_new_subcommand() {
-        // `/session new` replaces the old top-level `/new` command, so the
-        // namespace needs a first-argument completion that exposes the rename.
+        // `/session new` is the session-level fresh-start command; `/new` is
+        // reserved as an alias for `/agent new`.
         let completer = build_session_arg_completer();
 
         let values: Vec<_> = completer(&[""])

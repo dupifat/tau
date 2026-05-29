@@ -51,8 +51,9 @@ pub enum CalendarBackendConfig {
         client_id_secret: String,
         /// Optional secret containing the OAuth client secret.
         client_secret_secret: Option<String>,
-        /// Secret containing a Google OAuth refresh token.
-        refresh_token_secret: String,
+        /// Secret containing a Google OAuth refresh token. If omitted, use
+        /// `/calendar auth google` to store account auth in calendar state.
+        refresh_token_secret: Option<String>,
         /// Optional Google Calendar API base URL for tests or proxies.
         api_base: Option<String>,
     },
@@ -220,8 +221,9 @@ pub enum ValidatedBackendConfig {
         client_id_secret: String,
         /// Optional secret containing the OAuth client secret.
         client_secret_secret: Option<String>,
-        /// Secret containing a Google OAuth refresh token.
-        refresh_token_secret: String,
+        /// Secret containing a Google OAuth refresh token. If omitted, use
+        /// `/calendar auth google` to store account auth in calendar state.
+        refresh_token_secret: Option<String>,
         /// Optional Google Calendar API base URL for tests or proxies.
         api_base: Option<String>,
     },
@@ -312,7 +314,9 @@ impl ValidatedAccount {
                 api_base,
             }) => {
                 validate_secret_name("google client_id_secret", &client_id_secret)?;
-                validate_secret_name("google refresh_token_secret", &refresh_token_secret)?;
+                if let Some(secret) = &refresh_token_secret {
+                    validate_secret_name("google refresh_token_secret", secret)?;
+                }
                 if let Some(secret) = &client_secret_secret {
                     validate_secret_name("google client_secret_secret", secret)?;
                 }
@@ -496,7 +500,7 @@ mod tests {
                 backend: Some(CalendarBackendConfig::Google {
                     client_id_secret: "../client".to_owned(),
                     client_secret_secret: None,
-                    refresh_token_secret: "refresh".to_owned(),
+                    refresh_token_secret: Some("refresh".to_owned()),
                     api_base: None,
                 }),
                 ..Default::default()
@@ -542,11 +546,42 @@ mod tests {
         assert!(err.contains("loopback"), "{err}");
     }
 
+    #[test]
+    fn google_config_allows_missing_refresh_token_for_action_auth() {
+        // Interactive `/calendar auth google` stores refresh tokens in private
+        // extension state, so the manual refresh token secret is optional.
+        let cfg = CalendarExtensionConfig {
+            enable: true,
+            accounts: vec![CalendarAccountConfig {
+                id: "google".to_owned(),
+                backend: Some(CalendarBackendConfig::Google {
+                    client_id_secret: "client".to_owned(),
+                    client_secret_secret: None,
+                    refresh_token_secret: None,
+                    api_base: None,
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let config = cfg.validate().expect("missing refresh token is allowed");
+        let account = config.accounts.get("google").expect("google account");
+        let Some(ValidatedBackendConfig::Google {
+            refresh_token_secret,
+            ..
+        }) = &account.backend
+        else {
+            panic!("google backend expected");
+        };
+        assert!(refresh_token_secret.is_none());
+    }
+
     fn google_backend_with_api_base(api_base: &str) -> CalendarBackendConfig {
         CalendarBackendConfig::Google {
             client_id_secret: "client".to_owned(),
             client_secret_secret: None,
-            refresh_token_secret: "refresh".to_owned(),
+            refresh_token_secret: Some("refresh".to_owned()),
             api_base: Some(api_base.to_owned()),
         }
     }

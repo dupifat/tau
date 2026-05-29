@@ -275,11 +275,14 @@ can be reviewed with `/email log last [number]`.
 The same extension also owns the `calendar` tool and `/calendar` action schema.
 Read-only `ics_feed` accounts can list calendars, list events, read event
 details, and return free/busy blocks from bounded iCalendar feeds. Google
-Calendar accounts using user-provided OAuth refresh-token secrets support the
-same read/free-busy operations plus create, update, delete, and invite-response
-mutations through the native Calendar API. Calendar writes are queued for
-`/calendar change` approval by default, require ETags for existing events, and
-use provider conditional requests to avoid stale overwrites. Calendar reads and
+Calendar accounts can use `/calendar auth google start <account>` and
+`/calendar auth google finish <account>` to store OAuth refresh tokens in
+private extension state, or continue using manually supplied refresh-token
+secrets. They support the same read/free-busy operations plus create, update,
+delete, and invite-response mutations through the native Calendar API. Google
+access tokens are cached in memory until near expiry. Calendar writes are queued
+for `/calendar change` approval by default, require ETags for existing events,
+and use provider conditional requests to avoid stale overwrites. Calendar reads and
 write requests are logged to `logs/calendar.jsonl` and can be reviewed with
 `/calendar log last [number]`. Calendar tool results use the same structured
 `ok`/`command`/`status`/`data` envelope as email, with `format` fields and

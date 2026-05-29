@@ -31,10 +31,39 @@ pub fn calendar_action_schema() -> ActionSchema {
         version: ACTION_SCHEMA_VERSION,
         roots: vec![ActionCommand {
             name: "/calendar".to_owned(),
-            description: "Review calendar logs and pending calendar changes".to_owned(),
+            description: "Authorize Google Calendar, review logs, and approve pending changes"
+                .to_owned(),
             action_id: None,
             args: Vec::new(),
             children: vec![
+                ActionCommand {
+                    name: "auth".to_owned(),
+                    description: "Calendar account authorization".to_owned(),
+                    action_id: None,
+                    args: Vec::new(),
+                    children: vec![ActionCommand {
+                        name: "google".to_owned(),
+                        description: "Google Calendar OAuth device authorization".to_owned(),
+                        action_id: None,
+                        args: Vec::new(),
+                        children: vec![
+                            ActionCommand {
+                                name: "start".to_owned(),
+                                description: "Start Google Calendar authorization".to_owned(),
+                                action_id: Some("calendar.auth.google.start".to_owned()),
+                                args: vec![string_arg("account", "Calendar account id")],
+                                children: Vec::new(),
+                            },
+                            ActionCommand {
+                                name: "finish".to_owned(),
+                                description: "Finish Google Calendar authorization".to_owned(),
+                                action_id: Some("calendar.auth.google.finish".to_owned()),
+                                args: vec![string_arg("account", "Calendar account id")],
+                                children: Vec::new(),
+                            },
+                        ],
+                    }],
+                },
                 ActionCommand {
                     name: "log".to_owned(),
                     description: "Calendar activity log".to_owned(),

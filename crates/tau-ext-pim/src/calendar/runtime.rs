@@ -12,7 +12,7 @@ use super::config::{
 };
 use super::google::{GoogleBackend, GoogleEvent, GoogleEventWrite};
 use super::ics_feed::{IcsEvent, IcsFeedBackend, TimeRange, parse_rfc3339_bound};
-use super::state::{CalendarChangeApproval, CalendarLogEntry, StateStore};
+use super::state::{CalendarChangeApproval, CalendarLogEntry, GooglePendingAuth, StateStore};
 use super::tool::{CalendarArgs, CalendarCommand, ToolInvocation};
 
 const LIST_ACCOUNTS_FORMAT: &str = "id flags backend default_calendar timezone display_name";
@@ -182,6 +182,12 @@ impl Engine {
 
     fn dispatch_action(&self, action_id: &str, argv: &[String]) -> Result<String, String> {
         match action_id {
+            "calendar.auth.google.start" => {
+                require_one_arg(argv).and_then(|account| self.action_auth_google_start(account))
+            }
+            "calendar.auth.google.finish" => {
+                require_one_arg(argv).and_then(|account| self.action_auth_google_finish(account))
+            }
             "calendar.log.last" => {
                 parse_log_limit(argv).and_then(|limit| self.action_log_last(limit))
             }
@@ -199,6 +205,61 @@ impl Engine {
             }
             _ => Err(format!("unknown calendar action `{action_id}`")),
         }
+    }
+
+    fn action_auth_google_start(&self, account_id: &str) -> Result<String, String> {
+        let account = self.google_oauth_state_account(account_id)?;
+        let started = self.google.start_device_auth(account)?;
+        let pending = GooglePendingAuth::new(
+            &account.id,
+            &started.device_code,
+            &started.user_code,
+            &started.verification_uri,
+            started.expires_in_secs,
+            started.interval_secs,
+        );
+        self.state.save_pending_google_auth(&pending)?;
+        Ok(format!(
+            "Google Calendar authorization started for account {}.\nOpen this URL:\n{}\nEnter this code:\n{}\nThen run:\n/calendar auth google finish {}\nExpires in {} second(s). If authorization is still pending, wait at least {} second(s) before retrying finish.",
+            safe_display_line(&account.id),
+            safe_display_line(&started.verification_uri),
+            safe_display_line(&started.user_code),
+            safe_display_line(&account.id),
+            started.expires_in_secs,
+            started.interval_secs
+        ))
+    }
+
+    fn action_auth_google_finish(&self, account_id: &str) -> Result<String, String> {
+        let account = self.google_oauth_state_account(account_id)?;
+        let pending = self.state.pending_google_auth(&account.id)?;
+        if pending.expired() {
+            self.state.clear_pending_google_auth(&account.id)?;
+            return Err(format!(
+                "Google authorization for account `{}` expired; run `/calendar auth google start {}` again",
+                safe_display_line(&account.id),
+                safe_display_line(&account.id)
+            ));
+        }
+        let finished = self
+            .google
+            .finish_device_auth(account, &pending.device_code)?;
+        self.state
+            .save_google_refresh_token(&account.id, &finished.refresh_token)?;
+        self.state.clear_pending_google_auth(&account.id)?;
+        if let Some(access_token) = finished.access_token
+            && let Err(message) = self.google.prime_access_token_cache(
+                &account.id,
+                access_token,
+                finished.expires_in_secs,
+            )
+        {
+            tracing::warn!(target: crate::LOG_TARGET, error = %message, "failed to prime Google Calendar access token cache");
+        }
+        Ok(format!(
+            "Google Calendar authorization stored for account {}.",
+            safe_display_line(&account.id)
+        ))
     }
 
     fn action_log_last(&self, limit: usize) -> Result<String, String> {
@@ -449,7 +510,11 @@ impl Engine {
                         }
                     }
                     Some(ValidatedBackendConfig::Google { .. }) => {
-                        for calendar in self.google.list_calendars(account)? {
+                        let stored_refresh_token = self.google_refresh_token(account)?;
+                        for calendar in self
+                            .google
+                            .list_calendars(account, stored_refresh_token.as_deref())?
+                        {
                             let flags = if calendar.read_only {
                                 "read_only"
                             } else {
@@ -517,7 +582,13 @@ impl Engine {
                 BackendEvent::Ics(self.ics_feed.read_event(account, calendar, event_id)?)
             }
             Some(ValidatedBackendConfig::Google { .. }) => {
-                BackendEvent::Google(self.google.read_event(account, calendar, event_id)?)
+                let stored_refresh_token = self.google_refresh_token(account)?;
+                BackendEvent::Google(self.google.read_event(
+                    account,
+                    stored_refresh_token.as_deref(),
+                    calendar,
+                    event_id,
+                )?)
             }
             Some(ValidatedBackendConfig::Caldav { .. }) | None => {
                 return Err(format!(
@@ -704,10 +775,12 @@ impl Engine {
     ) -> Result<CalendarMutationResult, String> {
         let account = self.account_by_id(&change.account)?;
         self.ensure_calendar_allowed(account, &change.calendar)?;
+        let stored_refresh_token = self.google_refresh_token(account)?;
         match change.command.as_str() {
             "create_event" => {
                 let event = self.google.create_event(
                     account,
+                    stored_refresh_token.as_deref(),
                     &change.calendar,
                     &google_write_from_change(change),
                 )?;
@@ -718,6 +791,7 @@ impl Engine {
                 let etag = required_change_field(change.etag.as_deref(), "etag")?;
                 let event = self.google.update_event(
                     account,
+                    stored_refresh_token.as_deref(),
                     &change.calendar,
                     event_id,
                     etag,
@@ -728,8 +802,13 @@ impl Engine {
             "delete_event" => {
                 let event_id = required_change_field(change.event_id.as_deref(), "event_id")?;
                 let etag = required_change_field(change.etag.as_deref(), "etag")?;
-                self.google
-                    .delete_event(account, &change.calendar, event_id, etag)?;
+                self.google.delete_event(
+                    account,
+                    stored_refresh_token.as_deref(),
+                    &change.calendar,
+                    event_id,
+                    etag,
+                )?;
                 Ok(CalendarMutationResult::Deleted)
             }
             "respond_invite" => {
@@ -738,6 +817,7 @@ impl Engine {
                 let response = required_change_field(change.response.as_deref(), "response")?;
                 let event = self.google.respond_invite(
                     account,
+                    stored_refresh_token.as_deref(),
                     &change.calendar,
                     event_id,
                     etag,
@@ -769,9 +849,15 @@ impl Engine {
                 })
             }
             Some(ValidatedBackendConfig::Google { .. }) => {
-                let page = self
-                    .google
-                    .list_events_page(account, calendar, range, limit, cursor)?;
+                let stored_refresh_token = self.google_refresh_token(account)?;
+                let page = self.google.list_events_page(
+                    account,
+                    stored_refresh_token.as_deref(),
+                    calendar,
+                    range,
+                    limit,
+                    cursor,
+                )?;
                 let truncated = page.next_cursor.is_some();
                 Ok(BackendEventPage {
                     events: page.events.into_iter().map(BackendEvent::Google).collect(),
@@ -864,6 +950,52 @@ impl Engine {
             "calendar `{calendar}` is not allowed for account `{}`",
             account.id
         ))
+    }
+
+    fn google_oauth_state_account(&self, account_id: &str) -> Result<&ValidatedAccount, String> {
+        let account = self.account_by_id(account_id)?;
+        match &account.backend {
+            Some(ValidatedBackendConfig::Google {
+                refresh_token_secret: None,
+                ..
+            }) => Ok(account),
+            Some(ValidatedBackendConfig::Google { .. }) => Err(format!(
+                "calendar account `{}` already uses refresh_token_secret; remove it before using `/calendar auth google`",
+                account.id
+            )),
+            _ => Err(format!(
+                "calendar account `{}` backend `{}` is not google",
+                account.id,
+                account.backend_kind()
+            )),
+        }
+    }
+
+    fn google_refresh_token(&self, account: &ValidatedAccount) -> Result<Option<String>, String> {
+        match &account.backend {
+            Some(ValidatedBackendConfig::Google {
+                refresh_token_secret: Some(_),
+                ..
+            }) => Ok(None),
+            Some(ValidatedBackendConfig::Google {
+                refresh_token_secret: None,
+                ..
+            }) => self
+                .state
+                .google_refresh_token(&account.id)?
+                .map(Some)
+                .ok_or_else(|| {
+                    format!(
+                        "Google calendar account `{}` is not authorized; run `/calendar auth google start {}` and then `/calendar auth google finish {}`",
+                        account.id, account.id, account.id
+                    )
+                }),
+            _ => Err(format!(
+                "calendar account `{}` backend `{}` is not google",
+                account.id,
+                account.backend_kind()
+            )),
+        }
     }
 }
 
@@ -1741,7 +1873,14 @@ fn calendar_error_envelope(command: Option<&str>, message: &str) -> CborValue {
 }
 
 fn calendar_error_code(message: &str) -> &'static str {
-    if message.starts_with("Google Calendar API")
+    if (message.starts_with("Google calendar account") && message.contains("not authorized"))
+        || (message.starts_with("refreshing Google access token")
+            && (message.contains("invalid_grant")
+                || message.contains("invalid_client")
+                || message.contains("unauthorized_client")))
+    {
+        "auth_error"
+    } else if message.starts_with("Google Calendar API")
         || message.starts_with("Google token response")
         || message.starts_with("Google create event response")
         || message.starts_with("Google update event response")
@@ -2083,7 +2222,7 @@ mod tests {
                 backend: Some(CalendarBackendConfig::Google {
                     client_id_secret: "google_client_id".to_owned(),
                     client_secret_secret: None,
-                    refresh_token_secret: "google_refresh_token".to_owned(),
+                    refresh_token_secret: Some("google_refresh_token".to_owned()),
                     api_base: None,
                 }),
                 calendars: Default::default(),
@@ -2181,7 +2320,7 @@ mod tests {
                 backend: Some(CalendarBackendConfig::Google {
                     client_id_secret: "client".to_owned(),
                     client_secret_secret: None,
-                    refresh_token_secret: "refresh".to_owned(),
+                    refresh_token_secret: Some("refresh".to_owned()),
                     api_base: None,
                 }),
                 calendars: CalendarSelectionConfig {
@@ -2232,6 +2371,54 @@ mod tests {
     }
 
     #[test]
+    fn google_reads_without_stored_auth_report_auth_error() {
+        // Accounts that opt into action-owned OAuth should fail before any
+        // network call until `/calendar auth google` stores a refresh token.
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let cfg = CalendarExtensionConfig {
+            enable: true,
+            accounts: vec![CalendarAccountConfig {
+                id: "google".to_owned(),
+                enable: true,
+                backend: Some(CalendarBackendConfig::Google {
+                    client_id_secret: "client".to_owned(),
+                    client_secret_secret: None,
+                    refresh_token_secret: None,
+                    api_base: None,
+                }),
+                calendars: CalendarSelectionConfig {
+                    default: Some("primary".to_owned()),
+                    allow: vec!["primary".to_owned()],
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let engine = Engine {
+            config: cfg.validate().expect("valid config"),
+            state: StateStore::open(temp.path().join("state")).expect("state"),
+            google: GoogleBackend::new(BTreeMap::new()),
+            ics_feed: IcsFeedBackend::new(BTreeMap::new()),
+        };
+
+        let output = engine.dispatch(&command_args(
+            "list_calendars",
+            vec![("account", CborValue::Text("google".to_owned()))],
+        ));
+
+        assert_eq!(cbor_bool_field(&output, "ok"), Some(false));
+        assert_eq!(
+            cbor_nested_text_field(&output, "error", "code"),
+            Some("auth_error")
+        );
+        assert!(
+            calendar_error_message(&output).contains("/calendar auth google start google"),
+            "{}",
+            calendar_error_message(&output)
+        );
+    }
+
+    #[test]
     fn private_event_details_are_busy_only_by_default() {
         // Provider-private events should not leak summaries or descriptions to
         // the model unless policy explicitly opts into details.
@@ -2242,7 +2429,7 @@ mod tests {
             backend: Some(ValidatedBackendConfig::Google {
                 client_id_secret: "client".to_owned(),
                 client_secret_secret: None,
-                refresh_token_secret: "refresh".to_owned(),
+                refresh_token_secret: Some("refresh".to_owned()),
                 api_base: None,
             }),
             default_calendar: Some("primary".to_owned()),
@@ -2300,7 +2487,7 @@ mod tests {
             backend: Some(ValidatedBackendConfig::Google {
                 client_id_secret: "client".to_owned(),
                 client_secret_secret: None,
-                refresh_token_secret: "refresh".to_owned(),
+                refresh_token_secret: Some("refresh".to_owned()),
                 api_base: None,
             }),
             default_calendar: Some("primary".to_owned()),

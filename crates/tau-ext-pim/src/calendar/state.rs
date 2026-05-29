@@ -16,6 +16,9 @@ const MAX_CHANGE_FIELD_CHARS: usize = 512;
 const MAX_DESCRIPTION_BYTES: usize = 64 * 1024;
 const MAX_DESCRIPTION_LINES: usize = 1000;
 const MAX_ATTENDEES_HARD: usize = 200;
+const GOOGLE_AUTH_SCHEMA: u32 = 1;
+const GOOGLE_AUTH_PENDING_SCHEMA: u32 = 1;
+const MAX_GOOGLE_AUTH_FIELD_CHARS: usize = 4096;
 
 /// One persisted calendar audit log entry.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -159,6 +162,75 @@ impl CalendarChangeApproval {
     }
 }
 
+/// Stored OAuth authorization for one Google calendar account.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct GoogleStoredAuth {
+    /// Stored auth schema version.
+    pub(crate) schema: u32,
+    /// Configured account id.
+    pub(crate) account: String,
+    /// Google OAuth refresh token.
+    pub(crate) refresh_token: String,
+}
+
+impl GoogleStoredAuth {
+    /// Build a stored OAuth auth record.
+    pub(crate) fn new(account: &str, refresh_token: &str) -> Self {
+        Self {
+            schema: GOOGLE_AUTH_SCHEMA,
+            account: account.to_owned(),
+            refresh_token: refresh_token.to_owned(),
+        }
+    }
+}
+
+/// Pending Google device authorization request.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct GooglePendingAuth {
+    /// Pending auth schema version.
+    pub(crate) schema: u32,
+    /// Configured account id.
+    pub(crate) account: String,
+    /// Google OAuth device code. This is never shown back to the user.
+    pub(crate) device_code: String,
+    /// User-facing code entered on Google's verification page.
+    pub(crate) user_code: String,
+    /// Google verification URL for the user to open.
+    pub(crate) verification_uri: String,
+    /// Unix timestamp in milliseconds when this request expires.
+    pub(crate) expires_at_unix_ms: u64,
+    /// Suggested polling interval from Google.
+    pub(crate) interval_secs: u64,
+}
+
+impl GooglePendingAuth {
+    /// Build a pending Google device authorization record.
+    pub(crate) fn new(
+        account: &str,
+        device_code: &str,
+        user_code: &str,
+        verification_uri: &str,
+        expires_in_secs: u64,
+        interval_secs: u64,
+    ) -> Self {
+        Self {
+            schema: GOOGLE_AUTH_PENDING_SCHEMA,
+            account: account.to_owned(),
+            device_code: device_code.to_owned(),
+            user_code: user_code.to_owned(),
+            verification_uri: verification_uri.to_owned(),
+            expires_at_unix_ms: current_unix_millis()
+                .saturating_add(expires_in_secs.saturating_mul(1000)),
+            interval_secs,
+        }
+    }
+
+    /// Return true when this pending authorization has expired.
+    pub(crate) fn expired(&self) -> bool {
+        self.expires_at_unix_ms <= current_unix_millis()
+    }
+}
+
 /// Calendar module persistent state under the extension state directory.
 pub(crate) struct StateStore {
     state_dir: PathBuf,
@@ -169,6 +241,8 @@ impl StateStore {
     pub(crate) fn open(state_dir: PathBuf) -> Result<Self, String> {
         create_private_dir_all(&state_dir)?;
         create_private_dir_all(&state_dir.join("logs"))?;
+        create_private_dir_all(&state_dir.join("auth").join("google"))?;
+        create_private_dir_all(&state_dir.join("auth").join("google-pending"))?;
         for status in ["pending", "sending", "approved", "denied"] {
             create_private_dir_all(
                 &state_dir
@@ -223,6 +297,61 @@ impl StateStore {
             }
         }
         Ok(entries.into_iter().collect())
+    }
+
+    /// Store a Google OAuth refresh token for one account.
+    pub(crate) fn save_google_refresh_token(
+        &self,
+        account: &str,
+        refresh_token: &str,
+    ) -> Result<(), String> {
+        let auth = GoogleStoredAuth::new(account, refresh_token);
+        validate_google_stored_auth(&auth, Some(account))?;
+        atomic_json_replace(&self.google_auth_path(account), &auth)
+    }
+
+    /// Load a stored Google OAuth refresh token for one account.
+    pub(crate) fn google_refresh_token(&self, account: &str) -> Result<Option<String>, String> {
+        let path = self.google_auth_path(account);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let auth: GoogleStoredAuth = serde_json::from_slice(&read_sensitive_file(&path)?)
+            .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
+        validate_google_stored_auth(&auth, Some(account))?;
+        Ok(Some(auth.refresh_token))
+    }
+
+    /// Store a pending Google device authorization request.
+    pub(crate) fn save_pending_google_auth(
+        &self,
+        pending: &GooglePendingAuth,
+    ) -> Result<(), String> {
+        validate_google_pending_auth(pending, Some(&pending.account))?;
+        atomic_json_replace(&self.google_pending_auth_path(&pending.account), pending)
+    }
+
+    /// Load a pending Google device authorization request.
+    pub(crate) fn pending_google_auth(&self, account: &str) -> Result<GooglePendingAuth, String> {
+        let path = self.google_pending_auth_path(account);
+        if !path.exists() {
+            return Err(format!(
+                "no pending Google authorization for account `{account}`"
+            ));
+        }
+        let pending: GooglePendingAuth = serde_json::from_slice(&read_sensitive_file(&path)?)
+            .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
+        validate_google_pending_auth(&pending, Some(account))?;
+        Ok(pending)
+    }
+
+    /// Clear a pending Google device authorization request.
+    pub(crate) fn clear_pending_google_auth(&self, account: &str) -> Result<(), String> {
+        match fs::remove_file(self.google_pending_auth_path(account)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.to_string()),
+        }
     }
 
     /// Load pending calendar changes in deterministic order.
@@ -387,6 +516,20 @@ impl StateStore {
 
     fn calendar_log_path(&self) -> PathBuf {
         self.state_dir.join("logs").join("calendar.jsonl")
+    }
+
+    fn google_auth_path(&self, account: &str) -> PathBuf {
+        self.state_dir
+            .join("auth")
+            .join("google")
+            .join(format!("{}.json", account_file_stem(account)))
+    }
+
+    fn google_pending_auth_path(&self, account: &str) -> PathBuf {
+        self.state_dir
+            .join("auth")
+            .join("google-pending")
+            .join(format!("{}.json", account_file_stem(account)))
     }
 
     fn change_dir(&self, status: &str) -> PathBuf {
@@ -554,6 +697,65 @@ fn validate_change_record(
         ));
     }
     Ok(())
+}
+
+fn validate_google_stored_auth(
+    auth: &GoogleStoredAuth,
+    expected_account: Option<&str>,
+) -> Result<(), String> {
+    if auth.schema != GOOGLE_AUTH_SCHEMA {
+        return Err("Google auth has unsupported schema".to_owned());
+    }
+    validate_google_auth_account(&auth.account, expected_account)?;
+    if !is_safe_persisted_line(&auth.refresh_token, MAX_GOOGLE_AUTH_FIELD_CHARS) {
+        return Err("Google auth refresh token contains unsafe text".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_google_pending_auth(
+    pending: &GooglePendingAuth,
+    expected_account: Option<&str>,
+) -> Result<(), String> {
+    if pending.schema != GOOGLE_AUTH_PENDING_SCHEMA {
+        return Err("pending Google auth has unsupported schema".to_owned());
+    }
+    validate_google_auth_account(&pending.account, expected_account)?;
+    for (field, value) in [
+        ("device_code", pending.device_code.as_str()),
+        ("user_code", pending.user_code.as_str()),
+        ("verification_uri", pending.verification_uri.as_str()),
+    ] {
+        if !is_safe_persisted_line(value, MAX_GOOGLE_AUTH_FIELD_CHARS) {
+            return Err(format!(
+                "pending Google auth field `{field}` contains unsafe text"
+            ));
+        }
+    }
+    if pending.expires_at_unix_ms == 0 || pending.interval_secs == 0 {
+        return Err("pending Google auth timing is invalid".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_google_auth_account(
+    account: &str,
+    expected_account: Option<&str>,
+) -> Result<(), String> {
+    if account.trim().is_empty() || !is_safe_persisted_line(account, MAX_CHANGE_FIELD_CHARS) {
+        return Err("Google auth account id is invalid".to_owned());
+    }
+    if let Some(expected_account) = expected_account
+        && account != expected_account
+    {
+        return Err("Google auth account id mismatch".to_owned());
+    }
+    Ok(())
+}
+
+fn account_file_stem(account: &str) -> String {
+    let digest = blake3::hash(account.as_bytes());
+    digest.to_hex()[..16].to_owned()
 }
 
 fn validate_change_id(id: &str) -> Result<(), String> {
@@ -729,6 +931,18 @@ fn atomic_json_create_new<T: Serialize>(path: &Path, value: &T) -> Result<(), Cr
     }
 }
 
+fn atomic_json_replace<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    let tmp = write_json_temp(path, value)?;
+    fs::rename(&tmp, path).map_err(|error| {
+        let _ = fs::remove_file(&tmp);
+        format!(
+            "failed to rename {} into {}: {error}",
+            tmp.display(),
+            path.display()
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -787,6 +1001,60 @@ mod tests {
             ),
             0o600
         );
+    }
+
+    #[test]
+    fn google_auth_tokens_and_pending_requests_are_private() {
+        // Google refresh tokens and device codes are secrets. Persist them only
+        // under owner-only files named by a hash of the account id.
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let state = StateStore::open(temp.path().join("state")).expect("state");
+
+        state
+            .save_google_refresh_token("work/account", "refresh-token")
+            .expect("save refresh token");
+        assert_eq!(
+            state
+                .google_refresh_token("work/account")
+                .expect("load refresh token")
+                .as_deref(),
+            Some("refresh-token")
+        );
+        let auth_path = state.google_auth_path("work/account");
+        let auth_file = auth_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("auth filename");
+        assert!(!auth_file.contains("work"));
+        assert!(!auth_file.contains('/'));
+        #[cfg(unix)]
+        assert_eq!(file_mode(&auth_path), 0o600);
+
+        let pending = GooglePendingAuth::new(
+            "work/account",
+            "device-code",
+            "USER-CODE",
+            "https://example.test/device",
+            600,
+            5,
+        );
+        state
+            .save_pending_google_auth(&pending)
+            .expect("save pending auth");
+        assert_eq!(
+            state
+                .pending_google_auth("work/account")
+                .expect("load pending auth")
+                .device_code,
+            "device-code"
+        );
+        let pending_path = state.google_pending_auth_path("work/account");
+        #[cfg(unix)]
+        assert_eq!(file_mode(&pending_path), 0o600);
+        state
+            .clear_pending_google_auth("work/account")
+            .expect("clear pending auth");
+        assert!(state.pending_google_auth("work/account").is_err());
     }
 
     #[cfg(unix)]

@@ -96,15 +96,20 @@
 #             calendars:
 #               default: main
 #               allow: [main]
-#           # Google read/write support uses OAuth refresh-token secrets and
-#           # queues mutations under /calendar change by default.
+#           # Google read/write support can use /calendar auth google to
+#           # store OAuth in private extension state, or a manual refresh-token
+#           # secret for power users. Mutations queue under /calendar change by
+#           # default.
 #           - id: google-calendar
 #             enable: false
 #             backend:
 #               type: google
 #               client_id_secret: google_calendar_client_id
 #               client_secret_secret: google_calendar_client_secret
-#               refresh_token_secret: google_calendar_refresh_token
+#               # Omit refresh_token_secret and run:
+#               #   /calendar auth google start google-calendar
+#               #   /calendar auth google finish google-calendar
+#               # refresh_token_secret: google_calendar_refresh_token
 #             calendars:
 #               default: primary
 #               allow: [primary]

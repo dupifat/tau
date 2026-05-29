@@ -202,7 +202,7 @@ extensions:
             max_attendees: 50
 ```
 
-The `calendar.accounts[*].backend.type: google` backend uses the native Google Calendar API for reads and user-approved writes. It currently expects user-provided OAuth secrets, declared under `extensions.std-pim.secrets` and referenced by name:
+The `calendar.accounts[*].backend.type: google` backend uses the native Google Calendar API for reads and user-approved writes. Configure a Google OAuth client id secret, optionally a client secret, and either omit `refresh_token_secret` to authorize interactively with `/calendar auth google start <account>` followed by `/calendar auth google finish <account>`, or provide a refresh-token secret manually:
 
 ```yaml
 - id: google-calendar
@@ -211,15 +211,17 @@ The `calendar.accounts[*].backend.type: google` backend uses the native Google C
   backend:
     type: google
     client_id_secret: google_calendar_client_id
-    client_secret_secret: google_calendar_client_secret # optional for PKCE-style clients
-    refresh_token_secret: google_calendar_refresh_token
+    client_secret_secret: google_calendar_client_secret # optional for installed clients
+    # Omit refresh_token_secret and run /calendar auth google start google-calendar
+    # then /calendar auth google finish google-calendar.
+    # refresh_token_secret: google_calendar_refresh_token
   calendars:
     default: primary
     allow:
       - primary
 ```
 
-For Google accounts, `calendars.allow` entries are exact Google calendar IDs; use `primary` for Google's primary-calendar alias. Display summaries are not access-control identifiers. Use narrow Google scopes such as `https://www.googleapis.com/auth/calendar.calendarlist.readonly` plus `https://www.googleapis.com/auth/calendar.events.readonly` for read-only accounts. Use `https://www.googleapis.com/auth/calendar.events` when enabling create/update/delete/RSVP support.
+For Google accounts, `calendars.allow` entries are exact Google calendar IDs; use `primary` for Google's primary-calendar alias. Display summaries are not access-control identifiers. `/calendar auth google start <account>` prints a Google verification URL and user code; after approving in the browser, run `/calendar auth google finish <account>` to store the refresh token in the extension's private state directory. The device flow requests Google calendar event write and calendar-list read scopes; manual refresh tokens must include equivalent scopes. The action events are transient and never include the refresh token. Manual `refresh_token_secret` config remains available for power users. The backend caches short-lived Google access tokens in memory until near expiry.
 
 Calendar tool reads and write requests append sanitized audit entries to `logs/calendar.jsonl` under the extension state directory. Review them with `/calendar log last [number]`. Entries include command, status, account, calendar, event id, time bounds, and result counts; they do not persist event titles or descriptions. Pending calendar mutations are stored separately for `/calendar change` review.
 
@@ -310,6 +312,8 @@ The extension publishes `/email` actions for review:
 
 The extension also publishes `/calendar` actions:
 
+- `/calendar auth google start <account>` — print a Google verification URL and user code for OAuth device authorization.
+- `/calendar auth google finish <account>` — complete OAuth after browser approval and store the refresh token privately.
 - `/calendar log last [number]` — show recent calendar access and mutation log entries; defaults to 20.
 - `/calendar change list` — list pending calendar mutations.
 - `/calendar change open <id>` — inspect a pending calendar mutation.

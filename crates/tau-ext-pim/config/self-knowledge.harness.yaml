@@ -63,6 +63,7 @@ extensions:
               type: google
               client_id_secret: google_calendar_client_id
               client_secret_secret: google_calendar_client_secret
+              # Use a Google OAuth client of type "TVs and Limited Input devices".
               # Omit refresh_token_secret and authorize with:
               #   /calendar auth google start google
               #   /calendar auth google finish google

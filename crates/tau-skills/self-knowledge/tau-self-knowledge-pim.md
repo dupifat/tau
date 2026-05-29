@@ -70,9 +70,9 @@ Or for one startup, use `TAU_SECRET_<NAME>`, for example `TAU_SECRET_MAIL_PASSWO
 
 ## Google Calendar authorization
 
-For new Google Calendar configs, omit `refresh_token_secret` and use the device flow:
+For new Google Calendar configs, omit `refresh_token_secret` and use the device flow. Create a Google OAuth client of type `TVs and Limited Input devices`; desktop, web, Android, and iOS client IDs fail the device authorization start request with `invalid_client: Invalid client type`. Google may show both a client id and client secret for that client type. Configure both `client_id_secret` and `client_secret_secret`; the start request uses the client id, and the finish/token exchange can use the client secret.
 
-1. Start Tau with the `std-pim` config and the Google client id secret present.
+1. Start Tau with the `std-pim` config and the Google client id and client secret present.
 2. Run `/calendar auth google start <account>`.
 3. Open the printed URL manually and enter the printed user code.
 4. Run `/calendar auth google finish <account>`.
@@ -119,7 +119,7 @@ If PIM tools are unavailable:
 - Check the role has `enableTools: [email, calendar]` or equivalent.
 - Check startup config errors for missing required secrets.
 
-If Google Calendar says the account is not authorized, run `/calendar auth google start <account>` and `/calendar auth google finish <account>`. If it still fails, confirm the Google OAuth client is valid and has Calendar API access/scopes.
+If Google Calendar says the account is not authorized, run `/calendar auth google start <account>` and `/calendar auth google finish <account>`. If start returns `invalid_client: Invalid client type`, replace the client id with one from a Google OAuth client of type `TVs and Limited Input devices`. If it still fails, confirm the Google OAuth client is valid and has Calendar API access/scopes.
 
 If ICS calendar reads fail, verify the private ICS URL secret is present and reachable from the Tau process.
 

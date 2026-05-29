@@ -55,6 +55,39 @@ fn home_relative_token_reads_injected_home_and_preserves_tilde_replacement() {
 }
 
 #[test]
+fn filesystem_directory_candidates_include_trailing_slash() {
+    // Directory completions should be visibly distinct from files and accepting
+    // one should leave the prompt ready to complete or type a child path.
+    let home = tempfile::tempdir().expect("tempdir");
+    fs::create_dir(home.path().join("alpha-dir")).expect("mkdir alpha-dir");
+    fs::write(home.path().join("alpha.txt"), "").expect("write alpha file");
+    let buffer = "open ~/alpha";
+    let cursor = buffer.len();
+
+    let cands = build_candidates_with_home(
+        &[SlashCommand::new("/whatever", "")],
+        &CompletionData::new(),
+        buffer,
+        cursor,
+        Some(home.path()),
+    );
+
+    let dir = cands
+        .iter()
+        .find(|cand| cand.description == "directory")
+        .expect("directory candidate");
+    assert_eq!(dir.label, "~/alpha-dir/");
+    assert_eq!(dir.replacement, "open ~/alpha-dir/");
+
+    let file = cands
+        .iter()
+        .find(|cand| cand.description == "file")
+        .expect("file candidate");
+    assert_eq!(file.label, "~/alpha.txt");
+    assert_eq!(file.replacement, "open ~/alpha.txt");
+}
+
+#[test]
 fn slash_command_buffer_does_not_route_to_filesystem() {
     let cands = build_candidates(
         &[SlashCommand::new("/model", "Switch model")],

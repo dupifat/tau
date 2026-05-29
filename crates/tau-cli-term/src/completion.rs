@@ -434,7 +434,10 @@ fn build_filesystem_candidates_with_home(
         }
 
         let is_dir = entry.file_type().map(|ty| ty.is_dir()).unwrap_or(false);
-        let replacement = display_dir.join(name).to_string_lossy().into_owned();
+        let mut replacement = display_dir.join(name).to_string_lossy().into_owned();
+        if is_dir && !replacement.ends_with('/') {
+            replacement.push('/');
+        }
         candidates.push(Candidate {
             label: replacement.clone(),
             description: if is_dir { "directory" } else { "file" }.to_owned(),

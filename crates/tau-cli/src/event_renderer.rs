@@ -19,8 +19,7 @@ use crate::tool_render::{
     format_token_count, format_tool_call, render_compaction_block, render_delegate_display,
     render_diff_tool_block, render_harness_info, render_shell_block, render_tool_block,
     render_tool_display, render_turn_stats_block, session_status_block, streaming_block,
-    synthesize_fallback_display, system_loaded_block, system_status_block, tool_duration_suffix,
-    ui_dir_block,
+    synthesize_fallback_display, system_loaded_block, tool_duration_suffix, ui_dir_block,
 };
 
 pub(crate) struct EventRenderer {
@@ -2305,6 +2304,7 @@ impl EventRenderer {
             Event::ToolError(error) | Event::ProviderToolError(error) => {
                 !error.originator.is_user()
             }
+            Event::ExtensionContextReady(_) => true,
             _ => false,
         }
     }
@@ -2482,6 +2482,7 @@ impl EventRenderer {
             Event::AgentPromptSteered(steered) => Some(steered.agent_id.to_string()),
             Event::AgentCompactionTriggered(triggered) => Some(triggered.agent_id.to_string()),
             Event::HarnessAgentContextUsageChanged(changed) => Some(changed.agent_id.to_string()),
+            Event::ExtensionContextReady(ready) => Some(ready.agent_id.to_string()),
             Event::UiCancelPrompt(cancel) => {
                 cancel.target_agent_id.as_ref().map(ToString::to_string)
             }
@@ -4026,8 +4027,8 @@ impl EventRenderer {
                 self.handle_agents_md_available(agents);
                 true
             }
-            Event::ExtensionContextReady(_) => {
-                self.handle_extension_context_ready();
+            Event::ExtensionContextReady(ready) => {
+                self.handle_extension_context_ready(ready);
                 true
             }
             _ => false,
@@ -4075,10 +4076,10 @@ impl EventRenderer {
         );
     }
 
-    fn handle_extension_context_ready(&mut self) {
+    fn handle_extension_context_ready(&mut self, ready: &tau_proto::ExtensionContextReady) {
         self.handle.print_output(
             "extension-context-ready",
-            system_status_block(&self.theme, "agent context ", "ready"),
+            crate::tool_render::agent_context_ready_block(&self.theme, &ready.agent_id),
         );
     }
 

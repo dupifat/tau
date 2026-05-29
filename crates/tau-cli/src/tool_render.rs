@@ -1276,18 +1276,20 @@ pub(crate) fn system_loaded_block(
     tau_cli_term::StyledBlock::new(tau_cli_term::resolve::themed_text(theme, &text))
 }
 
-pub(crate) fn system_status_block(
+pub(crate) fn agent_context_ready_block(
     theme: &tau_themes::Theme,
-    prefix: &str,
-    status: &str,
+    agent_id: &tau_proto::AgentId,
 ) -> tau_cli_term::StyledBlock {
     use tau_themes::{ThemedText, names};
 
     let mut text = ThemedText::new();
     let info = text.add_style(names::SYSTEM_INFO);
+    let agent_style = text.add_style(names::STATUS_ROLE);
     let status_style = text.add_style(names::SYSTEM_STATUS);
-    text.push(info, prefix);
-    text.push(status_style, status);
+    text.push(info, "agent ");
+    text.push(agent_style, format!("@{agent_id}"));
+    text.push(info, " context ");
+    text.push(status_style, "ready");
     tau_cli_term::StyledBlock::new(tau_cli_term::resolve::themed_text(theme, &text))
 }
 

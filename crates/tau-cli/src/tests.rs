@@ -722,6 +722,29 @@ fn switching_between_displayed_agents_restores_transcripts() {
 }
 
 #[test]
+fn extension_context_ready_routes_to_agent_ui_state() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    renderer.handle(&Event::ExtensionContextReady(
+        tau_proto::ExtensionContextReady {
+            session_id: "s1".into(),
+            agent_id: "worker-1".to_owned().into(),
+        },
+    ));
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "context ready"));
+
+    renderer.switch_agent("worker-1".to_owned());
+    sync(&handle);
+    assert!(vt.screen_contains(80, "agent @worker-1 context ready"));
+}
+
+#[test]
 fn hidden_agent_events_do_not_force_visible_full_redraw() {
     let (_term, handle, _vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(

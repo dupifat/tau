@@ -425,7 +425,7 @@
     }
 
     .term-grey {
-      color: #839496;
+      color: #d5d9d6;
     }
 
     .term-bold {
@@ -467,7 +467,7 @@
     }
 
     .term-magenta {
-      color: #d33682;
+      color: #b56cff;
     }
 
     .term-green {
@@ -765,7 +765,7 @@
       --tile-blob-b: 38 139 210;
       isolation: isolate;
       background:
-        radial-gradient(ellipse at 50% 0%, rgb(42 161 152 / 0.16), transparent 62%),
+        radial-gradient(ellipse at var(--tile-glow-x, 50%) var(--tile-glow-y, 50%), rgb(42 161 152 / 0.16), transparent 62%),
         linear-gradient(180deg, rgb(6 22 24 / 0.72), rgb(1 7 8 / 0.58)),
         rgb(255 255 255 / 0.045);
       background-attachment: scroll;
@@ -783,8 +783,8 @@
     .hero-cta a::after {
       content: "";
       position: absolute;
-      left: 50%;
-      top: 50%;
+      left: var(--tile-blob-x, 50%);
+      top: var(--tile-blob-y, 50%);
       z-index: -1;
       border-radius: 999px;
       pointer-events: none;
@@ -820,31 +820,97 @@
     .features .feature:nth-child(1) {
       --tile-blob-a: 42 161 152;
       --tile-blob-b: 38 139 210;
+      --tile-glow-x: 26%;
+      --tile-glow-y: 34%;
+      --tile-blob-x: 42%;
+      --tile-blob-y: 58%;
     }
 
     .features .feature:nth-child(2) {
       --tile-blob-a: 133 153 0;
       --tile-blob-b: 108 113 196;
+      --tile-glow-x: 72%;
+      --tile-glow-y: 38%;
+      --tile-blob-x: 62%;
+      --tile-blob-y: 46%;
     }
 
     .features .feature:nth-child(3) {
       --tile-blob-a: 147 161 161;
       --tile-blob-b: 42 161 152;
+      --tile-glow-x: 38%;
+      --tile-glow-y: 72%;
+      --tile-blob-x: 48%;
+      --tile-blob-y: 66%;
     }
 
     .features .feature:nth-child(4) {
       --tile-blob-a: 38 139 210;
       --tile-blob-b: 133 153 0;
+      --tile-glow-x: 82%;
+      --tile-glow-y: 68%;
+      --tile-blob-x: 70%;
+      --tile-blob-y: 58%;
     }
 
     .features .feature:nth-child(5) {
       --tile-blob-a: 108 113 196;
       --tile-blob-b: 42 161 152;
+      --tile-glow-x: 18%;
+      --tile-glow-y: 60%;
+      --tile-blob-x: 36%;
+      --tile-blob-y: 44%;
     }
 
     .features .feature:nth-child(6) {
       --tile-blob-a: 133 153 0;
       --tile-blob-b: 38 139 210;
+      --tile-glow-x: 62%;
+      --tile-glow-y: 26%;
+      --tile-blob-x: 54%;
+      --tile-blob-y: 70%;
+    }
+
+    #major-features .feature:nth-child(1) {
+      --tile-glow-x: 64%;
+      --tile-glow-y: 32%;
+      --tile-blob-x: 56%;
+      --tile-blob-y: 62%;
+    }
+
+    #major-features .feature:nth-child(2) {
+      --tile-glow-x: 24%;
+      --tile-glow-y: 66%;
+      --tile-blob-x: 38%;
+      --tile-blob-y: 52%;
+    }
+
+    #major-features .feature:nth-child(3) {
+      --tile-glow-x: 78%;
+      --tile-glow-y: 56%;
+      --tile-blob-x: 66%;
+      --tile-blob-y: 38%;
+    }
+
+    #major-features .feature:nth-child(4) {
+      --tile-glow-x: 34%;
+      --tile-glow-y: 30%;
+      --tile-blob-x: 44%;
+      --tile-blob-y: 70%;
+    }
+
+    #major-features .feature:nth-child(5) {
+      --tile-glow-x: 70%;
+      --tile-glow-y: 76%;
+      --tile-blob-x: 60%;
+      --tile-blob-y: 56%;
+    }
+
+    #major-features .feature:nth-child(6) {
+      --tile-glow-x: 20%;
+      --tile-glow-y: 44%;
+      --tile-blob-x: 34%;
+      --tile-blob-y: 48%;
     }
 
     .contact-links a:nth-child(1),
@@ -1315,7 +1381,7 @@
         <div class="terminal-row terminal-split">
           <span class="terminal-left"><span class="term-grey">&amp;tau-agent-3lxhjh</span> <span
               class="term-magenta">@senior-engineer_a8</span></span>
-          <span class="terminal-right"><span class="term-blue">@1</span> <span class="term-yellow">#4.3k/258.4k</span></span>
+          <span class="terminal-right"><span class="term-blue">@1</span> <span class="term-blue">#4.3k/258.4k</span></span>
         </div>
       </div>
     </div>
@@ -1329,6 +1395,9 @@
     <p>Tau builds on top of the most venerable, powerful, and ubiquitous
       runtime there is: <strong style="color:var(--base1)">Unix itself.</strong>
       It embraces the Unix philosophy to its full potential.</p>
+    <p>It is built by devoted, experienced Unix users who want coding agents to
+      become first-class modern Unix tooling: composable, inspectable,
+      scriptable, and comfortable in the terminal.</p>
   </section>
 
   <hr class="divider">

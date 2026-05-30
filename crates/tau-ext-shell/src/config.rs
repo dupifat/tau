@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::process::Command;
 
-use crate::isolation::apply_command_isolation;
+use crate::isolation::{apply_command_isolation, apply_read_only_cwd_mount};
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -85,6 +85,7 @@ impl ShellConfig {
         &self,
         command: &str,
         cwd: Option<&str>,
+        read_only_cwd: bool,
     ) -> std::io::Result<std::process::Child> {
         let mut child_cmd = self.command_for(command);
         child_cmd
@@ -94,9 +95,26 @@ impl ShellConfig {
             child_cmd.current_dir(cwd);
         }
         apply_command_isolation(&mut child_cmd);
+        let read_only_warning = if read_only_cwd {
+            let mount_cwd = cwd.map_or_else(std::env::current_dir, |cwd| {
+                let cwd = std::path::Path::new(cwd);
+                if cwd.is_absolute() {
+                    Ok(cwd.to_path_buf())
+                } else {
+                    std::env::current_dir().map(|current| current.join(cwd))
+                }
+            })?;
+            apply_read_only_cwd_mount(&mut child_cmd, &mount_cwd)?
+        } else {
+            None
+        };
         for (key, value) in &self.extra_env {
             child_cmd.env(key, value);
         }
-        child_cmd.spawn()
+        let child = child_cmd.spawn();
+        if let Some(read_only_warning) = read_only_warning {
+            read_only_warning.log_after_spawn();
+        }
+        child
     }
 }

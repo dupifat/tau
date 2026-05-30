@@ -106,6 +106,22 @@ timeout operations that take longer than timeout argument, but currently 100%
 reliable child process termination is not implemented and will require advanced
 techniques to implement in the future (e.g. cgroups).
 
+#### Shell read-only mode
+
+When verifying `shell`, also verify `mode: ro`. Use a fresh scratch directory
+under `/tmp`; create an input file in it; then run a `shell` command with
+`cwd` set to that directory and `mode: ro` that reads the input file and then
+tries to create or overwrite another file in the same directory, e.g.
+`cat input.txt; touch should-not-exist.txt`.
+
+Expected on Linux platforms that support the native mount namespace setup:
+the read succeeds, the write fails with a non-zero shell result, and the target
+file is still absent after the command. The failure should be reported as a
+normal shell command result, not a tool invocation error. If the platform or
+container policy does not support read-only bind mounts, `mode: ro` may degrade
+to a normal shell command; report that the ro-bind enforcement was unavailable
+instead of treating the shell invocation itself as broken.
+
 `edit` tool produces unified-diff like output for edits made in the payload, and
 allows at most 100 replacements per call, to limit amount of output it produces.
 Requests for more than 100 replacements must error out immediately before making

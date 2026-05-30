@@ -3691,6 +3691,55 @@ fn shell_tool_rejects_negative_timeout() {
     assert_eq!(error.message, "argument `timeout` must be non-negative");
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn shell_tool_read_only_mode_bind_mounts_cwd_read_only() {
+    // Regression coverage for `mode: ro`: lock elision is not enough. The
+    // child must get a read-only bind mount over its cwd so accidental writes
+    // fail before they can alter the working tree.
+    let dir = TempDir::new().expect("temp dir");
+    fs::write(dir.path().join("input.txt"), "ok").expect("write fixture");
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("mode".to_owned()),
+            CborValue::Text("ro".to_owned()),
+        ),
+        (
+            CborValue::Text("cwd".to_owned()),
+            CborValue::Text(dir.path().display().to_string()),
+        ),
+        (
+            CborValue::Text("command".to_owned()),
+            CborValue::Text("cat input.txt; touch created.txt".to_owned()),
+        ),
+        (
+            CborValue::Text("timeout".to_owned()),
+            CborValue::Integer(5.into()),
+        ),
+    ]);
+
+    let output = match run_command(&args, &crate::config::ShellConfig::default()) {
+        Ok(output) => output,
+        Err(error) if error.message.contains("Operation not permitted") => return,
+        Err(error) => panic!("unexpected shell start error: {error:?}"),
+    };
+
+    assert_ne!(cbor_int_field(&output.result, "status"), Some(0));
+    assert!(
+        !dir.path().join("created.txt").exists(),
+        "read-only shell command must not create files in cwd"
+    );
+    let combined = cbor_map_text(&output.result, "output").expect("output");
+    assert!(
+        combined.contains(" ok"),
+        "read should still work: {combined}"
+    );
+    assert!(
+        combined.contains("Read-only file system") || combined.contains("Permission denied"),
+        "write should fail due to mount permissions: {combined}"
+    );
+}
+
 #[test]
 fn shell_tool_rejects_wrong_type_mode() {
     // A present-but-non-string access mode should not silently fall back to

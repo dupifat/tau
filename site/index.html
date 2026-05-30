@@ -357,10 +357,24 @@
     }
 
     .terminal-title {
-      margin-left: 0.75rem;
-      color: var(--base1);
-      font-size: 0.9rem;
-      font-weight: 700;
+      position: absolute;
+      left: 50%;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      margin-left: 0;
+      color: #ffffff;
+      font-size: 0.88rem;
+      font-weight: 950;
+      letter-spacing: -0.01em;
+      opacity: 0.8;
+      transform: translateX(-50%);
+    }
+
+    .terminal-title-logo {
+      width: 1em;
+      height: 1em;
+      opacity: 1;
     }
 
     .terminal-body {
@@ -789,7 +803,7 @@
         <span class="terminal-dot"></span>
         <span class="terminal-dot"></span>
         <span class="terminal-dot"></span>
-        <span class="terminal-title"><span class="term-bright-cyan">dpc</span>@tlb:<span class="term-blue">~</span><span class="term-white">$</span></span>
+        <span class="terminal-title"><img class="terminal-title-logo" src="logo.svg" alt="" aria-hidden="true">Tau Coding Agent</span>
       </div>
       <div class="terminal-body">
         <div class="terminal-row"><span class="term-bright-cyan">dpc</span>@tlb:<span class="term-blue">~</span><span class="term-white">$</span> tau</div>

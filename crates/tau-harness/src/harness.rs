@@ -815,10 +815,6 @@ pub struct Harness {
     /// `prompt_sessions[spid]` lookups become two hops:
     /// `prompt_agents[spid]` → `agents[cid].session_id`.
     pub(crate) prompt_agents: std::collections::HashMap<AgentPromptId, AgentId>,
-    /// Materialized full `agent.prompt_created` payloads by id.
-    /// New prompts are emitted fully materialized; snapshots remain so
-    /// late joiners and `tools_ref` events can still be served.
-    pub(crate) prompt_snapshots: std::collections::HashMap<AgentPromptId, AgentPromptCreated>,
     /// All in-flight agents keyed by durable `AgentId`. User agents and side
     /// agents use the same identity; there is no default/main alias.
     pub(crate) agents: std::collections::HashMap<AgentId, Agent>,
@@ -1304,7 +1300,6 @@ impl Harness {
             pending_extension_connects: 0,
             next_agent_prompt_id: 0,
             prompt_agents: std::collections::HashMap::new(),
-            prompt_snapshots: std::collections::HashMap::new(),
             agents,
             agent_routes: HashMap::new(),
             agent_states: HashMap::new(),
@@ -1542,7 +1537,6 @@ impl Harness {
             pending_extension_connects: 0,
             next_agent_prompt_id: 0,
             prompt_agents: std::collections::HashMap::new(),
-            prompt_snapshots: std::collections::HashMap::new(),
             agents,
             agent_routes: HashMap::new(),
             agent_states: HashMap::new(),
@@ -1984,37 +1978,11 @@ impl Harness {
         self.enqueue_publish(source, event, transient, false, sync);
     }
 
-    fn materialize_agent_prompt_created(
-        &self,
-        prompt: &AgentPromptCreated,
-    ) -> Option<AgentPromptCreated> {
-        let mut materialized = prompt.clone();
-        if let Some(tools_ref) = &prompt.tools_ref {
-            let base = self.prompt_snapshots.get(&tools_ref.base_agent_prompt_id)?;
-            materialized.tools = base.tools.clone();
-            materialized.tools_ref = None;
-        }
-        Some(materialized)
-    }
-
     fn note_agent_prompt_created(&mut self, prompt: &AgentPromptCreated) {
-        let Some(materialized) = self.materialize_agent_prompt_created(prompt) else {
-            tracing::warn!(
-                target: "tau_harness",
-                agent_prompt_id = %prompt.agent_prompt_id,
-                "could not materialize committed agent.prompt_created"
-            );
-            return;
-        };
-        self.prompt_snapshots
-            .insert(materialized.agent_prompt_id.clone(), materialized.clone());
-        if let Some(cid) = self
-            .prompt_agents
-            .get(&materialized.agent_prompt_id)
-            .cloned()
+        if let Some(cid) = self.prompt_agents.get(&prompt.agent_prompt_id).cloned()
             && let Some(conv) = self.agents.get_mut(&cid)
         {
-            conv.last_prompt_id = Some(materialized.agent_prompt_id);
+            conv.last_prompt_id = Some(prompt.agent_prompt_id.clone());
         }
     }
 
@@ -2073,13 +2041,15 @@ impl Harness {
                 .map(tau_core::AgentEventParent::Under)
                 .unwrap_or(tau_core::AgentEventParent::InheritHead)
         };
-        // Stamp once and share with every downstream observer: the
-        // durable record on disk, the in-memory event log entry, and
-        // the wire `LogEvent` envelope. Sampling the clock three
-        // separate times would let timing analyses disagree with what
-        // live subscribers saw.
+        // Stamp once and share with every downstream observer: the durable
+        // record on disk, the debug JSONL line, and the wire `LogEvent`
+        // envelope. Sampling the clock separately would let timing analyses
+        // disagree with what live subscribers saw.
         let source_id = source.map(tau_proto::ConnectionId::from);
-        let (seq, recorded_at) = self.event_log.append(source_id.clone(), event.clone());
+        let (seq, recorded_at) = self.event_log.append();
+        #[cfg(test)]
+        self.event_log
+            .record_for_test(seq, recorded_at, source_id.clone(), event.clone());
         // Mirror every committed event into the JSONL debug log as a
         // `published` line. The inbound `from_connection` lines carry
         // the raw frame the agent sent us, but for events that the
@@ -2785,22 +2755,13 @@ impl Harness {
         connection_id: &str,
         request: tau_proto::GetAgentPromptCreated,
     ) {
-        let prompt = self
-            .prompt_snapshots
-            .get(&request.agent_prompt_id)
-            .filter(|prompt| prompt.session_id == request.session_id)
-            .cloned()
-            .or_else(|| {
-                self.read_agent_prompt_created(&request.session_id, &request.agent_prompt_id)
-                    .ok()
-            });
         let _ = self.bus.send_to(
             connection_id,
             None,
             Frame::Message(Message::AgentPromptCreatedResult(Box::new(
                 tau_proto::AgentPromptCreatedResult {
                     request_id: request.request_id,
-                    prompt,
+                    prompt: None,
                 },
             ))),
         );
@@ -7208,11 +7169,22 @@ impl Harness {
     /// `system_prompt`, `tools`, or earlier messages busts the cache.
     /// See `linear_agent_prompts_strictly_extend_previous_messages`.
     pub(crate) fn send_prompt_to_agent_for(&mut self, cid: &AgentId) -> Option<AgentPromptId> {
+        let prompt = self.prepare_agent_prompt_for_dispatch(cid)?;
+        let agent_prompt_id = prompt.agent_prompt_id.clone();
+        self.publish_event(None, Event::AgentPromptCreated(prompt));
+        Some(agent_prompt_id)
+    }
+
+    /// Builds one prompt request and records the live in-flight bookkeeping
+    /// needed to route the corresponding provider response. The prompt payload
+    /// is returned to the caller instead of cached; it is a transient delivery
+    /// object, not durable harness state.
+    fn prepare_agent_prompt_for_dispatch(&mut self, cid: &AgentId) -> Option<AgentPromptCreated> {
         let _ = self.ensure_agent_id_for_agent(cid);
         let conv = self
             .agents
             .get(cid)
-            .expect("send_prompt_to_agent_for: unknown agent id");
+            .expect("prepare_agent_prompt_for_dispatch: unknown agent id");
         let originator = conv.originator.clone();
         let role_name = self.role_name_for_agent(conv);
         let (prompt_model, prompt_params) = if conv.role.is_some() {
@@ -7295,7 +7267,6 @@ impl Harness {
             };
         }
 
-        // Publish the prompt-shaped request event.
         self.current_session_state.token_usage.start_request(&model);
         self.prompt_models
             .insert(agent_prompt_id.clone(), model.clone());
@@ -7310,8 +7281,8 @@ impl Harness {
             .expect("agent has durable id")
             .into();
         let compaction = self.compaction_context_for_agent(cid, &model);
-        let prompt = AgentPromptCreated {
-            agent_prompt_id: agent_prompt_id.clone(),
+        Some(AgentPromptCreated {
+            agent_prompt_id,
             agent_id,
             session_id,
             system_prompt,
@@ -7325,10 +7296,7 @@ impl Harness {
             share_user_cache_key,
             ctx_id,
             compaction,
-        };
-        self.publish_event(None, Event::AgentPromptCreated(prompt));
-
-        Some(agent_prompt_id)
+        })
     }
 
     fn role_name_for_agent(&self, conv: &Agent) -> String {
@@ -8861,11 +8829,9 @@ impl Harness {
             }),
         );
 
-        let prompt_id = harness
-            .send_prompt_to_agent_for(&cid)
+        let prompt = harness
+            .prepare_agent_prompt_for_dispatch(&cid)
             .ok_or_else(|| HarnessError::Participant("no model available for prompt".to_owned()))?;
-        let session_id = harness.agents[&cid].session_id.clone();
-        let prompt = harness.read_agent_prompt_created(&session_id, &prompt_id)?;
         let mut out = String::new();
         out.push_str("================ MODEL / EFFORT ================\n");
         out.push_str(&format!("model:  {}\n", prompt.model));
@@ -8900,34 +8866,27 @@ impl Harness {
         Ok(())
     }
 
+    #[cfg(test)]
     fn read_agent_prompt_created(
         &self,
         session_id: &SessionId,
         prompt_id: &AgentPromptId,
     ) -> Result<AgentPromptCreated, HarnessError> {
         let mut cursor = tau_proto::EventLogSeq::new(0);
-        let mut snapshots = self.prompt_snapshots.clone();
         loop {
             let entry = self.event_log.get_next_from(cursor).ok_or_else(|| {
-                HarnessError::Participant("prompt event missing from log".to_owned())
+                HarnessError::Participant("prompt event missing from test observer".to_owned())
             })?;
             cursor = entry.seq.next();
             if let Event::AgentPromptCreated(prompt) = entry.event {
-                let mut materialized = prompt.clone();
-                if let Some(tools_ref) = &prompt.tools_ref {
-                    let base = snapshots
-                        .get(&tools_ref.base_agent_prompt_id)
-                        .ok_or_else(|| {
-                            HarnessError::Participant("prompt tools base missing".to_owned())
-                        })?;
-                    materialized.tools = base.tools.clone();
-                    materialized.tools_ref = None;
+                if prompt.tools_ref.is_some() {
+                    return Err(HarnessError::Participant(
+                        "test prompt reader cannot materialize tools_ref prompts without prompt snapshots"
+                            .to_owned(),
+                    ));
                 }
-                snapshots.insert(materialized.agent_prompt_id.clone(), materialized.clone());
-                if &materialized.session_id == session_id
-                    && &materialized.agent_prompt_id == prompt_id
-                {
-                    return Ok(materialized);
+                if &prompt.session_id == session_id && &prompt.agent_prompt_id == prompt_id {
+                    return Ok(prompt);
                 }
             }
         }

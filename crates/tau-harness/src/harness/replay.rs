@@ -7,10 +7,9 @@
 //! - [`Harness::replay_session_events`] announces the current loaded-agent
 //!   snapshot, then replays each loaded agent's durable transcript facts from
 //!   the global agent store.
-//! - [`Harness::replay_harness_info`] re-emits harness/extension lifecycle
-//!   events from the in-memory [`crate::event_log::EventLog`], plus the current
-//!   model / effort / context-usage state, so a UI that just joined sees the
-//!   same banners and indicators as one that was here from the start.
+//! - [`Harness::replay_harness_info`] reconstructs current harness status from
+//!   live state snapshots, so a UI that just joined sees the same indicators as
+//!   one that was here from the start without retaining old runtime events.
 
 use tau_proto::{
     ActionSchemaPublished, AgentPromptQueued, Event, EventSelector, Frame,
@@ -18,6 +17,8 @@ use tau_proto::{
     Message,
 };
 
+use super::session_dir_status_from_reason;
+use crate::extension::ExtensionState;
 use crate::harness::{Harness, selector_matches_event};
 use crate::model::{
     baseline_params_for_selection, context_window_for_model, efforts_for_model, role_infos,
@@ -125,31 +126,56 @@ impl Harness {
         }
     }
 
-    /// Replays harness info and extension lifecycle events to a
-    /// late-joining client.
+    /// Replays current harness and extension state to a late-joining client.
     ///
-    /// Runtime-only extension setup events are intentionally NOT replayed here.
-    /// The transcript catch-up path above comes from durable agent logs, while
-    /// this method only reconstructs current harness status snapshots.
+    /// Runtime-only historical events are intentionally not replayed here. The
+    /// transcript catch-up path above comes from durable agent logs, while this
+    /// method reconstructs current harness status snapshots.
     pub(crate) fn replay_harness_info(&mut self, client_id: &str, selectors: &[EventSelector]) {
-        let mut cursor = tau_proto::EventLogSeq::new(0);
-        while let Some(entry) = self.event_log.get_next_from(cursor) {
-            cursor = entry.seq.next();
-            let dominated = matches!(
-                entry.event,
-                Event::HarnessInfo(_)
-                    | Event::HarnessSessionDir(_)
-                    | Event::HarnessUiDir(_)
-                    | Event::ExtensionStarting(_)
-                    | Event::ExtensionReady(_)
-                    | Event::ExtensionExited(_)
-            );
-            if dominated && selector_matches_event(selectors, &entry.event) {
-                let _ = self.bus.send_to(
-                    client_id,
-                    entry.source.as_deref(),
-                    Frame::Event(entry.event),
-                );
+        let session_dir_event = Event::HarnessSessionDir(tau_proto::HarnessSessionDir {
+            session_id: self.current_session_id.clone(),
+            path: self.sessions_dir().join(self.current_session_id.as_str()),
+            status: session_dir_status_from_reason(self.current_session_start_reason),
+        });
+        if selector_matches_event(selectors, &session_dir_event) {
+            let _ = self
+                .bus
+                .send_to(client_id, None, Frame::Event(session_dir_event));
+        }
+
+        let extension_events: Vec<_> = self
+            .extension_order
+            .iter()
+            .filter_map(|connection_id| self.extensions.get(connection_id))
+            .map(|entry| match entry.state {
+                ExtensionState::Spawning | ExtensionState::Handshaking => {
+                    Event::ExtensionStarting(tau_proto::ExtensionStarting {
+                        instance_id: entry.instance_id,
+                        extension_name: entry.name.clone().into(),
+                        pid: entry.pid,
+                    })
+                }
+                ExtensionState::Ready => Event::ExtensionReady(tau_proto::ExtensionReady {
+                    instance_id: entry.instance_id,
+                    extension_name: entry.name.clone().into(),
+                    pid: entry.pid,
+                }),
+                ExtensionState::Disconnected => {
+                    Event::ExtensionExited(tau_proto::ExtensionExited {
+                        instance_id: entry.instance_id,
+                        extension_name: entry.name.clone().into(),
+                        pid: entry.pid,
+                        exit_code: None,
+                        signal: None,
+                    })
+                }
+            })
+            .collect();
+        for event in extension_events {
+            if selector_matches_event(selectors, &event) {
+                let _ = self
+                    .bus
+                    .send_to(client_id, Some("harness"), Frame::Event(event));
             }
         }
 

@@ -1,68 +1,60 @@
-//! Thread-safe append-only in-memory event log used by client follower
-//! threads for replay + live delivery.
+//! Thread-safe runtime event sequencer used by `LogEvent` delivery.
 //!
-//! The log grows unbounded over a daemon's lifetime: entries are
-//! never reclaimed. Followers poll via [`EventLog::get_next_from`]
-//! and never block, so no condvar is needed.
+//! The harness still assigns one globally monotonic [`EventLogSeq`] to every
+//! committed runtime event, but the sequencer does not retain event payloads.
+//! Replay comes from semantic state instead: durable session/agent stores,
+//! current harness snapshots, and the append-only `events.jsonl` debug trace.
 
+#[cfg(test)]
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use tau_proto::{ConnectionId, Event, EventLogSeq, UnixMicros};
+#[cfg(test)]
+use tau_proto::{ConnectionId, Event};
+use tau_proto::{EventLogSeq, UnixMicros};
 
-/// One entry in the event log.
-///
-/// `recorded_at` is stamped by [`EventLog::append`] at the moment
-/// the entry is created. It matches the value carried on the wire
-/// `LogEvent` envelope and any value persisted to durable semantic
-/// logs — sampling the clock here once and threading the same value
-/// through every downstream observer keeps offline timing analyses
-/// consistent with what live subscribers saw.
+/// One committed event captured by the test-only observer.
+#[cfg(test)]
 #[derive(Clone, Debug)]
 pub(crate) struct LogEntry {
     pub seq: EventLogSeq,
-    // Read by tests; live readers consult the wire envelope or the
-    // durable record instead. Kept on the in-memory entry so future
-    // replay paths that want to surface original timestamps don't
-    // have to re-derive them.
-    #[allow(dead_code)]
     pub recorded_at: UnixMicros,
     pub source: Option<ConnectionId>,
     pub event: Event,
 }
 
 struct EventLogInner {
-    entries: BTreeMap<EventLogSeq, LogEntry>,
     next_seq: EventLogSeq,
+    #[cfg(test)]
+    entries: BTreeMap<EventLogSeq, LogEntry>,
 }
 
-/// Thread-safe append-only event log.
+/// Thread-safe runtime event sequencer.
 ///
-/// Consumers track their own position and call
-/// [`EventLog::get_next_from`] in a loop. The log does not track
-/// subscribers, nor does it prune itself.
+/// Production builds keep only the next sequence counter. Tests also keep a
+/// small observer log so existing behavioral assertions can inspect what the
+/// harness committed without introducing a production retention path.
 pub(crate) struct EventLog {
     inner: Mutex<EventLogInner>,
 }
 
 impl EventLog {
-    /// Creates an empty event log.
+    /// Creates an empty sequencer.
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             inner: Mutex::new(EventLogInner {
-                entries: BTreeMap::new(),
                 next_seq: EventLogSeq::new(0),
+                #[cfg(test)]
+                entries: BTreeMap::new(),
             }),
         })
     }
 
     /// Reserves the next harness runtime event-log sequence.
     ///
-    /// Most live events use [`EventLog::append`], which reserves a sequence and
-    /// stores a replayable in-memory entry. Durable-history replay uses this
-    /// lighter path: replayed transcript facts are already stored in agent
-    /// logs, but their `LogEvent` envelopes still need fresh globally
-    /// monotonic [`EventLogSeq`] values rather than reusing persisted
+    /// Durable-history replay uses this path: replayed transcript facts already
+    /// live in agent logs, but their `LogEvent` envelopes still need fresh
+    /// globally monotonic [`EventLogSeq`] values rather than reusing persisted
     /// per-agent/per-session sequences.
     pub(crate) fn reserve_seq(&self) -> EventLogSeq {
         let mut inner = self.inner.lock().expect("event log mutex poisoned");
@@ -71,23 +63,29 @@ impl EventLog {
         seq
     }
 
-    /// Appends an event and returns its sequence number alongside the
-    /// wall-clock timestamp stamped on the entry.
+    /// Assigns a sequence and wall-clock timestamp for one live committed
+    /// event.
     ///
-    /// Stamping happens here (the single chokepoint every event passes
-    /// through on its way to the bus) so the value the wire `LogEvent`
-    /// envelope carries, the value followers see on replay, and any
-    /// value persisted to disk are all the same micros — offline
-    /// timing analyses agree with what live consumers saw.
-    pub(crate) fn append(
+    /// Stamping happens at the publish chokepoint so the wire `LogEvent`, any
+    /// durable semantic record, and the debug JSONL line all carry the same
+    /// timestamp. The timestamp is returned to the caller and is not retained
+    /// in production memory.
+    pub(crate) fn append(&self) -> (EventLogSeq, UnixMicros) {
+        let recorded_at = UnixMicros::now();
+        let seq = self.reserve_seq();
+        (seq, recorded_at)
+    }
+
+    /// Records a committed event for test assertions only.
+    #[cfg(test)]
+    pub(crate) fn record_for_test(
         &self,
+        seq: EventLogSeq,
+        recorded_at: UnixMicros,
         source: Option<ConnectionId>,
         event: Event,
-    ) -> (EventLogSeq, UnixMicros) {
-        let recorded_at = UnixMicros::now();
+    ) {
         let mut inner = self.inner.lock().expect("event log mutex poisoned");
-        let seq = inner.next_seq;
-        inner.next_seq = inner.next_seq.next();
         inner.entries.insert(
             seq,
             LogEntry {
@@ -97,11 +95,11 @@ impl EventLog {
                 event,
             },
         );
-        (seq, recorded_at)
     }
 
-    /// Returns the first entry with seq >= `from`, or `None` if no such
-    /// entry exists yet.
+    /// Returns the first test-observed entry with seq >= `from`, or `None` if
+    /// no such entry exists yet.
+    #[cfg(test)]
     pub(crate) fn get_next_from(&self, from: EventLogSeq) -> Option<LogEntry> {
         let inner = self.inner.lock().expect("event log mutex poisoned");
         inner
@@ -111,10 +109,8 @@ impl EventLog {
             .map(|(_, entry)| entry.clone())
     }
 
-    /// Returns the next runtime event-log sequence, which may be assigned to an
-    /// appended entry or reserved for a durable-history replay envelope. Used
-    /// by tests to assert that no event-log sequence was consumed across a
-    /// section of code.
+    /// Returns the next runtime event-log sequence. Used by tests to assert
+    /// that no event-log sequence was consumed across a section of code.
     #[cfg(test)]
     pub(crate) fn next_seq(&self) -> EventLogSeq {
         self.inner

@@ -129,12 +129,12 @@ pub struct ConfigError {
 }
 
 // ---------------------------------------------------------------------------
-// Wire transport — at-least-once delivery for event-log entries
+// Wire transport — sequenced delivery for runtime events
 // ---------------------------------------------------------------------------
 
-/// Monotonic sequence assigned by the harness event log.
+/// Monotonic sequence assigned by the harness runtime event stream.
 ///
-/// This sequence is relative to the harness runtime event log as a whole. Every
+/// This sequence is relative to the running harness as a whole. Every
 /// `LogEvent` envelope emitted by the running harness gets the next value in
 /// this single stream, regardless of whether the inner event is transient,
 /// persisted in an agent log, persisted in a session log, or replayed from
@@ -237,7 +237,7 @@ impl std::fmt::Display for UnixMicros {
     }
 }
 
-/// A bus event delivered through the harness's event log. Receivers
+/// A bus event delivered with harness-owned sequencing metadata. Receivers
 /// must process the inner event and then send an [`Ack`] referencing
 /// `seq` (or any later sequence, since acks are cumulative).
 ///
@@ -245,10 +245,9 @@ impl std::fmt::Display for UnixMicros {
 /// large) bus fact. It is never another `LogEvent` or `Ack` — only
 /// "real" payload events (e.g., `SessionStarted`, `ExtensionReady`).
 ///
-/// `recorded_at` is stamped by the harness at the moment the event
-/// is appended to the in-memory event log. Subscribers receive the
-/// same value the persisted record carries, so offline timing
-/// analyses agree with what live consumers saw. Older peers send
+/// `recorded_at` is stamped by the harness at the publish chokepoint.
+/// Subscribers receive the same value the persisted record carries, so offline
+/// timing analyses agree with what live consumers saw. Older peers send
 /// records without the field; they deserialize as `UnixMicros(0)`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LogEvent {
@@ -314,7 +313,12 @@ pub struct InterceptReply {
     pub action: InterceptAction,
 }
 
-/// Request a materialized full `agent.prompt_created` payload by id.
+/// Best-effort request for a materialized full `agent.prompt_created` payload
+/// by id.
+///
+/// Prompt-created payloads are transient delivery objects; harnesses are not
+/// required to retain them after live delivery. A missing prompt is reported as
+/// `None` in [`AgentPromptCreatedResult::prompt`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GetAgentPromptCreated {
     /// Request correlation id echoed by [`AgentPromptCreatedResult`].

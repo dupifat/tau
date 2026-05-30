@@ -8,11 +8,19 @@ fn info(message: &str) -> Event {
 }
 
 #[test]
-fn append_and_get() {
+fn append_assigns_sequence_and_timestamp_without_retaining_payloads_in_production() {
     let log = EventLog::new();
-    let (seq, recorded_at) = log.append(Some("conn-1".into()), info("hello"));
+    let (seq, recorded_at) = log.append();
     assert_eq!(seq.get(), 0);
     assert!(recorded_at.get() > 0, "append should stamp wall-clock time");
+    assert_eq!(log.next_seq().get(), 1);
+}
+
+#[test]
+fn test_observer_records_committed_events() {
+    let log = EventLog::new();
+    let (seq, recorded_at) = log.append();
+    log.record_for_test(seq, recorded_at, Some("conn-1".into()), info("hello"));
 
     let entry = log
         .get_next_from(tau_proto::EventLogSeq::new(0))
@@ -20,16 +28,15 @@ fn append_and_get() {
     assert_eq!(entry.seq.get(), 0);
     assert_eq!(entry.recorded_at, recorded_at);
     assert_eq!(entry.source, Some("conn-1".into()));
-
-    assert!(log.get_next_from(tau_proto::EventLogSeq::new(1)).is_none());
 }
 
 #[test]
-fn get_next_from_skips_earlier() {
+fn get_next_from_skips_earlier_test_observer_entries() {
     let log = EventLog::new();
-    log.append(None, info("a"));
-    log.append(None, info("b"));
-    log.append(None, info("c"));
+    for message in ["a", "b", "c"] {
+        let (seq, recorded_at) = log.append();
+        log.record_for_test(seq, recorded_at, None, info(message));
+    }
 
     let entry = log
         .get_next_from(tau_proto::EventLogSeq::new(1))

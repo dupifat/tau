@@ -72,12 +72,15 @@ point-to-point envelopes the bus never sees as facts.
   same `transient` flag, and the priority cursor identifying which
   interceptor in the chain this is for.
 
-## Transport (at-least-once delivery)
+## Transport (sequenced delivery)
 
 The harness's delivery layer wraps every published event in a
 `log_event` envelope so receivers can ack after processing. Receivers
-ack cumulatively — newer acks supersede older ones — and the harness
-re-delivers from the last known position on reconnect.
+ack cumulatively — newer acks supersede older ones. The harness does
+not retain the runtime event stream in memory; late UI catch-up is
+reconstructed from session/agent stores and current harness snapshots,
+and extension subscriptions remain live-only unless a future explicit
+replay mode is added.
 
 - **`log_event`** — The harness's log-delivery envelope around a real
   bus event, carrying a monotonic `EventLogSeq`. Receivers peel the

@@ -523,7 +523,11 @@ fn extension_that_never_sends_ready_never_exposes_staged_tool() {
         .expect("submit");
     assert!(matches!(submission, PromptSubmission::Queued));
     assert!(h.registry.providers_for("never_ready_tool").is_empty());
-    assert!(h.prompt_snapshots.is_empty());
+    assert!(
+        !event_log_events(&h)
+            .iter()
+            .any(|event| matches!(event, Event::AgentPromptCreated(_)))
+    );
 
     h.shutdown().expect("shutdown");
 }
@@ -559,7 +563,11 @@ fn provider_models_are_staged_until_ready_and_queued_prompt_waits() {
     assert!(matches!(submission, PromptSubmission::Queued));
     assert!(!h.available_models.contains(&model_id));
     assert!(!h.provider_model_routes.contains_key(&model_id));
-    assert!(h.prompt_snapshots.is_empty());
+    assert!(
+        !event_log_events(&h)
+            .iter()
+            .any(|event| matches!(event, Event::AgentPromptCreated(_)))
+    );
     assert!(!event_log_contains_source_event(&h, conn_id, |event| {
         matches!(event, Event::ProviderModelsUpdated(_))
     }));
@@ -580,12 +588,9 @@ fn provider_models_are_staged_until_ready_and_queued_prompt_waits() {
     assert!(event_log_contains_source_event(&h, conn_id, |event| {
         matches!(event, Event::ProviderModelsUpdated(update) if update.models.iter().any(|model| model.id == model_id))
     }));
-    let prompt = h
-        .prompt_snapshots
-        .values()
-        .find(|prompt| prompt.model == model_id)
-        .expect("queued prompt dispatched with staged model");
-    assert!(prompt_context_contains(prompt, "wait for staged model"));
+    let prompt = read_prompt_created(&h, &AgentPromptId::from("sp-0"));
+    assert_eq!(prompt.model, model_id);
+    assert!(prompt_context_contains(&prompt, "wait for staged model"));
 
     h.shutdown().expect("shutdown");
 }
@@ -746,7 +751,11 @@ fn agents_context_ready_staged_until_ready_and_queue_waits() {
         h.turn_state,
         TurnState::InitializingSession { .. }
     ));
-    assert!(h.prompt_snapshots.is_empty());
+    assert!(
+        !event_log_events(&h)
+            .iter()
+            .any(|event| matches!(event, Event::AgentPromptCreated(_)))
+    );
     assert!(!event_log_contains_source_event(&h, conn_id, |event| {
         matches!(
             event,
@@ -769,12 +778,12 @@ fn agents_context_ready_staged_until_ready_and_queue_waits() {
             Event::ExtAgentsMdAvailable(_) | Event::ExtensionContextReady(_)
         )
     }));
-    let prompt = h
-        .prompt_snapshots
-        .values()
-        .find(|prompt| prompt_context_contains(prompt, "queued after staged context"))
-        .expect("queued prompt dispatched after Ready");
-    assert!(prompt_context_contains(prompt, "STAGED AGENTS CONTEXT"));
+    let prompt = read_prompt_created(&h, &AgentPromptId::from("sp-0"));
+    assert!(prompt_context_contains(
+        &prompt,
+        "queued after staged context"
+    ));
+    assert!(prompt_context_contains(&prompt, "STAGED AGENTS CONTEXT"));
 
     h.shutdown().expect("shutdown");
 }
@@ -862,7 +871,11 @@ fn extension_emit_and_start_agent_request_are_staged_until_ready() {
         event.name() == custom_name
     }));
     assert!(!h.agents.keys().any(|cid| cid.as_str().contains("q-staged")));
-    assert!(h.prompt_snapshots.is_empty());
+    assert!(
+        !event_log_events(&h)
+            .iter()
+            .any(|event| matches!(event, Event::AgentPromptCreated(_)))
+    );
 
     h.handle_extension_message(
         conn_id,
@@ -876,11 +889,11 @@ fn extension_emit_and_start_agent_request_are_staged_until_ready() {
         event.name() == custom_name
     }));
     assert!(h.agents.keys().any(|cid| cid.as_str().contains("q-staged")));
-    assert!(
-        h.prompt_snapshots
-            .values()
-            .any(|prompt| prompt_context_contains(prompt, "STAGED START AGENT REQUEST"))
-    );
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentPromptCreated(prompt)
+            if prompt_context_contains(prompt, "STAGED START AGENT REQUEST")
+    )));
 
     h.shutdown().expect("shutdown");
 }
@@ -938,7 +951,11 @@ fn prompt_created_waits_for_registered_agent_context_provider() {
 
     h.dispatch_user_prompt("s1".into(), "first prompt".to_owned())
         .expect("dispatch user prompt");
-    assert!(h.prompt_snapshots.is_empty());
+    assert!(
+        !event_log_events(&h)
+            .iter()
+            .any(|event| matches!(event, Event::AgentPromptCreated(_)))
+    );
     assert!(event_log_events(&h).iter().any(|event| matches!(
         event,
         Event::AgentPromptSubmitted(prompt) if prompt.text == "first prompt"
@@ -973,11 +990,8 @@ fn prompt_created_waits_for_registered_agent_context_provider() {
     )
     .expect("context ready");
 
-    let prompt = h
-        .prompt_snapshots
-        .values()
-        .find(|prompt| prompt_context_contains(prompt, "first prompt"))
-        .expect("prompt dispatched after context ready");
+    let prompt = read_prompt_created(&h, &AgentPromptId::from("sp-0"));
+    assert!(prompt_context_contains(&prompt, "first prompt"));
     assert!(
         prompt
             .system_prompt
@@ -1216,7 +1230,11 @@ fn unregister_queues_unavailable_notice_for_next_user_prompt_only() {
     let notice = tool_unavailable_notice_prompt(&ToolName::new("shell"));
     unregister_shell(&mut h);
 
-    assert!(h.prompt_snapshots.is_empty());
+    assert!(
+        !event_log_events(&h)
+            .iter()
+            .any(|event| matches!(event, Event::AgentPromptCreated(_)))
+    );
     assert_eq!(agent_prompt_text_count(&h, &notice), 0);
 
     let cid = ensure_test_user_agent(&mut h);

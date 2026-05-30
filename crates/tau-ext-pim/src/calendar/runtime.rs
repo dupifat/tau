@@ -1,19 +1,24 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use serde::de::DeserializeOwned;
 use tau_proto::{
     ActionError, ActionInvoke, ActionOutput, ActionResult, CborValue, Event, SecretValue,
     ToolDisplay, ToolDisplayStats, ToolDisplayStatus, ToolError, ToolResult, ToolStarted,
 };
+use time_tz::{OffsetResult, PrimitiveDateTimeExt};
 
 use super::config::{
     CalendarExtensionConfig, DescriptionPolicy, PrivateEventsPolicy, ValidatedAccount,
     ValidatedBackendConfig, ValidatedConfig, ValidatedPolicy,
 };
 use super::google::{GoogleBackend, GoogleEvent, GoogleEventWrite};
-use super::ics_feed::{IcsEvent, IcsFeedBackend, TimeRange, parse_rfc3339_bound};
+use super::ics_feed::{IcsEvent, IcsFeedBackend, TimeRange};
 use super::state::{CalendarChangeApproval, CalendarLogEntry, GooglePendingAuth, StateStore};
-use super::tool::{CalendarArgs, CalendarCommand, ToolInvocation};
+use super::tool::{
+    CalendarCommand, CalendarRangeArgs, CreateEventArgs, DeleteEventArgs, ListCalendarsArgs,
+    NoArgs, ReadEventArgs, RespondInviteArgs, ToolInvocation, UpdateEventArgs,
+};
 
 const LIST_ACCOUNTS_FORMAT: &str = "id flags backend default_calendar timezone display_name";
 const LIST_CALENDARS_FORMAT: &str = "account calendar flags backend display_name";
@@ -142,6 +147,127 @@ enum CalendarMutationResult {
     Deleted,
 }
 
+struct ChangeArgs {
+    account: Option<String>,
+    calendar: Option<String>,
+    event_id: Option<String>,
+    etag: Option<String>,
+    title: Option<String>,
+    description: Option<String>,
+    location: Option<String>,
+    start: Option<String>,
+    end: Option<String>,
+    timezone: Option<String>,
+    attendees: Option<Vec<String>>,
+    response: Option<String>,
+}
+
+impl From<CreateEventArgs> for ChangeArgs {
+    fn from(args: CreateEventArgs) -> Self {
+        Self {
+            account: args.account,
+            calendar: args.calendar,
+            event_id: None,
+            etag: None,
+            title: args.title,
+            description: args.description,
+            location: args.location,
+            start: args.start,
+            end: args.end,
+            timezone: args.timezone,
+            attendees: args.attendees,
+            response: None,
+        }
+    }
+}
+
+impl From<UpdateEventArgs> for ChangeArgs {
+    fn from(args: UpdateEventArgs) -> Self {
+        Self {
+            account: args.account,
+            calendar: args.calendar,
+            event_id: args.event_id,
+            etag: args.etag,
+            title: args.title,
+            description: args.description,
+            location: args.location,
+            start: args.start,
+            end: args.end,
+            timezone: args.timezone,
+            attendees: args.attendees,
+            response: None,
+        }
+    }
+}
+
+impl From<DeleteEventArgs> for ChangeArgs {
+    fn from(args: DeleteEventArgs) -> Self {
+        Self {
+            account: args.account,
+            calendar: args.calendar,
+            event_id: args.event_id,
+            etag: args.etag,
+            title: None,
+            description: None,
+            location: None,
+            start: None,
+            end: None,
+            timezone: None,
+            attendees: None,
+            response: None,
+        }
+    }
+}
+
+impl From<RespondInviteArgs> for ChangeArgs {
+    fn from(args: RespondInviteArgs) -> Self {
+        Self {
+            account: args.account,
+            calendar: args.calendar,
+            event_id: args.event_id,
+            etag: args.etag,
+            title: None,
+            description: None,
+            location: None,
+            start: None,
+            end: None,
+            timezone: None,
+            attendees: None,
+            response: args.response,
+        }
+    }
+}
+
+fn parse_invocation_args<T>(invocation: &ToolInvocation) -> Result<T, String>
+where
+    T: DeserializeOwned,
+{
+    let empty_args;
+    let args = match invocation.args.as_ref() {
+        Some(args) => args,
+        None => {
+            empty_args = CborValue::Map(Vec::new());
+            &empty_args
+        }
+    };
+    args.deserialized()
+        .map_err(|error| calendar_arg_parse_error(command_name(invocation.command), &error))
+}
+
+fn calendar_arg_parse_error(command: &str, error: &dyn std::fmt::Display) -> String {
+    let message = error.to_string();
+    if let Some(field) = extract_unknown_field(&message) {
+        return format!("{command} does not accept `{field}`");
+    }
+    format!("invalid {command} args: {message}")
+}
+
+fn extract_unknown_field(message: &str) -> Option<&str> {
+    let (_, rest) = message.split_once("unknown field `")?;
+    let (field, _) = rest.split_once('`')?;
+    Some(field)
+}
+
 impl CalendarMutationResult {
     fn event_id(&self) -> Option<&str> {
         match self {
@@ -165,15 +291,29 @@ impl Engine {
         };
         let command = invocation.command;
         let result = match command {
-            CalendarCommand::ListAccounts => Ok(self.list_accounts()),
-            CalendarCommand::ListCalendars => self.list_calendars(&invocation.args),
-            CalendarCommand::ListEvents => self.list_events(&invocation.args),
-            CalendarCommand::ReadEvent => self.read_event(&invocation.args),
-            CalendarCommand::FreeBusy => self.free_busy(&invocation.args),
-            CalendarCommand::CreateEvent
-            | CalendarCommand::UpdateEvent
-            | CalendarCommand::DeleteEvent
-            | CalendarCommand::RespondInvite => self.submit_change(command, &invocation.args),
+            CalendarCommand::ListAccounts => {
+                parse_invocation_args::<NoArgs>(&invocation).map(|_args| self.list_accounts())
+            }
+            CalendarCommand::ListCalendars => {
+                parse_invocation_args::<ListCalendarsArgs>(&invocation)
+                    .and_then(|args| self.list_calendars(&args))
+            }
+            CalendarCommand::ListEvents => parse_invocation_args::<CalendarRangeArgs>(&invocation)
+                .and_then(|args| self.list_events(&args)),
+            CalendarCommand::ReadEvent => parse_invocation_args::<ReadEventArgs>(&invocation)
+                .and_then(|args| self.read_event(&args)),
+            CalendarCommand::FreeBusy => parse_invocation_args::<CalendarRangeArgs>(&invocation)
+                .and_then(|args| self.free_busy(&args)),
+            CalendarCommand::CreateEvent => parse_invocation_args::<CreateEventArgs>(&invocation)
+                .and_then(|args| self.submit_change(command, ChangeArgs::from(args))),
+            CalendarCommand::UpdateEvent => parse_invocation_args::<UpdateEventArgs>(&invocation)
+                .and_then(|args| self.submit_change(command, ChangeArgs::from(args))),
+            CalendarCommand::DeleteEvent => parse_invocation_args::<DeleteEventArgs>(&invocation)
+                .and_then(|args| self.submit_change(command, ChangeArgs::from(args))),
+            CalendarCommand::RespondInvite => {
+                parse_invocation_args::<RespondInviteArgs>(&invocation)
+                    .and_then(|args| self.submit_change(command, ChangeArgs::from(args)))
+            }
         }
         .unwrap_or_else(|message| calendar_error_envelope(Some(command_name(command)), &message));
         self.append_calendar_log_for_invocation(&invocation, &result);
@@ -419,7 +559,7 @@ impl Engine {
         if invocation.command == CalendarCommand::ListAccounts {
             return None;
         }
-        let args = &invocation.args;
+        let args = invocation.args.as_ref();
         let status = calendar_log_status(result);
         let account = self.log_account(args);
         let mut entry = CalendarLogEntry::tool(command_name(invocation.command), &status);
@@ -430,27 +570,24 @@ impl Engine {
             .log_calendar(args, account.as_deref())
             .map(|value| safe_log_value(&value, MAX_LOG_FIELD_CHARS));
         entry.event_id = args
-            .event_id
-            .as_deref()
+            .and_then(|args| cbor_text_field(args, "event_id"))
             .map(|value| safe_log_value(value, MAX_LOG_FIELD_CHARS));
-        entry.time_min = args
-            .time_min
-            .as_deref()
+        entry.start = args
+            .and_then(|args| cbor_text_field(args, "start"))
             .map(|value| safe_log_value(value, MAX_LOG_FIELD_CHARS));
-        entry.time_max = args
-            .time_max
-            .as_deref()
+        entry.end = args
+            .and_then(|args| cbor_text_field(args, "end"))
             .map(|value| safe_log_value(value, MAX_LOG_FIELD_CHARS));
-        entry.limit = args.limit;
+        entry.limit = args.and_then(|args| cbor_u32_field(args, "limit"));
         entry.item_count = calendar_log_item_count(invocation.command, result);
         entry.reason = calendar_log_error_message(result)
             .map(|reason| safe_log_value(reason, MAX_LOG_REASON_CHARS));
         Some(entry)
     }
 
-    fn log_account(&self, args: &CalendarArgs) -> Option<String> {
-        if let Some(account) = &args.account {
-            return Some(account.clone());
+    fn log_account(&self, args: Option<&CborValue>) -> Option<String> {
+        if let Some(account) = args.and_then(|args| cbor_text_field(args, "account")) {
+            return Some(account.to_owned());
         }
         let mut accounts = self
             .config
@@ -466,13 +603,15 @@ impl Engine {
         }
     }
 
-    fn log_calendar(&self, args: &CalendarArgs, account_id: Option<&str>) -> Option<String> {
-        args.calendar.clone().or_else(|| {
-            account_id
-                .and_then(|id| self.config.accounts.get(id))
-                .and_then(default_calendar_id_for_account)
-                .map(str::to_owned)
-        })
+    fn log_calendar(&self, args: Option<&CborValue>, account_id: Option<&str>) -> Option<String> {
+        args.and_then(|args| cbor_text_field(args, "calendar"))
+            .map(str::to_owned)
+            .or_else(|| {
+                account_id
+                    .and_then(|id| self.config.accounts.get(id))
+                    .and_then(default_calendar_id_for_account)
+                    .map(str::to_owned)
+            })
     }
 
     fn list_accounts(&self) -> CborValue {
@@ -509,8 +648,7 @@ impl Engine {
         )
     }
 
-    fn list_calendars(&self, args: &CalendarArgs) -> Result<CborValue, String> {
-        reject_cursor(args)?;
+    fn list_calendars(&self, args: &ListCalendarsArgs) -> Result<CborValue, String> {
         let mut rows = Vec::new();
         if self.config.enable {
             let accounts = self.accounts_for_read(args.account.as_deref())?;
@@ -568,11 +706,11 @@ impl Engine {
         ))
     }
 
-    fn list_events(&self, args: &CalendarArgs) -> Result<CborValue, String> {
+    fn list_events(&self, args: &CalendarRangeArgs) -> Result<CborValue, String> {
         let limit = normalized_limit(args.limit)?;
-        let range = parse_range(args)?;
         let account = self.single_account(args.account.as_deref())?;
         let calendar = self.calendar_arg(account, args.calendar.as_deref())?;
+        let range = parse_range(args, account)?;
         let page =
             self.events_for_account(account, calendar, range, limit, args.cursor.as_deref())?;
         let mut rows = Vec::new();
@@ -596,8 +734,7 @@ impl Engine {
         ))
     }
 
-    fn read_event(&self, args: &CalendarArgs) -> Result<CborValue, String> {
-        reject_cursor(args)?;
+    fn read_event(&self, args: &ReadEventArgs) -> Result<CborValue, String> {
         let event_id = required_arg(args.event_id.as_deref(), "event_id")?;
         let account = self.single_account(args.account.as_deref())?;
         let calendar = self.calendar_arg(account, args.calendar.as_deref())?;
@@ -640,11 +777,11 @@ impl Engine {
         ))
     }
 
-    fn free_busy(&self, args: &CalendarArgs) -> Result<CborValue, String> {
+    fn free_busy(&self, args: &CalendarRangeArgs) -> Result<CborValue, String> {
         let limit = normalized_limit(args.limit)?;
-        let range = parse_range(args)?;
         let account = self.single_account(args.account.as_deref())?;
         let calendar = self.calendar_arg(account, args.calendar.as_deref())?;
+        let range = parse_range(args, account)?;
         let page =
             self.events_for_account(account, calendar, range, limit, args.cursor.as_deref())?;
         let mut rows = Vec::new();
@@ -671,7 +808,7 @@ impl Engine {
     fn submit_change(
         &self,
         command: CalendarCommand,
-        args: &CalendarArgs,
+        args: ChangeArgs,
     ) -> Result<CborValue, String> {
         let change = self.build_change(command, args)?;
         self.validate_change_etag_is_current(&change)?;
@@ -686,13 +823,9 @@ impl Engine {
     fn build_change(
         &self,
         command: CalendarCommand,
-        args: &CalendarArgs,
+        args: ChangeArgs,
     ) -> Result<CalendarChangeApproval, String> {
         let account = self.single_account(args.account.as_deref())?;
-        if args.cursor.is_some() {
-            return Err("cursor is not supported for calendar writes yet".to_owned());
-        }
-        reject_read_range_args_for_write(args)?;
         let calendar = self.calendar_arg(account, args.calendar.as_deref())?;
         self.ensure_calendar_allowed(account, calendar)?;
         if !matches!(
@@ -709,7 +842,6 @@ impl Engine {
             CalendarChangeApproval::pending(command_name(command), &account.id, calendar);
         match command {
             CalendarCommand::CreateEvent => {
-                reject_read_only_write_target(args)?;
                 change.title = Some(required_text(args.title.as_deref(), "title")?);
                 let (start, end) =
                     create_event_time_pair(args.start.as_deref(), args.end.as_deref())?;
@@ -757,13 +889,11 @@ impl Engine {
             CalendarCommand::DeleteEvent => {
                 change.event_id = Some(required_text(args.event_id.as_deref(), "event_id")?);
                 change.etag = Some(required_text(args.etag.as_deref(), "etag")?);
-                reject_payload_fields_for_delete(args)?;
             }
             CalendarCommand::RespondInvite => {
                 change.event_id = Some(required_text(args.event_id.as_deref(), "event_id")?);
                 change.etag = Some(required_text(args.etag.as_deref(), "etag")?);
                 change.response = Some(required_response(args.response.as_deref())?);
-                reject_payload_fields_for_response(args)?;
             }
             CalendarCommand::ListAccounts
             | CalendarCommand::ListCalendars
@@ -1084,11 +1214,95 @@ fn default_calendar_id_for_account(account: &ValidatedAccount) -> Option<&str> {
     })
 }
 
-fn parse_range(args: &CalendarArgs) -> Result<TimeRange, String> {
+fn parse_range(args: &CalendarRangeArgs, account: &ValidatedAccount) -> Result<TimeRange, String> {
+    let start = parse_read_bound(
+        required_arg(args.start.as_deref(), "start")?,
+        "start",
+        account.timezone.as_deref(),
+    )?;
+    let end = match args.end.as_deref() {
+        Some(end) if !end.trim().is_empty() => {
+            parse_read_bound(end, "end", account.timezone.as_deref())?
+        }
+        _ => default_read_end_bound(
+            required_arg(args.start.as_deref(), "start")?,
+            start,
+            account.timezone.as_deref(),
+        )?,
+    };
+    if !is_datetime_before(start, end) {
+        return Err("start must be before end".to_owned());
+    }
     Ok(TimeRange {
-        min: parse_rfc3339_bound(args.time_min.as_deref(), "time_min")?,
-        max: parse_rfc3339_bound(args.time_max.as_deref(), "time_max")?,
+        min: Some(start),
+        max: Some(end),
     })
+}
+
+fn parse_read_bound(
+    value: &str,
+    field: &str,
+    account_timezone: Option<&str>,
+) -> Result<time::OffsetDateTime, String> {
+    if let Ok(value) =
+        time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+    {
+        return Ok(value);
+    }
+    let local = parse_local_read_bound(value, field)?;
+    local_read_bound_to_utc(local, field, account_timezone)
+}
+
+fn default_read_end_bound(
+    start_value: &str,
+    start_utc: time::OffsetDateTime,
+    account_timezone: Option<&str>,
+) -> Result<time::OffsetDateTime, String> {
+    if time::OffsetDateTime::parse(start_value, &time::format_description::well_known::Rfc3339)
+        .is_ok()
+    {
+        return start_utc
+            .checked_add(time::Duration::days(7))
+            .ok_or_else(|| "default end is out of range".to_owned());
+    }
+    let local = parse_local_read_bound(start_value, "start")?
+        .checked_add(time::Duration::days(7))
+        .ok_or_else(|| "default end is out of range".to_owned())?;
+    local_read_bound_to_utc(local, "end", account_timezone)
+}
+
+fn parse_local_read_bound(value: &str, field: &str) -> Result<time::PrimitiveDateTime, String> {
+    if let Some(date) = parse_tool_date(value) {
+        return Ok(date.with_time(time::Time::MIDNIGHT));
+    }
+    time::PrimitiveDateTime::parse(
+        value,
+        time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]"),
+    )
+    .map_err(|error| {
+        format!(
+            "{field} must be RFC3339 with offset, YYYY-MM-DD, or local YYYY-MM-DDTHH:MM:SS: {error}"
+        )
+    })
+}
+
+fn local_read_bound_to_utc(
+    local: time::PrimitiveDateTime,
+    field: &str,
+    account_timezone: Option<&str>,
+) -> Result<time::OffsetDateTime, String> {
+    let timezone_name = account_timezone.ok_or_else(|| {
+        format!("{field} has no UTC offset and account timezone is not configured")
+    })?;
+    let timezone = time_tz::timezones::get_by_name(timezone_name)
+        .ok_or_else(|| format!("account timezone `{timezone_name}` is not recognized"))?;
+    match local.assume_timezone(timezone) {
+        OffsetResult::Some(value) => Ok(value),
+        OffsetResult::Ambiguous(_, _) => Err(format!(
+            "{field} is ambiguous in timezone `{timezone_name}`"
+        )),
+        OffsetResult::None => Err(format!("{field} is invalid in timezone `{timezone_name}`")),
+    }
 }
 
 fn normalized_limit(limit: Option<u32>) -> Result<usize, String> {
@@ -1109,13 +1323,6 @@ fn required_arg<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str, Strin
         Some(value) if !value.trim().is_empty() => Ok(value),
         _ => Err(format!("{name} is required")),
     }
-}
-
-fn reject_cursor(args: &CalendarArgs) -> Result<(), String> {
-    if args.cursor.is_some() {
-        return Err("calendar cursor pagination is not implemented yet".to_owned());
-    }
-    Ok(())
 }
 
 fn required_text(value: Option<&str>, name: &str) -> Result<String, String> {
@@ -1310,52 +1517,6 @@ fn required_response(value: Option<&str>) -> Result<String, String> {
     Ok(response.to_owned())
 }
 
-fn reject_read_only_write_target(args: &CalendarArgs) -> Result<(), String> {
-    if args.event_id.is_some() || args.etag.is_some() || args.response.is_some() {
-        return Err("create_event does not accept event_id, etag, or response".to_owned());
-    }
-    Ok(())
-}
-
-fn reject_read_range_args_for_write(args: &CalendarArgs) -> Result<(), String> {
-    if args.time_min.is_some() || args.time_max.is_some() || args.limit.is_some() {
-        return Err("calendar writes do not accept time_min, time_max, or limit".to_owned());
-    }
-    Ok(())
-}
-
-fn reject_payload_fields_for_delete(args: &CalendarArgs) -> Result<(), String> {
-    if args.title.is_some()
-        || args.description.is_some()
-        || args.location.is_some()
-        || args.start.is_some()
-        || args.end.is_some()
-        || args.timezone.is_some()
-        || args.attendees.is_some()
-        || args.response.is_some()
-    {
-        return Err("delete_event accepts only account, calendar, event_id, and etag".to_owned());
-    }
-    Ok(())
-}
-
-fn reject_payload_fields_for_response(args: &CalendarArgs) -> Result<(), String> {
-    if args.title.is_some()
-        || args.description.is_some()
-        || args.location.is_some()
-        || args.start.is_some()
-        || args.end.is_some()
-        || args.timezone.is_some()
-        || args.attendees.is_some()
-    {
-        return Err(
-            "respond_invite accepts only account, calendar, event_id, etag, and response"
-                .to_owned(),
-        );
-    }
-    Ok(())
-}
-
 fn change_has_update_payload(change: &CalendarChangeApproval) -> bool {
     change.title.is_some()
         || change.description.is_some()
@@ -1509,8 +1670,8 @@ fn format_calendar_log_entry(entry: &CalendarLogEntry) -> String {
     push_log_field(&mut fields, "account", entry.account.as_deref());
     push_log_field(&mut fields, "calendar", entry.calendar.as_deref());
     push_log_field(&mut fields, "event_id", entry.event_id.as_deref());
-    push_log_field(&mut fields, "time_min", entry.time_min.as_deref());
-    push_log_field(&mut fields, "time_max", entry.time_max.as_deref());
+    push_log_field(&mut fields, "start", entry.start.as_deref());
+    push_log_field(&mut fields, "end", entry.end.as_deref());
     if let Some(limit) = entry.limit {
         fields.push(format!("limit={limit}"));
     }
@@ -2190,6 +2351,13 @@ fn cbor_bool_field(value: &CborValue, field: &str) -> Option<bool> {
     }
 }
 
+fn cbor_u32_field(value: &CborValue, field: &str) -> Option<u32> {
+    match cbor_field(value, field) {
+        Some(CborValue::Integer(value)) => u32::try_from(i128::from(*value)).ok(),
+        _ => None,
+    }
+}
+
 fn cbor_array_len(value: &CborValue, field: &str) -> Option<u64> {
     cbor_array_field(value, field).map(|values| values.len() as u64)
 }
@@ -2394,6 +2562,171 @@ mod tests {
         assert!(log.contains("status=ok"), "{log}");
         assert!(log.contains("account=feed"), "{log}");
         assert!(log.contains("items=1"), "{log}");
+    }
+
+    #[test]
+    fn list_events_uses_start_end_range_names_and_rejects_old_names() {
+        // Range reads now use the same `start`/`end` names as event payloads,
+        // parsed through a command-specific struct. The old time_min/time_max
+        // names must fail instead of being accepted as a second vocabulary.
+        let invocation = ToolInvocation {
+            command: CalendarCommand::ListEvents,
+            args: Some(cbor_map(vec![
+                ("account", CborValue::Text("feed".to_owned())),
+                ("calendar", CborValue::Text("main".to_owned())),
+                (
+                    "start",
+                    CborValue::Text("2026-05-29T00:00:00-07:00".to_owned()),
+                ),
+                (
+                    "end",
+                    CborValue::Text("2026-05-30T00:00:00-07:00".to_owned()),
+                ),
+            ])),
+        };
+        let args = parse_invocation_args::<CalendarRangeArgs>(&invocation).expect("range args");
+        assert_eq!(args.start.as_deref(), Some("2026-05-29T00:00:00-07:00"));
+        assert_eq!(args.end.as_deref(), Some("2026-05-30T00:00:00-07:00"));
+
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let engine = test_engine(temp.path());
+        let output = engine.dispatch(&command_args(
+            "list_events",
+            vec![
+                ("account", CborValue::Text("feed".to_owned())),
+                ("calendar", CborValue::Text("main".to_owned())),
+                (
+                    "time_min",
+                    CborValue::Text("2026-05-29T00:00:00Z".to_owned()),
+                ),
+            ],
+        ));
+
+        assert_eq!(cbor_bool_field(&output, "ok"), Some(false));
+        assert_eq!(cbor_text_field(&output, "command"), Some("list_events"));
+        let message = cbor_nested_text_field(&output, "error", "message").expect("message");
+        assert_eq!(message, "list_events does not accept `time_min`");
+    }
+
+    #[test]
+    fn free_busy_rejects_event_payload_fields_instead_of_ignoring_them() {
+        // free_busy has a command-specific range args struct, so payload fields
+        // like title fail during serde parsing instead of being silently ignored.
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let engine = test_engine(temp.path());
+
+        let output = engine.dispatch(&command_args(
+            "free_busy",
+            vec![
+                ("account", CborValue::Text("feed".to_owned())),
+                ("calendar", CborValue::Text("main".to_owned())),
+                ("title", CborValue::Text("tau test party".to_owned())),
+            ],
+        ));
+
+        assert_eq!(cbor_bool_field(&output, "ok"), Some(false));
+        assert_eq!(cbor_text_field(&output, "command"), Some("free_busy"));
+        let message = cbor_nested_text_field(&output, "error", "message").expect("message");
+        assert_eq!(message, "free_busy does not accept `title`");
+    }
+
+    #[test]
+    fn calendar_range_args_accept_local_bounds_and_default_end() {
+        // Agents often know the date but omit an offset. Range reads should
+        // interpret local date/date-time values in the account timezone and
+        // stay bounded even when `end` is omitted.
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let engine = test_engine(temp.path());
+        let account = engine.config.accounts.get("feed").expect("account");
+
+        let range = parse_range(
+            &CalendarRangeArgs {
+                start: Some("2026-05-30T12:34:56".to_owned()),
+                ..Default::default()
+            },
+            account,
+        )
+        .expect("local datetime range");
+        assert_eq!(
+            range
+                .min
+                .expect("min")
+                .format(&time::format_description::well_known::Rfc3339)
+                .expect("format min"),
+            "2026-05-30T12:34:56Z"
+        );
+        assert_eq!(
+            range
+                .max
+                .expect("max")
+                .format(&time::format_description::well_known::Rfc3339)
+                .expect("format max"),
+            "2026-06-06T12:34:56Z"
+        );
+
+        let range = parse_range(
+            &CalendarRangeArgs {
+                start: Some("2026-05-30".to_owned()),
+                end: Some("2026-05-31".to_owned()),
+                ..Default::default()
+            },
+            account,
+        )
+        .expect("local date range");
+        assert_eq!(
+            range
+                .min
+                .expect("min")
+                .format(&time::format_description::well_known::Rfc3339)
+                .expect("format min"),
+            "2026-05-30T00:00:00Z"
+        );
+        assert_eq!(
+            range
+                .max
+                .expect("max")
+                .format(&time::format_description::well_known::Rfc3339)
+                .expect("format max"),
+            "2026-05-31T00:00:00Z"
+        );
+
+        let la_start =
+            parse_read_bound("2026-05-30T00:00:00", "start", Some("America/Los_Angeles"))
+                .expect("la local start");
+        assert_eq!(
+            la_start
+                .format(&time::format_description::well_known::Rfc3339)
+                .expect("format la start"),
+            "2026-05-30T00:00:00-07:00"
+        );
+
+        let la_fall_start =
+            parse_read_bound("2026-10-31T00:00:00", "start", Some("America/Los_Angeles"))
+                .expect("la fall start");
+        let la_fall_end = default_read_end_bound(
+            "2026-10-31T00:00:00",
+            la_fall_start,
+            Some("America/Los_Angeles"),
+        )
+        .expect("la fall default end");
+        assert_eq!(
+            la_fall_end
+                .format(&time::format_description::well_known::Rfc3339)
+                .expect("format la fall end"),
+            "2026-11-07T00:00:00-08:00"
+        );
+    }
+
+    #[test]
+    fn calendar_range_args_require_start() {
+        // Missing start used to create unbounded reads. Calendar reads should
+        // now always have an explicit lower bound.
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let engine = test_engine(temp.path());
+        let account = engine.config.accounts.get("feed").expect("account");
+
+        let err = parse_range(&CalendarRangeArgs::default(), account).expect_err("missing start");
+        assert_eq!(err, "start is required");
     }
 
     #[test]

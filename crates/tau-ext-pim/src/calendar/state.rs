@@ -42,12 +42,12 @@ pub(crate) struct CalendarLogEntry {
     /// Event id when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) event_id: Option<String>,
-    /// Lower RFC3339 time bound from the tool call.
+    /// Inclusive lower time bound from the tool call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) time_min: Option<String>,
-    /// Upper RFC3339 time bound from the tool call.
+    pub(crate) start: Option<String>,
+    /// Exclusive upper time bound from the tool call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) time_max: Option<String>,
+    pub(crate) end: Option<String>,
     /// Requested row limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) limit: Option<u32>,
@@ -71,8 +71,8 @@ impl CalendarLogEntry {
             account: None,
             calendar: None,
             event_id: None,
-            time_min: None,
-            time_max: None,
+            start: None,
+            end: None,
             limit: None,
             item_count: None,
             reason: None,

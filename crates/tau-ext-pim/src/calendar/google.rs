@@ -328,14 +328,14 @@ impl GoogleBackend {
             query.append_pair(
                 "timeMin",
                 &min.format(&Rfc3339)
-                    .map_err(|error| format!("formatting time_min failed: {error}"))?,
+                    .map_err(|error| format!("formatting start failed: {error}"))?,
             );
         }
         if let Some(max) = range.max {
             query.append_pair(
                 "timeMax",
                 &max.format(&Rfc3339)
-                    .map_err(|error| format!("formatting time_max failed: {error}"))?,
+                    .map_err(|error| format!("formatting end failed: {error}"))?,
             );
         }
         let url = format!(

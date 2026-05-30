@@ -166,6 +166,7 @@ time = { version = "0.3", default-features = false, features = [
   "macros",
   "parsing",
 ] }
+time-tz = { version = "2", default-features = false, features = ["db"] }
 tokio = { version = "1", default-features = false, features = [
   "io-util",
   "macros",

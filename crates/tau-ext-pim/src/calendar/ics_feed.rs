@@ -3,6 +3,7 @@ use std::io::Read;
 use std::time::Duration;
 
 use tau_proto::SecretValue;
+#[cfg(test)]
 use time::format_description::well_known::Rfc3339;
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 use url::Url;
@@ -217,19 +218,6 @@ impl IcsFeedBackend {
         };
         normalize_feed_url(&url)
     }
-}
-
-/// Parse an RFC3339 bound used by the calendar tool.
-pub fn parse_rfc3339_bound(
-    value: Option<&str>,
-    field: &str,
-) -> Result<Option<OffsetDateTime>, String> {
-    value
-        .map(|value| {
-            OffsetDateTime::parse(value, &Rfc3339)
-                .map_err(|error| format!("{field} must be RFC3339: {error}"))
-        })
-        .transpose()
 }
 
 fn normalize_feed_url(url: &str) -> Result<String, String> {

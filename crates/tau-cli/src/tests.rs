@@ -1319,6 +1319,134 @@ fn deselect_then_first_prompt_for_new_agent_does_not_inherit_prior_transcript() 
 }
 
 #[test]
+fn queued_prompt_from_old_agent_does_not_steal_no_agent_selection() {
+    // Regression: after `/agent new`, an already-running agent can still emit
+    // queued/dequeued prompt events. Those background events must not reselect
+    // the old agent while the user is typing the prompt meant to create a fresh
+    // agent.
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
+        session_id: "s1".into(),
+        reason: tau_proto::SessionStartReason::Initial,
+    }));
+    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "old agent prompt".to_owned(),
+        target_agent_id: Some("old-agent".to_owned().into()),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "old agent prompt"));
+
+    renderer.clear_selected_agent();
+    renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
+        text: "queued old-agent prompt".into(),
+        agent_id: "old-agent".into(),
+        message_class: tau_proto::PromptMessageClass::User,
+    }));
+    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "stale old-agent prompt".to_owned(),
+        target_agent_id: Some("old-agent".to_owned().into()),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }));
+    renderer.handle(&Event::AgentPromptCreated(AgentPromptCreated {
+        agent_id: "old-agent".into(),
+        ..agent_prompt_created("old-sp", "s1")
+    }));
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "queued old-agent prompt"));
+    assert!(!vt.screen_contains(80, "stale old-agent prompt"));
+    assert_eq!(
+        *renderer
+            .current_agent_state()
+            .lock()
+            .expect("current agent"),
+        None
+    );
+
+    renderer.handle(&Event::AgentPromptCreated(AgentPromptCreated {
+        agent_id: "new-agent".into(),
+        ..agent_prompt_created("new-sp", "s1")
+    }));
+    sync(&handle);
+    assert_eq!(
+        *renderer
+            .current_agent_state()
+            .lock()
+            .expect("current agent"),
+        Some("new-agent".to_owned())
+    );
+}
+
+#[test]
+fn queued_prompt_selects_agent_from_empty_state() {
+    // Regression: replay can start with an already-queued user prompt. The UI
+    // should treat that prompt as selecting the live agent, otherwise the next
+    // Enter from the empty screen would create a new agent instead of targeting
+    // the active one.
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
+        text: "queued live-agent prompt".into(),
+        agent_id: "live-agent".into(),
+        message_class: tau_proto::PromptMessageClass::User,
+    }));
+    sync(&handle);
+
+    assert!(vt.screen_contains(80, "queued live-agent prompt"));
+    assert_eq!(
+        *renderer
+            .current_agent_state()
+            .lock()
+            .expect("current agent"),
+        Some("live-agent".to_owned())
+    );
+}
+
+#[test]
+fn manual_compaction_selects_agent_from_empty_state() {
+    // Regression: replay can expose a user-triggered compaction before any
+    // prompt-created/submitted event. Even though manual compaction is not
+    // rendered as progress, it still identifies the agent the empty UI should
+    // target for subsequent input.
+    let (_term, handle, _vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    renderer.handle(&Event::AgentCompactionTriggered(AgentCompactionTriggered {
+        agent_id: "live-agent".into(),
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    sync(&handle);
+
+    assert_eq!(
+        *renderer
+            .current_agent_state()
+            .lock()
+            .expect("current agent"),
+        Some("live-agent".to_owned())
+    );
+}
+
+#[test]
 fn stale_draft_snapshot_is_dropped_after_submit_epoch_bump() {
     let handle = (Mutex::new(DraftSlot::default()), std::sync::Condvar::new());
     {

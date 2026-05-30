@@ -34,6 +34,10 @@ pub(crate) struct EventRenderer {
     /// separately from [`Self::current_agent_id`] so changing the input target
     /// from the empty start-new-agent screen does not force a transcript swap.
     displayed_agent_id: Option<String>,
+    /// True after the user explicitly cleared selection to start a new agent.
+    /// While set, already-visible agents must not be reselected by late
+    /// background prompt lifecycle events.
+    awaiting_new_agent_selection: bool,
     /// Output and renderer bookkeeping for the no-agent screen shown after
     /// `/agent none`. This keeps deselection from leaving the previously
     /// selected agent's output in the visible renderer fields.
@@ -896,6 +900,7 @@ impl EventRenderer {
             theme,
             current_agent_id: None,
             displayed_agent_id: None,
+            awaiting_new_agent_selection: false,
             no_agent_ui_state: AgentUiState::default(),
             agents_ui_state: HashMap::new(),
             known_agents: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -993,6 +998,7 @@ impl EventRenderer {
     }
 
     pub(crate) fn switch_agent(&mut self, agent_id: String) {
+        self.awaiting_new_agent_selection = false;
         self.remember_agent(agent_id.clone());
         let target_changed = self.current_agent_id.as_deref() != Some(agent_id.as_str());
         let display_changed = self.displayed_agent_id.as_deref() != Some(agent_id.as_str());
@@ -1009,6 +1015,7 @@ impl EventRenderer {
     }
 
     pub(crate) fn clear_selected_agent(&mut self) {
+        self.awaiting_new_agent_selection = true;
         let target_changed = self.current_agent_id.is_some();
         let display_changed = self.displayed_agent_id.is_some();
 
@@ -2193,10 +2200,11 @@ impl EventRenderer {
             return;
         };
         if self.current_agent_id.is_none() {
-            if self.event_selects_agent_from_empty(event) {
+            if self.event_selects_agent_from_empty(event, &target_agent_id) {
                 if self.displayed_agent_id.as_deref() != Some(target_agent_id.as_str()) {
                     self.show_agent_transcript(target_agent_id.clone());
                 }
+                self.awaiting_new_agent_selection = false;
                 self.set_current_agent_id(Some(target_agent_id.clone()));
                 self.refresh_prompt_placeholder();
                 self.render_model_status();
@@ -2273,19 +2281,40 @@ impl EventRenderer {
         self.update_agent_in_progress();
     }
 
-    fn event_selects_agent_from_empty(&self, event: &Event) -> bool {
+    fn event_selects_agent_from_empty(&self, event: &Event, target_agent_id: &str) -> bool {
         match event {
-            Event::AgentPromptCreated(prompt) => prompt.originator.is_user(),
-            Event::AgentCompactionTriggered(triggered) => triggered.originator.is_user(),
-            Event::AgentPromptQueued(queued) => !queued.message_class.is_internal(),
+            Event::AgentPromptCreated(prompt) => {
+                prompt.originator.is_user() && self.can_select_target_from_empty(target_agent_id)
+            }
+            Event::AgentCompactionTriggered(triggered) => {
+                triggered.originator.is_user() && self.can_select_target_from_empty(target_agent_id)
+            }
+            Event::AgentPromptQueued(queued) => {
+                !queued.message_class.is_internal()
+                    && self.can_select_target_from_empty(target_agent_id)
+            }
             Event::AgentPromptSubmitted(prompt) => {
-                prompt.originator.is_user() && !prompt.message_class.is_internal()
+                prompt.originator.is_user()
+                    && !prompt.message_class.is_internal()
+                    && self.can_select_target_from_empty(target_agent_id)
             }
             Event::UiPromptSubmitted(prompt) => {
-                prompt.target_agent_id.is_some() && prompt.originator.is_user()
+                prompt.target_agent_id.is_some()
+                    && prompt.originator.is_user()
+                    && self.can_select_target_from_empty(target_agent_id)
             }
             _ => false,
         }
+    }
+
+    fn can_select_target_from_empty(&self, target_agent_id: &str) -> bool {
+        // When the UI is in the explicit start-new-agent state (`/agent new` or
+        // `/agent switch none`), background activity from the previously visible
+        // agent must not steal selection while the user is typing the prompt
+        // meant to create a fresh agent. An event for an agent whose transcript
+        // is already hidden here is therefore treated as background work, not as
+        // the new agent.
+        !self.awaiting_new_agent_selection || !self.agents_ui_state.contains_key(target_agent_id)
     }
 
     fn event_originator_is_extension(event: &Event) -> bool {

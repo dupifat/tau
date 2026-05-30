@@ -558,15 +558,23 @@
     }
 
     .feature {
-      background: var(--panel);
-      border: 1px solid var(--border-subtle);
+      position: relative;
+      overflow: hidden;
+      background:
+        radial-gradient(ellipse at 18% 0%, rgb(42 161 152 / 0.18), transparent 44%),
+        radial-gradient(ellipse at 90% 100%, rgb(38 139 210 / 0.14), transparent 48%),
+        rgb(255 255 255 / 0.045);
+      border: 1px solid rgb(255 255 255 / 0.12);
       border-radius: 6px;
+      box-shadow: 0 16px 48px rgb(0 0 0 / 0.22);
       padding: 1.5rem;
+      -webkit-backdrop-filter: blur(14px) saturate(120%);
+      backdrop-filter: blur(14px) saturate(120%);
     }
 
     .feature-title {
       font-size: 1rem;
-      color: var(--base1);
+      color: var(--base2);
       font-weight: 700;
       margin-bottom: 0.5rem;
       display: flex;
@@ -580,7 +588,7 @@
 
     .feature p {
       font-size: 1rem;
-      color: var(--base0);
+      color: var(--base1);
       margin-bottom: 0;
       line-height: 1.6;
     }
@@ -591,12 +599,21 @@
     }
 
     .arch-diagram {
-      background: var(--panel);
-      border: 1px solid var(--border-subtle);
+      position: relative;
+      overflow: hidden;
+      background:
+        radial-gradient(ellipse at 18% 18%, rgb(42 161 152 / 0.18), transparent 42%),
+        radial-gradient(ellipse at 76% 88%, rgb(38 139 210 / 0.16), transparent 48%),
+        radial-gradient(ellipse at 96% 0%, rgb(147 161 161 / 0.12), transparent 38%),
+        rgb(255 255 255 / 0.045);
+      border: 1px solid rgb(255 255 255 / 0.12);
       border-radius: 6px;
+      box-shadow: 0 16px 48px rgb(0 0 0 / 0.22);
       padding: 1.5rem 2rem;
       margin-top: 1.5rem;
       text-align: center;
+      -webkit-backdrop-filter: blur(14px) saturate(120%);
+      backdrop-filter: blur(14px) saturate(120%);
     }
 
     /* Diagram is inline SVG with per-tspan absolute x coords so
@@ -623,11 +640,12 @@
     }
 
     .arch-svg .c {
-      fill: var(--base00);
+      fill: var(--base1);
     }
 
     .arch-svg .h {
-      fill: var(--cyan);
+      fill: #ffffff;
+      font-weight: 700;
     }
 
     /* Status */
@@ -690,21 +708,410 @@
     }
 
     .contact-links a {
+      position: relative;
+      overflow: hidden;
       display: inline-flex;
       align-items: center;
       gap: 0.4rem;
       padding: 0.5rem 1rem;
-      background: var(--panel);
-      border: 1px solid var(--border-subtle);
-      border-radius: 4px;
+      background:
+        radial-gradient(ellipse at 18% 0%, rgb(42 161 152 / 0.16), transparent 44%),
+        radial-gradient(ellipse at 88% 100%, rgb(38 139 210 / 0.13), transparent 48%),
+        rgb(255 255 255 / 0.045);
+      border: 1px solid rgb(255 255 255 / 0.12);
+      border-radius: 5px;
+      box-shadow: 0 12px 36px rgb(0 0 0 / 0.2);
       font-size: 1rem;
-      color: var(--base1);
-      transition: background 0.2s;
+      color: var(--base2);
+      transition: background 0.2s, border-color 0.2s, color 0.2s;
+      -webkit-backdrop-filter: blur(14px) saturate(120%);
+      backdrop-filter: blur(14px) saturate(120%);
     }
 
     .contact-links a:hover {
-      background: #0a4050;
+      border-color: rgb(255 255 255 / 0.2);
       color: var(--base2);
+    }
+
+    .arch-diagram,
+    .features .feature,
+    .contact-links a:nth-child(n) {
+      --tile-blob-a: 42 161 152;
+      --tile-blob-b: 38 139 210;
+      isolation: isolate;
+      background:
+        radial-gradient(ellipse at 50% 0%, rgb(42 161 152 / 0.16), transparent 62%),
+        linear-gradient(180deg, rgb(6 22 24 / 0.72), rgb(1 7 8 / 0.58)),
+        rgb(255 255 255 / 0.045);
+      background-attachment: scroll;
+      animation: none;
+      will-change: auto;
+    }
+
+    .arch-diagram::before,
+    .arch-diagram::after,
+    .features .feature::before,
+    .features .feature::after,
+    .contact-links a::before,
+    .contact-links a::after {
+      content: "";
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      z-index: -1;
+      border-radius: 999px;
+      pointer-events: none;
+      filter: blur(30px);
+      will-change: transform;
+    }
+
+    .arch-diagram::before,
+    .features .feature::before,
+    .contact-links a::before {
+      width: 188%;
+      height: 144%;
+      background: radial-gradient(ellipse at center, rgb(var(--tile-blob-a) / 0.055) 0%, rgb(var(--tile-blob-a) / 0.037) 42%, rgb(var(--tile-blob-a) / 0.018) 70%, transparent 90%);
+      animation: tile-local-blob-a 11s ease-in-out infinite alternate;
+    }
+
+    .arch-diagram::after,
+    .features .feature::after,
+    .contact-links a::after {
+      width: 198%;
+      height: 156%;
+      background: radial-gradient(ellipse at center, rgb(var(--tile-blob-b) / 0.052) 0%, rgb(var(--tile-blob-b) / 0.035) 42%, rgb(var(--tile-blob-b) / 0.018) 70%, transparent 90%);
+      animation: tile-local-blob-b 15s ease-in-out infinite alternate-reverse;
+    }
+
+    .arch-diagram {
+      --tile-blob-a: 42 161 152;
+      --tile-blob-b: 108 113 196;
+    }
+
+    .features .feature:nth-child(1) {
+      --tile-blob-a: 42 161 152;
+      --tile-blob-b: 38 139 210;
+    }
+
+    .features .feature:nth-child(2) {
+      --tile-blob-a: 133 153 0;
+      --tile-blob-b: 108 113 196;
+    }
+
+    .features .feature:nth-child(3) {
+      --tile-blob-a: 147 161 161;
+      --tile-blob-b: 42 161 152;
+    }
+
+    .features .feature:nth-child(4) {
+      --tile-blob-a: 38 139 210;
+      --tile-blob-b: 133 153 0;
+    }
+
+    .features .feature:nth-child(5) {
+      --tile-blob-a: 108 113 196;
+      --tile-blob-b: 42 161 152;
+    }
+
+    .features .feature:nth-child(6) {
+      --tile-blob-a: 133 153 0;
+      --tile-blob-b: 38 139 210;
+    }
+
+    .contact-links a:nth-child(1) {
+      --tile-blob-a: 42 161 152;
+      --tile-blob-b: 38 139 210;
+    }
+
+    .contact-links a:nth-child(2) {
+      --tile-blob-a: 108 113 196;
+      --tile-blob-b: 147 161 161;
+    }
+
+    .contact-links a:nth-child(3) {
+      --tile-blob-a: 133 153 0;
+      --tile-blob-b: 42 161 152;
+    }
+
+    .contact-links a:nth-child(4) {
+      --tile-blob-a: 38 139 210;
+      --tile-blob-b: 108 113 196;
+    }
+
+    .arch-svg,
+    .feature > *,
+    .contact-links a > * {
+      position: relative;
+      z-index: 1;
+    }
+
+    .features .feature:nth-child(2)::before,
+    .contact-links a:nth-child(2)::before {
+      animation-delay: -2.5s;
+    }
+
+    .features .feature:nth-child(3)::before,
+    .contact-links a:nth-child(3)::before {
+      animation-delay: -5.5s;
+    }
+
+    .features .feature:nth-child(4)::before,
+    .contact-links a:nth-child(4)::before {
+      animation-delay: -8s;
+    }
+
+    .features .feature:nth-child(5)::before {
+      animation-delay: -4s;
+    }
+
+    .features .feature:nth-child(6)::before {
+      animation-delay: -9.5s;
+    }
+
+    .features .feature:nth-child(2)::after,
+    .contact-links a:nth-child(2)::after {
+      animation-delay: -7s;
+    }
+
+    .features .feature:nth-child(3)::after,
+    .contact-links a:nth-child(3)::after {
+      animation-delay: -3s;
+    }
+
+    .features .feature:nth-child(4)::after,
+    .contact-links a:nth-child(4)::after {
+      animation-delay: -11s;
+    }
+
+    .features .feature:nth-child(5)::after {
+      animation-delay: -13s;
+    }
+
+    .features .feature:nth-child(6)::after {
+      animation-delay: -5s;
+    }
+
+    .features .feature:nth-child(1)::before {
+      animation-duration: 12.7s;
+    }
+
+    .features .feature:nth-child(2)::before,
+    .features .feature:nth-child(5)::before {
+      animation-name: tile-local-blob-a-wide;
+      animation-duration: 14.2s;
+    }
+
+    .features .feature:nth-child(3)::before,
+    .features .feature:nth-child(6)::before {
+      animation-name: tile-local-blob-a-tall;
+      animation-duration: 10.4s;
+    }
+
+    .features .feature:nth-child(4)::before {
+      animation-name: tile-local-blob-a-diag;
+      animation-duration: 16.1s;
+    }
+
+    .features .feature:nth-child(5)::before {
+      animation-duration: 17.6s;
+    }
+
+    .features .feature:nth-child(6)::before {
+      animation-duration: 12.1s;
+    }
+
+    .features .feature:nth-child(1)::after {
+      animation-duration: 16.8s;
+    }
+
+    .features .feature:nth-child(2)::after,
+    .features .feature:nth-child(5)::after {
+      animation-name: tile-local-blob-b-tall;
+      animation-duration: 18.6s;
+    }
+
+    .features .feature:nth-child(3)::after,
+    .features .feature:nth-child(6)::after {
+      animation-name: tile-local-blob-b-wide;
+      animation-duration: 13.4s;
+    }
+
+    .features .feature:nth-child(4)::after {
+      animation-name: tile-local-blob-b-diag;
+      animation-duration: 20.3s;
+    }
+
+    .features .feature:nth-child(5)::after {
+      animation-duration: 21.7s;
+    }
+
+    .features .feature:nth-child(6)::after {
+      animation-duration: 15.2s;
+    }
+
+    @keyframes tile-local-blob-a {
+      0% {
+        transform: translate(-74%, -40%) rotate(-4deg);
+      }
+
+      24% {
+        transform: translate(-26%, -90%) rotate(5deg);
+      }
+
+      52% {
+        transform: translate(-2%, -30%) rotate(-2deg);
+      }
+
+      78% {
+        transform: translate(-58%, 2%) rotate(4deg);
+      }
+
+      100% {
+        transform: translate(-86%, -66%) rotate(-3deg);
+      }
+    }
+
+    @keyframes tile-local-blob-b {
+      0% {
+        transform: translate(-18%, -18%) rotate(6deg);
+      }
+
+      22% {
+        transform: translate(-90%, -6%) rotate(-4deg);
+      }
+
+      49% {
+        transform: translate(-66%, -94%) rotate(5deg);
+      }
+
+      74% {
+        transform: translate(2%, -70%) rotate(-5deg);
+      }
+
+      100% {
+        transform: translate(-34%, -10%) rotate(3deg);
+      }
+    }
+
+    @keyframes tile-local-blob-a-wide {
+      0% {
+        transform: translate(-90%, -48%) rotate(-3deg);
+      }
+
+      35% {
+        transform: translate(0%, -64%) rotate(4deg);
+      }
+
+      68% {
+        transform: translate(-88%, -20%) rotate(-5deg);
+      }
+
+      100% {
+        transform: translate(-14%, -76%) rotate(3deg);
+      }
+    }
+
+    @keyframes tile-local-blob-a-tall {
+      0% {
+        transform: translate(-56%, -96%) rotate(4deg);
+      }
+
+      29% {
+        transform: translate(-18%, 4%) rotate(-5deg);
+      }
+
+      63% {
+        transform: translate(-82%, -18%) rotate(3deg);
+      }
+
+      100% {
+        transform: translate(-34%, -88%) rotate(-2deg);
+      }
+    }
+
+    @keyframes tile-local-blob-a-diag {
+      0% {
+        transform: translate(-92%, -88%) rotate(-5deg);
+      }
+
+      41% {
+        transform: translate(-8%, -12%) rotate(5deg);
+      }
+
+      76% {
+        transform: translate(-72%, -4%) rotate(-3deg);
+      }
+
+      100% {
+        transform: translate(-18%, -86%) rotate(4deg);
+      }
+    }
+
+    @keyframes tile-local-blob-b-wide {
+      0% {
+        transform: translate(2%, -24%) rotate(4deg);
+      }
+
+      33% {
+        transform: translate(-94%, -44%) rotate(-6deg);
+      }
+
+      66% {
+        transform: translate(-6%, -78%) rotate(5deg);
+      }
+
+      100% {
+        transform: translate(-88%, -12%) rotate(-3deg);
+      }
+    }
+
+    @keyframes tile-local-blob-b-tall {
+      0% {
+        transform: translate(-28%, 2%) rotate(-4deg);
+      }
+
+      27% {
+        transform: translate(-72%, -98%) rotate(5deg);
+      }
+
+      61% {
+        transform: translate(-8%, -54%) rotate(-6deg);
+      }
+
+      100% {
+        transform: translate(-82%, -22%) rotate(3deg);
+      }
+    }
+
+    @keyframes tile-local-blob-b-diag {
+      0% {
+        transform: translate(-4%, -86%) rotate(5deg);
+      }
+
+      38% {
+        transform: translate(-92%, -8%) rotate(-5deg);
+      }
+
+      72% {
+        transform: translate(-22%, -2%) rotate(4deg);
+      }
+
+      100% {
+        transform: translate(-74%, -94%) rotate(-4deg);
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .arch-diagram::before,
+      .arch-diagram::after,
+      .features .feature::before,
+      .features .feature::after,
+      .contact-links a::before,
+      .contact-links a::after {
+        animation: none;
+        transform: translate(-50%, -50%);
+        will-change: auto;
+      }
     }
 
     /* Footer */
@@ -904,7 +1311,7 @@
       <div class="feature">
         <div class="feature-title"><span class="icon">@</span> Remote execution</div>
         <p>Running a component on another machine is as simple as prefixing
-          its command with <code style="color:var(--cyan)">ssh&nbsp;user@host&nbsp;-c</code>.</p>
+          its command with <code style="color:#00ffff">ssh&nbsp;user@host&nbsp;-c</code>.</p>
       </div>
       <div class="feature">
         <div class="feature-title"><span class="icon">&amp;</span> Native packaging</div>

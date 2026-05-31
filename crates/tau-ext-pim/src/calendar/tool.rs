@@ -100,8 +100,6 @@ pub(crate) struct CreateEventArgs {
     pub(crate) start: Option<String>,
     /// Event end as RFC3339 date-time or all-day exclusive date.
     pub(crate) end: Option<String>,
-    /// IANA timezone for date-time values.
-    pub(crate) timezone: Option<String>,
     /// Attendee email addresses.
     pub(crate) attendees: Option<Vec<String>>,
 }
@@ -126,8 +124,6 @@ pub(crate) struct UpdateEventArgs {
     pub(crate) start: Option<String>,
     /// Event end as RFC3339 date-time or all-day exclusive date.
     pub(crate) end: Option<String>,
-    /// IANA timezone for date-time values.
-    pub(crate) timezone: Option<String>,
     /// Attendee email addresses.
     pub(crate) attendees: Option<Vec<String>>,
 }
@@ -163,7 +159,7 @@ pub fn calendar_tool_spec() -> ToolSpec {
     ToolSpec {
         name: tau_proto::ToolName::new(TOOL_NAME),
         model_visible_name: None,
-        description: Some("Controlled calendar access through configured accounts. Commands: list_accounts, list_calendars, list_events, read_event, free_busy, create_event, update_event, delete_event, respond_invite. Results use the email-style ok/command/status/data envelope; list/detail data includes a format field and sanitized line arrays. For list_events/free_busy, use start/end as event range filters; start is inclusive, end is exclusive, and omitted end defaults to start plus 7 days. Read bounds accept RFC3339 timestamps with offsets, YYYY-MM-DD dates, or local YYYY-MM-DDTHH:MM:SS values interpreted in the account timezone. Google calendar mutations are queued for user approval by default and require explicit account/calendar targets for existing events. ICS feed accounts are read-only. Use explicit timestamps or YYYY-MM-DD all-day dates; do not pass natural-language dates. For create_event, omit end only when the intended default duration is one hour for date-times or one day for all-day dates.".to_owned()),
+        description: Some("Controlled calendar access. Use list_accounts, list_calendars, list_events, read_event, free_busy, create_event, update_event, delete_event, or respond_invite. Results use ok/command/status/data envelopes with line arrays and format fields. For event ranges pass start; end is optional and defaults to 7 days after start. Time values may be RFC3339 with offset, YYYY-MM-DD all-day dates, or local YYYY-MM-DDTHH:MM:SS interpreted in the configured calendar timezone. Existing event writes require event_id; ETags are handled internally.".to_owned()),
         tool_type: tau_proto::ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
@@ -175,19 +171,18 @@ pub fn calendar_tool_spec() -> ToolSpec {
                 },
                 "args": {
                     "type": "object",
-                    "description": "Command arguments. list_accounts takes no arguments. Other commands generally require account/calendar once more than one target is configured. list_events and free_busy use start/end for range bounds; omitted end defaults to start plus 7 days, and cursor can be passed from the previous next_cursor. Mutations for existing events require event_id.",
+                    "description": "Command-specific arguments. account/calendar are optional when there is only one configured target.",
                     "properties": {
                         "account": {"type": "string", "description": "Configured calendar account id."},
                         "calendar": {"type": "string", "description": "Calendar id within the account."},
                         "event_id": {"type": "string", "description": "Backend event id."},
                         "limit": {"type": "integer", "minimum": 1, "maximum": 100},
-                        "cursor": {"type": "string", "description": "Cursor returned as next_cursor by list_events or free_busy; pass it with the same account/calendar/range arguments."},
+                        "cursor": {"type": "string", "description": "Cursor returned as next_cursor by list_events or free_busy."},
                         "title": {"type": "string"},
                         "description": {"type": "string"},
                         "location": {"type": "string"},
-                        "start": {"type": "string", "description": "Event start for create/update, or inclusive lower bound for list_events/free_busy. Read bounds accept RFC3339 with offset, YYYY-MM-DD, or local YYYY-MM-DDTHH:MM:SS interpreted in the account timezone."},
-                        "end": {"type": "string", "description": "Event end for create/update, or exclusive upper bound for list_events/free_busy. For list_events/free_busy, omitted end defaults to start plus 7 days. create_event may omit this to default to start plus one hour for date-times or plus one day for all-day dates."},
-                        "timezone": {"type": "string", "description": "IANA timezone for create/update payloads. Read bounds should include offsets in start/end."},
+                        "start": {"type": "string", "description": "Range or event start. Use RFC3339 with offset, YYYY-MM-DD, or local YYYY-MM-DDTHH:MM:SS."},
+                        "end": {"type": "string", "description": "Range or event end. For update_event, pass end whenever start is passed."},
                         "attendees": {"type": "array", "items": {"type": "string"}},
                         "response": {"type": "string", "enum": ["accepted", "tentative", "declined"]}
                     },
@@ -195,7 +190,85 @@ pub fn calendar_tool_spec() -> ToolSpec {
                 }
             },
             "required": ["command"],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "allOf": [
+                {
+                    "if": {"properties": {"command": {"const": "list_accounts"}}, "required": ["command"]},
+                    "then": {"properties": {"args": {"maxProperties": 0}}}
+                },
+                {
+                    "if": {"properties": {"command": {"const": "list_calendars"}}, "required": ["command"]},
+                    "then": {"properties": {"args": {"properties": {"account": {}}, "additionalProperties": false}}}
+                },
+                {
+                    "if": {"properties": {"command": {"enum": ["list_events", "free_busy"]}}, "required": ["command"]},
+                    "then": {
+                        "required": ["args"],
+                        "properties": {"args": {
+                            "required": ["start"],
+                            "properties": {"account": {}, "calendar": {}, "start": {}, "end": {}, "limit": {}, "cursor": {}},
+                            "additionalProperties": false
+                        }}
+                    }
+                },
+                {
+                    "if": {"properties": {"command": {"const": "read_event"}}, "required": ["command"]},
+                    "then": {
+                        "required": ["args"],
+                        "properties": {"args": {
+                            "required": ["event_id"],
+                            "properties": {"account": {}, "calendar": {}, "event_id": {}},
+                            "additionalProperties": false
+                        }}
+                    }
+                },
+                {
+                    "if": {"properties": {"command": {"const": "create_event"}}, "required": ["command"]},
+                    "then": {
+                        "required": ["args"],
+                        "properties": {"args": {
+                            "required": ["title", "start"],
+                            "properties": {"account": {}, "calendar": {}, "title": {}, "description": {}, "location": {}, "start": {}, "end": {}, "attendees": {}},
+                            "additionalProperties": false
+                        }}
+                    }
+                },
+                {
+                    "if": {"properties": {"command": {"const": "update_event"}}, "required": ["command"]},
+                    "then": {
+                        "required": ["args"],
+                        "properties": {"args": {
+                            "required": ["event_id"],
+                            "anyOf": [{"required": ["title"]}, {"required": ["description"]}, {"required": ["location"]}, {"required": ["start"]}, {"required": ["end"]}, {"required": ["attendees"]}],
+                            "dependentRequired": {"start": ["end"], "end": ["start"]},
+                            "properties": {"account": {}, "calendar": {}, "event_id": {}, "title": {}, "description": {}, "location": {}, "start": {}, "end": {}, "attendees": {}},
+                            "additionalProperties": false
+                        }}
+                    }
+                },
+                {
+                    "if": {"properties": {"command": {"const": "delete_event"}}, "required": ["command"]},
+                    "then": {
+                        "required": ["args"],
+                        "properties": {"args": {
+                            "required": ["event_id"],
+                            "properties": {"account": {}, "calendar": {}, "event_id": {}},
+                            "additionalProperties": false
+                        }}
+                    }
+                },
+                {
+                    "if": {"properties": {"command": {"const": "respond_invite"}}, "required": ["command"]},
+                    "then": {
+                        "required": ["args"],
+                        "properties": {"args": {
+                            "required": ["event_id", "response"],
+                            "properties": {"account": {}, "calendar": {}, "event_id": {}, "response": {}},
+                            "additionalProperties": false
+                        }}
+                    }
+                }
+            ]
         })),
         format: None,
         enabled_by_default: false,
@@ -210,4 +283,28 @@ pub fn calendar_prompt_fragment() -> PromptFragment {
         PromptPriority::new(120),
         include_str!("prompts/calendar_instructions.md"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calendar_schema_hides_timezone_and_has_command_conditionals() {
+        // Weak local models need command-specific schema constraints rather
+        // than prose-only guidance. Keep timezone out of model-visible args.
+        let schema = calendar_tool_spec().parameters.expect("parameters");
+        let args_properties = schema
+            .pointer("/properties/args/properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("args properties");
+
+        assert!(!args_properties.contains_key("timezone"));
+        assert!(
+            schema
+                .get("allOf")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|rules| 7 < rules.len())
+        );
+    }
 }

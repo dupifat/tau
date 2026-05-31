@@ -292,7 +292,7 @@ The model-visible tool name for calendars is `calendar`. Commands are selected t
 
 Calendar results use the same `ok`, `command`, `status`, `data` envelope as email. Line-style data includes `data.format` and sanitized text arrays (`accounts`, `calendars`, `events`, `event`, or `busy`). `list_events` and `free_busy` include `data.next_cursor` and `data.truncated`; pass the cursor with the same account/calendar/range arguments to continue.
 
-Calendar writes target Google accounts only. The default write policy queues `/calendar change` approvals; ICS feed accounts remain read-only. `start` and `end` accept RFC3339 date-times or `YYYY-MM-DD` all-day dates.
+Calendar writes target Google accounts only. The default write policy queues `/calendar change` approvals; ICS feed accounts remain read-only. `start` and `end` accept RFC3339 date-times with offsets, local `YYYY-MM-DDTHH:MM:SS` date-times interpreted in the configured calendar timezone, or `YYYY-MM-DD` all-day dates.
 
 
 ## User approval actions

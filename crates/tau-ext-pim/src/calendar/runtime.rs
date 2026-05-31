@@ -21,8 +21,8 @@ use super::tool::{
     NoArgs, ReadEventArgs, RespondInviteArgs, ToolInvocation, UpdateEventArgs,
 };
 
-const LIST_ACCOUNTS_FORMAT: &str = "id flags backend default_calendar timezone display_name";
-const LIST_CALENDARS_FORMAT: &str = "account calendar flags backend display_name";
+const LIST_ACCOUNTS_FORMAT: &str = "account_id default_calendar display_name";
+const LIST_CALENDARS_FORMAT: &str = "account_id calendar_id flags display_name";
 const LIST_EVENTS_FORMAT: &str = "account calendar event_id start end flags status summary...";
 const FREE_BUSY_FORMAT: &str = "account calendar event_id start end flags";
 const EVENT_DETAIL_FORMAT: &str = "key value...";
@@ -166,7 +166,6 @@ struct ChangeArgs {
     location: Option<String>,
     start: Option<String>,
     end: Option<String>,
-    timezone: Option<String>,
     attendees: Option<Vec<String>>,
     response: Option<String>,
 }
@@ -182,7 +181,6 @@ impl From<CreateEventArgs> for ChangeArgs {
             location: args.location,
             start: args.start,
             end: args.end,
-            timezone: args.timezone,
             attendees: args.attendees,
             response: None,
         }
@@ -200,7 +198,6 @@ impl From<UpdateEventArgs> for ChangeArgs {
             location: args.location,
             start: args.start,
             end: args.end,
-            timezone: args.timezone,
             attendees: args.attendees,
             response: None,
         }
@@ -218,7 +215,6 @@ impl From<DeleteEventArgs> for ChangeArgs {
             location: None,
             start: None,
             end: None,
-            timezone: None,
             attendees: None,
             response: None,
         }
@@ -236,7 +232,6 @@ impl From<RespondInviteArgs> for ChangeArgs {
             location: None,
             start: None,
             end: None,
-            timezone: None,
             attendees: None,
             response: args.response,
         }
@@ -630,16 +625,12 @@ impl Engine {
                     continue;
                 }
                 let default_calendar = account.default_calendar.as_deref().unwrap_or("-");
-                let timezone = account.timezone.as_deref().unwrap_or("-");
                 let display_name = account.display_name.as_deref().unwrap_or("-");
                 rows.push(format!(
-                    "{} {} {} {} {} {}",
+                    "{} {} {}",
                     safe_field(&account.id),
-                    "enabled",
-                    safe_field(account.backend_kind()),
                     safe_field(default_calendar),
-                    safe_field(timezone),
-                    safe_field(display_name)
+                    quoted_display_field(display_name)
                 ));
             }
         }
@@ -667,12 +658,11 @@ impl Engine {
                                 "writable"
                             };
                             rows.push(format!(
-                                "{} {} {} {} {}",
+                                "{} {} {} {}",
                                 safe_field(&account.id),
                                 safe_field(&calendar.id),
                                 flags,
-                                safe_field(account.backend_kind()),
-                                safe_field(&calendar.display_name)
+                                quoted_display_field(&calendar.display_name)
                             ));
                         }
                     }
@@ -688,12 +678,11 @@ impl Engine {
                                 "writable"
                             };
                             rows.push(format!(
-                                "{} {} {} {} {}",
+                                "{} {} {} {}",
                                 safe_field(&account.id),
                                 safe_field(&calendar.id),
                                 flags,
-                                safe_field(account.backend_kind()),
-                                safe_field(&calendar.summary)
+                                quoted_display_field(&calendar.summary)
                             ));
                         }
                     }
@@ -850,16 +839,15 @@ impl Engine {
         match command {
             CalendarCommand::CreateEvent => {
                 change.title = Some(required_text(args.title.as_deref(), "title")?);
-                let (start, end) =
-                    create_event_time_pair(args.start.as_deref(), args.end.as_deref())?;
+                let (start, end) = create_event_time_pair(
+                    args.start.as_deref(),
+                    args.end.as_deref(),
+                    account.timezone.as_deref(),
+                )?;
                 change.start = Some(start);
                 change.end = Some(end);
                 change.description = optional_description(args.description.as_deref())?;
                 change.location = optional_line(args.location.as_deref(), "location", true)?;
-                change.timezone = optional_timezone(args.timezone.as_deref())?;
-                if change.timezone.is_some() && change.start.is_none() {
-                    return Err("timezone updates require start and end".to_owned());
-                }
                 change.attendees = optional_attendees(
                     args.attendees.as_deref(),
                     self.config.policy.write.max_attendees,
@@ -873,15 +861,17 @@ impl Engine {
                 change.location = optional_line(args.location.as_deref(), "location", true)?;
                 match (args.start.as_deref(), args.end.as_deref()) {
                     (Some(_), Some(_)) => {
-                        let (start, end) =
-                            required_time_pair(args.start.as_deref(), args.end.as_deref())?;
+                        let (start, end) = required_time_pair(
+                            args.start.as_deref(),
+                            args.end.as_deref(),
+                            account.timezone.as_deref(),
+                        )?;
                         change.start = Some(start);
                         change.end = Some(end);
                     }
                     (None, None) => {}
                     _ => return Err("start and end must be provided together".to_owned()),
                 }
-                change.timezone = optional_timezone(args.timezone.as_deref())?;
                 change.attendees = optional_attendees(
                     args.attendees.as_deref(),
                     self.config.policy.write.max_attendees,
@@ -1431,10 +1421,6 @@ fn optional_description(value: Option<&str>) -> Result<Option<String>, String> {
     Ok(Some(value.to_owned()))
 }
 
-fn optional_timezone(value: Option<&str>) -> Result<Option<String>, String> {
-    optional_line(value, "timezone", false)
-}
-
 fn validate_line(value: &str, name: &str, allow_empty: bool) -> Result<(), String> {
     if (!allow_empty && value.trim().is_empty())
         || MAX_EVENT_FIELD_CHARS < value.chars().count()
@@ -1479,10 +1465,15 @@ fn validate_attendee(value: &str) -> Result<(), String> {
 fn create_event_time_pair(
     start: Option<&str>,
     end: Option<&str>,
+    account_timezone: Option<&str>,
 ) -> Result<(String, String), String> {
     let start = required_text(start, "start")?;
+    let start = normalize_write_time_value(&start, "start", account_timezone)?;
     let end = match end {
-        Some(end) if !end.trim().is_empty() => end.to_owned(),
+        Some(end) if !end.trim().is_empty() => {
+            let end = required_text(Some(end), "end")?;
+            normalize_write_time_value(&end, "end", account_timezone)?
+        }
         _ => default_create_event_end(&start)?,
     };
     validate_time_pair(&start, &end)?;
@@ -1505,11 +1496,34 @@ fn default_create_event_end(start: &str) -> Result<String, String> {
         .map_err(|error| format!("default event end could not be formatted: {error}"))
 }
 
-fn required_time_pair(start: Option<&str>, end: Option<&str>) -> Result<(String, String), String> {
+fn required_time_pair(
+    start: Option<&str>,
+    end: Option<&str>,
+    account_timezone: Option<&str>,
+) -> Result<(String, String), String> {
     let start = required_text(start, "start")?;
     let end = required_text(end, "end")?;
+    let start = normalize_write_time_value(&start, "start", account_timezone)?;
+    let end = normalize_write_time_value(&end, "end", account_timezone)?;
     validate_time_pair(&start, &end)?;
     Ok((start, end))
+}
+
+fn normalize_write_time_value(
+    value: &str,
+    field: &str,
+    account_timezone: Option<&str>,
+) -> Result<String, String> {
+    if parse_tool_date(value).is_some()
+        || time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+            .is_ok()
+    {
+        return Ok(value.to_owned());
+    }
+    let local = parse_local_read_bound(value, field)?;
+    local_read_bound_to_utc(local, field, account_timezone)?
+        .format(&time::format_description::well_known::Rfc3339)
+        .map_err(|error| format!("{field} could not be formatted: {error}"))
 }
 
 fn validate_time_pair(start: &str, end: &str) -> Result<(), String> {
@@ -2445,6 +2459,10 @@ fn safe_field(value: &str) -> String {
     }
 }
 
+fn quoted_display_field(value: &str) -> String {
+    format!("\"{}\"", safe_field(value).replace('"', "'"))
+}
+
 fn safe_multiline(value: &str) -> String {
     let collapsed = value
         .chars()
@@ -2584,10 +2602,7 @@ mod tests {
         assert_eq!(cbor_text_field(&output, "command"), Some("list_accounts"));
         assert_eq!(cbor_text_field(&output, "status"), Some("ok"));
         assert_eq!(cbor_text_field(data, "format"), Some(LIST_ACCOUNTS_FORMAT));
-        assert_eq!(
-            line_payload(data, "accounts"),
-            "work enabled google - UTC Work_Calendar"
-        );
+        assert_eq!(line_payload(data, "accounts"), "work - \"Work_Calendar\"");
     }
 
     #[test]
@@ -2894,15 +2909,24 @@ mod tests {
         // Small local models often omit `end` even when they identified a
         // concrete start. Queueing a safe default prevents an avoidable retry
         // loop while keeping the pending change visible for user approval.
-        let (start, end) = create_event_time_pair(Some("2026-05-28T12:00:00Z"), None)
+        let (start, end) = create_event_time_pair(Some("2026-05-28T12:00:00Z"), None, Some("UTC"))
             .expect("default date-time end");
         assert_eq!(start, "2026-05-28T12:00:00Z");
         assert_eq!(end, "2026-05-28T13:00:00Z");
 
-        let (start, end) =
-            create_event_time_pair(Some("2026-05-28"), None).expect("default all-day end");
+        let (start, end) = create_event_time_pair(Some("2026-05-28"), None, Some("UTC"))
+            .expect("default all-day end");
         assert_eq!(start, "2026-05-28");
         assert_eq!(end, "2026-05-29");
+
+        let (start, end) = create_event_time_pair(
+            Some("2026-05-28T12:00:00"),
+            Some("2026-05-28T13:00:00"),
+            Some("UTC"),
+        )
+        .expect("local date-times use account timezone");
+        assert_eq!(start, "2026-05-28T12:00:00Z");
+        assert_eq!(end, "2026-05-28T13:00:00Z");
     }
 
     #[test]

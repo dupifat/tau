@@ -10,13 +10,14 @@ fn event(text: &str) -> Option<Event> {
 
 fn prompt_text(text: &str) -> String {
     match event(text).expect("prompt event") {
-        Event::UiPromptSubmitted(prompt) => {
-            assert_eq!(prompt.session_id, SESSION_ID);
-            assert_eq!(prompt.originator, PromptOriginator::User);
-            assert_eq!(prompt.ctx_id, None);
-            prompt.text
+        Event::UiCreateAgent(req) => {
+            assert_eq!(req.session_id, SESSION_ID);
+            assert_eq!(req.role, "senior-engineer");
+            assert_eq!(req.originator, PromptOriginator::User);
+            assert_eq!(req.ctx_id, None);
+            req.initial_prompt.expect("initial prompt")
         }
-        other => panic!("expected UiPromptSubmitted, got {other:?}"),
+        other => panic!("expected UiCreateAgent, got {other:?}"),
     }
 }
 

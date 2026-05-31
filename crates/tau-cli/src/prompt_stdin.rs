@@ -8,8 +8,7 @@ use tau_harness::SessionLaunchStatus;
 use tau_proto::{
     AgentPromptTerminated, ClientKind, ContentPart, ContextItem, ContextRole, Event, EventName,
     EventSelector, Frame, FrameReader, FrameWriter, Hello, Message, PROTOCOL_VERSION,
-    PromptOriginator, ProviderResponseFinished, ProviderResponseUpdated, Subscribe,
-    UiPromptSubmitted,
+    PromptOriginator, ProviderResponseFinished, ProviderResponseUpdated, Subscribe, UiCreateAgent,
 };
 
 use crate::CliError;
@@ -111,10 +110,11 @@ fn subscribe_to_prompt_stdin_events(writer: &mut OneShotWriter) -> io::Result<()
 fn submit_prompt(writer: &mut OneShotWriter, session_id: &str, prompt: String) -> io::Result<()> {
     send_frame(
         writer,
-        &Frame::Event(Event::UiPromptSubmitted(UiPromptSubmitted {
+        &Frame::Event(Event::UiCreateAgent(UiCreateAgent {
             session_id: session_id.into(),
-            text: prompt,
-            target_agent_id: None,
+            role: "senior-engineer".to_owned(),
+            cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            initial_prompt: Some(prompt),
             message_class: tau_proto::PromptMessageClass::User,
             originator: PromptOriginator::User,
             ctx_id: None,

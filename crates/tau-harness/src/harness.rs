@@ -3875,67 +3875,15 @@ impl Harness {
         &mut self,
         prompt: tau_proto::UiPromptSubmitted,
     ) -> Result<bool, HarnessError> {
-        if let Some(target_agent_id) = prompt.target_agent_id.as_deref() {
-            let submission = self.submit_prompt_to_agent(
-                prompt.session_id.clone(),
-                target_agent_id,
-                prompt.text.clone(),
-            )?;
-            if matches!(submission, PromptSubmission::Queued) && !prompt.message_class.is_internal()
-            {
-                self.interrupt_active_waits();
-            }
-            return Ok(true);
-        }
-
-        if prompt.session_id != self.current_session_id {
-            let reason = format!(
-                "harness is bound to session `{}`; prompt for `{}` rejected",
-                self.current_session_id.as_str(),
-                prompt.session_id.as_str()
-            );
-            self.emit_info(&reason);
-            return Ok(true);
-        }
-        let role = self.selected_role.clone();
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let cid = self.create_durable_user_agent(prompt.session_id.clone(), &role, cwd);
-        if !prompt.message_class.is_internal() {
-            self.preempt_blocking_ext_side_agents(&prompt.session_id);
-        }
-        if let Some(c) = self.agents.get_mut(&cid) {
-            c.next_ctx_id = prompt.ctx_id.clone();
-        }
+        let agent_id = prompt.agent_id.to_string();
         let pending = if prompt.message_class.is_internal() {
             PendingPrompt::internal(prompt.text.clone())
         } else {
             PendingPrompt::user(prompt.text.clone())
         };
-        if self.dispatch_blocked_for(&cid) || !self.session_initialized(&prompt.session_id) {
-            if let Some(conv) = self.agents.get_mut(&cid) {
-                conv.pending_prompts.push_back(pending);
-            }
-            self.publish_event(
-                None,
-                Event::AgentPromptQueued(AgentPromptQueued {
-                    agent_id: self
-                        .target_agent_id_for_agent(&cid)
-                        .unwrap_or_else(|| cid.to_string())
-                        .into(),
-                    text: prompt.text.clone(),
-                    message_class: prompt.message_class,
-                }),
-            );
-            if !prompt.message_class.is_internal() {
-                self.interrupt_active_waits();
-            }
-            if self.selected_model.is_none() {
-                self.emit_info(
-                    "selected role has no available model — use /model to pick a role or enable a provider",
-                );
-            }
-        } else {
-            self.dispatch_prompt_for_agent(&cid, pending)?;
+        let submission = self.submit_prompt_to_agent(prompt.session_id, &agent_id, pending)?;
+        if matches!(submission, PromptSubmission::Queued) && !prompt.message_class.is_internal() {
+            self.interrupt_active_waits();
         }
         Ok(true)
     }
@@ -3983,8 +3931,19 @@ impl Harness {
             };
             if self.dispatch_blocked_for(&cid) || !self.session_initialized(&req.session_id) {
                 if let Some(conv) = self.agents.get_mut(&cid) {
-                    conv.pending_prompts.push_back(prompt);
+                    conv.pending_prompts.push_back(prompt.clone());
                 }
+                self.publish_event(
+                    None,
+                    Event::AgentPromptQueued(AgentPromptQueued {
+                        agent_id: self
+                            .target_agent_id_for_agent(&cid)
+                            .unwrap_or_else(|| cid.to_string())
+                            .into(),
+                        text: prompt.text,
+                        message_class: prompt.message_class,
+                    }),
+                );
                 self.try_advance_queue();
             } else {
                 self.dispatch_prompt_for_agent(&cid, prompt)?;
@@ -6061,8 +6020,9 @@ impl Harness {
         &mut self,
         session_id: SessionId,
         agent_id: &str,
-        text: String,
+        prompt: impl Into<PendingPrompt>,
     ) -> Result<PromptSubmission, HarnessError> {
+        let prompt = prompt.into();
         if session_id != self.current_session_id {
             let reason = format!(
                 "harness is bound to session `{}`; prompt for `{}` rejected",
@@ -6085,15 +6045,14 @@ impl Harness {
             || !self.extensions_all_ready()
         {
             if let Some(conv) = self.agents.get_mut(&cid) {
-                conv.pending_prompts
-                    .push_back(PendingPrompt::user(text.clone()));
+                conv.pending_prompts.push_back(prompt.clone());
             }
             self.publish_event(
                 None,
                 Event::AgentPromptQueued(AgentPromptQueued {
                     agent_id: agent_id.to_owned().into(),
-                    text,
-                    message_class: tau_proto::PromptMessageClass::User,
+                    text: prompt.text,
+                    message_class: prompt.message_class,
                 }),
             );
             self.try_advance_queue();
@@ -6101,21 +6060,20 @@ impl Harness {
         }
         if self.dispatch_blocked_for(&cid) {
             if let Some(conv) = self.agents.get_mut(&cid) {
-                conv.pending_prompts
-                    .push_back(PendingPrompt::user(text.clone()));
+                conv.pending_prompts.push_back(prompt.clone());
             }
             self.publish_event(
                 None,
                 Event::AgentPromptQueued(AgentPromptQueued {
                     agent_id: agent_id.to_owned().into(),
-                    text,
-                    message_class: tau_proto::PromptMessageClass::User,
+                    text: prompt.text,
+                    message_class: prompt.message_class,
                 }),
             );
             self.try_advance_queue();
             return Ok(PromptSubmission::Queued);
         }
-        self.dispatch_prompt_for_agent(&cid, PendingPrompt::user(text))?;
+        self.dispatch_prompt_for_agent(&cid, prompt)?;
         Ok(PromptSubmission::Dispatched)
     }
 

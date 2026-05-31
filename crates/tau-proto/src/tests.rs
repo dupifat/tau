@@ -125,7 +125,7 @@ fn representative_events() -> Vec<Event> {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "hello".to_owned(),
-            target_agent_id: None,
+            agent_id: "agent".into(),
             message_class: PromptMessageClass::User,
             originator: PromptOriginator::User,
             ctx_id: None,
@@ -812,7 +812,7 @@ fn event_defaults_to_transient_marks_progress_kinds() {
         Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
             text: "hi".to_owned(),
-            target_agent_id: None,
+            agent_id: "agent".into(),
             message_class: PromptMessageClass::User,
             originator: PromptOriginator::User,
             ctx_id: None,
@@ -894,6 +894,7 @@ fn prompt_message_class_defaults_to_user_when_omitted() {
     let prompt: UiPromptSubmitted = serde_json::from_value(serde_json::json!({
         "session_id": "s1",
         "text": "legacy",
+        "agent_id": "agent",
         "originator": { "kind": "user" }
     }))
     .expect("ui prompt decodes");

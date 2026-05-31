@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use tau_proto::{
     ClientKind, Disconnect, Event, EventSelector, Frame, Hello, Message, PROTOCOL_VERSION,
-    Subscribe, UiPromptSubmitted,
+    Subscribe, UiCreateAgent,
 };
 use tau_socket::SocketPeer;
 
@@ -365,7 +365,7 @@ pub fn run_daemon_with_config(
 /// Sends one user message to a running daemon and returns progress
 /// plus the final response.
 ///
-/// Stamps the outgoing `UiPromptSubmitted` with a unique `ctx_id` and
+/// Stamps the outgoing `UiCreateAgent` with a unique `ctx_id` and
 /// uses the matching `AgentPromptCreated` to capture the
 /// `agent_prompt_id` the harness allocated for this submission.
 /// Without this, opening a fresh socket against a daemon that has
@@ -396,10 +396,11 @@ pub fn send_daemon_message_with_trace(
         ],
     })))?;
     let ctx_id = next_ctx_id();
-    peer.send(&Frame::Event(Event::UiPromptSubmitted(UiPromptSubmitted {
+    peer.send(&Frame::Event(Event::UiCreateAgent(UiCreateAgent {
         session_id: session_id.into(),
-        text: message.to_owned(),
-        target_agent_id: None,
+        role: "senior-engineer".to_owned(),
+        cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        initial_prompt: Some(message.to_owned()),
         message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: Some(ctx_id.clone()),

@@ -5,7 +5,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
 use tau_proto::{
-    ClientKind, Event, Frame, FrameWriter, Hello, Message, PROTOCOL_VERSION, UiPromptSubmitted,
+    ClientKind, Event, Frame, FrameWriter, Hello, Message, PROTOCOL_VERSION, UiCreateAgent,
 };
 
 use crate::CliError;
@@ -108,10 +108,11 @@ fn event_for_line(session_id: &str, text: &str) -> Option<Event> {
         return None;
     }
 
-    Some(Event::UiPromptSubmitted(UiPromptSubmitted {
+    Some(Event::UiCreateAgent(UiCreateAgent {
         session_id: session_id.into(),
-        text: text.to_owned(),
-        target_agent_id: None,
+        role: "senior-engineer".to_owned(),
+        cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        initial_prompt: Some(text.to_owned()),
         message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,

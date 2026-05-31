@@ -1704,11 +1704,9 @@ impl PromptMessageClass {
 pub struct UiPromptSubmitted {
     pub session_id: SessionId,
     pub text: String,
-    /// Target agent for this user-authored prompt. `None` means no explicit
-    /// target was supplied; the harness routes it to the selected/default
-    /// conversation and stamps concrete routing on durable follow-up events.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_agent_id: Option<AgentId>,
+    /// Agent that should receive this prompt. Agent creation is explicit via
+    /// [`UiCreateAgent`]; prompt submissions only target existing agents.
+    pub agent_id: AgentId,
     /// Whether this prompt text is user-authored or hidden internal control
     /// text.
     #[serde(default)]

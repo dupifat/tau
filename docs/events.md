@@ -218,10 +218,11 @@ harness/agent.
 Emitted by attached UI clients (tau-cli-term, etc.) to express user
 intent.
 
-- **`ui.prompt_submitted`** — The user submitted a prompt request: session id,
-  text, optional `target_agent_id`, originator (defaults to `user`; reused for
-  extension-driven side prompts), and user/internal message class. The harness
-  translates accepted requests into durable `agent.prompt_submitted` facts.
+- **`ui.prompt_submitted`** — The user submitted a prompt request for an
+  existing agent: session id, text, required `agent_id`, originator (defaults to
+  `user`; reused for extension-driven side prompts), and user/internal message
+  class. The harness translates accepted requests into durable
+  `agent.prompt_submitted` facts.
 - **`ui.prompt_draft`** — Trailing-edge debounced (≤1/s) snapshot of the
   current draft buffer. Transient — used for "user is alive" signals
   (e.g. notification idle reset), not persisted.

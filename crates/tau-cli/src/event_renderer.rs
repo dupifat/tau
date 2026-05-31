@@ -2305,9 +2305,7 @@ impl EventRenderer {
                     && self.can_select_target_from_empty(target_agent_id)
             }
             Event::UiPromptSubmitted(prompt) => {
-                prompt.target_agent_id.is_some()
-                    && prompt.originator.is_user()
-                    && self.can_select_target_from_empty(target_agent_id)
+                prompt.originator.is_user() && self.can_select_target_from_empty(target_agent_id)
             }
             _ => false,
         }
@@ -2375,18 +2373,15 @@ impl EventRenderer {
             }
             Event::StartAgentResult(_) => {}
             Event::UiPromptSubmitted(prompt) => {
-                if let Some(agent_id) = prompt.target_agent_id.as_deref() {
-                    if prompt.originator.is_user() {
-                        self.mark_agent_live(agent_id.to_owned());
-                    } else {
-                        self.remember_agent(agent_id.to_owned());
-                    }
-                    if let tau_proto::PromptOriginator::Extension { query_id, .. } =
-                        &prompt.originator
-                    {
-                        self.query_agents
-                            .insert(query_id.clone(), agent_id.to_owned());
-                    }
+                let agent_id = prompt.agent_id.to_string();
+                if prompt.originator.is_user() {
+                    self.mark_agent_live(agent_id.clone());
+                } else {
+                    self.remember_agent(agent_id.clone());
+                }
+                if let tau_proto::PromptOriginator::Extension { query_id, .. } = &prompt.originator
+                {
+                    self.query_agents.insert(query_id.clone(), agent_id);
                 }
             }
             Event::UiShellCommand(command) => {
@@ -2504,11 +2499,7 @@ impl EventRenderer {
             }
             Event::AgentMessageSent(message) => Some(message.sender_id.to_string()),
             Event::AgentMessageReceived(message) => Some(message.recipient_id.to_string()),
-            Event::UiPromptSubmitted(prompt) => prompt
-                .target_agent_id
-                .as_ref()
-                .map(ToString::to_string)
-                .or_else(|| self.agent_id_for_originator(&prompt.originator)),
+            Event::UiPromptSubmitted(prompt) => Some(prompt.agent_id.to_string()),
             Event::AgentPromptSubmitted(prompt) => Some(prompt.agent_id.to_string()),
             Event::AgentPromptQueued(queued) => Some(queued.agent_id.to_string()),
             Event::AgentPromptRecalled(recalled) => Some(recalled.agent_id.to_string()),

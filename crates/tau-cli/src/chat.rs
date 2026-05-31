@@ -1565,7 +1565,7 @@ impl<'a> TerminalInputSession<'a> {
             Event::UiPromptSubmitted(UiPromptSubmitted {
                 session_id: self.session_id.as_str().into(),
                 text: text.to_owned(),
-                target_agent_id: Some(target_agent_id),
+                agent_id: target_agent_id,
                 message_class: tau_proto::PromptMessageClass::User,
                 originator: tau_proto::PromptOriginator::User,
                 ctx_id: None,

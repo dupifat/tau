@@ -161,14 +161,14 @@ where
                  `line_count` original lines starting at 1-based `start_line` with \
                  `newText`, and all edits use the original file's line numbering as if \
                  applied simultaneously. Ranges must be non-overlapping and within the \
-                 file's available line range; line 1 is always available for an empty \
+                 file's valid start-line range; line 1 is always available for an empty \
                  or missing file, and the line after a trailing newline is available for \
                  appends. Missing files are treated as empty and missing parent \
                  directories are created, so use line 1 with line_count 1 to create a file. \
                  Optional per-edit `guard` must exactly match the first original line content, \
                  excluding the line ending, or the edit fails and returns the current range contents. \
-                 Returns minimal status headers: replacements, changed, available_lines \
-                 (highest valid start_line after the edit), and total_bytes."
+                 Returns minimal status headers: replacements, changed, max_valid_start_line, \
+                 and total_bytes."
                     .to_owned(),
             ),
             tool_type: tau_proto::ToolType::Function,
@@ -356,7 +356,8 @@ where
                  50 KB; truncated output keeps the first 1000 and last 1000 lines \
                  separated by a literal `...` line. Output lines are prefixed with `out ` \
                  for stdout or `err ` for stderr; missing trailing newlines are marked, e.g. \
-                 `out(no_nl)`. Invalid UTF-8 and lines that would exceed the 50 KB output \
+                 `out(no_nl)`; CRLF and CR line endings are marked as `out(crlf)` \
+                 or `out(cr)`. Invalid UTF-8 and lines that would exceed the 50 KB output \
                  budget are marker-only, e.g. `out(invalid-utf8)` or `err(truncated)`. \
                  Truncated results include `truncated: true`, `total_lines`, and `total_bytes`. \
                  Commands taking longer than 5 seconds include duration metadata. Prefer dedicated \

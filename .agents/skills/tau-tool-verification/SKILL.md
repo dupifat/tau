@@ -68,6 +68,7 @@ Range operations should use `start_line` and `line_count` fields for range selec
 
 Newlines are assumed to be `\n`, but other styles are supported
 and displayed as `crlf` (`\r\n`), `cr` (`\r`) or `no_nl` (missing trailing newline).
+This applies to both `read` line-number prefixes and `shell` stdout/stderr prefixes.
 
 Lines containing invalid UTF-8 characters are skipped, and a `invalid-utf8` is displayed,
 and line content is skipped to avoid mistakes and force fallback to more appropriate tools.
@@ -123,9 +124,9 @@ container policy does not support read-only bind mounts, `mode: ro` may degrade
 to a normal shell command; report that the ro-bind enforcement was unavailable
 instead of treating the shell invocation itself as broken.
 
-`edit` is line-oriented. Each edit entry must include `start_line`, `line_count`, and `newText`; it replaces that original line range with `newText` verbatim. All edit ranges use the original file numbering as if applied simultaneously, so the tool must reject overlapping ranges before changing the file. Ranges must fit within the current available line range. Line 1 is always available for an empty or missing file, and the line after a trailing newline is available for appends.
+`edit` is line-oriented. Each edit entry must include `start_line`, `line_count`, and `newText`; it replaces that original line range with `newText` verbatim. All edit ranges use the original file numbering as if applied simultaneously, so the tool must reject overlapping ranges before changing the file. Ranges must fit within the current valid start-line range. Line 1 is always available for an empty or missing file, and the line after a trailing newline is available for appends.
 
-`edit` supports file creation: missing files are treated as empty, and missing parent directories are created only after the request validates. To create a file, replace `start_line: 1`, `line_count: 1` with the desired contents. The model-visible result should stay minimal: `replacements`, `changed`, `available_lines` (highest valid `start_line` after the edit), and `total_bytes`. Diff payloads belong in UI display state, not the model-visible result.
+`edit` supports file creation: missing files are treated as empty, and missing parent directories are created only after the request validates. To create a file, replace `start_line: 1`, `line_count: 1` with the desired contents. The model-visible result should stay minimal: `replacements`, `changed`, `max_valid_start_line`, and `total_bytes`. Diff payloads belong in UI display state, not the model-visible result.
 
 `edit` supports an optional per-entry `guard` string. When provided, it must exactly match the first original line content in that range, excluding any line ending. Empty, missing-file, and append virtual lines match an empty guard. A guard mismatch must leave the file unchanged and return read-like `line-numbered content` details for the current contents of the requested ranges, with invalid UTF-8 and truncation handled like `read`.
 

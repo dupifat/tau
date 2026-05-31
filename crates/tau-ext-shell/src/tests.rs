@@ -1719,7 +1719,11 @@ fn edit_result_reports_minimal_status_without_model_diff() {
     assert!(cbor_map_field(&output.result, "path").is_none());
     assert_eq!(cbor_int_field(&output.result, "replacements"), Some(1));
     assert_eq!(cbor_bool_field(&output.result, "changed"), Some(true));
-    assert_eq!(cbor_int_field(&output.result, "available_lines"), Some(3));
+    assert_eq!(
+        cbor_int_field(&output.result, "max_valid_start_line"),
+        Some(3)
+    );
+    assert!(cbor_map_field(&output.result, "available_lines").is_none());
     assert_eq!(cbor_int_field(&output.result, "total_bytes"), Some(22));
     assert!(cbor_map_text(&output.result, "output").is_none());
     assert!(cbor_map_text(&output.result, "diff").is_none());
@@ -1741,7 +1745,10 @@ fn edit_self_replacement_counts_without_diff() {
     assert!(cbor_map_field(&output.result, "path").is_none());
     assert_eq!(cbor_int_field(&output.result, "replacements"), Some(1));
     assert_eq!(cbor_bool_field(&output.result, "changed"), Some(false));
-    assert_eq!(cbor_int_field(&output.result, "available_lines"), Some(2));
+    assert_eq!(
+        cbor_int_field(&output.result, "max_valid_start_line"),
+        Some(2)
+    );
     assert_eq!(cbor_int_field(&output.result, "total_bytes"), Some(5));
     assert!(cbor_map_text(&output.result, "output").is_none());
     assert!(output.display.payload.is_none());
@@ -1761,7 +1768,7 @@ fn edit_new_file_reports_created_as_changed() {
 
     assert_eq!(cbor_int_field(&result, "replacements"), Some(1));
     assert_eq!(cbor_bool_field(&result, "changed"), Some(true));
-    assert_eq!(cbor_int_field(&result, "available_lines"), Some(2));
+    assert_eq!(cbor_int_field(&result, "max_valid_start_line"), Some(2));
     assert_eq!(cbor_int_field(&result, "total_bytes"), Some(8));
     assert!(cbor_map_text(&result, "output").is_none());
     assert_eq!(
@@ -2542,7 +2549,10 @@ fn edit_uses_original_line_numbers_for_multiple_replacements() {
         panic!("expected tool result");
     };
     assert_eq!(cbor_map_int(&result.result, "replacements"), Some(2));
-    assert_eq!(cbor_map_int(&result.result, "available_lines"), Some(5));
+    assert_eq!(
+        cbor_map_int(&result.result, "max_valid_start_line"),
+        Some(5)
+    );
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
         "x\ny\nb\nz\n"
@@ -2606,7 +2616,7 @@ fn edit_appends_to_line_after_trailing_newline() {
         .expect("edit")
         .result;
 
-    assert_eq!(cbor_int_field(&result, "available_lines"), Some(3));
+    assert_eq!(cbor_int_field(&result, "max_valid_start_line"), Some(3));
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
         "fish\ncat\n"
@@ -2626,7 +2636,7 @@ fn edit_replaces_empty_file_line_one() {
     .expect("edit")
     .result;
 
-    assert_eq!(cbor_int_field(&result, "available_lines"), Some(2));
+    assert_eq!(cbor_int_field(&result, "max_valid_start_line"), Some(2));
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
         "hello\n"
@@ -2660,7 +2670,7 @@ fn edit_rejects_start_line_past_end() {
     };
     assert_eq!(error.tool_name, EDIT_TOOL_NAME);
     assert!(error.message.contains("start_line 3 is past end of file"));
-    assert!(error.message.contains("available_lines: 2"));
+    assert!(error.message.contains("max_valid_start_line: 2"));
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
         "hello\n"
@@ -2681,12 +2691,10 @@ fn edit_rejects_range_past_end_without_trailing_newline() {
     let error = edit_file(&edit_arguments(&file_path, vec![line_edit(1, 2, "x")]))
         .expect_err("range should fail");
 
-    assert!(
-        error
-            .message
-            .contains("line range 1..3 is past end of file")
+    assert_eq!(
+        error.message,
+        "line range starting at 1 with count 2 exceeds max_valid_start_line 1"
     );
-    assert!(error.message.contains("available_lines: 1"));
     assert_eq!(fs::read_to_string(&file_path).expect("read back"), "hello");
 }
 
@@ -2704,7 +2712,7 @@ fn edit_guard_allows_matching_first_line() {
     .expect("edit")
     .result;
 
-    assert_eq!(cbor_int_field(&result, "available_lines"), Some(4));
+    assert_eq!(cbor_int_field(&result, "max_valid_start_line"), Some(4));
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
         "alpha\nBETA\ngamma\n"
@@ -2782,7 +2790,7 @@ fn edit_guard_matches_crlf_line_without_ending() {
     .expect("edit")
     .result;
 
-    assert_eq!(cbor_int_field(&result, "available_lines"), Some(3));
+    assert_eq!(cbor_int_field(&result, "max_valid_start_line"), Some(3));
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
         "one\r\nTWO\r\n"
@@ -2802,7 +2810,7 @@ fn edit_guard_allows_empty_append_line_after_trailing_newline() {
     .expect("edit")
     .result;
 
-    assert_eq!(cbor_int_field(&result, "available_lines"), Some(3));
+    assert_eq!(cbor_int_field(&result, "max_valid_start_line"), Some(3));
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
         "fish\ncat\n"
@@ -2822,7 +2830,7 @@ fn edit_handles_crlf_line_ranges() {
     .expect("edit")
     .result;
 
-    assert_eq!(cbor_int_field(&result, "available_lines"), Some(3));
+    assert_eq!(cbor_int_field(&result, "max_valid_start_line"), Some(3));
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
         "one\r\nTWO\r\n"
@@ -3281,6 +3289,22 @@ fn shell_tool_replaces_invalid_utf8_both_streams_in_combined_output() {
         Some("out(invalid-utf8,no_nl)\nerr(invalid-utf8,no_nl)")
     );
     assert_eq!(cbor_bool_field(&output.result, "valid_utf8"), Some(false));
+}
+
+#[test]
+fn shell_tool_marks_crlf_and_cr_line_endings() {
+    // Keep shell output line markers aligned with `read`: raw carriage
+    // returns should not leak into agent-visible output.
+    let args = CborValue::Map(vec![(
+        CborValue::Text("command".to_owned()),
+        CborValue::Text("printf 'a\r\nb\rc\n'".to_owned()),
+    )]);
+
+    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
+    assert_eq!(
+        cbor_map_text(&output.result, "output"),
+        Some("out(crlf) a\nout(cr) b\nout c")
+    );
 }
 
 #[test]

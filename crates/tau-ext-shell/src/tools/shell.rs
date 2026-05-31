@@ -854,8 +854,20 @@ struct OutputLine {
 
 #[derive(Clone)]
 enum OutputContent {
-    Text { text: String, no_nl: bool },
-    InvalidUtf8 { no_nl: bool },
+    Text {
+        text: String,
+        ending: Option<LineEndingKind>,
+    },
+    InvalidUtf8 {
+        ending: Option<LineEndingKind>,
+    },
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum LineEndingKind {
+    Lf,
+    Crlf,
+    Cr,
 }
 
 #[derive(Default)]
@@ -935,6 +947,7 @@ struct StreamDecoder {
     pending_utf8: Vec<u8>,
     pending_line: String,
     pending_line_invalid: bool,
+    pending_cr: bool,
     had_invalid_utf8: bool,
 }
 
@@ -969,10 +982,12 @@ impl StreamDecoder {
                         );
                     }
                     if let Some(error_len) = error.error_len() {
+                        self.flush_pending_cr_as_cr(&mut lines);
                         self.had_invalid_utf8 = true;
                         self.pending_line_invalid = true;
                         remaining = &remaining[valid_up_to + error_len..];
                     } else {
+                        self.flush_pending_cr_as_cr(&mut lines);
                         self.pending_utf8 = remaining[valid_up_to..].to_vec();
                         break;
                     }
@@ -983,39 +998,55 @@ impl StreamDecoder {
     }
 
     fn push_str(&mut self, text: &str, lines: &mut Vec<OutputContent>) {
-        for segment in text.split_inclusive('\n') {
-            if let Some(line) = segment.strip_suffix('\n') {
-                if !self.pending_line_invalid {
-                    self.pending_line.push_str(line);
+        for ch in text.chars() {
+            if self.pending_cr {
+                self.pending_cr = false;
+                if ch == '\n' {
+                    lines.push(self.take_pending_line(Some(LineEndingKind::Crlf)));
+                    continue;
                 }
-                lines.push(self.take_pending_line(false));
-            } else if !self.pending_line_invalid {
-                self.pending_line.push_str(segment);
+                lines.push(self.take_pending_line(Some(LineEndingKind::Cr)));
+            }
+
+            match ch {
+                '\r' => self.pending_cr = true,
+                '\n' => lines.push(self.take_pending_line(Some(LineEndingKind::Lf))),
+                _ if !self.pending_line_invalid => self.pending_line.push(ch),
+                _ => {}
             }
         }
     }
 
     fn finish(&mut self) -> Vec<OutputContent> {
+        let mut lines = Vec::new();
         if !self.pending_utf8.is_empty() {
             self.had_invalid_utf8 = true;
             self.pending_utf8.clear();
+            self.flush_pending_cr_as_cr(&mut lines);
             self.pending_line_invalid = true;
         }
-        if self.pending_line.is_empty() && !self.pending_line_invalid {
-            Vec::new()
-        } else {
-            vec![self.take_pending_line(true)]
+        self.flush_pending_cr_as_cr(&mut lines);
+        if !self.pending_line.is_empty() || self.pending_line_invalid {
+            lines.push(self.take_pending_line(None));
+        }
+        lines
+    }
+
+    fn flush_pending_cr_as_cr(&mut self, lines: &mut Vec<OutputContent>) {
+        if self.pending_cr {
+            self.pending_cr = false;
+            lines.push(self.take_pending_line(Some(LineEndingKind::Cr)));
         }
     }
 
-    fn take_pending_line(&mut self, no_nl: bool) -> OutputContent {
+    fn take_pending_line(&mut self, ending: Option<LineEndingKind>) -> OutputContent {
         if std::mem::take(&mut self.pending_line_invalid) {
             self.pending_line.clear();
-            OutputContent::InvalidUtf8 { no_nl }
+            OutputContent::InvalidUtf8 { ending }
         } else {
             OutputContent::Text {
                 text: std::mem::take(&mut self.pending_line),
-                no_nl,
+                ending,
             }
         }
     }
@@ -1024,18 +1055,25 @@ impl StreamDecoder {
 fn render_output_line(line: &OutputLine) -> String {
     let prefix = line.stream.prefix();
     match &line.content {
-        OutputContent::Text { text, no_nl } => {
-            let marker = no_nl.then_some("no_nl");
-            format_output_line(prefix, marker, text)
+        OutputContent::Text { text, ending } => {
+            format_output_line(prefix, line_ending_marker(*ending), text)
         }
-        OutputContent::InvalidUtf8 { no_nl } => {
-            let marker = if *no_nl {
-                "invalid-utf8,no_nl"
-            } else {
-                "invalid-utf8"
-            };
-            mark_line(&format_output_line(prefix, None, ""), marker)
+        OutputContent::InvalidUtf8 { ending } => {
+            let mut markers = vec!["invalid-utf8"];
+            if let Some(marker) = line_ending_marker(*ending) {
+                markers.push(marker);
+            }
+            mark_line(&format_output_line(prefix, None, ""), &markers.join(","))
         }
+    }
+}
+
+fn line_ending_marker(ending: Option<LineEndingKind>) -> Option<&'static str> {
+    match ending {
+        Some(LineEndingKind::Lf) => None,
+        Some(LineEndingKind::Crlf) => Some("crlf"),
+        Some(LineEndingKind::Cr) => Some("cr"),
+        None => Some("no_nl"),
     }
 }
 

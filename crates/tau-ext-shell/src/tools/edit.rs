@@ -119,7 +119,7 @@ pub(crate) fn edit_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
         result: edit_result_value(
             replacements.len(),
             changed,
-            result_lines.available_lines(),
+            result_lines.max_valid_start_line(),
             result.len(),
         ),
         display,
@@ -190,7 +190,7 @@ impl LineIndex {
         }
     }
 
-    fn available_lines(&self) -> usize {
+    fn max_valid_start_line(&self) -> usize {
         if self.spans.is_empty() {
             return 1;
         }
@@ -207,25 +207,24 @@ impl LineIndex {
         line_count: usize,
         display_args: &str,
     ) -> Result<(), ToolFailure> {
-        let available_lines = self.available_lines();
-        if available_lines < start_line {
+        let max_valid_start_line = self.max_valid_start_line();
+        if max_valid_start_line < start_line {
             return Err(with_display_args(
                 display_args,
                 ToolFailure::new(format!(
-                    "start_line {start_line} is past end of file (available_lines: {available_lines})"
+                    "start_line {start_line} is past end of file (max_valid_start_line: {max_valid_start_line})"
                 )),
             ));
         }
         let end_line = start_line.checked_add(line_count).ok_or_else(|| {
             with_display_args(display_args, ToolFailure::new("line_count is too large"))
         })?;
-        let max_end_line = available_lines.saturating_add(1);
+        let max_end_line = max_valid_start_line.saturating_add(1);
         if max_end_line < end_line {
             return Err(with_display_args(
                 display_args,
                 ToolFailure::new(format!(
-                    "line range {} is past end of file (available_lines: {available_lines})",
-                    format_read_range(Some(start_line), Some(line_count))
+                    "line range starting at {start_line} with count {line_count} exceeds max_valid_start_line {max_valid_start_line}"
                 )),
             ));
         }
@@ -241,7 +240,7 @@ impl LineIndex {
 
     fn line_content_text<'a>(&self, line: usize, input: &'a [u8]) -> Option<&'a str> {
         let Some(span) = self.spans.get(line.saturating_sub(1)) else {
-            return (line <= self.available_lines()).then_some("");
+            return (line <= self.max_valid_start_line()).then_some("");
         };
         std::str::from_utf8(&input[span.start..span.content_end]).ok()
     }
@@ -435,7 +434,7 @@ fn edit_display_args(path: &str, ranges: &[String]) -> String {
 fn edit_result_value(
     replacements: usize,
     changed: bool,
-    available_lines: usize,
+    max_valid_start_line: usize,
     total_bytes: usize,
 ) -> CborValue {
     CborValue::Map(vec![
@@ -448,8 +447,8 @@ fn edit_result_value(
             CborValue::Bool(changed),
         ),
         (
-            CborValue::Text("available_lines".to_owned()),
-            CborValue::Integer((available_lines as i64).into()),
+            CborValue::Text("max_valid_start_line".to_owned()),
+            CborValue::Integer((max_valid_start_line as i64).into()),
         ),
         (
             CborValue::Text("total_bytes".to_owned()),

@@ -627,10 +627,10 @@ pub enum Event {
     /// depends on either (typically the menu and the prompt itself).
     BufferChanged,
     /// The user pressed Ctrl-Enter with a candidate previewed in the
-    /// menu. The buffer is now the candidate's replacement and the
-    /// menu has been closed. The caller should re-render the menu
-    /// area but typically *should not* submit — a second Ctrl-Enter is
-    /// expected to confirm.
+    /// menu. The buffer is now the candidate's replacement and
+    /// completion has been re-evaluated for that buffer. The caller
+    /// should re-render the menu area but typically *should not*
+    /// submit — a second Ctrl-Enter is expected to confirm.
     CompletionAccept,
     /// The user pressed Shift-Tab outside an open completion menu.
     /// Inside a menu it cycles backwards and is consumed internally.
@@ -1551,10 +1551,7 @@ impl Term {
                 let mut st = self.handle.lock();
                 st.dismiss_completion().then_some(Event::BufferChanged)
             }
-            KeyCode::Enter if ctrl || (!shift && !alt) => {
-                let mut st = self.handle.lock();
-                st.accept_completion().then_some(Event::CompletionAccept)
-            }
+            KeyCode::Enter if ctrl || (!shift && !alt) => self.accept_completion_event(),
             _ => None,
         }
     }
@@ -1767,8 +1764,15 @@ impl Term {
     }
 
     fn accept_completion_event(&self) -> Option<Event> {
-        let mut st = self.handle.lock();
-        st.accept_completion().then_some(Event::CompletionAccept)
+        let accepted = {
+            let mut st = self.handle.lock();
+            st.accept_completion()
+        };
+        if !accepted {
+            return None;
+        }
+        self.refresh_completion();
+        Some(Event::CompletionAccept)
     }
 
     /// Returns true when `action` is handled by [`Self::trigger_named_action`].
@@ -1852,11 +1856,8 @@ impl Term {
         // line — the buffer already reflects the replacement (cycling
         // previewed it), so we just close the menu and surface a
         // distinct event.
-        {
-            let mut st = self.handle.lock();
-            if st.accept_completion() {
-                return Event::CompletionAccept;
-            }
+        if self.accept_completion_event().is_some() {
+            return Event::CompletionAccept;
         }
         let line = {
             let mut st = self.handle.lock();

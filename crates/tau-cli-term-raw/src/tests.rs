@@ -3888,6 +3888,74 @@ fn completion_keys_take_precedence_over_bindings() {
     assert_eq!(handle.get_buffer(), "/quit");
 }
 
+/// Accepting a filesystem-like directory completion must immediately refresh
+/// the menu for the accepted path. This keeps drilling into `./crates/` usable
+/// without requiring an extra keypress to discover entries inside it.
+#[test]
+fn accepting_completion_refreshes_next_candidates_immediately() {
+    let buf = SharedBuffer::new();
+    let (mut term, handle, input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+    term.set_completion_source(Some(Box::new(
+        |buffer: &str, _cursor: usize| match buffer {
+            "./" => vec![Candidate {
+                label: "./crates/".to_owned(),
+                description: "directory".to_owned(),
+                replacement: "./crates/".to_owned(),
+            }],
+            "./crates/" => vec![Candidate {
+                label: "./crates/tau-cli-term-raw/".to_owned(),
+                description: "directory".to_owned(),
+                replacement: "./crates/tau-cli-term-raw/".to_owned(),
+            }],
+            _ => Vec::new(),
+        },
+    )));
+
+    for ch in ['.', '/'] {
+        input_tx
+            .send(RawEvent::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )))
+            .expect("send path char");
+        assert!(matches!(
+            term.get_next_event().expect("type path char"),
+            Event::BufferChanged
+        ));
+    }
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Tab,
+            KeyModifiers::NONE,
+        )))
+        .expect("send tab");
+    assert!(matches!(
+        term.get_next_event().expect("select directory"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "./crates/");
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )))
+        .expect("send enter");
+    assert!(matches!(
+        term.get_next_event().expect("accept directory"),
+        Event::CompletionAccept
+    ));
+
+    let completion = handle
+        .completion_state()
+        .expect("accepted directory should open child completions");
+    assert_eq!(completion.selected, None);
+    assert_eq!(completion.candidates.len(), 1);
+    assert_eq!(completion.candidates[0].label, "./crates/tau-cli-term-raw/");
+}
+
 /// If the row leaving the viewport changed, the scrolling planner should know
 /// it can still render that prefix before it drops.
 #[test]

@@ -32,6 +32,7 @@
 - `FEATURES.md` — major feature tour; update after editing any new major features
 - `docs/` — focused design and feature notes
 - `crates/*/README.md` — crate-specific documentation where present
+- `crates/*/AGENTS.md` — crate-specific agent instructions - MUST read these (if exists) before modifing code in a given crate
 
 ## Common commands
 

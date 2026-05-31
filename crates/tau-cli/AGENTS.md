@@ -1,0 +1,1 @@
+* CLI (or any other UI crate) MUST NOT special-case handling of tool-related UI. They should use general purpose mechanisms like `ToolUseState` to handle well even tools written by external developers that are not in this codebase. Any exceptions should be confirmed with the user, and notably documented as such.

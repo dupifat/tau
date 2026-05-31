@@ -191,6 +191,15 @@ fn line_edit(start_line: i64, line_count: i64, new_text: &str) -> CborValue {
     ])
 }
 
+fn guarded_line_edit(start_line: i64, line_count: i64, new_text: &str, guard: &str) -> CborValue {
+    cbor_map(vec![
+        ("start_line", CborValue::Integer(start_line.into())),
+        ("line_count", CborValue::Integer(line_count.into())),
+        ("newText", CborValue::Text(new_text.to_owned())),
+        ("guard", CborValue::Text(guard.to_owned())),
+    ])
+}
+
 fn read_range(start_line: i64, line_count: i64) -> CborValue {
     cbor_map(vec![
         ("start_line", CborValue::Integer(start_line.into())),
@@ -307,6 +316,10 @@ fn startup_registers_echo_disabled_by_default_and_gpt_shell_visible_name() {
                 serde_json::json!(["start_line", "line_count", "newText"])
             );
             assert_eq!(edit_item["properties"]["oldText"], serde_json::Value::Null);
+            assert_eq!(
+                edit_item["properties"]["guard"]["type"],
+                serde_json::json!("string")
+            );
             found_edit_schema = true;
         }
         if register.tool.name == "write" {
@@ -2675,6 +2688,125 @@ fn edit_rejects_range_past_end_without_trailing_newline() {
     );
     assert!(error.message.contains("available_lines: 1"));
     assert_eq!(fs::read_to_string(&file_path).expect("read back"), "hello");
+}
+
+#[test]
+fn edit_guard_allows_matching_first_line() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("edit.txt");
+    fs::write(&file_path, "alpha\nbeta\ngamma\n").expect("write");
+
+    // Guarded edits make the line-number assumption explicit before writing.
+    let result = edit_file(&edit_arguments(
+        &file_path,
+        vec![guarded_line_edit(2, 1, "BETA\n", "beta")],
+    ))
+    .expect("edit")
+    .result;
+
+    assert_eq!(cbor_int_field(&result, "available_lines"), Some(4));
+    assert_eq!(
+        fs::read_to_string(&file_path).expect("read back"),
+        "alpha\nBETA\ngamma\n"
+    );
+}
+
+#[test]
+fn edit_guard_rejects_stale_line_number_and_returns_current_ranges() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("edit.txt");
+    fs::write(&file_path, "alpha\nbeta\ngamma\n").expect("write");
+
+    // On mismatch, the file stays untouched and the agent gets read-like
+    // output for every range it tried to change.
+    let error = edit_file(&edit_arguments(
+        &file_path,
+        vec![
+            guarded_line_edit(1, 1, "ALPHA\n", "alpha"),
+            guarded_line_edit(3, 1, "GAMMA\n", "wrong"),
+        ],
+    ))
+    .expect_err("guard mismatch should fail");
+
+    assert_eq!(error.message, "guard for line 3 did not match");
+    let details = error.details.as_deref().expect("details");
+    assert_eq!(
+        cbor_map_text(details, "line-numbered content"),
+        Some("1 alpha\n\n3 gamma")
+    );
+    assert_eq!(cbor_int_field(details, "guard_start_line"), Some(3));
+    assert!(matches!(
+        error.display.payload.as_ref(),
+        Some(ToolUsePayload::Text { text }) if text == "1 alpha\n\n3 gamma"
+    ));
+    assert_eq!(
+        fs::read_to_string(&file_path).expect("read back"),
+        "alpha\nbeta\ngamma\n"
+    );
+}
+
+#[test]
+fn edit_guard_rejects_non_string_guard_without_writing() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("edit.txt");
+    fs::write(&file_path, "alpha\n").expect("write");
+
+    let error = edit_file(&edit_arguments(
+        &file_path,
+        vec![cbor_map(vec![
+            ("start_line", CborValue::Integer(1.into())),
+            ("line_count", CborValue::Integer(1.into())),
+            ("newText", CborValue::Text("ALPHA\n".to_owned())),
+            ("guard", CborValue::Integer(1.into())),
+        ])],
+    ))
+    .expect_err("non-string guard should fail");
+
+    assert_eq!(error.message, "guard must be a string when provided");
+    assert_eq!(
+        fs::read_to_string(&file_path).expect("read back"),
+        "alpha\n"
+    );
+}
+
+#[test]
+fn edit_guard_matches_crlf_line_without_ending() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("edit.txt");
+    fs::write(&file_path, "one\r\ntwo\r\n").expect("write");
+
+    let result = edit_file(&edit_arguments(
+        &file_path,
+        vec![guarded_line_edit(2, 1, "TWO\r\n", "two")],
+    ))
+    .expect("edit")
+    .result;
+
+    assert_eq!(cbor_int_field(&result, "available_lines"), Some(3));
+    assert_eq!(
+        fs::read_to_string(&file_path).expect("read back"),
+        "one\r\nTWO\r\n"
+    );
+}
+
+#[test]
+fn edit_guard_allows_empty_append_line_after_trailing_newline() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("edit.txt");
+    fs::write(&file_path, "fish\n").expect("write");
+
+    let result = edit_file(&edit_arguments(
+        &file_path,
+        vec![guarded_line_edit(2, 1, "cat\n", "")],
+    ))
+    .expect("edit")
+    .result;
+
+    assert_eq!(cbor_int_field(&result, "available_lines"), Some(3));
+    assert_eq!(
+        fs::read_to_string(&file_path).expect("read back"),
+        "fish\ncat\n"
+    );
 }
 
 #[test]

@@ -7,8 +7,9 @@ use tau_proto::{CborValue, ToolUsePayload, ToolUseState, ToolUseStatus};
 
 use crate::argument::{argument_array, argument_text, cbor_map_int, cbor_map_text};
 use crate::diff::compute_diff;
-use crate::display::{ToolFailure, ToolOutput};
-use crate::tools::read::format_read_range;
+use crate::display::{ToolFailure, ToolOutput, text_stats};
+use crate::tools::read::{ReadLineRange, format_read_range, slice_line_ranges};
+use crate::truncate::truncate_line_oriented;
 
 const MAX_EDITS_PER_CALL: usize = 100;
 
@@ -49,9 +50,9 @@ pub(crate) fn edit_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
                 ToolFailure::new("each edit must have a string newText"),
             )
         })?;
-
         requested_ranges.push(format_read_range(Some(start_line), Some(line_count)));
         display_args = edit_display_args(&display_path, &requested_ranges);
+        let guard = parse_optional_guard(edit, &display_args)?;
 
         original_lines.validate_range(start_line, line_count, &display_args)?;
         let end_line = start_line.checked_add(line_count).ok_or_else(|| {
@@ -63,10 +64,17 @@ pub(crate) fn edit_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
             start_byte: original_lines.byte_start_for_line(start_line, original_bytes.len()),
             end_byte: original_lines.byte_start_for_line(end_line, original_bytes.len()),
             new_text: new_text.as_bytes(),
+            guard,
         });
     }
 
     validate_non_overlapping(&replacements, &display_args)?;
+    validate_guards(
+        &replacements,
+        &original_bytes,
+        &original_lines,
+        &display_args,
+    )?;
 
     let mut result = original_bytes.clone();
     replacements.sort_by_key(|replacement| std::cmp::Reverse(replacement.start_byte));
@@ -124,6 +132,7 @@ struct LineReplacement<'a> {
     start_byte: usize,
     end_byte: usize,
     new_text: &'a [u8],
+    guard: Option<&'a str>,
 }
 
 struct LineIndex {
@@ -133,6 +142,7 @@ struct LineIndex {
 
 struct LineSpan {
     start: usize,
+    content_end: usize,
 }
 
 impl LineIndex {
@@ -143,7 +153,10 @@ impl LineIndex {
         while index < input.len() {
             match input[index] {
                 b'\r' => {
-                    spans.push(LineSpan { start: line_start });
+                    spans.push(LineSpan {
+                        start: line_start,
+                        content_end: index,
+                    });
                     index += if index + 1 < input.len() && input[index + 1] == b'\n' {
                         2
                     } else {
@@ -152,7 +165,10 @@ impl LineIndex {
                     line_start = index;
                 }
                 b'\n' => {
-                    spans.push(LineSpan { start: line_start });
+                    spans.push(LineSpan {
+                        start: line_start,
+                        content_end: index,
+                    });
                     index += 1;
                     line_start = index;
                 }
@@ -162,7 +178,10 @@ impl LineIndex {
 
         let has_trailing_line_ending = !input.is_empty() && line_start == input.len();
         if line_start < input.len() {
-            spans.push(LineSpan { start: line_start });
+            spans.push(LineSpan {
+                start: line_start,
+                content_end: input.len(),
+            });
         }
 
         Self {
@@ -219,6 +238,13 @@ impl LineIndex {
             .map(|span| span.start)
             .unwrap_or(eof)
     }
+
+    fn line_content_text<'a>(&self, line: usize, input: &'a [u8]) -> Option<&'a str> {
+        let Some(span) = self.spans.get(line.saturating_sub(1)) else {
+            return (line <= self.available_lines()).then_some("");
+        };
+        std::str::from_utf8(&input[span.start..span.content_end]).ok()
+    }
 }
 
 fn validate_non_overlapping(
@@ -236,6 +262,85 @@ fn validate_non_overlapping(
         }
     }
     Ok(())
+}
+
+fn validate_guards(
+    replacements: &[LineReplacement<'_>],
+    original_bytes: &[u8],
+    original_lines: &LineIndex,
+    display_args: &str,
+) -> Result<(), ToolFailure> {
+    for replacement in replacements {
+        let Some(guard) = replacement.guard else {
+            continue;
+        };
+        if original_lines.line_content_text(replacement.start_line, original_bytes) == Some(guard) {
+            continue;
+        }
+        return Err(guard_mismatch_failure(
+            replacements,
+            original_bytes,
+            display_args,
+            replacement.start_line,
+        ));
+    }
+    Ok(())
+}
+
+fn guard_mismatch_failure(
+    replacements: &[LineReplacement<'_>],
+    original_bytes: &[u8],
+    display_args: &str,
+    start_line: usize,
+) -> ToolFailure {
+    let ranges = replacements
+        .iter()
+        .map(|replacement| ReadLineRange {
+            start_line: replacement.start_line,
+            line_count: Some(replacement.end_line.saturating_sub(replacement.start_line)),
+        })
+        .collect::<Vec<_>>();
+    let rendered = slice_line_ranges(original_bytes, &ranges);
+    let truncated = truncate_line_oriented(&rendered.content);
+    let mut details = vec![
+        (
+            CborValue::Text("line-numbered content".to_owned()),
+            CborValue::Text(truncated.content.clone()),
+        ),
+        (
+            CborValue::Text("guard_start_line".to_owned()),
+            CborValue::Integer((start_line as i64).into()),
+        ),
+    ];
+    if !rendered.valid_utf8 {
+        details.push((
+            CborValue::Text("valid_utf8".to_owned()),
+            CborValue::Bool(false),
+        ));
+    }
+    if truncated.was_truncated {
+        details.push((
+            CborValue::Text("truncated".to_owned()),
+            CborValue::Bool(true),
+        ));
+        details.push((
+            CborValue::Text("total_lines".to_owned()),
+            CborValue::Integer((rendered.total_lines as i64).into()),
+        ));
+        details.push((
+            CborValue::Text("total_bytes".to_owned()),
+            CborValue::Integer((original_bytes.len() as i64).into()),
+        ));
+    }
+
+    let mut failure = ToolFailure::new(format!("guard for line {start_line} did not match"))
+        .with_args(display_args.to_owned())
+        .with_details(CborValue::Map(details))
+        .with_payload(Some(ToolUsePayload::Text {
+            text: truncated.content.clone(),
+        }));
+    failure.display.stats = text_stats(&truncated.content);
+    failure
 }
 
 fn read_original_or_empty(path: &Path, display_args: &str) -> Result<(Vec<u8>, bool), ToolFailure> {
@@ -281,6 +386,29 @@ fn parse_required_line(
             ToolFailure::new(format!("each edit must have an integer {key}")),
         )),
     }
+}
+
+fn parse_optional_guard<'a>(
+    edit: &'a CborValue,
+    display_args: &str,
+) -> Result<Option<&'a str>, ToolFailure> {
+    let CborValue::Map(entries) = edit else {
+        return Ok(None);
+    };
+    for (key, value) in entries {
+        if let CborValue::Text(key) = key
+            && key == "guard"
+        {
+            return match value {
+                CborValue::Text(value) => Ok(Some(value.as_str())),
+                _ => Err(with_display_args(
+                    display_args,
+                    ToolFailure::new("guard must be a string when provided"),
+                )),
+            };
+        }
+    }
+    Ok(None)
 }
 
 fn with_display_args(args: &str, failure: ToolFailure) -> ToolFailure {

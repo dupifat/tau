@@ -127,7 +127,9 @@ instead of treating the shell invocation itself as broken.
 
 `edit` supports file creation: missing files are treated as empty, and missing parent directories are created only after the request validates. To create a file, replace `start_line: 1`, `line_count: 1` with the desired contents. The model-visible result should stay minimal: `replacements`, `changed`, `available_lines` (highest valid `start_line` after the edit), and `total_bytes`. Diff payloads belong in UI display state, not the model-visible result.
 
-`edit` allows at most 100 edit entries per call. Requests with more entries must error out immediately before reading, writing, or creating parent directories. Invalid ranges, overlapping ranges, missing `newText`, and malformed line fields must leave the file unchanged.
+`edit` supports an optional per-entry `guard` string. When provided, it must exactly match the first original line content in that range, excluding any line ending. Empty, missing-file, and append virtual lines match an empty guard. A guard mismatch must leave the file unchanged and return read-like `line-numbered content` details for the current contents of the requested ranges, with invalid UTF-8 and truncation handled like `read`.
+
+`edit` allows at most 100 edit entries per call. Requests with more entries must error out immediately before reading, writing, or creating parent directories. Invalid ranges, overlapping ranges, missing `newText`, malformed line fields, malformed guards, and guard mismatches must leave the file unchanged.
 
 Other commands should adhere to pre-existing conventions and naming used in
 standard tools.

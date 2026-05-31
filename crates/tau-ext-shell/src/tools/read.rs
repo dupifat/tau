@@ -59,13 +59,16 @@ pub(crate) fn read_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
     })
 }
 
+/// One 1-based line range requested from a file.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ReadRange {
-    start_line: usize,
-    line_count: Option<usize>,
+pub(crate) struct ReadLineRange {
+    /// 1-based inclusive first line to include.
+    pub(crate) start_line: usize,
+    /// Number of lines to include, or `None` for the rest of the file.
+    pub(crate) line_count: Option<usize>,
 }
 
-impl ReadRange {
+impl ReadLineRange {
     fn contains_line(&self, line: usize) -> bool {
         if line < self.start_line {
             return false;
@@ -83,7 +86,7 @@ impl ReadRange {
 }
 
 struct ReadRequest {
-    ranges: Vec<ReadRange>,
+    ranges: Vec<ReadLineRange>,
     display_ranges: Vec<String>,
 }
 
@@ -92,33 +95,38 @@ pub(crate) struct ReadSlice {
     #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) line_count: usize,
     pub(crate) valid_utf8: bool,
-    /// Total lines in the source. For [`stream_slice_line_ranges`] this is
-    /// computed by scanning the whole file after collecting requested ranges.
+    /// Total lines in the source. For [`slice_line_ranges`] this is computed
+    /// by scanning the whole file after collecting requested ranges.
     pub(crate) total_lines: usize,
 }
 
 /// Stream line ranges from `path` while reading the file contents once.
-fn stream_slice_line_ranges(path: &Path, ranges: &[ReadRange]) -> std::io::Result<ReadSlice> {
+fn stream_slice_line_ranges(path: &Path, ranges: &[ReadLineRange]) -> std::io::Result<ReadSlice> {
     let bytes = fs::read(path)?;
+    Ok(slice_line_ranges(&bytes, ranges))
+}
+
+/// Render line ranges from already-loaded file bytes using `read` output rules.
+pub(crate) fn slice_line_ranges(input: &[u8], ranges: &[ReadLineRange]) -> ReadSlice {
     let mut state = SliceState::new(ranges);
 
     let mut line_start = 0usize;
     let mut index = 0usize;
-    while index < bytes.len() {
-        match bytes[index] {
+    while index < input.len() {
+        match input[index] {
             b'\r' => {
-                let is_crlf = index + 1 < bytes.len() && bytes[index + 1] == b'\n';
+                let is_crlf = index + 1 < input.len() && input[index + 1] == b'\n';
                 let ending = if is_crlf {
                     LineEndingKind::Crlf
                 } else {
                     LineEndingKind::Cr
                 };
-                state.push_line(&bytes[line_start..index], Some(ending));
+                state.push_line(&input[line_start..index], Some(ending));
                 index += if is_crlf { 2 } else { 1 };
                 line_start = index;
             }
             b'\n' => {
-                state.push_line(&bytes[line_start..index], Some(LineEndingKind::Lf));
+                state.push_line(&input[line_start..index], Some(LineEndingKind::Lf));
                 index += 1;
                 line_start = index;
             }
@@ -126,15 +134,15 @@ fn stream_slice_line_ranges(path: &Path, ranges: &[ReadRange]) -> std::io::Resul
         }
     }
 
-    if line_start < bytes.len() {
-        state.push_line(&bytes[line_start..], None);
+    if line_start < input.len() {
+        state.push_line(&input[line_start..], None);
     }
 
-    Ok(state.finish())
+    state.finish()
 }
 
 struct SliceState {
-    ranges: Vec<ReadRange>,
+    ranges: Vec<ReadLineRange>,
     chunks: Vec<Vec<ReadLine>>,
     total_lines: usize,
     lf_count: usize,
@@ -157,7 +165,7 @@ enum LineEndingKind {
 }
 
 impl SliceState {
-    fn new(ranges: &[ReadRange]) -> Self {
+    fn new(ranges: &[ReadLineRange]) -> Self {
         Self {
             ranges: ranges.to_vec(),
             chunks: ranges.iter().map(|_| Vec::new()).collect(),
@@ -270,7 +278,7 @@ fn parse_read_request(arguments: &CborValue) -> Result<ReadRequest, ToolFailure>
     let start_line = parse_read_start_line(start_line_arg)?;
     let line_count = parse_read_line_count(line_count_arg)?;
     Ok(ReadRequest {
-        ranges: vec![ReadRange {
+        ranges: vec![ReadLineRange {
             start_line,
             line_count,
         }],
@@ -304,7 +312,7 @@ fn parse_disjoint_read_ranges(
     for range in ranges {
         let start_line = parse_required_range_line(range, "start_line")?;
         let line_count = parse_required_range_line(range, "line_count")?;
-        parsed.push(ReadRange {
+        parsed.push(ReadLineRange {
             start_line,
             line_count: Some(line_count),
         });
@@ -360,7 +368,7 @@ fn parse_required_range_line(range: &CborValue, key: &str) -> Result<usize, Tool
     }
 }
 
-fn validate_non_overlapping_read_ranges(ranges: &[ReadRange]) -> Result<(), ToolFailure> {
+fn validate_non_overlapping_read_ranges(ranges: &[ReadLineRange]) -> Result<(), ToolFailure> {
     let mut sorted: Vec<_> = ranges.iter().collect();
     sorted.sort_by_key(|range| range.start_line);
     for pair in sorted.windows(2) {
@@ -377,7 +385,7 @@ fn validate_non_overlapping_read_ranges(ranges: &[ReadRange]) -> Result<(), Tool
 }
 
 fn validate_ranges_with_total(
-    ranges: &[ReadRange],
+    ranges: &[ReadLineRange],
     total_lines: usize,
     display_args: &str,
 ) -> Result<(), ToolFailure> {

@@ -165,6 +165,8 @@ where
                  or missing file, and the line after a trailing newline is available for \
                  appends. Missing files are treated as empty and missing parent \
                  directories are created, so use line 1 with line_count 1 to create a file. \
+                 Optional per-edit `guard` must exactly match the first original line content, \
+                 excluding the line ending, or the edit fails and returns the current range contents. \
                  Returns minimal status headers: replacements, changed, available_lines \
                  (highest valid start_line after the edit), and total_bytes."
                     .to_owned(),
@@ -198,6 +200,10 @@ where
                                 "newText": {
                                     "type": "string",
                                     "description": "Replacement text, written verbatim. Embed real newlines directly — do NOT use backslash-n escape sequences."
+                                },
+                                "guard": {
+                                    "type": "string",
+                                    "description": "Optional exact expected content of the first original line in this range, excluding the line ending. Use an empty string for an empty, missing, or append line. If it does not match, the edit fails and returns the current requested range contents."
                                 }
                             },
                             "required": ["start_line", "line_count", "newText"],

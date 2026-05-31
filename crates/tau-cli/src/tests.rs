@@ -3306,16 +3306,16 @@ fn streaming_indicator_appends_during_updates() {
 fn render_compaction_block_styles_completed_status() {
     let theme = tau_themes::Theme::builtin();
 
-    let block = render_compaction_block(&theme, "compacted", CompactionStatus::Success);
+    let block = render_compaction_block(&theme, "ok", CompactionStatus::Success);
     let spans = block.content.spans();
     let success_style =
         tau_cli_term::resolve::resolve(&theme, tau_themes::names::TOOL_STATUS_SUCCESS);
-    let compacted = spans
+    let ok = spans
         .iter()
-        .find(|span| span.text == "compacted")
+        .find(|span| span.text == "ok")
         .expect("completed compaction status span");
 
-    assert_eq!(compacted.style, success_style);
+    assert_eq!(ok.style, success_style);
 }
 
 #[test]
@@ -3379,6 +3379,31 @@ fn manual_compaction_trigger_does_not_render_progress_status() {
 }
 
 #[test]
+fn render_provider_compaction_update_as_compact_progress() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    renderer.handle(&Event::ProviderResponseUpdated(ProviderResponseUpdated {
+        agent_prompt_id: "sp-compact".into(),
+        items: vec![tau_proto::ProviderResponseItem::InProgress(
+            tau_proto::InProgressOutputItem::Compaction {
+                status: tau_proto::InProgressCompactionStatus::Started,
+            },
+        )],
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    sync(&handle);
+
+    let progress = format!("compact {}", tau_proto::PROGRESS_INDICATOR_TEXT);
+    assert!(vt.screen_contains(80, &progress));
+    assert!(!vt.screen_contains(80, "compacting"));
+}
+
+#[test]
 fn render_provider_compaction_item_when_response_finishes() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
@@ -3398,7 +3423,8 @@ fn render_provider_compaction_item_when_response_finishes() {
     )));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "compact compacted"));
+    assert!(vt.screen_contains(80, "compact ok"));
+    assert!(!vt.screen_contains(80, "compacted"));
 }
 
 #[test]

@@ -3113,9 +3113,7 @@ impl EventRenderer {
             return;
         };
         let text = match status {
-            InProgressCompactionStatus::Started => {
-                format!("compacting {}", tau_proto::PROGRESS_INDICATOR_TEXT)
-            }
+            InProgressCompactionStatus::Started => tau_proto::PROGRESS_INDICATOR_TEXT,
         };
         let block = render_compaction_block(&self.theme, text, CompactionStatus::Progress);
         let existing_id = self.prompts.get(spid).and_then(|s| s.compaction_block_id);
@@ -3431,7 +3429,7 @@ impl EventRenderer {
             ContextItem::Compaction(_) => {
                 self.handle.print_output(
                     "compaction-completed",
-                    render_compaction_block(&self.theme, "compacted", CompactionStatus::Success),
+                    render_compaction_block(&self.theme, "ok", CompactionStatus::Success),
                 );
             }
             _ => {}

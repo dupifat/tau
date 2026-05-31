@@ -3815,7 +3815,8 @@ fn enter_variants_insert_newline_and_ctrl_enter_submits() {
 }
 
 /// Enter and Ctrl-Enter can be bound explicitly; those bindings take precedence
-/// over the default newline and submit behavior.
+/// over the default newline and submit behavior, without stealing the explicit
+/// Shift-Enter / Alt-Enter multiline affordance.
 #[test]
 fn enter_bindings_override_default_newline_and_submit() {
     let buf = SharedBuffer::new();
@@ -3840,6 +3841,33 @@ fn enter_bindings_override_default_newline_and_submit() {
     ));
     assert_eq!(handle.get_buffer(), "draft");
 
+    handle.set_buffer("draft".to_owned(), "draft".len());
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::SHIFT,
+        )))
+        .expect("send shift+enter");
+    assert!(matches!(
+        term.get_next_event().expect("event"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "draft\n");
+
+    handle.set_buffer("draft".to_owned(), "draft".len());
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::ALT,
+        )))
+        .expect("send alt+enter");
+    assert!(matches!(
+        term.get_next_event().expect("event"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "draft\n");
+
+    handle.set_buffer("draft".to_owned(), "draft".len());
     input_tx
         .send(RawEvent::Key(KeyEvent::new(
             KeyCode::Enter,
@@ -3851,7 +3879,6 @@ fn enter_bindings_override_default_newline_and_submit() {
         Event::Binding(action) if action == "ctrl-enter"
     ));
     assert_eq!(handle.get_buffer(), "draft");
-
     input_tx
         .send(RawEvent::Key(KeyEvent::new(
             KeyCode::BackTab,

@@ -622,8 +622,10 @@ fn parse_key_binding(input: &str) -> Option<KeyBinding> {
 }
 
 fn key_binding_for_event(key: KeyEvent, ctrl: bool) -> Option<KeyBinding> {
-    let plain = key.modifiers.is_empty();
-    let ctrl_only = key.modifiers == KeyModifiers::CONTROL;
+    let modifiers = key.modifiers;
+    let plain = modifiers.is_empty();
+    let ctrl_only = modifiers == KeyModifiers::CONTROL;
+
     match key.code {
         KeyCode::Char(ch) if ctrl => Some(KeyBinding::Ctrl(ch.to_ascii_lowercase())),
         KeyCode::Char(ch @ '\u{1}'..='\u{1a}') => {
@@ -631,10 +633,9 @@ fn key_binding_for_event(key: KeyEvent, ctrl: bool) -> Option<KeyBinding> {
             Some(KeyBinding::Ctrl(letter))
         }
         KeyCode::Enter if ctrl_only => Some(KeyBinding::CtrlKey(KeyCode::Enter)),
-        KeyCode::Enter if plain => Some(KeyBinding::Key(KeyCode::Enter)),
-        KeyCode::Up | KeyCode::Down if ctrl => Some(KeyBinding::CtrlKey(key.code)),
+        KeyCode::Up | KeyCode::Down if ctrl_only => Some(KeyBinding::CtrlKey(key.code)),
+        KeyCode::BackTab => Some(KeyBinding::Key(KeyCode::BackTab)),
         KeyCode::Backspace
-        | KeyCode::BackTab
         | KeyCode::Delete
         | KeyCode::Down
         | KeyCode::End
@@ -644,11 +645,14 @@ fn key_binding_for_event(key: KeyEvent, ctrl: bool) -> Option<KeyBinding> {
         | KeyCode::Left
         | KeyCode::Right
         | KeyCode::Tab
-        | KeyCode::Up => Some(KeyBinding::Key(key.code)),
+        | KeyCode::Up
+            if plain =>
+        {
+            Some(KeyBinding::Key(key.code))
+        }
         _ => None,
     }
 }
-
 /// High-level events surfaced to the downstream event loop.
 pub enum Event {
     /// The user submitted a line with Ctrl-Enter or `submit-prompt`

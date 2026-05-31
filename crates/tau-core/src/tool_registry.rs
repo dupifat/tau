@@ -631,6 +631,7 @@ impl ToolRegistry {
                 call_id: request.call_id,
                 tool_name,
                 arguments: request.arguments,
+                display: None,
                 agent_id: request.agent_id,
                 originator: request.originator,
             },

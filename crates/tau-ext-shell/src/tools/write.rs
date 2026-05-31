@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use tau_proto::{CborValue, ToolDisplayPayload, ToolDisplayStatus};
+use tau_proto::{CborValue, ToolUsePayload, ToolUseStatus};
 
 use crate::argument::argument_text;
 use crate::diff::compute_diff;
@@ -51,11 +51,11 @@ pub(crate) fn write_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailur
         .as_deref()
         .map(|original| compute_diff(original, &content));
 
-    let display = tau_proto::ToolDisplay {
+    let display = tau_proto::ToolUseState {
         args: display_args.clone(),
-        status: ToolDisplayStatus::Success,
+        status: ToolUseStatus::Success,
         status_text: "ok".to_owned(),
-        payload: diff.clone().map(ToolDisplayPayload::Diff),
+        payload: diff.clone().map(ToolUsePayload::Diff),
         ..Default::default()
     };
     Ok(ToolOutput {

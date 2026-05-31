@@ -19,8 +19,8 @@ use tau_harness::internal_tools::{InternalSkill, InternalSkillSource};
 use tau_harness::{AgentId, AgentToolCall, HarnessError, InternalToolHandler, InternalToolHost};
 use tau_proto::{
     BackgroundSupport, CborValue, Event, PromptOriginator, StartAgentRequest, ToolCallId,
-    ToolDisplay, ToolDisplayStats, ToolDisplayStatus, ToolError, ToolName, ToolResult,
-    ToolResultKind, ToolSpec, ToolStarted, ToolType,
+    ToolError, ToolName, ToolResult, ToolResultKind, ToolSpec, ToolStarted, ToolType, ToolUseState,
+    ToolUseStats, ToolUseStatus,
 };
 
 const SKILL_TOOL_NAME: &str = "skill";
@@ -53,6 +53,8 @@ struct PendingDelegate {
     started_at: Instant,
     self_agent_id: String,
     agent_id: String,
+    task_name: String,
+    input_stats: ToolUseStats,
 }
 
 impl InternalToolHandler for BuiltinTools {
@@ -164,11 +166,13 @@ impl BuiltinTools {
             state.next_delegate_query_id += 1;
             query_id
         };
+        let input_stats = ToolUseStats::for_text(&parsed.prompt);
+        let task_name = parsed.task_name.clone();
         let start_request = StartAgentRequest {
             query_id: query_id.clone(),
             instruction: delegate_instruction(&self_agent_id, &parsed.prompt),
             role: parsed.role,
-            input_stats: ToolDisplayStats::for_text(&parsed.prompt),
+            input_stats,
             tool_call_id: Some(call_id.clone()),
             task_name: Some(parsed.task_name),
         };
@@ -198,6 +202,8 @@ impl BuiltinTools {
                     started_at: Instant::now(),
                     self_agent_id: self_agent_id.clone(),
                     agent_id: agent_id.clone(),
+                    task_name,
+                    input_stats,
                 },
             );
         host.background_tool_call(
@@ -247,6 +253,13 @@ impl BuiltinTools {
         };
         let duration_seconds = delegate_duration_seconds(pending.started_at.elapsed());
         if let Some(message) = result.error.clone() {
+            let display = delegate_final_display(
+                &pending.task_name,
+                &result.text,
+                pending.input_stats,
+                ToolUseStatus::Error,
+                &message,
+            );
             host.finish_prebuilt_tool_error(ToolError {
                 call_id: pending.call_id,
                 tool_name: pending.tool_name,
@@ -257,10 +270,17 @@ impl BuiltinTools {
                     Some(&pending.self_agent_id),
                     Some(&pending.agent_id),
                 ),
-                display: None,
+                display: Some(display),
                 originator: PromptOriginator::User,
             });
         } else {
+            let display = delegate_final_display(
+                &pending.task_name,
+                &result.text,
+                pending.input_stats,
+                ToolUseStatus::Success,
+                "ok",
+            );
             host.finish_prebuilt_tool_result(ToolResult {
                 call_id: pending.call_id,
                 tool_name: pending.tool_name,
@@ -272,7 +292,7 @@ impl BuiltinTools {
                     Some(&pending.agent_id),
                 ),
                 kind: ToolResultKind::Final,
-                display: None,
+                display: Some(display),
                 originator: PromptOriginator::User,
             });
         }
@@ -324,7 +344,7 @@ fn handle_skill_tool_call(
 fn handle_skill_query(
     host: &mut InternalToolHost<'_>,
     arguments: &CborValue,
-) -> Result<(CborValue, Option<ToolDisplay>), (String, Option<ToolDisplay>)> {
+) -> Result<(CborValue, Option<ToolUseState>), (String, Option<ToolUseState>)> {
     let needles = extract_skill_search_queries(arguments).map_err(|message| {
         (
             message.clone(),
@@ -355,7 +375,7 @@ fn read_skill_by_name(
     host: &mut InternalToolHost<'_>,
     skills: &[InternalSkill],
     name: &str,
-) -> Result<(CborValue, Option<ToolDisplay>), (String, Option<ToolDisplay>)> {
+) -> Result<(CborValue, Option<ToolUseState>), (String, Option<ToolUseState>)> {
     let Some(skill) = skills.iter().find(|skill| skill.name == name) else {
         let message = format!("unknown skill: {name}");
         return Err((message.clone(), Some(skill_error_display(name, &message))));
@@ -499,7 +519,7 @@ fn skill_search_result(
     needles: &[String],
     search_content: bool,
     outcome: SkillSearchOutcome,
-) -> (CborValue, Option<ToolDisplay>) {
+) -> (CborValue, Option<ToolUseState>) {
     let scope_label = if search_content { " [content]" } else { "" };
     let display_args = format!("{}{scope_label}", needles.join(" "));
     let mut display = skill_ok_display(&display_args);
@@ -643,33 +663,33 @@ fn sort_skill_hits(hits: &mut [SkillSearchHit]) {
             .then_with(|| a.name.cmp(&b.name))
     });
 }
-fn skill_ok_display(args: &str) -> ToolDisplay {
-    ToolDisplay {
+fn skill_ok_display(args: &str) -> ToolUseState {
+    ToolUseState {
         args: args.to_owned(),
-        status: ToolDisplayStatus::Success,
+        status: ToolUseStatus::Success,
         status_text: "ok".to_owned(),
         ..Default::default()
     }
 }
-fn skill_error_display(args: &str, message: &str) -> ToolDisplay {
-    ToolDisplay {
+fn skill_error_display(args: &str, message: &str) -> ToolUseState {
+    ToolUseState {
         args: args.to_owned(),
-        status: ToolDisplayStatus::Error,
+        status: ToolUseStatus::Error,
         status_text: error_chip_text(message),
         ..Default::default()
     }
 }
-fn text_stats_for_skill(text: &str) -> ToolDisplayStats {
+fn text_stats_for_skill(text: &str) -> ToolUseStats {
     if text.is_empty() {
-        return ToolDisplayStats::default();
+        return ToolUseStats::default();
     }
-    ToolDisplayStats {
+    ToolUseStats {
         matches: None,
         lines: Some(text.lines().count() as u64),
         bytes: Some(text.len() as u64),
     }
 }
-fn skill_search_stats(matches: &[SkillSearchHit]) -> ToolDisplayStats {
+fn skill_search_stats(matches: &[SkillSearchHit]) -> ToolUseStats {
     let output = matches
         .iter()
         .map(|hit| format!("{}: {}", hit.name, hit.description))
@@ -939,6 +959,54 @@ fn delegate_duration_seconds(elapsed: Duration) -> Option<u64> {
         Some(elapsed.as_secs_f64().ceil() as u64)
     } else {
         None
+    }
+}
+
+fn delegate_final_display(
+    task_name: &str,
+    output: &str,
+    input_stats: ToolUseStats,
+    status: ToolUseStatus,
+    status_text: &str,
+) -> ToolUseState {
+    let mut info_chips = Vec::new();
+    let input_stats_chip = tool_use_stats_chip(input_stats);
+    if !input_stats_chip.is_empty() {
+        info_chips.push(format!("↘︎{input_stats_chip}"));
+    }
+    ToolUseState {
+        args: format!("[{task_name}]"),
+        stats: ToolUseStats::for_text(output),
+        info_chips,
+        status,
+        status_text: status_text.to_owned(),
+        ..Default::default()
+    }
+}
+
+fn tool_use_stats_chip(stats: ToolUseStats) -> String {
+    let mut parts = Vec::new();
+    if let Some(matches) = stats.matches {
+        parts.push(matches.to_string());
+    }
+    if let Some(lines) = stats.lines {
+        parts.push(format!("{lines}L"));
+    }
+    if let Some(bytes) = stats.bytes {
+        parts.push(format_tool_use_bytes(bytes));
+    }
+    parts.join(", ")
+}
+
+fn format_tool_use_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        return format!("{bytes}B");
+    }
+    let kb = bytes as f64 / 1024.0;
+    if kb < 100.0 {
+        format!("{kb:.1}kB")
+    } else {
+        format!("{kb:.0}kB")
     }
 }
 

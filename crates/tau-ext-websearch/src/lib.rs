@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use tau_proto::{
     Ack, CborValue, ConfigError, Event, EventLogSeq, Frame, FrameReader, FrameWriter, Message,
-    ToolDisplay, ToolDisplayStats, ToolDisplayStatus, ToolError, ToolResult, ToolSpec, ToolStarted,
+    ToolError, ToolResult, ToolSpec, ToolStarted, ToolUseState, ToolUseStats, ToolUseStatus,
 };
 
 /// `tracing` target for events emitted from this extension.
@@ -394,22 +394,22 @@ fn tool_error(invoke: ToolStarted, message: String) -> Event {
     })
 }
 
-fn ok_display(response: &str) -> ToolDisplay {
+fn ok_display(response: &str) -> ToolUseState {
     let has_response = !response.is_empty();
-    ToolDisplay {
+    ToolUseState {
         args: String::new(),
-        stats: ToolDisplayStats {
+        stats: ToolUseStats {
             matches: None,
             lines: has_response.then_some(response.lines().count() as u64),
             bytes: has_response.then_some(response.len() as u64),
         },
-        status: ToolDisplayStatus::Success,
+        status: ToolUseStatus::Success,
         status_text: "ok".to_owned(),
         ..Default::default()
     }
 }
 
-fn exa_ok_display(response: &str) -> ToolDisplay {
+fn exa_ok_display(response: &str) -> ToolUseState {
     let mut display = ok_display(response);
     let titles = response
         .lines()
@@ -423,16 +423,16 @@ fn exa_ok_display(response: &str) -> ToolDisplay {
     display
 }
 
-fn error_display(message: &str) -> ToolDisplay {
+fn error_display(message: &str) -> ToolUseState {
     let status_text = message
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
         .unwrap_or("")
         .to_owned();
-    ToolDisplay {
+    ToolUseState {
         args: String::new(),
-        status: ToolDisplayStatus::Error,
+        status: ToolUseStatus::Error,
         status_text,
         ..Default::default()
     }

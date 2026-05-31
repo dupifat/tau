@@ -6,7 +6,7 @@ use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
-use tau_proto::{CborValue, ToolDisplay, ToolDisplayPayload, ToolDisplayStatus, cbor_field};
+use tau_proto::{CborValue, ToolUsePayload, ToolUseState, ToolUseStatus, cbor_field};
 
 #[cfg(test)]
 pub(crate) fn format_turn_stats_line(
@@ -276,7 +276,7 @@ pub(crate) struct ToolCallDisplay {
     pub(crate) mode: String,
     pub(crate) args: String,
     pub(crate) suffixes: Vec<ToolSuffixSegment>,
-    pub(crate) payload: Option<ToolDisplayPayload>,
+    pub(crate) payload: Option<ToolUsePayload>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -296,7 +296,7 @@ pub(crate) struct ToolSummaryDisplay {
 /// tool call from the harness-stamped descriptor. Falls back to a
 /// name-only block when the descriptor is absent (older logs, or
 /// extensions whose tools the harness doesn't know how to label).
-pub(crate) fn format_tool_call(tool_name: &str, display: Option<&ToolDisplay>) -> ToolCallDisplay {
+pub(crate) fn format_tool_call(tool_name: &str, display: Option<&ToolUseState>) -> ToolCallDisplay {
     let mode = display.map(|d| d.mode.clone()).unwrap_or_default();
     let args = display.map(|d| d.args.clone()).unwrap_or_default();
     let suffix = running_suffix_after(&args);
@@ -316,29 +316,29 @@ pub(crate) fn format_tool_call(tool_name: &str, display: Option<&ToolDisplay>) -
 /// status. The input stats stay as a marked chip so delegate rendering
 /// can show input first, then output, then progress counters.
 pub(crate) fn build_delegate_completion_display(
-    cached: Option<&ToolDisplay>,
+    cached: Option<&ToolUseState>,
     details: &CborValue,
     error: Option<&str>,
-) -> ToolDisplay {
+) -> ToolUseState {
     let response_text = delegate_response_text(details);
-    let mut display = cached.cloned().unwrap_or_else(|| ToolDisplay {
+    let mut display = cached.cloned().unwrap_or_else(|| ToolUseState {
         args: String::new(),
         ..Default::default()
     });
     let input_stats = display.stats;
-    display.stats = tau_proto::ToolDisplayStats::for_text(response_text);
+    display.stats = tau_proto::ToolUseStats::for_text(response_text);
     if !input_stats.is_empty() {
         display
             .info_chips
-            .push(format!("↘︎{}", format_tool_display_stats(&input_stats)));
+            .push(format!("↘︎{}", format_tool_use_state_stats(&input_stats)));
     }
     match error {
         Some(msg) if !msg.is_empty() => {
-            display.status = ToolDisplayStatus::Error;
+            display.status = ToolUseStatus::Error;
             display.status_text = first_error_line(msg);
         }
         _ => {
-            display.status = ToolDisplayStatus::Success;
+            display.status = ToolUseStatus::Success;
             display.status_text = "ok".to_owned();
         }
     }
@@ -477,18 +477,16 @@ fn abbreviate_inline_text(text: &str) -> String {
 /// ` +role` embedded in `args`; strip that legacy copy so the line does not
 /// render both the old role chip and the new agent chip.
 pub(crate) fn render_delegate_display(
-    display: &ToolDisplay,
+    display: &ToolUseState,
     agent_id: Option<&str>,
     legacy_role: Option<&str>,
 ) -> ToolCallDisplay {
-    let mut rendered = render_tool_display("delegate", display);
-    let stats_chip = format_tool_display_stats(&display.stats);
+    let mut rendered = render_tool_use_state("delegate", display);
+    let stats_chip = format_tool_use_state_stats(&display.stats);
     if !stats_chip.is_empty() {
         let marker = match display.status {
-            ToolDisplayStatus::InProgress => "↘︎",
-            ToolDisplayStatus::Success | ToolDisplayStatus::Warning | ToolDisplayStatus::Error => {
-                "↖︎"
-            }
+            ToolUseStatus::InProgress => "↘︎",
+            ToolUseStatus::Success | ToolUseStatus::Warning | ToolUseStatus::Error => "↖︎",
         };
         if let Some(suffix) = rendered
             .suffixes
@@ -501,7 +499,7 @@ pub(crate) fn render_delegate_display(
     for suffix in &mut rendered.suffixes {
         normalize_delegate_input_stats_suffix(suffix);
     }
-    if !matches!(display.status, ToolDisplayStatus::InProgress) {
+    if !matches!(display.status, ToolUseStatus::InProgress) {
         move_delegate_completion_stats_first(&mut rendered.suffixes, &stats_chip);
     }
 
@@ -586,17 +584,17 @@ fn move_delegate_completion_stats_first(
     *suffixes = rest;
 }
 
-/// Render a [`ToolDisplay`] descriptor directly to a
+/// Render a [`ToolUseState`] descriptor directly to a
 /// [`ToolCallDisplay`]. The generic path the renderer takes when the
 /// tool side attached a display descriptor to its result/error event —
 /// no `match tool_name` arms needed. Falls back to
 /// [`format_tool_completion`] for older events that didn't carry a
 /// descriptor.
-pub(crate) fn render_tool_display(tool_name: &str, display: &ToolDisplay) -> ToolCallDisplay {
+pub(crate) fn render_tool_use_state(tool_name: &str, display: &ToolUseState) -> ToolCallDisplay {
     let mut suffixes: Vec<ToolSuffixSegment> = Vec::new();
     // Diff `+N -M` chips (themed green/red) are derived from the
     // payload so write/edit don't have to push them as info chips.
-    if let Some(ToolDisplayPayload::Diff(summary)) = &display.payload
+    if let Some(ToolUsePayload::Diff(summary)) = &display.payload
         && (summary.added > 0 || summary.removed > 0)
     {
         if summary.added > 0 {
@@ -613,7 +611,7 @@ pub(crate) fn render_tool_display(tool_name: &str, display: &ToolDisplay) -> Too
             });
         }
     }
-    let stats_chip = format_tool_display_stats(&display.stats);
+    let stats_chip = format_tool_use_state_stats(&display.stats);
     if !stats_chip.is_empty() {
         suffixes.push(info_suffix(stats_chip));
     }
@@ -624,19 +622,18 @@ pub(crate) fn render_tool_display(tool_name: &str, display: &ToolDisplay) -> Too
         suffixes.push(info_suffix(chip.clone()));
     }
     let status_kind = match display.status {
-        ToolDisplayStatus::Success => ToolStatus::Success,
-        ToolDisplayStatus::Warning => ToolStatus::Warning,
-        ToolDisplayStatus::Error => ToolStatus::Error,
-        ToolDisplayStatus::InProgress => ToolStatus::Progress,
+        ToolUseStatus::Success => ToolStatus::Success,
+        ToolUseStatus::Warning => ToolStatus::Warning,
+        ToolUseStatus::Error => ToolStatus::Error,
+        ToolUseStatus::InProgress => ToolStatus::Progress,
     };
-    let mut status_text = if display.status_text.is_empty()
-        && matches!(display.status, ToolDisplayStatus::InProgress)
-    {
-        tau_proto::PROGRESS_INDICATOR_TEXT.to_owned()
-    } else {
-        display.status_text.clone()
-    };
-    if matches!(display.status, ToolDisplayStatus::Error) {
+    let mut status_text =
+        if display.status_text.is_empty() && matches!(display.status, ToolUseStatus::InProgress) {
+            tau_proto::PROGRESS_INDICATOR_TEXT.to_owned()
+        } else {
+            display.status_text.clone()
+        };
+    if matches!(display.status, ToolUseStatus::Error) {
         status_text = error_status_text(&status_text);
     }
     suffixes.push(tool_suffix(status_text, status_kind));
@@ -678,7 +675,7 @@ fn format_progress_counter(counter: &tau_proto::ProgressCounter) -> ToolSuffixSe
     }
 }
 
-fn format_tool_display_stats(stats: &tau_proto::ToolDisplayStats) -> String {
+fn format_tool_use_state_stats(stats: &tau_proto::ToolUseStats) -> String {
     format_stats(stats.matches, stats.lines, stats.bytes)
 }
 
@@ -691,12 +688,12 @@ fn format_stats(matches: Option<u64>, lines: Option<u64>, bytes: Option<u64>) ->
         parts.push(format!("{l}L"));
     }
     if let Some(b) = bytes {
-        parts.push(format_tool_display_bytes(b));
+        parts.push(format_tool_use_state_bytes(b));
     }
     parts.join(", ")
 }
 
-fn format_tool_display_bytes(bytes: u64) -> String {
+fn format_tool_use_state_bytes(bytes: u64) -> String {
     if bytes >= 1024 {
         let k = bytes as f64 / 1024.0;
         if k >= 100.0 {
@@ -709,18 +706,18 @@ fn format_tool_display_bytes(bytes: u64) -> String {
     }
 }
 
-/// Minimal display for events that didn't ship a [`ToolDisplay`]
+/// Minimal display for events that didn't ship a [`ToolUseState`]
 /// (old logs and any extension that hasn't migrated). Renders just
 /// `<tool_name> ok` or `<tool_name> err: <short message>` — the chip
 /// shape is intentionally generic so future tool names render without
 /// touching this code.
-pub(crate) fn synthesize_fallback_display(tool_name: &str, error: Option<&str>) -> ToolDisplay {
+pub(crate) fn synthesize_fallback_display(tool_name: &str, error: Option<&str>) -> ToolUseState {
     let (status, status_text) = match error {
-        Some(msg) if !msg.is_empty() => (ToolDisplayStatus::Error, first_error_line(msg)),
-        _ => (ToolDisplayStatus::Success, "ok".to_owned()),
+        Some(msg) if !msg.is_empty() => (ToolUseStatus::Error, first_error_line(msg)),
+        _ => (ToolUseStatus::Success, "ok".to_owned()),
     };
     let _ = tool_name;
-    ToolDisplay {
+    ToolUseState {
         args: String::new(),
         status,
         status_text,
@@ -801,7 +798,7 @@ pub(crate) fn build_tool_summary_display(summary: &ToolSummaryDisplay) -> ToolCa
 /// Render a completed provider-side compaction item as a compact session
 /// status line. Compaction is not a model-visible tool invocation, so this
 /// paints the small lifecycle line directly instead of fabricating a
-/// `ToolDisplay`.
+/// `ToolUseState`.
 pub(crate) fn render_compaction_block(
     theme: &tau_themes::Theme,
     status_text: impl Into<String>,
@@ -898,7 +895,7 @@ pub(crate) fn render_tool_block(
             vec![SpanTree::text(abbreviate_inline_text(&suffix.text))],
         ));
     }
-    if let Some(ToolDisplayPayload::Text { text }) = &display.payload {
+    if let Some(ToolUsePayload::Text { text }) = &display.payload {
         children.push(SpanTree::span(args, vec![SpanTree::text("\n")]));
         children.push(SpanTree::span(args, vec![SpanTree::text(text.clone())]));
     }

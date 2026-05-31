@@ -16,7 +16,7 @@ use std::collections::VecDeque;
 use tau_core::NodeId;
 use tau_proto::{
     AgentId, AgentPromptId, ConnectionId, PromptMessageClass, PromptOriginator, SessionId,
-    ToolCallId, ToolDisplayStats,
+    ToolCallId, ToolUseStats,
 };
 
 use crate::dedup::ResultDedupMap;
@@ -111,7 +111,7 @@ pub(crate) struct Agent {
     pub(crate) task_name: Option<String>,
     /// Line and byte stats for the user-provided delegate prompt.
     /// Excludes any hidden prefix added by the delegate extension.
-    pub(crate) delegate_input_stats: ToolDisplayStats,
+    pub(crate) delegate_input_stats: ToolUseStats,
     /// Agent role used for this conversation. `None` means the conversation
     /// follows the harness's globally selected interactive role.
     pub(crate) role: Option<String>,
@@ -246,7 +246,7 @@ impl Agent {
             parent_tool_call_id: None,
             parent_agent_id: None,
             task_name: None,
-            delegate_input_stats: ToolDisplayStats::default(),
+            delegate_input_stats: ToolUseStats::default(),
             role: None,
             agent_id: None,
             tools_in_flight: 0,

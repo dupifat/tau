@@ -11,8 +11,8 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use tau_proto::{
-    AgentId, CborValue, Event, Frame, ToolCallId, ToolCancelled, ToolDisplay, ToolDisplayStatus,
-    ToolError, ToolProgress, ToolResult, ToolResultKind, ToolStarted, ToolType,
+    AgentId, CborValue, Event, Frame, ToolCallId, ToolCancelled, ToolError, ToolProgress,
+    ToolResult, ToolResultKind, ToolStarted, ToolType, ToolUseState, ToolUseStatus,
 };
 
 use crate::argument::{argument_text, optional_argument_text};
@@ -813,10 +813,10 @@ pub(crate) fn waiting_progress_event(invoke: &ToolStarted, dirs: &[PathBuf]) -> 
         tool_name: invoke.tool_name.clone(),
         message: Some(format!("waiting for directory lock: {dirs_display}")),
         progress: None,
-        display: Some(ToolDisplay {
+        display: Some(ToolUseState {
             args: dirs_display,
             info_chips: vec!["dir lock".to_owned()],
-            status: ToolDisplayStatus::InProgress,
+            status: ToolUseStatus::InProgress,
             status_text: "waiting".to_owned(),
             ..Default::default()
         }),
@@ -1035,11 +1035,11 @@ fn dir_lock_display_args(command: &str, dir: &Path) -> String {
     format!("{command} {}", dir.display())
 }
 
-fn dir_lock_display(command: &str, dir: &Path) -> ToolDisplay {
+fn dir_lock_display(command: &str, dir: &Path) -> ToolUseState {
     ok_display(dir_lock_display_args(command, dir))
 }
 
-fn tool_result(invoke: &ToolStarted, result: CborValue, display: ToolDisplay) -> Event {
+fn tool_result(invoke: &ToolStarted, result: CborValue, display: ToolUseState) -> Event {
     Event::ToolResult(ToolResult {
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),
@@ -1067,9 +1067,9 @@ fn tool_error_with_args(
         tool_type: ToolType::Function,
         message,
         details,
-        display: Some(ToolDisplay {
+        display: Some(ToolUseState {
             args: args.unwrap_or_default(),
-            status: ToolDisplayStatus::Error,
+            status: ToolUseStatus::Error,
             status_text: "dir_lock failed".to_owned(),
             ..Default::default()
         }),

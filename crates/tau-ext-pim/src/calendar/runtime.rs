@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde::de::DeserializeOwned;
 use tau_proto::{
     ActionError, ActionInvoke, ActionOutput, ActionResult, AgentId, CborValue, Event, SecretValue,
-    ToolDisplay, ToolDisplayStats, ToolDisplayStatus, ToolError, ToolResult, ToolStarted,
+    ToolError, ToolResult, ToolStarted, ToolUseState, ToolUseStats, ToolUseStatus,
 };
 use time_tz::{OffsetDateTimeExt, OffsetResult, PrimitiveDateTimeExt, TimeZone};
 
@@ -2492,25 +2492,25 @@ fn calendar_log_error_message(result: &CborValue) -> Option<&str> {
     }
 }
 
-fn success_display(result: &CborValue) -> ToolDisplay {
+fn success_display(result: &CborValue) -> ToolUseState {
     let command = cbor_text_field(result, "command").unwrap_or("calendar");
     let status_text = cbor_text_field(result, "status").unwrap_or("ok");
     let data = cbor_field(result, "data");
-    ToolDisplay {
+    ToolUseState {
         args: calendar_display_args(command, data).unwrap_or_default(),
         stats: calendar_display_stats(command, data),
         info_chips: calendar_display_info(command, data),
-        status: ToolDisplayStatus::Success,
+        status: ToolUseStatus::Success,
         status_text: status_text.to_owned(),
         ..Default::default()
     }
 }
 
-fn error_display(arguments: &CborValue, details: &CborValue, message: &str) -> ToolDisplay {
+fn error_display(arguments: &CborValue, details: &CborValue, message: &str) -> ToolUseState {
     let command = cbor_text_field(details, "command").unwrap_or("calendar");
-    ToolDisplay {
+    ToolUseState {
         args: invocation_display_args(arguments).unwrap_or_else(|| safe_display_line(command)),
-        status: ToolDisplayStatus::Error,
+        status: ToolUseStatus::Error,
         status_text: message.to_owned(),
         ..Default::default()
     }
@@ -2520,9 +2520,9 @@ fn calendar_display_args(command: &str, _data: Option<&CborValue>) -> Option<Str
     Some(safe_display_line(command))
 }
 
-fn calendar_display_stats(command: &str, data: Option<&CborValue>) -> ToolDisplayStats {
+fn calendar_display_stats(command: &str, data: Option<&CborValue>) -> ToolUseStats {
     let Some(data) = data else {
-        return ToolDisplayStats::default();
+        return ToolUseStats::default();
     };
     match command {
         "list_accounts" => line_array_stats(data, "accounts"),
@@ -2530,7 +2530,7 @@ fn calendar_display_stats(command: &str, data: Option<&CborValue>) -> ToolDispla
         "list_events" => line_array_stats(data, "events"),
         "read_event" => line_array_stats(data, "event"),
         "free_busy" => line_array_stats(data, "busy"),
-        _ => ToolDisplayStats::default(),
+        _ => ToolUseStats::default(),
     }
 }
 
@@ -2575,9 +2575,9 @@ fn optional_text(value: Option<String>) -> CborValue {
     value.map(CborValue::Text).unwrap_or(CborValue::Null)
 }
 
-fn line_array_stats(data: &CborValue, field: &str) -> ToolDisplayStats {
+fn line_array_stats(data: &CborValue, field: &str) -> ToolUseStats {
     let Some(lines) = cbor_array_field(data, field) else {
-        return ToolDisplayStats::default();
+        return ToolUseStats::default();
     };
     let line_count = lines.len() as u64;
     let byte_count = lines
@@ -2587,7 +2587,7 @@ fn line_array_stats(data: &CborValue, field: &str) -> ToolDisplayStats {
             _ => None,
         })
         .sum();
-    ToolDisplayStats {
+    ToolUseStats {
         matches: Some(line_count),
         lines: (0 < line_count).then_some(line_count),
         bytes: (0 < line_count).then_some(byte_count),

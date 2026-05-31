@@ -747,6 +747,35 @@ fn shell_command_args_keeps_short_first_line() {
     );
 }
 
+#[test]
+fn started_tool_use_state_is_generic_and_complete() {
+    let state = super::build_tool_args_display(
+        "grep",
+        &CborValue::Map(vec![
+            (
+                CborValue::Text("pattern".to_owned()),
+                CborValue::Text("needle".to_owned()),
+            ),
+            (
+                CborValue::Text("path".to_owned()),
+                CborValue::Text("src".to_owned()),
+            ),
+            (
+                CborValue::Text("glob".to_owned()),
+                CborValue::Text("*.rs".to_owned()),
+            ),
+        ]),
+    )
+    .expect("known tool display state");
+
+    // Regression: the harness must stamp a generic ToolUseState for the UI to
+    // render. The CLI should not need to know that grep arguments are named
+    // `pattern`, `path`, or `glob` to draw the live tool-use line.
+    assert_eq!(state.args, "\"needle\" in src [*.rs]");
+    assert_eq!(state.status, tau_proto::ToolUseStatus::InProgress);
+    assert_eq!(state.status_text, tau_proto::PROGRESS_INDICATOR_TEXT);
+}
+
 mod action;
 mod dedup;
 mod dispatch;

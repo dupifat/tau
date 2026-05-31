@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use tau_proto::{CborValue, ToolDisplay, ToolDisplayPayload, ToolDisplayStatus};
+use tau_proto::{CborValue, ToolUsePayload, ToolUseState, ToolUseStatus};
 
 use crate::argument::{argument_array, argument_text, cbor_map_int, cbor_map_text};
 use crate::diff::{compute_diff, unified_diff};
@@ -122,13 +122,13 @@ pub(crate) fn edit_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
     };
     let changed = result != original_bytes;
 
-    let display = ToolDisplay {
+    let display = ToolUseState {
         args: display_args.clone(),
-        status: ToolDisplayStatus::Success,
+        status: ToolUseStatus::Success,
         status_text: "ok".to_owned(),
         payload: match diff.clone() {
-            Some(diff) => Some(ToolDisplayPayload::Diff(diff)),
-            None if changed => Some(ToolDisplayPayload::Text {
+            Some(diff) => Some(ToolUsePayload::Diff(diff)),
+            None if changed => Some(ToolUsePayload::Text {
                 text: "[diff skipped: file is not valid UTF-8]".to_owned(),
             }),
             None => None,

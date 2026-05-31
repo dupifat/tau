@@ -860,7 +860,7 @@ fn extension_emit_and_start_agent_request_are_staged_until_ready() {
             query_id: "q-staged".to_owned(),
             instruction: "STAGED START AGENT REQUEST".to_owned(),
             role: None,
-            input_stats: tau_proto::ToolDisplayStats::default(),
+            input_stats: tau_proto::ToolUseStats::default(),
             tool_call_id: None,
             task_name: None,
         })),

@@ -992,6 +992,19 @@ pub struct ToolStarted {
     /// Arguments to pass to the selected tool provider. These are copied from
     /// the accepted request after harness validation/routing.
     pub arguments: CborValue,
+    /// Generic, UI-facing state for the running tool use.
+    ///
+    /// This must stay a tool-agnostic description of what should be rendered:
+    /// name/mode/argument label, stats, counters, status, and optional rich
+    /// payload. Do not make terminal UIs inspect tool-specific CBOR arguments
+    /// or result payloads just to produce the normal tool-use line; add another
+    /// optional field to [`ToolUseState`] or [`ToolUsePayload`] when a new tool
+    /// needs more structured display data. Keeping this state in the event log
+    /// makes replay, alternate UIs, and compact/full rendering modes all
+    /// consume the same semantic description instead of growing independent
+    /// special cases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<ToolUseState>,
     /// Durable agent that owns this tool call.
     #[serde(default, skip_serializing_if = "AgentId::is_empty")]
     pub agent_id: AgentId,
@@ -1039,12 +1052,14 @@ pub struct ToolResult {
     pub result: CborValue,
     #[serde(default)]
     pub kind: ToolResultKind,
-    /// Optional UI display descriptor populated by the tool. When
-    /// present, lets the renderer paint a uniform tool block without
-    /// inspecting `result`'s tool-specific shape. This is operational
-    /// display metadata, not transcript truth.
+    /// Generic UI state for the completed tool use.
+    ///
+    /// Tool producers should populate this instead of relying on terminal UIs
+    /// to parse `result`. This is operational display metadata, not
+    /// transcript truth; the raw `result` remains the
+    /// model-/extension-facing payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display: Option<ToolDisplay>,
+    pub display: Option<ToolUseState>,
     /// Echo of the originating [`ToolRequest::originator`]. Tool
     /// extensions usually pass [`PromptOriginator::User`] (the
     /// default); the harness re-stamps this with the call's owning
@@ -1063,12 +1078,12 @@ pub struct ToolError {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<CborValue>,
-    /// See [`ToolResult::display`]. On error, the descriptor's
-    /// `status` is typically [`ToolDisplayStatus::Error`] and
+    /// See [`ToolResult::display`]. On error, the state `status` is typically
+    /// [`ToolUseStatus::Error`] and
     /// `status_text` carries an optional error label. Renderers add the
     /// generic error prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display: Option<ToolDisplay>,
+    pub display: Option<ToolUseState>,
     /// Echo of the originating [`ToolRequest::originator`]; see
     /// [`ToolResult::originator`].
     #[serde(default)]
@@ -1084,7 +1099,7 @@ pub struct ToolBackgroundResult {
     pub tool_type: ToolType,
     pub result: CborValue,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display: Option<ToolDisplay>,
+    pub display: Option<ToolUseState>,
     #[serde(default)]
     pub originator: PromptOriginator,
 }
@@ -1100,20 +1115,36 @@ pub struct ToolBackgroundError {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<CborValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display: Option<ToolDisplay>,
+    pub display: Option<ToolUseState>,
     #[serde(default)]
     pub originator: PromptOriginator,
 }
 
-/// UI display descriptor for one finished tool call.
+/// Generic UI state for one tool use at one point in its lifecycle.
 ///
-/// Populated by the tool side (in-tree dispatchers or out-of-tree
-/// extensions) and rendered uniformly by the CLI without inspecting
-/// the tool's specific result shape. Carries everything the chip line
-/// needs (args label, info chips, stats, status word) plus an
-/// optional rich payload to render in a block below.
+/// This type exists to keep tool rendering semantic and uniform. A tool or the
+/// harness should describe the current tool use here once, then every UI should
+/// render this structure without parsing tool-specific arguments, CBOR result
+/// shapes, error details, or ad-hoc strings. That separation is important: the
+/// event log is the durable source of truth for replay, terminal rendering,
+/// compact summaries, future graphical UIs, and alternate clients. If a
+/// renderer has to know that `grep` uses `pattern`, `delegate` has a role, or
+/// `write` carries a diff, the abstraction has failed and the special case will
+/// spread.
+///
+/// Prefer extending this general-purpose structure when a new tool needs richer
+/// presentation. Add optional fields, typed counters, typed chips, or a new
+/// [`ToolUsePayload`] variant rather than teaching the CLI about that tool's
+/// private input or output format. Free-form text fields are intentionally kept
+/// small and display-oriented; model-visible transcript data still belongs in
+/// the normal tool result payloads.
+///
+/// A `ToolUseState` may appear on `tool.started`, `tool.progress`,
+/// `tool.result`, `tool.error`, background result/error events, and delegated
+/// progress events. Each occurrence is a complete replacement for the display
+/// state at that lifecycle point, not a patch that renderers need to merge.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct ToolDisplay {
+pub struct ToolUseState {
     /// Short label rendered alongside the tool name (e.g.
     /// `"src/main.rs"`, `"\"foo\" in src"`, `"git status"`). Empty
     /// when the tool has nothing useful to surface beyond its name.
@@ -1126,8 +1157,8 @@ pub struct ToolDisplay {
     pub mode: String,
     /// Compact `NM, NL, NkB`-style stats. Each field is optional
     /// so the renderer can omit a slot rather than emit `(0M, 1L)`.
-    #[serde(default, skip_serializing_if = "ToolDisplayStats::is_empty")]
-    pub stats: ToolDisplayStats,
+    #[serde(default, skip_serializing_if = "ToolUseStats::is_empty")]
+    pub stats: ToolUseStats,
     /// Labelled counter chips (current / optional total) rendered
     /// between stats and `info_chips`. Used for tools that surface
     /// progress data: `#12.3k/200k`, `%3`, `bytes: 12/200`,
@@ -1137,19 +1168,23 @@ pub struct ToolDisplay {
     /// Free-form info chips beyond the stats slot (e.g. `"(2
     /// suggestions)"`, `"(3 entries)"`). Rendered between counters
     /// and status.
+    ///
+    /// Keep these display-only and generic. If a chip starts requiring renderer
+    /// code that knows which tool produced it, replace it with a typed optional
+    /// field or typed counter instead.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub info_chips: Vec<String>,
     /// Severity of the trailing status chip. Picks its themed color.
-    pub status: ToolDisplayStatus,
+    pub status: ToolUseStatus,
     /// Status word/message rendered as the last chip (e.g. `"ok"`,
     /// `"regex parse error"`). For
-    /// [`ToolDisplayStatus::Error`], this is the label without the
+    /// [`ToolUseStatus::Error`], this is the label without the
     /// generic `"err:"` prefix; renderers add that prefix and handle any
     /// width abbreviation needed for the current UI.
     pub status_text: String,
     /// Optional rich content rendered in a block below the chip row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub payload: Option<ToolDisplayPayload>,
+    pub payload: Option<ToolUsePayload>,
 }
 
 /// One labelled counter rendered as an info chip. Shape depends on
@@ -1193,9 +1228,9 @@ pub enum ProgressUnit {
 
 /// Volume metrics. Each is optional because a given tool typically
 /// reports only some of them — `read` has lines/bytes but no matches;
-/// `grep` has all three; `ls` has none (uses [`ToolDisplay::info_chips`]).
+/// `grep` has all three; `ls` has none (uses [`ToolUseState::info_chips`]).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct ToolDisplayStats {
+pub struct ToolUseStats {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matches: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1204,7 +1239,7 @@ pub struct ToolDisplayStats {
     pub bytes: Option<u64>,
 }
 
-impl ToolDisplayStats {
+impl ToolUseStats {
     pub fn is_empty(&self) -> bool {
         self.matches.is_none() && self.lines.is_none() && self.bytes.is_none()
     }
@@ -1225,7 +1260,7 @@ impl ToolDisplayStats {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ToolDisplayStatus {
+pub enum ToolUseStatus {
     #[default]
     Success,
     Warning,
@@ -1236,12 +1271,14 @@ pub enum ToolDisplayStatus {
     InProgress,
 }
 
-/// Rich content rendered below the chip row. Closed for now — extend
-/// as new tool kinds need it. Tools that don't produce a rich payload
-/// (most of them) leave [`ToolDisplay::payload`] as `None`.
+/// Rich content rendered below the chip row.
+///
+/// Extend this enum when a tool needs structured body content that a plain
+/// stats/counter/chip row cannot express. That is preferred over adding
+/// renderer-side checks for individual tool names.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ToolDisplayPayload {
+pub enum ToolUsePayload {
     /// Structured file diff. The renderer derives the `+N -M` chip
     /// from the summary's `added`/`removed` and renders the hunks
     /// below the chip row.
@@ -1267,9 +1304,9 @@ pub struct ToolProgress {
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<ProgressUpdate>,
-    /// Optional live display replacement for the running tool block.
+    /// Optional complete replacement for the running tool-use UI state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display: Option<ToolDisplay>,
+    pub display: Option<ToolUseState>,
 }
 
 /// Live snapshot of a sub-agent spawned by the `delegate` tool.
@@ -1308,11 +1345,11 @@ pub struct DelegateProgress {
     /// Cumulative number of tool calls the sub-agent has started
     /// during this delegation (including completed and in-flight).
     pub tools_total: u32,
-    /// UI display descriptor for the running delegate block. The
-    /// harness fills this in from the fields above so the renderer
-    /// can paint the progress generically without inspecting them.
+    /// Generic UI state for the running delegate block. The harness fills this
+    /// in from the fields above so the renderer can paint the progress without
+    /// delegate-specific parsing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display: Option<ToolDisplay>,
+    pub display: Option<ToolUseState>,
 }
 
 /// Broadcast intent to request cancellation of a running tool call.
@@ -1538,8 +1575,8 @@ pub struct StartAgentRequest {
     pub role: Option<String>,
     /// Input stats for the extension-provided instruction, excluding
     /// any private prefix the extension may have added.
-    #[serde(default, skip_serializing_if = "ToolDisplayStats::is_empty")]
-    pub input_stats: ToolDisplayStats,
+    #[serde(default, skip_serializing_if = "ToolUseStats::is_empty")]
+    pub input_stats: ToolUseStats,
     /// `ToolCallId` of the tool invocation that triggered this query,
     /// when the extension is implementing a tool whose live progress
     /// the harness should attribute back to that call. Used by the

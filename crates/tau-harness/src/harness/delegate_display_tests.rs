@@ -4,7 +4,7 @@ use super::*;
 /// delegate input volume immediately, before the sub-agent finishes.
 #[test]
 fn progress_display_includes_delegate_input_stats() {
-    let input_stats = tau_proto::ToolDisplayStats {
+    let input_stats = tau_proto::ToolUseStats {
         matches: None,
         lines: Some(2),
         bytes: Some(12),
@@ -13,5 +13,5 @@ fn progress_display_includes_delegate_input_stats() {
 
     assert_eq!(display.args, "[audit]");
     assert_eq!(display.stats, input_stats);
-    assert_eq!(display.status, tau_proto::ToolDisplayStatus::InProgress);
+    assert_eq!(display.status, tau_proto::ToolUseStatus::InProgress);
 }

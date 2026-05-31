@@ -18,7 +18,7 @@ use crate::tool_render::{
     build_osc1337_set_user_var, build_tool_summary_display, extension_status_block, extract_diff,
     format_token_count, format_tool_call, render_compaction_block, render_delegate_display,
     render_diff_tool_block, render_harness_info, render_shell_block, render_tool_block,
-    render_tool_display, render_turn_stats_block, session_status_block, streaming_block,
+    render_tool_use_state, render_turn_stats_block, session_status_block, streaming_block,
     synthesize_fallback_display, system_loaded_block, tool_duration_suffix, ui_dir_block,
 };
 
@@ -820,11 +820,11 @@ fn cbor_text_field(arguments: &CborValue, key: &str) -> Option<String> {
         })
 }
 
-fn tool_display_from_call(call: &ToolCallItem) -> tau_proto::ToolDisplay {
+fn tool_use_state_from_call(call: &ToolCallItem) -> tau_proto::ToolUseState {
     if call.name.as_str() == "shell" {
         let command = cbor_text_field(&call.arguments, "command").unwrap_or_default();
         let mode = cbor_text_field(&call.arguments, "mode").unwrap_or_else(|| "rw".to_owned());
-        return shell_tool_display_from_command(command, &mode);
+        return shell_tool_use_state_from_command(command, &mode);
     }
 
     let args = match call.name.as_str() {
@@ -836,31 +836,31 @@ fn tool_display_from_call(call: &ToolCallItem) -> tau_proto::ToolDisplay {
             .or_else(|| cbor_text_field(&call.arguments, "query")),
     }
     .unwrap_or_default();
-    in_progress_tool_display(args, None)
+    in_progress_tool_use_state(args, None)
 }
 
-pub(crate) fn shell_tool_display_from_command(
+pub(crate) fn shell_tool_use_state_from_command(
     command: String,
     mode: &str,
-) -> tau_proto::ToolDisplay {
+) -> tau_proto::ToolUseState {
     // Mirror ext-shell's final display shape so `show-tools=full` does not
     // change layout or styling when a multiline command finishes.
     let command_args = command.lines().next().unwrap_or_default().to_owned();
-    let payload = (2 <= command.lines().count())
-        .then_some(tau_proto::ToolDisplayPayload::Text { text: command });
-    let mut display = in_progress_tool_display(command_args, payload);
+    let payload =
+        (2 <= command.lines().count()).then_some(tau_proto::ToolUsePayload::Text { text: command });
+    let mut display = in_progress_tool_use_state(command_args, payload);
     display.mode = mode.to_owned();
     display
 }
 
-fn in_progress_tool_display(
+fn in_progress_tool_use_state(
     args: String,
-    payload: Option<tau_proto::ToolDisplayPayload>,
-) -> tau_proto::ToolDisplay {
-    tau_proto::ToolDisplay {
+    payload: Option<tau_proto::ToolUsePayload>,
+) -> tau_proto::ToolUseState {
+    tau_proto::ToolUseState {
         args,
         payload,
-        status: tau_proto::ToolDisplayStatus::InProgress,
+        status: tau_proto::ToolUseStatus::InProgress,
         status_text: "…".to_owned(),
         ..Default::default()
     }
@@ -1459,7 +1459,7 @@ impl EventRenderer {
     fn record_tool_summary_result(
         &mut self,
         block_id: Option<tau_cli_term::BlockId>,
-        display: Option<&tau_proto::ToolDisplay>,
+        display: Option<&tau_proto::ToolUseState>,
         diff: Option<&tau_proto::DiffSummary>,
         is_error: bool,
     ) {
@@ -3334,30 +3334,43 @@ impl EventRenderer {
         {
             return;
         }
-        let call = ToolCallItem {
+        let fallback_call = ToolCallItem {
             call_id: started.call_id.clone(),
             name: started.tool_name.clone(),
             tool_type: tau_proto::ToolType::Function,
             arguments: started.arguments.clone(),
         };
-        let display_payload = tool_display_from_call(&call);
-        let mut display = format_tool_call(call.name.as_str(), Some(&display_payload));
+        let fallback_display;
+        let display_state = if let Some(display) = started.display.as_ref() {
+            display
+        } else {
+            // Compatibility for old event logs and third-party producers that have
+            // not yet attached ToolUseState to tool.started. New code should put
+            // all normal tool-use presentation data on the event, not derive it
+            // here from tool-specific arguments.
+            fallback_display = tool_use_state_from_call(&fallback_call);
+            &fallback_display
+        };
+        let mut display = format_tool_call(started.tool_name.as_str(), Some(display_state));
         Self::upsert_tool_duration_suffix(&mut display, Duration::ZERO);
         let live_block = self.render_tool_history_block(&display);
         let live_id = self.handle.new_block(
-            format!("tool-call-live:{}:{}", call.name, call.call_id),
+            format!("tool-call-live:{}:{}", started.tool_name, started.call_id),
             live_block,
         );
         self.handle.push_above_active(live_id);
         let state = self.tool_calls.entry(call_id).or_insert_with(|| {
             let history_id = self.handle.new_block(
-                format!("tool-call-history:{}:{}", call.name, call.call_id),
+                format!(
+                    "tool-call-history:{}:{}",
+                    started.tool_name, started.call_id
+                ),
                 Self::empty_block(),
             );
             self.handle.push_history(history_id);
             ToolCallState {
                 history_block_id: Some(history_id),
-                is_main_delegate: call.name.as_str() == "delegate",
+                is_main_delegate: started.tool_name.as_str() == "delegate",
                 ..ToolCallState::default()
             }
         });
@@ -3366,7 +3379,7 @@ impl EventRenderer {
         state.started_at = Some(Instant::now());
         state.recorded_started_at = Some(recorded_at);
         if let Some(timer) = &self.tool_timer {
-            timer.tool_started(call.call_id.as_str());
+            timer.tool_started(started.call_id.as_str());
         }
     }
 
@@ -3438,8 +3451,7 @@ impl EventRenderer {
             if let Some(state) = self.tool_calls.get_mut(progress.call_id.as_str())
                 && let Some(block_id) = state.block_id
             {
-                let mut display =
-                    format_tool_call(progress.tool_name.as_str(), Some(progress_display));
+                let mut display = render_tool_use_state(&progress.tool_name, progress_display);
                 if let Some(duration) = Self::live_tool_duration(state) {
                     Self::upsert_tool_duration_suffix(&mut display, duration);
                 }
@@ -3697,6 +3709,9 @@ impl EventRenderer {
         if result.tool_name.as_str() == "delegate" {
             let role = last_progress.and_then(|p| p.role.as_deref());
             let agent_id = last_progress.and_then(|p| p.agent_id.as_deref());
+            if let Some(descriptor) = &result.display {
+                return render_delegate_display(descriptor, agent_id, role);
+            }
             let descriptor = build_delegate_completion_display(
                 last_progress.and_then(|p| p.display.as_ref()),
                 &result.result,
@@ -3704,9 +3719,9 @@ impl EventRenderer {
             );
             render_delegate_display(&descriptor, agent_id, role)
         } else if let Some(descriptor) = &result.display {
-            render_tool_display(&result.tool_name, descriptor)
+            render_tool_use_state(&result.tool_name, descriptor)
         } else {
-            render_tool_display(
+            render_tool_use_state(
                 &result.tool_name,
                 &synthesize_fallback_display(&result.tool_name, None),
             )
@@ -3720,14 +3735,17 @@ impl EventRenderer {
     }
 
     fn tool_result_diff(result: &tau_proto::ToolResult) -> Option<tau_proto::DiffSummary> {
-        result
-            .display
-            .as_ref()
-            .and_then(|d| match &d.payload {
-                Some(tau_proto::ToolDisplayPayload::Diff(s)) => Some(s.clone()),
-                _ => None,
-            })
-            .or_else(|| extract_diff(&result.result))
+        let display_diff = result.display.as_ref().and_then(|d| match &d.payload {
+            Some(tau_proto::ToolUsePayload::Diff(s)) if 0 < s.added || 0 < s.removed => {
+                Some(s.clone())
+            }
+            _ => None,
+        });
+        if result.display.is_some() {
+            display_diff
+        } else {
+            display_diff.or_else(|| extract_diff(&result.result))
+        }
     }
 
     fn record_tool_result_block(
@@ -3808,6 +3826,9 @@ impl EventRenderer {
         if error.tool_name.as_str() == "delegate" {
             let role = last_progress.and_then(|p| p.role.as_deref());
             let agent_id = last_progress.and_then(|p| p.agent_id.as_deref());
+            if let Some(descriptor) = &error.display {
+                return render_delegate_display(descriptor, agent_id, role);
+            }
             let descriptor = build_delegate_completion_display(
                 last_progress.and_then(|p| p.display.as_ref()),
                 cbor.unwrap_or(&CborValue::Null),
@@ -3815,9 +3836,9 @@ impl EventRenderer {
             );
             render_delegate_display(&descriptor, agent_id, role)
         } else if let Some(descriptor) = &error.display {
-            render_tool_display(&error.tool_name, descriptor)
+            render_tool_use_state(&error.tool_name, descriptor)
         } else {
-            render_tool_display(
+            render_tool_use_state(
                 &error.tool_name,
                 &synthesize_fallback_display(&error.tool_name, Some(&error.message)),
             )
@@ -3833,7 +3854,7 @@ impl EventRenderer {
         let Some((prior, known_main_tool)) = self.take_finished_tool_call(call_id, true) else {
             return;
         };
-        let mut display = render_tool_display(
+        let mut display = render_tool_use_state(
             &cancelled.tool_name,
             &synthesize_fallback_display(&cancelled.tool_name, Some("cancelled")),
         );

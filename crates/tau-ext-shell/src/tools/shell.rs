@@ -2,7 +2,7 @@
 
 use std::sync::mpsc;
 
-use tau_proto::{CborValue, Event, Frame, ToolDisplay, ToolDisplayPayload, ToolDisplayStatus};
+use tau_proto::{CborValue, Event, Frame, ToolUsePayload, ToolUseState, ToolUseStatus};
 use tracing::{debug, trace};
 
 use crate::argument::{argument_text, optional_argument_int_strict, optional_argument_text};
@@ -171,9 +171,9 @@ pub(crate) fn run_command_cancellable(
         } else {
             exit_label
         };
-        ToolDisplay {
+        ToolUseState {
             args: display_args,
-            status: ToolDisplayStatus::Error,
+            status: ToolUseStatus::Error,
             status_text,
             ..Default::default()
         }
@@ -1107,11 +1107,11 @@ fn shorten_command_line(line: &str) -> String {
     format!("{head}┄{tail}")
 }
 
-fn command_display_payload(command: &str) -> Option<ToolDisplayPayload> {
+fn command_display_payload(command: &str) -> Option<ToolUsePayload> {
     if command.lines().count() < 2 {
         return None;
     }
-    Some(ToolDisplayPayload::Text {
+    Some(ToolUsePayload::Text {
         text: command.to_owned(),
     })
 }

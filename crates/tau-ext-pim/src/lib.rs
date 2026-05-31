@@ -250,6 +250,7 @@ mod tests {
             call_id: tau_proto::ToolCallId::new("call-read"),
             tool_name: tau_proto::ToolName::new("read"),
             arguments: CborValue::Map(vec![]),
+            display: None,
             agent_id: tau_proto::AgentId::new("agent-1"),
             originator: tau_proto::PromptOriginator::User,
         };

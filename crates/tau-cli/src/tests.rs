@@ -20,12 +20,12 @@ use super::chat::{
     DraftSlot, SUSPENDED_AGENT_PROMPT, agent_is_active_in_sets, invalidate_pending_draft,
     is_local_slash_command, next_active_agent, role_cycling_enabled, should_send_draft_snapshot,
 };
-use super::event_renderer::{EventRenderer, shell_tool_display_from_command};
+use super::event_renderer::{EventRenderer, shell_tool_use_state_from_command};
 use super::tool_render::{
     CompactionStatus, ToolStatus, build_delegate_completion_display, build_osc1337_set_user_var,
     cache_hit_percent, format_turn_stats_line, render_action_error_block,
     render_action_output_block, render_compaction_block, render_delegate_display,
-    render_shell_block, render_tool_block, render_tool_display, render_turn_stats_block,
+    render_shell_block, render_tool_block, render_tool_use_state, render_turn_stats_block,
     streaming_block, synthesize_fallback_display,
 };
 
@@ -613,6 +613,7 @@ fn tool_started(call_id: &str, tool_name: &str, arguments: CborValue) -> Event {
         call_id: call_id.into(),
         tool_name: tau_proto::ToolName::new(tool_name),
         arguments,
+        display: None,
         agent_id: Default::default(),
         originator: tau_proto::PromptOriginator::User,
     })
@@ -1096,7 +1097,7 @@ fn delegate_progress_routes_to_hidden_tool_owner() {
         ctx_window: None,
         tools_in_flight: 1,
         tools_total: 2,
-        display: Some(tau_proto::ToolDisplay {
+        display: Some(tau_proto::ToolUseState {
             args: "nested".into(),
             progress_counters: vec![tau_proto::ProgressCounter {
                 label: Some("tools".into()),
@@ -1104,7 +1105,7 @@ fn delegate_progress_routes_to_hidden_tool_owner() {
                 complete: Some(1),
                 total: Some(2),
             }],
-            status: tau_proto::ToolDisplayStatus::InProgress,
+            status: tau_proto::ToolUseStatus::InProgress,
             status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
             ..Default::default()
         }),
@@ -1784,9 +1785,9 @@ fn new_session_clears_session_ui_state() {
             ),
         ]),
         kind: tau_proto::ToolResultKind::Final,
-        display: Some(tau_proto::ToolDisplay {
+        display: Some(tau_proto::ToolUseState {
             args: "src/lib.rs".into(),
-            status: tau_proto::ToolDisplayStatus::Success,
+            status: tau_proto::ToolUseStatus::Success,
             status_text: "ok".into(),
             ..Default::default()
         }),
@@ -2432,7 +2433,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
         ctx_window: None,
         tools_in_flight: 2,
         tools_total: 3,
-        display: Some(tau_proto::ToolDisplay {
+        display: Some(tau_proto::ToolUseState {
             args: "[probe]".into(),
             progress_counters: vec![tau_proto::ProgressCounter {
                 label: Some("tools".into()),
@@ -2440,7 +2441,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
                 complete: Some(1),
                 total: Some(3),
             }],
-            status: tau_proto::ToolDisplayStatus::InProgress,
+            status: tau_proto::ToolUseStatus::InProgress,
             status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
             ..Default::default()
         }),
@@ -3412,7 +3413,7 @@ fn delegate_progress_redraws_live_parent_block() {
         ctx_window: None,
         tools_in_flight: 0,
         tools_total: 3,
-        display: Some(tau_proto::ToolDisplay {
+        display: Some(tau_proto::ToolUseState {
             args: "[probe]".into(),
             progress_counters: vec![tau_proto::ProgressCounter {
                 label: Some("tools".into()),
@@ -3420,7 +3421,7 @@ fn delegate_progress_redraws_live_parent_block() {
                 complete: Some(3),
                 total: Some(3),
             }],
-            status: tau_proto::ToolDisplayStatus::InProgress,
+            status: tau_proto::ToolUseStatus::InProgress,
             status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
             ..Default::default()
         }),
@@ -3587,14 +3588,14 @@ fn running_tool_call_shows_ellipsis_until_result() {
                 ),
             ]),
             kind: tau_proto::ToolResultKind::Final,
-            display: Some(tau_proto::ToolDisplay {
+            display: Some(tau_proto::ToolUseState {
                 args: "src/main.rs".into(),
-                stats: tau_proto::ToolDisplayStats {
+                stats: tau_proto::ToolUseStats {
                     matches: None,
                     lines: Some(1),
                     bytes: Some(13),
                 },
-                status: tau_proto::ToolDisplayStatus::Success,
+                status: tau_proto::ToolUseStatus::Success,
                 status_text: "ok".into(),
                 ..Default::default()
             }),
@@ -3605,6 +3606,79 @@ fn running_tool_call_shows_ellipsis_until_result() {
     sync(&handle);
     assert!(vt.screen_contains(80, "read src/main.rs 1L, 13B 2s ok"));
     assert!(!vt.screen_contains(80, "read src/main.rs …"));
+}
+
+#[test]
+fn tool_progress_display_replaces_live_state_generically() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    renderer.handle_recorded_at(
+        &tool_started("call-1", "dir_lock", CborValue::Map(vec![])),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    renderer.handle_recorded_at(
+        &Event::ToolProgress(tau_proto::ToolProgress {
+            call_id: "call-1".into(),
+            tool_name: tau_proto::ToolName::new("dir_lock"),
+            message: None,
+            progress: None,
+            display: Some(tau_proto::ToolUseState {
+                args: "update /tmp/project".into(),
+                info_chips: vec!["dir lock".into()],
+                status: tau_proto::ToolUseStatus::InProgress,
+                status_text: "waiting".into(),
+                ..Default::default()
+            }),
+        }),
+        tau_proto::UnixMicros::new(2_000_000),
+    );
+
+    // Regression: ToolProgress.display is a complete ToolUseState replacement.
+    // The renderer must preserve generic stats/counters/chips/status instead of
+    // treating progress as just a name/args/ellipsis header.
+    sync(&handle);
+    assert!(vt.screen_contains(80, "dir_lock update /tmp/project"));
+    assert!(vt.screen_contains(80, "dir lock"));
+    assert!(vt.screen_contains(80, "waiting"));
+}
+
+#[test]
+fn tool_started_display_wins_over_argument_fallback() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    renderer.handle_recorded_at(
+        &Event::ToolStarted(tau_proto::ToolStarted {
+            call_id: "call-1".into(),
+            tool_name: tau_proto::ToolName::new("read"),
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("path".into()),
+                CborValue::Text("fallback.rs".into()),
+            )]),
+            display: Some(tau_proto::ToolUseState {
+                args: "semantic.rs".into(),
+                status: tau_proto::ToolUseStatus::InProgress,
+                status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
+                ..Default::default()
+            }),
+            agent_id: Default::default(),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+
+    sync(&handle);
+    assert!(vt.screen_contains(80, "read semantic.rs 0s …"));
+    assert!(!vt.screen_contains(80, "fallback.rs"));
 }
 
 #[test]
@@ -3688,9 +3762,9 @@ fn backgrounded_tool_stays_visibly_running_until_background_result() {
             tool_name: tau_proto::ToolName::new("shell"),
             tool_type: tau_proto::ToolType::Function,
             result: CborValue::Text("done".into()),
-            display: Some(tau_proto::ToolDisplay {
+            display: Some(tau_proto::ToolUseState {
                 args: "ro sleep 10".into(),
-                status: tau_proto::ToolDisplayStatus::Success,
+                status: tau_proto::ToolUseStatus::Success,
                 status_text: "ok".into(),
                 ..Default::default()
             }),
@@ -3760,11 +3834,11 @@ fn running_shell_tool_shows_multiline_command_body_in_full_mode() {
             tool_type: tau_proto::ToolType::Function,
             result: CborValue::Null,
             kind: tau_proto::ToolResultKind::Final,
-            display: Some(tau_proto::ToolDisplay {
+            display: Some(tau_proto::ToolUseState {
                 args: "rw printf hello".into(),
-                status: tau_proto::ToolDisplayStatus::Success,
+                status: tau_proto::ToolUseStatus::Success,
                 status_text: "ok".into(),
-                payload: Some(tau_proto::ToolDisplayPayload::Text {
+                payload: Some(tau_proto::ToolUsePayload::Text {
                     text: command.into(),
                 }),
                 ..Default::default()
@@ -3815,9 +3889,9 @@ fn finished_tool_result_preserves_message_and_tool_item_order() {
         tool_type: tau_proto::ToolType::Function,
         result: CborValue::Null,
         kind: tau_proto::ToolResultKind::Final,
-        display: Some(tau_proto::ToolDisplay {
+        display: Some(tau_proto::ToolUseState {
             args: "src/main.rs".into(),
-            status: tau_proto::ToolDisplayStatus::Success,
+            status: tau_proto::ToolUseStatus::Success,
             status_text: "ok".into(),
             ..Default::default()
         }),
@@ -3935,14 +4009,14 @@ fn show_tools_summarize_turn_summarizes_tool_batch() {
         tool_type: tau_proto::ToolType::Function,
         result: CborValue::Null,
         kind: tau_proto::ToolResultKind::Final,
-        display: Some(tau_proto::ToolDisplay {
+        display: Some(tau_proto::ToolUseState {
             args: "src/main.rs".into(),
-            stats: tau_proto::ToolDisplayStats {
+            stats: tau_proto::ToolUseStats {
                 matches: None,
                 lines: Some(1),
                 bytes: Some(13),
             },
-            status: tau_proto::ToolDisplayStatus::Success,
+            status: tau_proto::ToolUseStatus::Success,
             status_text: "ok".into(),
             ..Default::default()
         }),
@@ -3954,9 +4028,9 @@ fn show_tools_summarize_turn_summarizes_tool_batch() {
         tool_type: tau_proto::ToolType::Function,
         message: "nope".into(),
         details: None,
-        display: Some(tau_proto::ToolDisplay {
+        display: Some(tau_proto::ToolUseState {
             args: "foo".into(),
-            status: tau_proto::ToolDisplayStatus::Error,
+            status: tau_proto::ToolUseStatus::Error,
             status_text: "err: nope".into(),
             ..Default::default()
         }),
@@ -3996,14 +4070,14 @@ fn show_tools_summarize_prompt_aggregates_across_tool_followups() {
         tool_type: tau_proto::ToolType::Function,
         result: CborValue::Null,
         kind: tau_proto::ToolResultKind::Final,
-        display: Some(tau_proto::ToolDisplay {
+        display: Some(tau_proto::ToolUseState {
             args: "src/main.rs".into(),
-            stats: tau_proto::ToolDisplayStats {
+            stats: tau_proto::ToolUseStats {
                 matches: None,
                 lines: Some(1),
                 bytes: Some(13),
             },
-            status: tau_proto::ToolDisplayStatus::Success,
+            status: tau_proto::ToolUseStatus::Success,
             status_text: "ok".into(),
             ..Default::default()
         }),
@@ -4035,14 +4109,14 @@ fn show_tools_summarize_prompt_aggregates_across_tool_followups() {
         tool_type: tau_proto::ToolType::Function,
         result: CborValue::Null,
         kind: tau_proto::ToolResultKind::Final,
-        display: Some(tau_proto::ToolDisplay {
+        display: Some(tau_proto::ToolUseState {
             args: "foo".into(),
-            stats: tau_proto::ToolDisplayStats {
+            stats: tau_proto::ToolUseStats {
                 matches: Some(3),
                 lines: None,
                 bytes: None,
             },
-            status: tau_proto::ToolDisplayStatus::Success,
+            status: tau_proto::ToolUseStatus::Success,
             status_text: "ok".into(),
             ..Default::default()
         }),
@@ -4097,16 +4171,16 @@ fn show_tools_compact_hides_payload_body() {
             tool_type: tau_proto::ToolType::Function,
             result: CborValue::Null,
             kind: tau_proto::ToolResultKind::Final,
-            display: Some(tau_proto::ToolDisplay {
+            display: Some(tau_proto::ToolUseState {
                 args: "src/main.rs".into(),
-                stats: tau_proto::ToolDisplayStats {
+                stats: tau_proto::ToolUseStats {
                     matches: None,
                     lines: Some(1),
                     bytes: Some(13),
                 },
-                status: tau_proto::ToolDisplayStatus::Success,
+                status: tau_proto::ToolUseStatus::Success,
                 status_text: "ok".into(),
-                payload: Some(tau_proto::ToolDisplayPayload::Text {
+                payload: Some(tau_proto::ToolUsePayload::Text {
                     text: "fn main() {}\n".into(),
                 }),
                 ..Default::default()
@@ -4173,14 +4247,14 @@ fn websearch_tool_result_shows_result_count_and_size() {
             "Title: One\nURL: https://one.example\n\nTitle: Two\nURL: https://two.example\n".into(),
         ),
         kind: tau_proto::ToolResultKind::Final,
-        display: Some(tau_proto::ToolDisplay {
+        display: Some(tau_proto::ToolUseState {
             args: String::new(),
-            stats: tau_proto::ToolDisplayStats {
+            stats: tau_proto::ToolUseStats {
                 matches: Some(2),
                 lines: Some(193),
                 bytes: Some(7370),
             },
-            status: tau_proto::ToolDisplayStatus::Success,
+            status: tau_proto::ToolUseStatus::Success,
             status_text: "ok".into(),
             ..Default::default()
         }),
@@ -4260,22 +4334,22 @@ fn agents_md_loaded_event_shows_output_stats() {
 }
 
 #[test]
-fn render_tool_display_assembles_chips_in_order() {
-    use tau_proto::{ToolDisplay, ToolDisplayStats, ToolDisplayStatus};
+fn render_tool_use_state_assembles_chips_in_order() {
+    use tau_proto::{ToolUseState, ToolUseStats, ToolUseStatus};
 
     // grep-style: matches + stats + status.
-    let display = ToolDisplay {
+    let display = ToolUseState {
         args: "\"foo\" in src".into(),
-        stats: ToolDisplayStats {
+        stats: ToolUseStats {
             matches: Some(3),
             lines: Some(7),
             bytes: Some(120),
         },
-        status: ToolDisplayStatus::Success,
+        status: ToolUseStatus::Success,
         status_text: "ok".into(),
         ..Default::default()
     };
-    let rendered = render_tool_display("grep", &display);
+    let rendered = render_tool_use_state("grep", &display);
     assert_eq!(rendered.tool_name, "grep");
     assert_eq!(rendered.args, "\"foo\" in src");
     let texts: Vec<&str> = rendered.suffixes.iter().map(|s| s.text.as_str()).collect();
@@ -4289,9 +4363,9 @@ fn render_tool_display_assembles_chips_in_order() {
 #[test]
 fn running_shell_display_keeps_mode_separate_for_dedicated_style() {
     let theme = tau_themes::Theme::builtin();
-    let display = shell_tool_display_from_command("printf hello".to_owned(), "rw");
+    let display = shell_tool_use_state_from_command("printf hello".to_owned(), "rw");
 
-    let rendered = render_tool_display("shell", &display);
+    let rendered = render_tool_use_state("shell", &display);
     assert_eq!(rendered.mode, "rw");
     assert_eq!(rendered.args, "printf hello");
 
@@ -4310,18 +4384,18 @@ fn running_shell_display_keeps_mode_separate_for_dedicated_style() {
 
 #[test]
 fn render_tool_block_paints_mode_with_dedicated_style() {
-    use tau_proto::{ToolDisplay, ToolDisplayStatus};
+    use tau_proto::{ToolUseState, ToolUseStatus};
 
     let theme = tau_themes::Theme::builtin();
-    let display = ToolDisplay {
+    let display = ToolUseState {
         mode: "rw".into(),
         args: "printf hello".into(),
-        status: ToolDisplayStatus::Success,
+        status: ToolUseStatus::Success,
         status_text: "ok".into(),
         ..Default::default()
     };
 
-    let rendered = render_tool_display("shell", &display);
+    let rendered = render_tool_use_state("shell", &display);
     assert_eq!(rendered.mode, "rw");
     assert_eq!(rendered.args, "printf hello");
 
@@ -4340,13 +4414,13 @@ fn render_tool_block_paints_mode_with_dedicated_style() {
 
 #[test]
 fn render_delegate_display_pulls_legacy_role_args_into_first_suffix() {
-    use tau_proto::{ProgressCounter, ProgressUnit, ToolDisplay, ToolDisplayStatus};
+    use tau_proto::{ProgressCounter, ProgressUnit, ToolUseState, ToolUseStatus};
 
-    // Regression: delegate roles used to be embedded in `ToolDisplay.args`,
+    // Regression: delegate roles used to be embedded in `ToolUseState.args`,
     // which made `+engineer` inherit the tool-args color. Rendering delegates now
     // strips that legacy suffix and reinserts the role as the first dedicated
     // suffix so later progress chips keep their existing order.
-    let display = ToolDisplay {
+    let display = ToolUseState {
         args: "[probe] +engineer".into(),
         progress_counters: vec![ProgressCounter {
             label: Some("tools".into()),
@@ -4354,7 +4428,7 @@ fn render_delegate_display_pulls_legacy_role_args_into_first_suffix() {
             complete: Some(3),
             total: Some(3),
         }],
-        status: ToolDisplayStatus::InProgress,
+        status: ToolUseStatus::InProgress,
         status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
         ..Default::default()
     };
@@ -4376,18 +4450,16 @@ fn render_delegate_display_pulls_legacy_role_args_into_first_suffix() {
 
 #[test]
 fn render_delegate_display_marks_input_and_output_stats() {
-    use tau_proto::{
-        ProgressCounter, ProgressUnit, ToolDisplay, ToolDisplayStats, ToolDisplayStatus,
-    };
+    use tau_proto::{ProgressCounter, ProgressUnit, ToolUseState, ToolUseStats, ToolUseStatus};
 
-    let input = ToolDisplay {
+    let input = ToolUseState {
         args: "[audit]".into(),
-        stats: ToolDisplayStats {
+        stats: ToolUseStats {
             matches: None,
             lines: Some(2),
             bytes: Some(12),
         },
-        status: ToolDisplayStatus::InProgress,
+        status: ToolUseStatus::InProgress,
         status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
         ..Default::default()
     };
@@ -4395,9 +4467,9 @@ fn render_delegate_display_marks_input_and_output_stats() {
     let texts: Vec<&str> = rendered.suffixes.iter().map(|s| s.text.as_str()).collect();
     assert_eq!(texts, vec!["↘︎2L, 12B", tau_proto::PROGRESS_INDICATOR_TEXT]);
 
-    let output = ToolDisplay {
+    let output = ToolUseState {
         args: "[audit]".into(),
-        stats: ToolDisplayStats {
+        stats: ToolUseStats {
             matches: None,
             lines: Some(3),
             bytes: Some(24),
@@ -4408,7 +4480,7 @@ fn render_delegate_display_marks_input_and_output_stats() {
             complete: Some(2),
             total: Some(2),
         }],
-        status: ToolDisplayStatus::Success,
+        status: ToolUseStatus::Success,
         status_text: "ok".into(),
         info_chips: vec!["↘︎2L, 12B".into()],
         ..Default::default()
@@ -4420,14 +4492,14 @@ fn render_delegate_display_marks_input_and_output_stats() {
 
 #[test]
 fn render_delegate_display_styles_agent_id_like_status_bar() {
-    use tau_proto::{ToolDisplay, ToolDisplayStatus};
+    use tau_proto::{ToolUseState, ToolUseStatus};
 
     // Regression: the delegated agent id is visually the same semantic chip as
     // the bottom status-bar agent id, not part of the free-form tool args string.
     let theme = tau_themes::Theme::builtin();
-    let display = ToolDisplay {
+    let display = ToolUseState {
         args: "[probe]".into(),
-        status: ToolDisplayStatus::InProgress,
+        status: ToolUseStatus::InProgress,
         status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
         ..Default::default()
     };
@@ -4449,16 +4521,16 @@ fn render_delegate_display_styles_agent_id_like_status_bar() {
 
 #[test]
 fn delegate_completion_keeps_input_stats_with_output_stats() {
-    use tau_proto::{ToolDisplay, ToolDisplayStats, ToolDisplayStatus};
+    use tau_proto::{ToolUseState, ToolUseStats, ToolUseStatus};
 
-    let cached = ToolDisplay {
+    let cached = ToolUseState {
         args: "[audit]".into(),
-        stats: ToolDisplayStats {
+        stats: ToolUseStats {
             matches: None,
             lines: Some(10),
             bytes: Some(200),
         },
-        status: ToolDisplayStatus::InProgress,
+        status: ToolUseStatus::InProgress,
         status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
         ..Default::default()
     };
@@ -4467,24 +4539,24 @@ fn delegate_completion_keeps_input_stats_with_output_stats() {
         build_delegate_completion_display(Some(&cached), &CborValue::Text("ok\nmore".into()), None);
 
     assert_eq!(display.args, "[audit]");
-    assert_eq!(display.stats, ToolDisplayStats::for_text("ok\nmore"));
+    assert_eq!(display.stats, ToolUseStats::for_text("ok\nmore"));
     assert_eq!(display.info_chips, vec!["↘︎10L, 200B"]);
-    assert_eq!(display.status, ToolDisplayStatus::Success);
+    assert_eq!(display.status, ToolUseStatus::Success);
     assert_eq!(display.status_text, "ok");
 }
 
 #[test]
 fn delegate_completion_uses_output_stats_from_duration_result_map() {
-    use tau_proto::{ToolDisplay, ToolDisplayStats, ToolDisplayStatus};
+    use tau_proto::{ToolUseState, ToolUseStats, ToolUseStatus};
 
-    let cached = ToolDisplay {
+    let cached = ToolUseState {
         args: "[audit]".into(),
-        stats: ToolDisplayStats {
+        stats: ToolUseStats {
             matches: None,
             lines: Some(10),
             bytes: Some(200),
         },
-        status: ToolDisplayStatus::InProgress,
+        status: ToolUseStatus::InProgress,
         status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
         ..Default::default()
     };
@@ -4502,24 +4574,24 @@ fn delegate_completion_uses_output_stats_from_duration_result_map() {
     let display = build_delegate_completion_display(Some(&cached), &details, None);
 
     assert_eq!(display.args, "[audit]");
-    assert_eq!(display.stats, ToolDisplayStats::for_text("ok\nmore"));
+    assert_eq!(display.stats, ToolUseStats::for_text("ok\nmore"));
     assert_eq!(display.info_chips, vec!["↘︎10L, 200B"]);
-    assert_eq!(display.status, ToolDisplayStatus::Success);
+    assert_eq!(display.status, ToolUseStatus::Success);
     assert_eq!(display.status_text, "ok");
 }
 
 #[test]
 fn delegate_completion_keeps_input_stats_for_empty_output() {
-    use tau_proto::{ToolDisplay, ToolDisplayStats, ToolDisplayStatus};
+    use tau_proto::{ToolUseState, ToolUseStats, ToolUseStatus};
 
-    let cached = ToolDisplay {
+    let cached = ToolUseState {
         args: "[audit]".into(),
-        stats: ToolDisplayStats {
+        stats: ToolUseStats {
             matches: None,
             lines: Some(10),
             bytes: Some(200),
         },
-        status: ToolDisplayStatus::InProgress,
+        status: ToolUseStatus::InProgress,
         status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
         ..Default::default()
     };
@@ -4527,17 +4599,17 @@ fn delegate_completion_keeps_input_stats_for_empty_output() {
     let display =
         build_delegate_completion_display(Some(&cached), &CborValue::Text(String::new()), None);
 
-    assert_eq!(display.stats, ToolDisplayStats::default());
+    assert_eq!(display.stats, ToolUseStats::default());
     assert_eq!(display.info_chips, vec!["↘︎10L, 200B"]);
-    assert_eq!(display.status, ToolDisplayStatus::Success);
+    assert_eq!(display.status, ToolUseStatus::Success);
     assert_eq!(display.status_text, "ok");
 }
 
 #[test]
-fn render_tool_display_token_progress_formats_context_like_status_bar() {
-    use tau_proto::{ProgressCounter, ProgressUnit, ToolDisplay, ToolDisplayStatus};
+fn render_tool_use_state_token_progress_formats_context_like_status_bar() {
+    use tau_proto::{ProgressCounter, ProgressUnit, ToolUseState, ToolUseStatus};
 
-    let display = ToolDisplay {
+    let display = ToolUseState {
         args: "[research]".into(),
         progress_counters: vec![ProgressCounter {
             label: Some("ctx".into()),
@@ -4545,12 +4617,12 @@ fn render_tool_display_token_progress_formats_context_like_status_bar() {
             complete: Some(133_400),
             total: Some(200_000),
         }],
-        status: ToolDisplayStatus::InProgress,
+        status: ToolUseStatus::InProgress,
         status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
         ..Default::default()
     };
 
-    let rendered = render_tool_display("delegate", &display);
+    let rendered = render_tool_use_state("delegate", &display);
     let texts: Vec<&str> = rendered.suffixes.iter().map(|s| s.text.as_str()).collect();
     assert_eq!(
         texts,
@@ -4559,39 +4631,39 @@ fn render_tool_display_token_progress_formats_context_like_status_bar() {
 }
 
 #[test]
-fn render_tool_display_text_payload_is_preserved_for_block_rendering() {
-    use tau_proto::{ToolDisplay, ToolDisplayPayload, ToolDisplayStatus};
+fn render_tool_use_state_text_payload_is_preserved_for_block_rendering() {
+    use tau_proto::{ToolUsePayload, ToolUseState, ToolUseStatus};
 
-    let display = ToolDisplay {
+    let display = ToolUseState {
         args: "printf hello".into(),
-        status: ToolDisplayStatus::Success,
+        status: ToolUseStatus::Success,
         status_text: "ok".into(),
-        payload: Some(ToolDisplayPayload::Text {
+        payload: Some(ToolUsePayload::Text {
             text: "printf hello\nprintf world".into(),
         }),
         ..Default::default()
     };
-    let rendered = render_tool_display("shell", &display);
+    let rendered = render_tool_use_state("shell", &display);
     assert_eq!(rendered.args, "printf hello");
     assert_eq!(rendered.payload, display.payload);
 }
 
 #[test]
-fn render_tool_display_diff_payload_adds_plus_minus_chips() {
-    use tau_proto::{DiffSummary, ToolDisplay, ToolDisplayPayload, ToolDisplayStatus};
+fn render_tool_use_state_diff_payload_adds_plus_minus_chips() {
+    use tau_proto::{DiffSummary, ToolUsePayload, ToolUseState, ToolUseStatus};
 
-    let display = ToolDisplay {
+    let display = ToolUseState {
         args: "src/main.rs".into(),
-        status: ToolDisplayStatus::Success,
+        status: ToolUseStatus::Success,
         status_text: "ok".into(),
-        payload: Some(ToolDisplayPayload::Diff(DiffSummary {
+        payload: Some(ToolUsePayload::Diff(DiffSummary {
             added: 12,
             removed: 3,
             hunks: vec![],
         })),
         ..Default::default()
     };
-    let rendered = render_tool_display("edit", &display);
+    let rendered = render_tool_use_state("edit", &display);
     let texts: Vec<&str> = rendered.suffixes.iter().map(|s| s.text.as_str()).collect();
     assert_eq!(texts, vec!["+12", "-3", "ok"]);
     assert!(matches!(rendered.suffixes[0].status, ToolStatus::DiffAdded));
@@ -4606,12 +4678,12 @@ fn synthesize_fallback_display_is_minimal() {
     let ok = synthesize_fallback_display("my_tool", None);
     assert_eq!(ok.args, "");
     assert_eq!(ok.status_text, "ok");
-    assert!(matches!(ok.status, tau_proto::ToolDisplayStatus::Success));
+    assert!(matches!(ok.status, tau_proto::ToolUseStatus::Success));
 
     let err =
         synthesize_fallback_display("my_tool", Some("failure description\nwith trailing line"));
     assert_eq!(err.status_text, "failure description");
-    assert!(matches!(err.status, tau_proto::ToolDisplayStatus::Error));
+    assert!(matches!(err.status, tau_proto::ToolUseStatus::Error));
 }
 
 #[test]
@@ -4623,7 +4695,7 @@ fn fallback_error_status_is_abbreviated_only_by_renderer() {
     assert!(!display.status_text.contains("err:"));
     assert!(!display.status_text.contains('…'));
 
-    let rendered = render_tool_display("ls", &display);
+    let rendered = render_tool_use_state("ls", &display);
     let block = render_tool_block(&tau_themes::Theme::builtin(), &rendered);
     let text: String = block
         .content
@@ -4637,45 +4709,45 @@ fn fallback_error_status_is_abbreviated_only_by_renderer() {
 }
 
 #[test]
-fn render_tool_display_error_status_picks_error_severity() {
-    use tau_proto::{ToolDisplay, ToolDisplayStatus};
+fn render_tool_use_state_error_status_picks_error_severity() {
+    use tau_proto::{ToolUseState, ToolUseStatus};
 
-    let display = ToolDisplay {
+    let display = ToolUseState {
         args: "/etc".into(),
-        status: ToolDisplayStatus::Error,
+        status: ToolUseStatus::Error,
         status_text: "permission denied".into(),
         ..Default::default()
     };
-    let rendered = render_tool_display("ls", &display);
+    let rendered = render_tool_use_state("ls", &display);
     assert_eq!(rendered.suffixes.len(), 1);
     assert_eq!(rendered.suffixes[0].text, "err: permission denied");
     assert!(matches!(rendered.suffixes[0].status, ToolStatus::Error));
 
-    let legacy_display = ToolDisplay {
+    let legacy_display = ToolUseState {
         args: "/etc".into(),
-        status: ToolDisplayStatus::Error,
+        status: ToolUseStatus::Error,
         status_text: "err: permission denied".into(),
         ..Default::default()
     };
-    let rendered = render_tool_display("ls", &legacy_display);
+    let rendered = render_tool_use_state("ls", &legacy_display);
     assert_eq!(rendered.suffixes[0].text, "err: permission denied");
 }
 
 #[test]
 fn render_tool_block_abbreviates_inline_args_and_error_but_preserves_payload() {
-    use tau_proto::{ToolDisplay, ToolDisplayPayload, ToolDisplayStatus};
+    use tau_proto::{ToolUsePayload, ToolUseState, ToolUseStatus};
 
     let payload = "full payload line one\nfull payload line two".to_owned();
-    let display = ToolDisplay {
+    let display = ToolUseState {
         args: "LOG_MODULE_WALLETV2|LOG_CLIENT_MODULE_WALLETV2 in modules/fedimint-walletv2-server/src modules/fedimint-walletv2-client/src".into(),
-        status: ToolDisplayStatus::Error,
+        status: ToolUseStatus::Error,
         status_text: "ripgrep error: rg: modules/fedimint-walletv2-server/src modules/fedimint-walletv2-client/src: IO error for operation".into(),
-        payload: Some(ToolDisplayPayload::Text {
+        payload: Some(ToolUsePayload::Text {
             text: payload.clone(),
         }),
         ..Default::default()
     };
-    let rendered = render_tool_display("grep", &display);
+    let rendered = render_tool_use_state("grep", &display);
     let block = render_tool_block(&tau_themes::Theme::builtin(), &rendered);
     let text: String = block
         .content

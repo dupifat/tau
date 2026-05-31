@@ -622,7 +622,7 @@ where
                                 query_id: query_id.clone(),
                                 instruction: SUMMARY_INSTRUCTION.to_owned(),
                                 role: None,
-                                input_stats: tau_proto::ToolDisplayStats::default(),
+                                input_stats: tau_proto::ToolUseStats::default(),
                                 // Notifications doesn't implement a tool —
                                 // these fields are only meaningful for the
                                 // `delegate` flow.

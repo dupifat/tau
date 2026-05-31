@@ -219,6 +219,7 @@ fn forwards_query_and_num_results_to_exa_searcher_and_returns_text() {
                     CborValue::Integer(3.into()),
                 ),
             ]),
+            display: None,
             agent_id: Default::default(),
             originator: tau_proto::PromptOriginator::User,
         }))
@@ -261,6 +262,7 @@ fn defaults_num_results_when_omitted() {
                 CborValue::Text("query".to_owned()),
                 CborValue::Text("hello world".to_owned()),
             )]),
+            display: None,
             agent_id: Default::default(),
             originator: tau_proto::PromptOriginator::User,
         }))
@@ -286,6 +288,7 @@ fn missing_query_returns_tool_error() {
             call_id: "call-3".into(),
             tool_name: tau_proto::ToolName::new(EXA_TOOL_NAME),
             arguments: CborValue::Map(Vec::new()),
+            display: None,
             agent_id: Default::default(),
             originator: tau_proto::PromptOriginator::User,
         }))
@@ -313,6 +316,7 @@ fn searcher_error_surfaces_as_tool_error() {
                 CborValue::Text("query".to_owned()),
                 CborValue::Text("anything".to_owned()),
             )]),
+            display: None,
             agent_id: Default::default(),
             originator: tau_proto::PromptOriginator::User,
         }))
@@ -346,6 +350,7 @@ fn rejects_num_results_out_of_range() {
                     CborValue::Integer(0.into()),
                 ),
             ]),
+            display: None,
             agent_id: Default::default(),
             originator: tau_proto::PromptOriginator::User,
         }))
@@ -380,6 +385,7 @@ fn forwards_parallel_search_to_web_search_and_returns_text() {
                     CborValue::Integer(3.into()),
                 ),
             ]),
+            display: None,
             agent_id: Default::default(),
             originator: tau_proto::PromptOriginator::User,
         }))
@@ -416,6 +422,7 @@ fn forwards_parallel_fetch_to_web_fetch() {
                 CborValue::Text("url".to_owned()),
                 CborValue::Text("https://example.com".to_owned()),
             )]),
+            display: None,
             agent_id: Default::default(),
             originator: tau_proto::PromptOriginator::User,
         }))
@@ -446,6 +453,7 @@ fn parallel_non_string_argument_keys_are_rejected_before_forwarding() {
                 CborValue::Integer(1.into()),
                 CborValue::Text("anything".to_owned()),
             )]),
+            display: None,
             agent_id: Default::default(),
             originator: tau_proto::PromptOriginator::User,
         }))

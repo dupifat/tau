@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tau_proto::{
-    CborValue, Event, StartAgentRequest, ToolCallId, ToolDisplay, ToolError, ToolName, ToolResult,
-    ToolSpec,
+    CborValue, Event, StartAgentRequest, ToolCallId, ToolError, ToolName, ToolResult, ToolSpec,
+    ToolUseState,
 };
 
 use crate::discovery::DiscoveredSkillSource;
@@ -252,7 +252,7 @@ impl<'a> InternalToolHost<'a> {
         tool_name: ToolName,
         tool_type: tau_proto::ToolType,
         result: tau_proto::CborValue,
-        display: Option<ToolDisplay>,
+        display: Option<ToolUseState>,
     ) {
         self.harness.finish_harness_owned_tool_with_cbor_result(
             conversation_id,
@@ -294,7 +294,7 @@ impl<'a> InternalToolHost<'a> {
         tool_type: tau_proto::ToolType,
         message: String,
         details: Option<tau_proto::CborValue>,
-        display: Option<ToolDisplay>,
+        display: Option<ToolUseState>,
     ) {
         self.harness.finish_harness_owned_tool_with_display_error(
             conversation_id,

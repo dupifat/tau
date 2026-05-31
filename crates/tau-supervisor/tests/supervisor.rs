@@ -110,6 +110,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new("echo"),
             arguments: CborValue::Text("hello".to_owned()),
+            display: None,
             agent_id: Default::default(),
             originator: tau_proto::PromptOriginator::User,
         })))

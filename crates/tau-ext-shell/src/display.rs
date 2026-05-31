@@ -1,19 +1,19 @@
-//! Helpers tools use to attach a [`ToolDisplay`] descriptor to their
+//! Helpers tools use to attach a [`ToolUseState`] descriptor to their
 //! result/error.
 //!
 //! Tools return `Result<ToolOutput, ToolFailure>`; both carry a
-//! `ToolDisplay` next to the existing CBOR payload / error message.
+//! `ToolUseState` next to the existing CBOR payload / error message.
 //! The dispatcher in [`crate::tools`] unpacks these into `ToolResult`
 //! / `ToolError` events with the descriptor attached.
 
-use tau_proto::{CborValue, ToolDisplay, ToolDisplayPayload, ToolDisplayStats, ToolDisplayStatus};
+use tau_proto::{CborValue, ToolUsePayload, ToolUseState, ToolUseStats, ToolUseStatus};
 
 /// Success bundle: the CBOR result the agent consumes and the display
 /// descriptor the UI consumes.
 #[derive(Debug)]
 pub(crate) struct ToolOutput {
     pub result: CborValue,
-    pub display: ToolDisplay,
+    pub display: ToolUseState,
 }
 
 /// Error bundle: the message the agent sees, optional structured
@@ -22,7 +22,7 @@ pub(crate) struct ToolOutput {
 pub(crate) struct ToolFailure {
     pub message: String,
     pub details: Option<Box<CborValue>>,
-    pub display: Box<ToolDisplay>,
+    pub display: Box<ToolUseState>,
 }
 
 impl ToolFailure {
@@ -32,8 +32,8 @@ impl ToolFailure {
         Self {
             message,
             details: None,
-            display: Box::new(ToolDisplay {
-                status: ToolDisplayStatus::Error,
+            display: Box::new(ToolUseState {
+                status: ToolUseStatus::Error,
                 status_text,
                 ..Default::default()
             }),
@@ -55,7 +55,7 @@ impl ToolFailure {
         self
     }
 
-    pub fn with_payload(mut self, payload: Option<ToolDisplayPayload>) -> Self {
+    pub fn with_payload(mut self, payload: Option<ToolUsePayload>) -> Self {
         self.display.payload = payload;
         self
     }
@@ -80,13 +80,13 @@ fn error_chip_text(message: &str) -> String {
         .to_owned()
 }
 
-/// Build a `ToolDisplayStats` from textual output: lines + bytes.
+/// Build a `ToolUseStats` from textual output: lines + bytes.
 /// Empty input yields an empty stats block (nothing renders).
-pub(crate) fn text_stats(text: &str) -> ToolDisplayStats {
+pub(crate) fn text_stats(text: &str) -> ToolUseStats {
     if text.is_empty() {
-        return ToolDisplayStats::default();
+        return ToolUseStats::default();
     }
-    ToolDisplayStats {
+    ToolUseStats {
         matches: None,
         lines: Some(text.lines().count() as u64),
         bytes: Some(text.len() as u64),
@@ -94,10 +94,10 @@ pub(crate) fn text_stats(text: &str) -> ToolDisplayStats {
 }
 
 /// A standard `Success` display with `args` label and `"ok"` chip.
-pub(crate) fn ok_display(args: impl Into<String>) -> ToolDisplay {
-    ToolDisplay {
+pub(crate) fn ok_display(args: impl Into<String>) -> ToolUseState {
+    ToolUseState {
         args: args.into(),
-        status: ToolDisplayStatus::Success,
+        status: ToolUseStatus::Success,
         status_text: "ok".to_owned(),
         ..Default::default()
     }

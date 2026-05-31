@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use tau_proto::{
     AgentContextKey, AgentContextValue, AgentId, AgentMessageReceived, AgentMessageSent, CborValue,
-    Event, ToolBackgroundError, ToolBackgroundResult, ToolCallId, ToolDisplay, ToolDisplayStatus,
-    ToolError, ToolName, ToolResult, ToolResultKind, ToolType,
+    Event, ToolBackgroundError, ToolBackgroundResult, ToolCallId, ToolError, ToolName, ToolResult,
+    ToolResultKind, ToolType, ToolUseState, ToolUseStatus,
 };
 
 use crate::error::HarnessError;
@@ -342,7 +342,7 @@ impl Harness {
         tool_name: ToolName,
         tool_type: ToolType,
         result: CborValue,
-        display: Option<tau_proto::ToolDisplay>,
+        display: Option<tau_proto::ToolUseState>,
     ) {
         let result = ToolResult {
             call_id: call_id.clone(),
@@ -381,7 +381,7 @@ impl Harness {
         tool_type: ToolType,
         message: String,
         details: Option<CborValue>,
-        display: Option<tau_proto::ToolDisplay>,
+        display: Option<tau_proto::ToolUseState>,
     ) {
         let error = ToolError {
             call_id: call_id.clone(),
@@ -627,12 +627,12 @@ struct WaitRequest {
 enum WaitReplyKind {
     Result {
         result: CborValue,
-        display: Option<ToolDisplay>,
+        display: Option<ToolUseState>,
     },
     Error {
         message: String,
         details: Option<CborValue>,
-        display: Option<ToolDisplay>,
+        display: Option<ToolUseState>,
     },
 }
 
@@ -1272,7 +1272,7 @@ impl WaitReply {
     fn with_source_display(
         mut self,
         source_tool_name: Option<ToolName>,
-        display: Option<ToolDisplay>,
+        display: Option<ToolUseState>,
     ) -> Self {
         if let WaitReplyKind::Error {
             message,
@@ -1283,7 +1283,7 @@ impl WaitReply {
             *dst = Some(wait_display_from_source(
                 source_tool_name,
                 display,
-                ToolDisplayStatus::Error,
+                ToolUseStatus::Error,
                 wait_error_status_text(message),
             ));
         }
@@ -1329,7 +1329,7 @@ fn wait_result_reply(
     wait_tool_name: ToolName,
     source_tool_name: Option<ToolName>,
     result: CborValue,
-    display: Option<ToolDisplay>,
+    display: Option<ToolUseState>,
 ) -> WaitReply {
     WaitReply {
         wait_call_id,
@@ -1339,7 +1339,7 @@ fn wait_result_reply(
             display: Some(wait_display_from_source(
                 source_tool_name,
                 display,
-                ToolDisplayStatus::Success,
+                ToolUseStatus::Success,
                 "ok".to_owned(),
             )),
         },
@@ -1350,10 +1350,10 @@ fn wait_result_reply(
 
 fn wait_display_from_source(
     source_tool_name: Option<ToolName>,
-    display: Option<ToolDisplay>,
-    default_status: ToolDisplayStatus,
+    display: Option<ToolUseState>,
+    default_status: ToolUseStatus,
     default_status_text: String,
-) -> ToolDisplay {
+) -> ToolUseState {
     // The waited tool's descriptor describes the payload returned to the model.
     // Rendering that descriptor under the `wait` tool makes the UI surface
     // arbitrary command/path labels when the source tool happened to provide
@@ -1362,7 +1362,7 @@ fn wait_display_from_source(
     let (status, status_text) = display
         .map(|display| (display.status, display.status_text))
         .unwrap_or((default_status, default_status_text));
-    ToolDisplay {
+    ToolUseState {
         args: source_tool_name
             .map(|tool_name| tool_name.to_string())
             .unwrap_or_default(),
@@ -1372,15 +1372,15 @@ fn wait_display_from_source(
     }
 }
 
-fn wait_display_status_text(status: ToolDisplayStatus, status_text: String) -> String {
+fn wait_display_status_text(status: ToolUseStatus, status_text: String) -> String {
     if !status_text.trim().is_empty() {
         return status_text;
     }
     match status {
-        ToolDisplayStatus::Success => "ok".to_owned(),
-        ToolDisplayStatus::Warning => "warning".to_owned(),
-        ToolDisplayStatus::Error => "err".to_owned(),
-        ToolDisplayStatus::InProgress => tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
+        ToolUseStatus::Success => "ok".to_owned(),
+        ToolUseStatus::Warning => "warning".to_owned(),
+        ToolUseStatus::Error => "err".to_owned(),
+        ToolUseStatus::InProgress => tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
     }
 }
 

@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use tau_proto::{CborValue, ToolDisplayPayload};
+use tau_proto::{CborValue, ToolUsePayload};
 
 use crate::diff::compute_diff;
 use crate::display::{ToolFailure, ToolOutput};
@@ -278,24 +278,21 @@ fn apply_hunks(hunks: &[Hunk]) -> Result<Vec<AppliedChange>, ApplyPatchFailure> 
     Ok(changes)
 }
 
-fn display_payload_for_changes(
-    changes: &[AppliedChange],
-    summary: &str,
-) -> Option<ToolDisplayPayload> {
+fn display_payload_for_changes(changes: &[AppliedChange], summary: &str) -> Option<ToolUsePayload> {
     if changes.len() == 1 {
         let change = &changes[0];
         let new_content = change.new_content.as_deref().unwrap_or_default();
-        return Some(ToolDisplayPayload::Diff(compute_diff(
+        return Some(ToolUsePayload::Diff(compute_diff(
             &change.old_content,
             new_content,
         )));
     }
-    Some(ToolDisplayPayload::Text {
+    Some(ToolUsePayload::Text {
         text: summary.to_owned(),
     })
 }
 
-fn display_payload_for_failure(changes: &[AppliedChange]) -> Option<ToolDisplayPayload> {
+fn display_payload_for_failure(changes: &[AppliedChange]) -> Option<ToolUsePayload> {
     if changes.is_empty() {
         return None;
     }
@@ -314,7 +311,7 @@ fn display_payload_for_failure(changes: &[AppliedChange]) -> Option<ToolDisplayP
             ));
         }
     }
-    Some(ToolDisplayPayload::Text {
+    Some(ToolUsePayload::Text {
         text: lines.join("\n"),
     })
 }

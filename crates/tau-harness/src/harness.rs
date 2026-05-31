@@ -443,8 +443,10 @@ pub struct AgentToolCall {
     pub tool_type: tau_proto::ToolType,
     /// CBOR arguments supplied by the model/provider.
     pub arguments: CborValue,
-    /// Optional provider display hint.
-    pub display: Option<tau_proto::ToolDisplay>,
+    /// Generic UI state computed before dispatch and copied into the
+    /// `tool.started` event so clients can render the live tool line without
+    /// parsing tool-specific arguments.
+    pub display: Option<tau_proto::ToolUseState>,
 }
 
 #[derive(Clone, Debug)]
@@ -8648,7 +8650,8 @@ impl Harness {
 
         match self.registry.route_tool_request(request) {
             Ok(route) => {
-                let started = route.invoke;
+                let mut started = route.invoke;
+                started.display = call.display.clone();
                 match route.target {
                     ToolRouteTarget::Internal => {
                         self.publish_for_agent(cid, Event::ToolStarted(started));
@@ -8942,7 +8945,7 @@ fn provider_disconnected_error() -> HarnessError {
 /// per-tool string knowledge. The descriptor carries the tool's
 /// args label (e.g. `"foo" in src` for grep, `[task]` for delegate),
 /// optional mode chip, and is stamped with
-/// [`tau_proto::ToolDisplayStatus::InProgress`] /
+/// [`tau_proto::ToolUseStatus::InProgress`] /
 /// [`tau_proto::PROGRESS_INDICATOR_TEXT`] so subscribers render the
 /// running ellipsis uniformly.
 ///
@@ -8951,8 +8954,8 @@ fn provider_disconnected_error() -> HarnessError {
 fn build_tool_args_display(
     tool_name: &str,
     arguments: &tau_proto::CborValue,
-) -> Option<tau_proto::ToolDisplay> {
-    use tau_proto::{ToolDisplayStatus, cbor_array_field, cbor_bool_field, cbor_text_field};
+) -> Option<tau_proto::ToolUseState> {
+    use tau_proto::{ToolUseStatus, cbor_array_field, cbor_bool_field, cbor_text_field};
 
     let mut payload = None;
     let mut mode = String::new();
@@ -9012,10 +9015,10 @@ fn build_tool_args_display(
         }
         _ => return None,
     };
-    Some(tau_proto::ToolDisplay {
+    Some(tau_proto::ToolUseState {
         args,
         mode,
-        status: ToolDisplayStatus::InProgress,
+        status: ToolUseStatus::InProgress,
         status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
         payload,
         ..Default::default()
@@ -9096,23 +9099,23 @@ fn shorten_shell_command_line(line: &str) -> String {
     format!("{head}┄{tail}")
 }
 
-fn shell_command_payload(command: &str) -> Option<tau_proto::ToolDisplayPayload> {
+fn shell_command_payload(command: &str) -> Option<tau_proto::ToolUsePayload> {
     if command.lines().count() < 2 {
         return None;
     }
-    Some(tau_proto::ToolDisplayPayload::Text {
+    Some(tau_proto::ToolUsePayload::Text {
         text: command.to_owned(),
     })
 }
 
-/// Build the [`ToolDisplay`] descriptor the renderer paints for a
+/// Build the [`ToolUseState`] descriptor the renderer paints for a
 /// running `delegate` tool block. Carries the sub-task name as the
 /// args label and two progress counters (tools and context); the agent id stays
 /// on [`tau_proto::DelegateProgress`] so the UI can paint it as a dedicated
 /// chip. The tools counter is completed/total so
 /// users can infer the currently running count as `total - completed`.
 /// The trailing chip is set to
-/// [`ToolDisplayStatus::InProgress`] so the renderer paints
+/// [`ToolUseStatus::InProgress`] so the renderer paints
 /// [`tau_proto::PROGRESS_INDICATOR_TEXT`].
 fn build_delegate_progress_display(
     task_name: &str,
@@ -9121,9 +9124,9 @@ fn build_delegate_progress_display(
     ctx_window: Option<u64>,
     tools_in_flight: u32,
     tools_total: u32,
-    input_stats: tau_proto::ToolDisplayStats,
-) -> tau_proto::ToolDisplay {
-    use tau_proto::{ProgressCounter, ProgressUnit, ToolDisplayStatus};
+    input_stats: tau_proto::ToolUseStats,
+) -> tau_proto::ToolUseState {
+    use tau_proto::{ProgressCounter, ProgressUnit, ToolUseStatus};
 
     let tools_completed = tools_total.saturating_sub(tools_in_flight);
     let mut counters: Vec<ProgressCounter> = vec![ProgressCounter {
@@ -9147,11 +9150,11 @@ fn build_delegate_progress_display(
             total: None,
         });
     }
-    tau_proto::ToolDisplay {
+    tau_proto::ToolUseState {
         args: format!("[{task_name}]"),
         stats: input_stats,
         progress_counters: counters,
-        status: ToolDisplayStatus::InProgress,
+        status: ToolUseStatus::InProgress,
         status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
         ..Default::default()
     }

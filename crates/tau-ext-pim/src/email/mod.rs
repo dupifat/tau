@@ -48,7 +48,7 @@ use tau_proto::{
     ACTION_SCHEMA_VERSION, Ack, ActionArg, ActionArgKind, ActionChoice, ActionCommand, ActionError,
     ActionInvoke, ActionOutput, ActionResult, ActionSchema, CborValue, ConfigError, Event,
     EventLogSeq, Frame, FrameReader, FrameWriter, Message, PromptFragment, PromptPriority,
-    ToolDisplay, ToolDisplayStats, ToolDisplayStatus, ToolError, ToolResult, ToolSpec, ToolStarted,
+    ToolError, ToolResult, ToolSpec, ToolStarted, ToolUseState, ToolUseStats, ToolUseStatus,
 };
 
 /// `tracing` target for events emitted from this extension.
@@ -5662,12 +5662,12 @@ fn cbor_nested_text_field<'a>(value: &'a CborValue, outer: &str, inner: &str) ->
     })?;
     cbor_text_field(nested, inner)
 }
-fn success_display(result: &CborValue) -> ToolDisplay {
+fn success_display(result: &CborValue) -> ToolUseState {
     let command = cbor_text_field(result, "command").unwrap_or("email");
     let status_text = cbor_text_field(result, "status").unwrap_or("ok");
-    let status = ToolDisplayStatus::Success;
+    let status = ToolUseStatus::Success;
     let data = cbor_field(result, "data");
-    ToolDisplay {
+    ToolUseState {
         args: email_display_args(command, data).unwrap_or_default(),
         stats: email_display_stats(command, data),
         info_chips: email_display_info(command, data),
@@ -5677,7 +5677,7 @@ fn success_display(result: &CborValue) -> ToolDisplay {
     }
 }
 
-fn error_display(arguments: &CborValue, details: &CborValue, message: &str) -> ToolDisplay {
+fn error_display(arguments: &CborValue, details: &CborValue, message: &str) -> ToolUseState {
     let command = cbor_text_field(details, "command").unwrap_or("email");
     let data = cbor_field(details, "data").or_else(|| {
         let details =
@@ -5687,11 +5687,11 @@ fn error_display(arguments: &CborValue, details: &CborValue, message: &str) -> T
             _ => Some(details),
         }
     });
-    ToolDisplay {
+    ToolUseState {
         args: email_display_args(command, data)
             .or_else(|| invocation_display_args(arguments))
             .unwrap_or_default(),
-        status: ToolDisplayStatus::Error,
+        status: ToolUseStatus::Error,
         status_text: message.to_owned(),
         ..Default::default()
     }
@@ -5787,9 +5787,9 @@ fn email_display_args(command: &str, data: Option<&CborValue>) -> Option<String>
     }
 }
 
-fn email_display_stats(command: &str, data: Option<&CborValue>) -> ToolDisplayStats {
+fn email_display_stats(command: &str, data: Option<&CborValue>) -> ToolUseStats {
     let Some(data) = data else {
-        return ToolDisplayStats::default();
+        return ToolUseStats::default();
     };
     match command {
         "list_accounts" => line_array_stats(data, "accounts"),
@@ -5797,27 +5797,27 @@ fn email_display_stats(command: &str, data: Option<&CborValue>) -> ToolDisplaySt
         "list" | "list_by_uid" | "list_recent" => line_array_stats(data, "messages"),
         "read" => cbor_text_field(data, "body_text")
             .or_else(|| cbor_text_field(data, "body_preview"))
-            .map(ToolDisplayStats::for_text)
+            .map(ToolUseStats::for_text)
             .unwrap_or_default(),
         "send" => count_stats(
             cbor_array_len(data, "accepted_recipients")
                 .or_else(|| cbor_array_len(data, "allowed_recipients"))
                 .or_else(|| cbor_array_len(data, "blocked_recipients")),
         ),
-        _ => ToolDisplayStats::default(),
+        _ => ToolUseStats::default(),
     }
 }
 
-fn count_stats(count: Option<u64>) -> ToolDisplayStats {
-    ToolDisplayStats {
+fn count_stats(count: Option<u64>) -> ToolUseStats {
+    ToolUseStats {
         matches: count,
         ..Default::default()
     }
 }
 
-fn line_array_stats(data: &CborValue, field: &str) -> ToolDisplayStats {
+fn line_array_stats(data: &CborValue, field: &str) -> ToolUseStats {
     let Some(lines) = cbor_array_field(data, field) else {
-        return ToolDisplayStats::default();
+        return ToolUseStats::default();
     };
     let line_count = lines.len() as u64;
     let byte_count = lines
@@ -5827,7 +5827,7 @@ fn line_array_stats(data: &CborValue, field: &str) -> ToolDisplayStats {
             _ => None,
         })
         .sum();
-    ToolDisplayStats {
+    ToolUseStats {
         matches: Some(line_count),
         lines: (0 < line_count).then_some(line_count),
         bytes: (0 < line_count).then_some(byte_count),

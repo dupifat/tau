@@ -62,6 +62,7 @@ fn representative_events() -> Vec<Event> {
             call_id: "call-1".into(),
             tool_name: ToolName::new("echo"),
             arguments: CborValue::Text("hello".to_owned()),
+            display: None,
             agent_id: Default::default(),
             originator: PromptOriginator::User,
         }),
@@ -555,6 +556,7 @@ fn event_wire_form_uses_dotted_event_tag() {
         call_id: "call-1".into(),
         tool_name: ToolName::new("echo"),
         arguments: CborValue::Text("hi".to_owned()),
+        display: None,
         agent_id: Default::default(),
         originator: PromptOriginator::User,
     });

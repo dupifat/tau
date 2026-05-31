@@ -91,7 +91,7 @@ fn reply_result(reply: WaitReply) -> CborValue {
     }
 }
 
-fn reply_result_with_display(reply: WaitReply) -> (CborValue, Option<ToolDisplay>) {
+fn reply_result_with_display(reply: WaitReply) -> (CborValue, Option<ToolUseState>) {
     match reply.kind {
         WaitReplyKind::Result { result, display } => (result, display),
         other => panic!("expected result reply, got {other:?}"),
@@ -107,7 +107,7 @@ fn reply_error(reply: WaitReply) -> (String, Option<CborValue>) {
     }
 }
 
-fn reply_error_with_display(reply: WaitReply) -> (String, Option<CborValue>, Option<ToolDisplay>) {
+fn reply_error_with_display(reply: WaitReply) -> (String, Option<CborValue>, Option<ToolUseState>) {
     match reply.kind {
         WaitReplyKind::Error {
             message,
@@ -208,16 +208,16 @@ fn wait_tool_schema_does_not_require_tool_call_id() {
 fn wait_result_display_uses_wait_descriptor_with_source_tool_name() {
     let owner = conv("main");
     let mut tracker = WaitTracker::default();
-    let source_display = ToolDisplay {
+    let source_display = ToolUseState {
         args: "cargo test".to_owned(),
-        stats: tau_proto::ToolDisplayStats {
+        stats: tau_proto::ToolUseStats {
             matches: None,
             lines: Some(10),
             bytes: Some(200),
         },
-        status: ToolDisplayStatus::Error,
+        status: ToolUseStatus::Error,
         status_text: "1".to_owned(),
-        payload: Some(tau_proto::ToolDisplayPayload::Text {
+        payload: Some(tau_proto::ToolUsePayload::Text {
             text: "cargo test".to_owned(),
         }),
         ..Default::default()
@@ -251,7 +251,7 @@ fn wait_result_display_uses_wait_descriptor_with_source_tool_name() {
 
     let display = display.expect("wait display");
     assert_eq!(display.args, "shell");
-    assert_eq!(display.status, ToolDisplayStatus::Error);
+    assert_eq!(display.status, ToolUseStatus::Error);
     assert_eq!(display.status_text, "1");
     assert!(display.stats.is_empty());
     assert!(display.payload.is_none());
@@ -410,7 +410,7 @@ fn no_arg_wait_resolves_when_running_background_call_is_cancelled() {
     );
     let display = display.expect("wait cancellation display");
     assert_eq!(display.args, "slow");
-    assert_eq!(display.status, ToolDisplayStatus::Error);
+    assert_eq!(display.status, ToolUseStatus::Error);
 }
 
 /// Background errors are completions too. A no-arg wait must return the

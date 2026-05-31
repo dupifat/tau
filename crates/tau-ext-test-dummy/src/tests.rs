@@ -12,6 +12,7 @@ fn invoke_restart() -> Frame {
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new(RESTART_TEST_DUMMY_TOOL_NAME),
         arguments: tau_proto::CborValue::Map(Vec::new()),
+        display: None,
         agent_id: Default::default(),
         originator: tau_proto::PromptOriginator::User,
     }))

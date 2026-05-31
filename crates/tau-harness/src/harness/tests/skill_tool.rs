@@ -303,7 +303,7 @@ fn skill_tool_search_matches_name_description_and_optional_content() {
             })
             .collect()
     };
-    let read_display = |h: &Harness, call_id: &str| -> tau_proto::ToolDisplay {
+    let read_display = |h: &Harness, call_id: &str| -> tau_proto::ToolUseState {
         let events = event_log_events(h);
         events
             .iter()
@@ -820,7 +820,7 @@ fn skill_tool_default_display_formats_query() {
 }
 
 #[test]
-fn default_tool_display_formats_requested_line_ranges() {
+fn default_tool_use_state_formats_requested_line_ranges() {
     let read_display = super::super::build_tool_args_display(
         "read",
         &CborValue::Map(vec![

@@ -41,6 +41,6 @@ fn format_single_file_diff_payload() {
             }],
             &summary,
         ),
-        Some(ToolDisplayPayload::Diff(_))
+        Some(ToolUsePayload::Diff(_))
     ));
 }

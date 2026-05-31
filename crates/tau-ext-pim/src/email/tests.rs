@@ -397,6 +397,7 @@ fn tool_started(command: &str, args: Vec<(&str, CborValue)>) -> ToolStarted {
         call_id: tau_proto::ToolCallId::from("call-1"),
         tool_name: tau_proto::ToolName::new(TOOL_NAME),
         arguments: command_args(command, args),
+        display: None,
         agent_id: Default::default(),
         originator: tau_proto::PromptOriginator::User,
     }
@@ -806,7 +807,7 @@ fn successful_email_tool_results_show_command_scope_and_counts() {
         panic!("successful email command should be a tool result")
     };
     let display = result.display.expect("display");
-    assert_eq!(display.status, ToolDisplayStatus::Success);
+    assert_eq!(display.status, ToolUseStatus::Success);
     assert_eq!(display.status_text, "ok");
     assert_eq!(display.args, "list_by_uid work/INBOX");
     let CborValue::Array(messages) = data_field(&result.result, "messages") else {
@@ -861,7 +862,7 @@ fn failed_email_tool_results_show_invoked_command_scope() {
         panic!("failed email command should be a tool error")
     };
     let display = error.display.expect("display");
-    assert_eq!(display.status, ToolDisplayStatus::Error);
+    assert_eq!(display.status, ToolUseStatus::Error);
     assert_eq!(display.args, "read work/INBOX uid=6218");
     assert_eq!(
         display.status_text,
@@ -894,7 +895,7 @@ fn approval_required_send_displays_as_success_for_agent() {
         panic!("approval-required send should be a successful tool result")
     };
     let display = result.display.expect("display");
-    assert_eq!(display.status, ToolDisplayStatus::Success);
+    assert_eq!(display.status, ToolUseStatus::Success);
     assert_eq!(display.status_text, "approval_required");
     assert_eq!(
         text_field(map_get(&result.result, "data").expect("data"), "message"),

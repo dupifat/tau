@@ -5212,6 +5212,63 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
     h.shutdown().expect("shutdown");
 }
 
+/// Delegated agents are durable, user-addressable agents, not temporary
+/// implementation details. Their harness conversation id should therefore be
+/// the minted public agent id instead of the old deterministic
+/// `start-agent-{extension}-{query}` key.
+#[test]
+fn start_agent_request_conversation_id_is_public_agent_id() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    for conn_id in ["conn-delegate-a", "conn-delegate-b"] {
+        let connection_id: tau_proto::ConnectionId = conn_id.into();
+        h.extensions.insert(
+            connection_id.clone(),
+            crate::extension::ExtensionEntry {
+                name: "delegate-ext".to_owned(),
+                instance_id: 42.into(),
+                connection_id: connection_id.clone(),
+                kind: tau_proto::ClientKind::Tool,
+                pid: None,
+                in_process_thread: None,
+                supervised_config: None,
+                secrets: std::collections::BTreeMap::new(),
+                restart_attempt: 0,
+                state: crate::extension::ExtensionState::Ready,
+                last_acked: tau_proto::EventLogSeq::default(),
+            },
+        );
+        h.extension_order.push(connection_id);
+    }
+    h.handle_start_agent_request("conn-delegate-a", ext_query("q-named"))
+        .expect("query");
+    let mut side_agents = h.agents.iter().filter(|(_, conv)| {
+        matches!(
+            &conv.originator,
+            tau_proto::PromptOriginator::Extension { query_id, .. } if query_id == "q-named"
+        )
+    });
+    let (cid, conv) = side_agents.next().expect("side agent");
+    assert!(side_agents.next().is_none());
+    let public_agent_id = conv.agent_id.as_deref().expect("public agent id");
+    assert_eq!(cid.as_str(), public_agent_id);
+    assert!(!cid.as_str().starts_with("start-agent-"));
+    let cid = cid.clone();
+    let agent_count = h.agents.len();
+    h.handle_start_agent_request("conn-delegate-b", ext_query("q-named"))
+        .expect("duplicate query");
+    assert_eq!(h.agents.len(), agent_count);
+    assert_eq!(
+        h.agents
+            .get(&cid)
+            .and_then(|conv| conv.source_connection.as_deref()),
+        Some("conn-delegate-b")
+    );
+    h.shutdown().expect("shutdown");
+}
+
 /// A tool-backed `StartAgentRequest` (`tool_call_id: Some(...)`) is the
 /// `delegate` path: it dispatches *while the parent's tool call is
 /// still in flight*, so the parent conv's tip is a `ToolUse` block

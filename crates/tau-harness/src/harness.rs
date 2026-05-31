@@ -5357,6 +5357,27 @@ impl Harness {
         self.drain_pending_start_agent_requests()
     }
 
+    fn accept_duplicate_start_agent_request(
+        &mut self,
+        source_id: &str,
+        query_id: &str,
+        agent_id: &str,
+    ) {
+        let accepted = tau_proto::StartAgentAccepted {
+            query_id: query_id.to_owned(),
+            agent_id: agent_id.to_owned().into(),
+        };
+        self.publish_event(
+            Some(HARNESS_CONNECTION_ID),
+            Event::StartAgentAccepted(accepted.clone()),
+        );
+        let _ = self.bus.send_to(
+            source_id,
+            None,
+            Frame::Event(Event::StartAgentAccepted(accepted)),
+        );
+    }
+
     /// Enqueue an internal start-agent request and return its minted agent id.
     pub(crate) fn enqueue_internal_start_agent_request_without_draining(
         &mut self,
@@ -5394,19 +5415,48 @@ impl Harness {
             .map(|e| e.name.clone())
             .unwrap_or_else(|| source_id.to_owned());
         let role = self.resolve_start_agent_request_role(&query)?;
-        let cid: AgentId = format!("start-agent-{}-{}", extension_name, query.query_id).into();
-        if self.agents.contains_key(&cid)
-            || self
-                .pending_start_agent_requests
-                .iter()
-                .any(|pending| pending.cid == cid)
-        {
+        let duplicate_active = self.agents.iter().find_map(|(cid, conv)| {
+            let matches_query = conv.source_connection.is_some()
+                && matches!(
+                    &conv.originator,
+                    tau_proto::PromptOriginator::Extension { name, query_id }
+                        if name.as_str() == extension_name && query_id == &query.query_id
+                );
+            matches_query.then(|| {
+                conv.agent_id
+                    .clone()
+                    .map(|agent_id| (cid.clone(), agent_id))
+            })?
+        });
+        if let Some((cid, agent_id)) = duplicate_active {
+            if let Some(conv) = self.agents.get_mut(&cid) {
+                conv.source_connection = Some(source_id.into());
+            }
+            self.accept_duplicate_start_agent_request(source_id, &query.query_id, &agent_id);
             self.emit_info(&format!(
-                "ignoring duplicate start-agent-request `{}` from `{}` — already in flight",
-                query.query_id, extension_name
+                "rebound duplicate start-agent-request `{}` from `{}` to existing agent `{}`",
+                query.query_id, extension_name, agent_id
             ));
             return Ok(None);
         }
+        if let Some(idx) = self
+            .pending_start_agent_requests
+            .iter()
+            .position(|pending| {
+                pending.extension_name == extension_name && pending.query.query_id == query.query_id
+            })
+        {
+            let agent_id = self.pending_start_agent_requests[idx].agent_id.clone();
+            self.pending_start_agent_requests[idx].source_id = source_id.to_owned();
+            self.accept_duplicate_start_agent_request(source_id, &query.query_id, &agent_id);
+            self.emit_info(&format!(
+                "rebound duplicate start-agent-request `{}` from `{}` to pending agent `{}`",
+                query.query_id, extension_name, agent_id
+            ));
+            return Ok(None);
+        }
+        let agent_id = self.mint_available_agent_id_for_role(&role);
+        let cid: AgentId = agent_id.clone().into();
 
         // Resolve the parent agent at enqueue time: tool-backed requests
         // inherit from the conversation that owns the triggering tool call;
@@ -5417,7 +5467,6 @@ impl Harness {
             .and_then(|call_id| self.tool_agents.get(call_id))
             .cloned()
             .unwrap_or_else(|| cid.clone());
-        let agent_id = self.mint_available_agent_id_for_role(&role);
 
         Ok(Some(PendingStartAgentRequest {
             source_id: source_id.to_owned(),

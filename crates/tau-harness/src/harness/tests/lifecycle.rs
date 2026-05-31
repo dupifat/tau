@@ -888,7 +888,13 @@ fn extension_emit_and_start_agent_request_are_staged_until_ready() {
     assert!(event_log_contains_source_event(&h, conn_id, |event| {
         event.name() == custom_name
     }));
-    assert!(h.agents.keys().any(|cid| cid.as_str().contains("q-staged")));
+    assert!(h.agents.iter().any(|(cid, conv)| {
+        conv.agent_id.as_deref() == Some(cid.as_str())
+            && matches!(
+                &conv.originator,
+                tau_proto::PromptOriginator::Extension { query_id, .. } if query_id == "q-staged"
+            )
+    }));
     assert!(event_log_events(&h).iter().any(|event| matches!(
         event,
         Event::AgentPromptCreated(prompt)

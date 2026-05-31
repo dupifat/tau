@@ -100,6 +100,8 @@ than 5s to execute. Whole-second precision is acceptable; finer precision is
 not needed. Reported durations are approximate, and can include overheads and
 latencies of internal components.
 
+Mutating ext-shell tools that wait more than 5s to acquire an automatic directory update lock should add `lock_wait_duration_seconds: {number}` to the final result or error details. Use the same approximate whole-second semantics as `duration_seconds`. Omit this header for waits of 5s or less, for tools that did not wait, and for canceled or abandoned waiters that never acquired the lock.
+
 `shell` tool should return non-zero exits and timeouts as structured command
 results with output details, not as tool invocation errors. It should reliably
 timeout operations that take longer than timeout argument, but currently 100%
@@ -184,6 +186,7 @@ When locking is enabled, verify all of these behaviors:
 * Reads stay free: `read`, `grep`, `find`, and `ls` complete while an update lock is held.
 * Mutating tools participate when enabled: `edit`, `apply_patch`, `shell`, and `gpt_shell` wait on conflicting locks.
 * Lock waiters do not consume the ext-shell worker semaphore before their lock is available. A large number of blocked lock waiters should not prevent unrelated reads from running.
+* A mutating tool that waits more than 5s and then acquires its automatic lock reports `lock_wait_duration_seconds` in its final result or error details. Fast, unblocked, canceled, and abandoned lock paths omit it.
 * Waiting on an idle manual lock eventually returns an abandoned-lock error. It should return `error: dir_lock_abandoned` with details headers including `blocking_directory`, `lock_owner_id`, `idle_seconds`, and `held_seconds`, plus a clear text payload in `output`. Active same-owner mutating tools under the lock should prevent this abandoned-lock error.
 * Waiting tool UI/status includes the directory or directories being waited on. `dir_lock` success and failure UI/status should also include the relevant directory when known, and successful lock/unlock status should use the normal `ok` chip.
 * The `/shell-dir-force-unlock DIRECTORY` UI action is published by ext-shell and force-releases manual locks overlapping that canonical directory, regardless of owner.
@@ -200,9 +203,9 @@ Also verify same-owner reentry: while the original agent holds `root/a`, run a s
 
 #### Phase 2: reads remain unblocked
 
-Hold a manual lock on `root/a`. While it is held, run `read root/a/file.txt`, `grep` against `root/a`, `find` under `root/a`, and `ls root/a`. These should complete promptly and should not wait for unlock. Then start a conflicting `shell` with `cwd: root/a` and command `python3 -c 'open("shell-waited.txt", "w").write("locked")'`. It should wait. Unlock `root/a`; the shell should run and create the file.
+Hold a manual lock on `root/a`. While it is held, run `read root/a/file.txt`, `grep` against `root/a`, `find` under `root/a`, and `ls root/a`. These should complete promptly and should not wait for unlock. Then start a conflicting `shell` with `cwd: root/a` and command `python3 -c 'open("shell-waited.txt", "w").write("locked")'`. It should wait. Leave it blocked for more than 5s, then unlock `root/a`; the shell should run, create the file, and include `lock_wait_duration_seconds` in the final result.
 
-If the `shell` waits long enough to background, call `wait` after unlocking and confirm the real shell result is returned normally.
+If the `shell` waits long enough to background, call `wait` after unlocking and confirm the real shell result is returned normally with the same `lock_wait_duration_seconds` header.
 
 #### Phase 3: automatic lock scopes
 
@@ -257,6 +260,7 @@ Report concise but complete findings:
 * Whether reads stayed unblocked.
 * For each mutating tool, whether it waited on the expected directory and completed only after unlock.
 * Whether waiting UI/status showed the blocked directory, whether `dir_lock` failures showed the target directory, and whether auto-background plus `wait` behaved normally.
+* Whether slow acquired lock waits reported `lock_wait_duration_seconds`, and whether quick/no-wait, canceled, and abandoned paths omitted it.
 * Whether `/shell-dir-force-unlock DIRECTORY` was available, released overlapping manual locks, reported owner details, and left automatic locks alone.
 * Whether FIFO prevented later independent waiters from jumping ahead of a blocked front waiter.
 * Whether cancellation removed a waiting lock request and prevented the delayed mutation.

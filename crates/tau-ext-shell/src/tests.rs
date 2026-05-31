@@ -3908,6 +3908,73 @@ fn classify_ripgrep_stderr_recognizes_stable_prefixes() {
 }
 
 #[test]
+fn reported_lock_wait_duration_seconds_rounds_only_slow_waits() {
+    assert_eq!(
+        reported_lock_wait_duration_seconds(Duration::from_secs(5)),
+        None
+    );
+    assert_eq!(
+        reported_lock_wait_duration_seconds(Duration::from_millis(5001)),
+        Some(6)
+    );
+    assert_eq!(
+        reported_lock_wait_duration_seconds(Duration::from_secs(6)),
+        Some(6)
+    );
+}
+
+#[test]
+fn lock_wait_duration_header_wraps_non_map_results() {
+    let event = with_lock_wait_duration(
+        Event::ToolResult(tau_proto::ToolResult {
+            call_id: "call-lock-wait".into(),
+            tool_name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("changed".to_owned()),
+            kind: tau_proto::ToolResultKind::Final,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        }),
+        Some(6),
+    );
+
+    let Event::ToolResult(result) = event else {
+        panic!("expected tool result");
+    };
+    assert_eq!(
+        cbor_int_field(&result.result, LOCK_WAIT_DURATION_SECONDS_HEADER),
+        Some(6)
+    );
+    assert_eq!(cbor_map_text(&result.result, "output"), Some("changed"));
+}
+
+#[test]
+fn lock_wait_duration_header_extends_tool_error_details() {
+    let event = with_lock_wait_duration(
+        Event::ToolError(tau_proto::ToolError {
+            call_id: "call-lock-wait".into(),
+            tool_name: tau_proto::ToolName::new(SHELL_TOOL_NAME),
+            tool_type: tau_proto::ToolType::Function,
+            message: "failed".to_owned(),
+            details: Some(cbor_text_map(vec![("output", "start failed")])),
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        }),
+        Some(7),
+    );
+
+    let Event::ToolError(error) = event else {
+        panic!("expected tool error");
+    };
+    let details = error.details.expect("error details");
+    assert_eq!(
+        cbor_int_field(&details, LOCK_WAIT_DURATION_SECONDS_HEADER),
+        Some(7)
+    );
+    assert_eq!(cbor_map_text(&details, "output"), Some("start failed"));
+}
+
+#[test]
 fn command_details_value_records_combined_output_stats() {
     let details = command_details_value(CommandDetails {
         status: Some(0),

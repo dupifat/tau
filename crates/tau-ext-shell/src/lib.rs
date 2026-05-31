@@ -11,10 +11,11 @@ use std::error::Error;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 use tau_proto::{
     Ack, ActionError, ActionInvoke, ActionOutput, ActionResult, AgentContextKey, AgentContextValue,
-    ConfigError, Event, EventLogSeq, ExtAgentContextPublish, ExtPromptFragmentPublish,
+    CborValue, ConfigError, Event, EventLogSeq, ExtAgentContextPublish, ExtPromptFragmentPublish,
     ExtensionContextReady, Frame, FrameReader, FrameWriter, Message, PromptContent, PromptFragment,
     PromptPriority, SessionAgentLoaded, SessionStarted, ToolCancelled, ToolResult, ToolResultKind,
     ToolSpec,
@@ -47,6 +48,8 @@ use crate::tools::{
 };
 
 const SHELL_DIR_FORCE_UNLOCK_ACTION_ID: &str = "shell.dir.force_unlock";
+const SLOW_LOCK_WAIT_THRESHOLD_SECS: u64 = 5;
+const LOCK_WAIT_DURATION_SECONDS_HEADER: &str = "lock_wait_duration_seconds";
 
 /// Runs the extension on stdin/stdout.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
@@ -566,7 +569,7 @@ where
                     let permit = sem.acquire();
                     std::thread::spawn(move || {
                         let _permit = permit;
-                        dispatch_tool_invoke(invoke, shell_config, &tx, &running_shells);
+                        dispatch_tool_invoke(invoke, shell_config, &tx, &running_shells, None);
                     });
                 }
             }
@@ -756,7 +759,7 @@ fn dispatch_locked_tool_invoke(
         Ok(Some(dirs)) => crate::dir_lock::normalize_lock_dirs(dirs),
         Ok(None) => {
             let _permit = sem.acquire();
-            dispatch_tool_invoke(invoke, shell_config, tx, running_shells);
+            dispatch_tool_invoke(invoke, shell_config, tx, running_shells, None);
             return;
         }
         Err(error) => {
@@ -765,6 +768,7 @@ fn dispatch_locked_tool_invoke(
         }
     };
 
+    let lock_wait_started = Instant::now();
     let wait_invoke = invoke.clone();
     let wait_dirs = dirs.clone();
     let wait_tx = tx.clone();
@@ -794,8 +798,16 @@ fn dispatch_locked_tool_invoke(
         }
     };
 
+    let lock_wait_duration_seconds =
+        reported_lock_wait_duration_seconds(lock_wait_started.elapsed());
     let _permit = sem.acquire();
-    dispatch_tool_invoke(invoke, shell_config, tx, running_shells);
+    dispatch_tool_invoke(
+        invoke,
+        shell_config,
+        tx,
+        running_shells,
+        lock_wait_duration_seconds,
+    );
     drop(guard);
 }
 
@@ -820,15 +832,89 @@ fn send_tool_failure(
     })));
 }
 
+fn reported_lock_wait_duration_seconds(elapsed: Duration) -> Option<u64> {
+    if elapsed <= Duration::from_secs(SLOW_LOCK_WAIT_THRESHOLD_SECS) {
+        return None;
+    }
+
+    let whole_seconds = elapsed.as_secs();
+    if Duration::from_secs(whole_seconds) < elapsed {
+        Some(whole_seconds.saturating_add(1))
+    } else {
+        Some(whole_seconds)
+    }
+}
+
+fn with_lock_wait_duration(event: Event, lock_wait_duration_seconds: Option<u64>) -> Event {
+    let Some(seconds) = lock_wait_duration_seconds else {
+        return event;
+    };
+
+    match event {
+        Event::ToolResult(mut result) => {
+            result.result = cbor_value_with_lock_wait_duration(result.result, seconds, "output");
+            Event::ToolResult(result)
+        }
+        Event::ToolError(mut error) => {
+            error.details = Some(match error.details {
+                Some(details) => cbor_value_with_lock_wait_duration(details, seconds, "details"),
+                None => CborValue::Map(vec![lock_wait_duration_entry(seconds)]),
+            });
+            Event::ToolError(error)
+        }
+        event => event,
+    }
+}
+
+fn cbor_value_with_lock_wait_duration(
+    value: CborValue,
+    seconds: u64,
+    non_map_payload_key: &str,
+) -> CborValue {
+    match value {
+        CborValue::Map(mut entries) => {
+            prepend_lock_wait_duration(&mut entries, seconds);
+            CborValue::Map(entries)
+        }
+        value => CborValue::Map(vec![
+            lock_wait_duration_entry(seconds),
+            (CborValue::Text(non_map_payload_key.to_owned()), value),
+        ]),
+    }
+}
+
+fn prepend_lock_wait_duration(entries: &mut Vec<(CborValue, CborValue)>, seconds: u64) {
+    entries.retain(|(key, _)| match key {
+        CborValue::Text(key) => key != LOCK_WAIT_DURATION_SECONDS_HEADER,
+        _ => true,
+    });
+    entries.insert(0, lock_wait_duration_entry(seconds));
+}
+
+fn lock_wait_duration_entry(seconds: u64) -> (CborValue, CborValue) {
+    let seconds = i64::try_from(seconds).unwrap_or(i64::MAX);
+    (
+        CborValue::Text(LOCK_WAIT_DURATION_SECONDS_HEADER.to_owned()),
+        CborValue::Integer(seconds.into()),
+    )
+}
+
 /// Execute a single tool invocation and send the response event(s).
 fn dispatch_tool_invoke(
     invoke: tau_proto::ToolStarted,
     shell_config: ShellConfig,
     tx: &mpsc::Sender<Frame>,
     running_shells: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
+    lock_wait_duration_seconds: Option<u64>,
 ) {
     if invoke.tool_name == SHELL_TOOL_NAME || invoke.tool_name == GPT_SHELL_TOOL_NAME {
-        dispatch_cancellable_shell_tool(invoke, shell_config, tx, running_shells);
+        dispatch_cancellable_shell_tool(
+            invoke,
+            shell_config,
+            tx,
+            running_shells,
+            lock_wait_duration_seconds,
+        );
         return;
     }
 
@@ -844,6 +930,7 @@ fn dispatch_tool_invoke(
 
     let events = execute_tool(invoke, &shell_config);
     for event in events {
+        let event = with_lock_wait_duration(event, lock_wait_duration_seconds);
         let _ = tx.send(Frame::Event(event));
     }
 }
@@ -853,6 +940,7 @@ fn dispatch_cancellable_shell_tool(
     shell_config: ShellConfig,
     tx: &mpsc::Sender<Frame>,
     running_shells: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
+    lock_wait_duration_seconds: Option<u64>,
 ) {
     let (cancel_tx, cancel_rx) = mpsc::channel();
     debug!(
@@ -925,6 +1013,7 @@ fn dispatch_cancellable_shell_tool(
         .expect("running shell registry lock poisoned")
         .remove(&invoke.call_id);
     trace!(call_id = %invoke.call_id, "removed shell call from cancellation registry");
+    let event = with_lock_wait_duration(event, lock_wait_duration_seconds);
     if tx.send(Frame::Event(event)).is_err() {
         debug!(call_id = %invoke.call_id, "failed to send terminal shell event to harness");
     }

@@ -50,3 +50,4 @@
 ## Rules
 
 - ALWAYS consult `tau-commit` skill before making commits
+- When asked to debug existing tau sessions, read `tau-self-knowledge-debugging` skill

@@ -165,20 +165,23 @@ where
             description: Some(
                 "Edit a file using line-oriented replacements. Each edit replaces \
                  the inclusive range from 1-based `start_line` through `end_line` with \
-                 `newText`, and all edits use the original file's line numbering as if \
-                 applied simultaneously. Ranges must be non-overlapping and may include \
-                 the single virtual empty line used for creation/appending, but must not \
-                 extend beyond it; line 1 is always available for an empty or missing file, \
-                 and the line after a trailing newline is available for appends. Missing files \
-                 are treated as empty and missing parent directories are created, so use \
-                 `start_line: 1, end_line: 1` to create a file. \
-                 Per-edit `guard` must exactly match the first original line content, \
-                 excluding the line ending, and must not include newline characters. Use an empty string \
-                 for an empty, missing, or append line. On mismatch, \
-                 the edit fails and returns the mismatched range contents. Returns minimal status \
-                 headers: replacements, changed, new_max_valid_start_line after the edit, and \
-                 total_bytes."
-                    .to_owned(),            ),
+                 `newText`. All edits use the original file's line numbering as if \
+                 applied simultaneously. `newText` is written verbatim; the tool does not \
+                 add a trailing newline for you. When replacing whole lines, include a final \
+                 newline in `newText` if the next original line should remain separate; \
+                 otherwise the last replacement line will be joined to the line after the \
+                 replaced range. Ranges must be non-overlapping and may include the single \
+                 virtual empty line used for creation/appending, but must not extend beyond \
+                 it; line 1 is always available for an empty or missing file, and the line \
+                 after a trailing newline is available for appends. Missing files are treated \
+                 as empty and missing parent directories are created, so use `start_line: 1, \
+                 end_line: 1` to create a file. Per-edit `guard` must exactly match the \
+                 first original line content, excluding the line ending, and must not include \
+                 newline characters. Use an empty string for an empty, missing, or \
+                 append line. On mismatch, the edit fails and returns the mismatched range \
+                 contents."
+                    .to_owned(),
+            ),
             tool_type: tau_proto::ToolType::Function,
             parameters: Some(serde_json::json!({
                 "type": "object",
@@ -207,7 +210,7 @@ where
                                 },
                                 "newText": {
                                     "type": "string",
-                                    "description": "Replacement text, written verbatim. Embed real newlines directly — do NOT use backslash-n escape sequences."
+                                    "description": "Replacement text, written verbatim. Embed real newlines directly — do NOT use backslash-n escape sequences. The tool does not add a trailing newline; include one when replacing a complete line and the line after the replaced range should remain separate."
                                 },
                                 "guard": {
                                     "type": "string",
@@ -216,7 +219,8 @@ where
                             },
                             "required": ["start_line", "end_line", "newText", "guard"],
                             "additionalProperties": false
-                        }                    }
+                        }
+                    }
                 },
                 "required": ["path", "edits"],
                 "additionalProperties": false

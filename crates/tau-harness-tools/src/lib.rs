@@ -44,7 +44,98 @@ struct BuiltinTools {
 struct BuiltinState {
     pending_delegates: HashMap<String, PendingDelegate>,
     cancel_requested: HashSet<ToolCallId>,
+    in_progress_tool_names: HashMap<ToolCallId, ToolName>,
     next_delegate_query_id: u64,
+}
+
+impl BuiltinState {
+    fn record_tool_started(&mut self, call_id: ToolCallId, tool_name: ToolName) {
+        self.in_progress_tool_names.insert(call_id, tool_name);
+    }
+
+    fn record_tool_lifecycle_event(&mut self, event: &Event) {
+        match event {
+            Event::ToolResult(result) => {
+                self.record_tool_finished(&result.call_id);
+            }
+            Event::ProviderToolResult(result) => {
+                if result.kind != ToolResultKind::BackgroundPlaceholder {
+                    self.record_tool_finished(&result.call_id);
+                }
+            }
+            Event::ToolError(error) | Event::ProviderToolError(error) => {
+                self.record_tool_finished(&error.call_id);
+            }
+            Event::ToolBackgroundResult(result) => {
+                self.record_tool_finished(&result.call_id);
+            }
+            Event::ToolBackgroundError(error) => {
+                self.record_tool_finished(&error.call_id);
+            }
+            Event::ToolCancelled(cancelled) => {
+                self.record_tool_finished(&cancelled.call_id);
+            }
+            Event::ToolRejected(rejected) => {
+                self.record_tool_finished(&rejected.call_id);
+            }
+            _ => {}
+        }
+    }
+
+    fn record_tool_finished(&mut self, call_id: &ToolCallId) {
+        self.in_progress_tool_names.remove(call_id);
+    }
+
+    fn initial_display(&self, call: &AgentToolCall) -> Option<ToolUseState> {
+        let (args, status_text) = match call.name.as_str() {
+            SKILL_TOOL_NAME => {
+                let needles = extract_skill_search_queries(&call.arguments).unwrap_or_default();
+                let search_content = extract_optional_bool(&call.arguments, "search_content")
+                    .ok()
+                    .flatten()
+                    .unwrap_or(false);
+                let scope = if search_content { " [content]" } else { "" };
+                (
+                    format!("{}{scope}", needles.join(" ")),
+                    tau_proto::PROGRESS_INDICATOR_TEXT,
+                )
+            }
+            DELEGATE_TOOL_NAME => {
+                let parsed = parse_delegate_args(&call.arguments).ok()?;
+                let args = match parsed.role {
+                    Some(role) => format!("[{}] +{role}", parsed.task_name),
+                    None => format!("[{}]", parsed.task_name),
+                };
+                (args, tau_proto::PROGRESS_INDICATOR_TEXT)
+            }
+            WAIT_TOOL_NAME => (
+                self.wait_initial_display_args(&call.arguments),
+                tau_proto::PROGRESS_INDICATOR_TEXT,
+            ),
+            MESSAGE_TOOL_NAME => match parse_message_args(&call.arguments) {
+                Ok(parsed) => (parsed.recipient_id, tau_proto::PROGRESS_INDICATOR_TEXT),
+                Err(_) => (String::new(), tau_proto::PROGRESS_INDICATOR_TEXT),
+            },
+            CANCEL_TOOL_NAME => match parse_cancel_args(&call.arguments) {
+                Ok(target) => (target.to_string(), tau_proto::PROGRESS_INDICATOR_TEXT),
+                Err(_) => (String::new(), tau_proto::PROGRESS_INDICATOR_TEXT),
+            },
+            _ => return None,
+        };
+        Some(ToolUseState {
+            args,
+            status: ToolUseStatus::InProgress,
+            status_text: status_text.to_owned(),
+            ..Default::default()
+        })
+    }
+
+    fn wait_initial_display_args(&self, arguments: &CborValue) -> String {
+        wait_target_call_id(arguments)
+            .and_then(|call_id| self.in_progress_tool_names.get(call_id))
+            .map(ToString::to_string)
+            .unwrap_or_default()
+    }
 }
 
 struct PendingDelegate {
@@ -90,7 +181,12 @@ impl InternalToolHandler for BuiltinTools {
                 else {
                     return Ok(());
                 };
-                if let Some(display) = initial_display(&call) {
+                let display = {
+                    let mut state = self.state.lock().expect("builtin tool state poisoned");
+                    state.record_tool_started(call.id.clone(), visible_tool_name.clone());
+                    state.initial_display(&call)
+                };
+                if let Some(display) = display {
                     host.publish_tool_progress(
                         &conversation_id,
                         call.id.clone(),
@@ -128,7 +224,13 @@ impl InternalToolHandler for BuiltinTools {
                 self.handle_tool_cancel_request(host, &request.target_call_id)
             }
             Event::StartAgentAccepted(_) => Ok(()),
-            _ => Ok(()),
+            _ => {
+                self.state
+                    .lock()
+                    .expect("builtin tool state poisoned")
+                    .record_tool_lifecycle_event(event);
+                Ok(())
+            }
         }
     }
 }
@@ -313,50 +415,6 @@ fn started_call(
     started: &ToolStarted,
 ) -> Option<(AgentId, AgentToolCall, ToolName)> {
     host.internal_started_call(started)
-}
-
-fn initial_display(call: &AgentToolCall) -> Option<ToolUseState> {
-    let (args, status_text) = match call.name.as_str() {
-        SKILL_TOOL_NAME => {
-            let needles = extract_skill_search_queries(&call.arguments).unwrap_or_default();
-            let search_content = extract_optional_bool(&call.arguments, "search_content")
-                .ok()
-                .flatten()
-                .unwrap_or(false);
-            let scope = if search_content { " [content]" } else { "" };
-            (
-                format!("{}{scope}", needles.join(" ")),
-                tau_proto::PROGRESS_INDICATOR_TEXT,
-            )
-        }
-        DELEGATE_TOOL_NAME => {
-            let parsed = parse_delegate_args(&call.arguments).ok()?;
-            let args = match parsed.role {
-                Some(role) => format!("[{}] +{role}", parsed.task_name),
-                None => format!("[{}]", parsed.task_name),
-            };
-            (args, tau_proto::PROGRESS_INDICATOR_TEXT)
-        }
-        WAIT_TOOL_NAME => match cbor_map_field(&call.arguments, "tool_call_id") {
-            Some(CborValue::Text(id)) => (id.clone(), tau_proto::PROGRESS_INDICATOR_TEXT),
-            _ => (String::new(), tau_proto::PROGRESS_INDICATOR_TEXT),
-        },
-        MESSAGE_TOOL_NAME => match parse_message_args(&call.arguments) {
-            Ok(parsed) => (parsed.recipient_id, tau_proto::PROGRESS_INDICATOR_TEXT),
-            Err(_) => (String::new(), tau_proto::PROGRESS_INDICATOR_TEXT),
-        },
-        CANCEL_TOOL_NAME => match parse_cancel_args(&call.arguments) {
-            Ok(target) => (target.to_string(), tau_proto::PROGRESS_INDICATOR_TEXT),
-            Err(_) => (String::new(), tau_proto::PROGRESS_INDICATOR_TEXT),
-        },
-        _ => return None,
-    };
-    Some(ToolUseState {
-        args,
-        status: ToolUseStatus::InProgress,
-        status_text: status_text.to_owned(),
-        ..Default::default()
-    })
 }
 
 const MAX_SKILL_CONTENT_BYTES: usize = 64 * 1024;
@@ -800,6 +858,14 @@ fn cbor_map_field<'a>(arguments: &'a CborValue, key: &str) -> Option<&'a CborVal
         _ => None,
     })
 }
+
+fn wait_target_call_id(arguments: &CborValue) -> Option<&str> {
+    match cbor_map_field(arguments, "tool_call_id") {
+        Some(CborValue::Text(id)) if !id.trim().is_empty() => Some(id.as_str()),
+        _ => None,
+    }
+}
+
 fn normalized_skill_query_terms(raw_query: &str) -> Vec<String> {
     let mut terms = Vec::new();
     let mut current = String::new();
@@ -1191,6 +1257,83 @@ mod tests {
                     _ => None,
                 })
         })
+    }
+
+    fn wait_args_exact(call_id: &str) -> CborValue {
+        CborValue::Map(vec![(
+            CborValue::Text("tool_call_id".to_owned()),
+            CborValue::Text(call_id.to_owned()),
+        )])
+    }
+
+    fn wait_call(target_call_id: &str) -> AgentToolCall {
+        AgentToolCall {
+            id: "wait-call".into(),
+            name: ToolName::new(WAIT_TOOL_NAME),
+            tool_type: ToolType::Function,
+            arguments: wait_args_exact(target_call_id),
+        }
+    }
+
+    fn tool_result(call_id: &str, kind: ToolResultKind) -> ToolResult {
+        ToolResult {
+            call_id: call_id.into(),
+            tool_name: ToolName::new("shell"),
+            tool_type: ToolType::Function,
+            result: CborValue::Text("done".to_owned()),
+            kind,
+            display: None,
+            originator: PromptOriginator::User,
+        }
+    }
+
+    fn tool_background_result(call_id: &str) -> tau_proto::ToolBackgroundResult {
+        tau_proto::ToolBackgroundResult {
+            call_id: call_id.into(),
+            tool_name: ToolName::new("shell"),
+            tool_type: ToolType::Function,
+            result: CborValue::Text("done".to_owned()),
+            display: None,
+            originator: PromptOriginator::User,
+        }
+    }
+
+    #[test]
+    fn wait_initial_display_uses_tracked_target_tool_name() {
+        // Regression for provider-owned running display: the wait tool should
+        // show the logical source tool name, not the opaque target call id.
+        let mut state = BuiltinState::default();
+        state.record_tool_started("shell-call".into(), ToolName::new("shell"));
+
+        let display = state
+            .initial_display(&wait_call("shell-call"))
+            .expect("wait display");
+
+        assert_eq!(display.args, "shell");
+        assert_eq!(display.status, ToolUseStatus::InProgress);
+    }
+
+    #[test]
+    fn wait_initial_display_tracks_only_running_or_backgrounded_tools() {
+        let mut state = BuiltinState::default();
+        state.record_tool_started("shell-call".into(), ToolName::new("shell"));
+
+        state.record_tool_lifecycle_event(&Event::ProviderToolResult(tool_result(
+            "shell-call",
+            ToolResultKind::BackgroundPlaceholder,
+        )));
+        let display = state
+            .initial_display(&wait_call("shell-call"))
+            .expect("wait display after placeholder");
+        assert_eq!(display.args, "shell");
+
+        state.record_tool_lifecycle_event(&Event::ToolBackgroundResult(tool_background_result(
+            "shell-call",
+        )));
+        let display = state
+            .initial_display(&wait_call("shell-call"))
+            .expect("wait display after finish");
+        assert_eq!(display.args, "");
     }
 
     #[test]

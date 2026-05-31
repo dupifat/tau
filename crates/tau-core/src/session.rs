@@ -776,7 +776,9 @@ impl AgentTree {
             Event::ProviderToolResult(result) => {
                 self.validate_terminal_tool_result(&result.call_id)
             }
-            Event::ProviderToolError(error) => self.validate_terminal_tool_result(&error.call_id),
+            Event::ProviderToolError(error) | Event::ToolError(error) => {
+                self.validate_terminal_tool_result(&error.call_id)
+            }
             Event::ToolCancelled(cancelled) => {
                 self.validate_terminal_tool_result(&cancelled.call_id)
             }

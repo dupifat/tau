@@ -2030,7 +2030,7 @@ impl EventRenderer {
                     self.agent_activity.finish_tool(&result.call_id);
                 }
             }
-            Event::ToolError(error) | Event::ProviderToolError(error) => {
+            Event::ToolError(error) => {
                 self.agent_activity.finish_tool(&error.call_id);
             }
             Event::ToolBackgroundResult(result) => {
@@ -2336,9 +2336,7 @@ impl EventRenderer {
             Event::ToolResult(result) | Event::ProviderToolResult(result) => {
                 !result.originator.is_user()
             }
-            Event::ToolError(error) | Event::ProviderToolError(error) => {
-                !error.originator.is_user()
-            }
+            Event::ToolError(error) => !error.originator.is_user(),
             Event::ExtensionContextReady(_) => true,
             _ => false,
         }
@@ -2490,7 +2488,7 @@ impl EventRenderer {
                 .get(result.call_id.as_str())
                 .cloned()
                 .or_else(|| self.agent_id_for_originator(&result.originator)),
-            Event::ToolError(error) | Event::ProviderToolError(error) => self
+            Event::ToolError(error) => self
                 .tool_agents
                 .get(error.call_id.as_str())
                 .cloned()
@@ -3409,10 +3407,7 @@ impl EventRenderer {
                 self.handle_tool_result(result, recorded_at);
                 true
             }
-            Event::ProviderToolError(error) => {
-                self.handle_tool_error(error, recorded_at);
-                true
-            }
+            Event::ProviderToolError(_) => true,
             Event::ToolResult(result) => {
                 self.handle_tool_result(result, recorded_at);
                 true

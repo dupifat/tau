@@ -2380,6 +2380,7 @@ impl Harness {
             event,
             Event::ProviderToolResult(_)
                 | Event::ProviderToolError(_)
+                | Event::ToolError(_)
                 | Event::ToolCancelled(_)
                 | Event::ToolBackgroundResult(_)
                 | Event::ToolBackgroundError(_)
@@ -2415,7 +2416,7 @@ impl Harness {
                 .and_then(|conv| conv.agent_id.as_ref())
                 .cloned()
                 .map(Into::into),
-            Event::ProviderToolError(error) => self
+            Event::ProviderToolError(error) | Event::ToolError(error) => self
                 .tool_agents
                 .get(&error.call_id)
                 .and_then(|cid| self.agents.get(cid))
@@ -8563,9 +8564,10 @@ impl Harness {
     ) {
         let call_id: ToolCallId = call.id.clone();
         self.tool_agents.insert(call_id.clone(), cid.clone());
-        self.publish_for_agent(
-            cid,
-            Event::ProviderToolError(ToolError {
+        self.publish_terminal_tool_error(
+            Some(cid),
+            None,
+            ToolError {
                 call_id: call_id.clone(),
                 tool_name,
                 tool_type: call.tool_type,
@@ -8573,7 +8575,7 @@ impl Harness {
                 details: None,
                 display: None,
                 originator: tau_proto::PromptOriginator::User,
-            }),
+            },
         );
         self.on_tool_call_complete(call_id.as_str());
         self.clear_tool_call_tracking(call_id.as_str());

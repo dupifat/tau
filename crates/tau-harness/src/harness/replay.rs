@@ -325,6 +325,7 @@ fn should_replay_agent_event_to_late_subscriber(event: &Event) -> bool {
             | Event::AgentMessageReceived(_)
             | Event::ProviderToolResult(_)
             | Event::ProviderToolError(_)
+            | Event::ToolError(_)
             | Event::ToolBackgroundResult(_)
             | Event::ToolBackgroundError(_)
             | Event::ToolCancelled(_)

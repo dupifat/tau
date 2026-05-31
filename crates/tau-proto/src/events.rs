@@ -2878,8 +2878,7 @@ impl Event {
     pub const fn defaults_to_transient(&self) -> bool {
         matches!(
             self,
-            Self::ToolError(_)
-                | Self::ToolCancelled(_)
+            Self::ToolCancelled(_)
                 | Self::ProviderResponseUpdated(_)
                 | Self::ProviderPromptSubmitted(_)
                 | Self::ToolProgress(_)

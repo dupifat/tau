@@ -3439,11 +3439,11 @@ fn delegate_progress_redraws_live_parent_block() {
     );
 }
 
-/// Regression: invalid provider tool calls can fail schema validation before
-/// the harness emits `ToolStarted`. The UI must reserve transcript order but
-/// must not show a fake live tool while waiting for the provider error.
+/// Provider-facing tool errors are model plumbing, not user-visible logical
+/// tool state. Without a logical `ToolError`, the UI must not invent a history
+/// line.
 #[test]
-fn provider_tool_error_before_tool_started_does_not_show_live_tool() {
+fn provider_tool_error_before_tool_started_is_ignored() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -3482,15 +3482,57 @@ fn provider_tool_error_before_tool_started_does_not_show_live_tool() {
         tau_proto::UnixMicros::new(2_000_000),
     );
     sync(&handle);
-    assert!(vt.screen_contains(80, "delegate err: invalid"));
+    assert!(!vt.screen_contains(80, "delegate err: invalid"));
     assert!(!vt.screen_contains(80, "delegate 0s …"));
 }
-
-/// Schema validation failures only emit `ProviderToolError`. The UI still has
-/// a live block from the preceding `ToolStarted`, so it must treat that
-/// provider-facing error as terminal and render the error in history.
 #[test]
-fn provider_tool_error_without_logical_tool_error_finishes_live_tool() {
+fn logical_and_provider_tool_errors_render_one_terminal_line() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    renderer.handle_recorded_at(
+        &tool_started("overlap-read", "read", CborValue::Map(Vec::new())),
+        tau_proto::UnixMicros::new(1_000_000),
+    );
+    renderer.handle_recorded_at(
+        &Event::ToolError(ToolError {
+            call_id: "overlap-read".into(),
+            tool_name: tau_proto::ToolName::new("read"),
+            tool_type: tau_proto::ToolType::Function,
+            message: "overlapping ranges".to_owned(),
+            details: None,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        }),
+        tau_proto::UnixMicros::new(2_000_000),
+    );
+    renderer.handle_recorded_at(
+        &Event::ProviderToolError(ToolError {
+            call_id: "overlap-read".into(),
+            tool_name: tau_proto::ToolName::new("read"),
+            tool_type: tau_proto::ToolType::Function,
+            message: "overlapping ranges".to_owned(),
+            details: None,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        }),
+        tau_proto::UnixMicros::new(2_100_000),
+    );
+    sync(&handle);
+
+    let text = vt.screen_text(80).join("\n");
+    assert!(text.contains("read 1s err: overlapping ranges"));
+    assert_eq!(text.matches("overlapping ranges").count(), 1);
+}
+
+/// Provider-facing errors must not finish live UI tool blocks. The harness is
+/// responsible for publishing a logical `ToolError` for user-visible failures.
+#[test]
+fn provider_tool_error_without_logical_tool_error_does_not_finish_live_tool() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -3530,8 +3572,8 @@ fn provider_tool_error_without_logical_tool_error_finishes_live_tool() {
         tau_proto::UnixMicros::new(2_000_000),
     );
     sync(&handle);
-    assert!(vt.screen_contains(80, "err: invalid"));
-    assert!(!vt.screen_contains(80, "strict_tool 0s …"));
+    assert!(!vt.screen_contains(80, "err: invalid"));
+    assert!(vt.screen_contains(80, "strict_tool 0s …"));
 }
 
 #[test]

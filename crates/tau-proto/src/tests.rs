@@ -857,6 +857,15 @@ fn event_defaults_to_transient_marks_progress_kinds() {
             session_id: "s1".into(),
             agent_id: "worker".into(),
         }),
+        Event::ToolError(ToolError {
+            call_id: "call-1".into(),
+            tool_name: ToolName::new("read"),
+            tool_type: ToolType::Function,
+            message: "failed".to_owned(),
+            details: None,
+            display: None,
+            originator: PromptOriginator::User,
+        }),
     ];
     for event in &durable {
         assert!(

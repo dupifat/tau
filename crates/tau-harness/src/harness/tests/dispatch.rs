@@ -793,10 +793,10 @@ fn tool_invoke_call_ids(events: &Arc<Mutex<Vec<RoutedFrame>>>) -> Vec<String> {
         .collect()
 }
 
-/// Invalid model arguments must be rejected before the logical tool pipeline.
-/// This keeps bad calls out of the event log as
-/// `ToolRequest`/`ToolStarted` while still returning a
-/// provider-facing tool error to the model.
+/// Invalid model arguments must be rejected before tool dispatch. The harness
+/// still emits a logical `ToolError` for user-visible UI state and a
+/// provider-facing error for the model, but no
+/// `ToolRequest`/`ToolStarted`.
 #[test]
 fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
     let td = TempDir::new().expect("tempdir");
@@ -874,10 +874,7 @@ fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
     let provider_error = provider_error.expect("provider tool error");
     assert!(provider_error.contains("invalid arguments for tool `strict_tool`"));
     assert!(provider_error.contains("unexpected argument `extra`"));
-    assert!(
-        logical_events.is_empty(),
-        "unexpected events: {logical_events:?}"
-    );
+    assert_eq!(logical_events, vec!["tool.error"]);
     assert!(tool_invoke_call_ids(&tool_events).is_empty());
 
     h.shutdown().expect("shutdown");

@@ -35,6 +35,8 @@ fn run_full_render(
         all_lines,
         line_sources,
         log_end: history_lines,
+        history_generation: 0,
+        history_width: cols as usize,
         cursor_row,
         cursor_col,
     };
@@ -230,6 +232,8 @@ fn full_render_caps_visible_state_when_fixed_area_exceeds_height() {
             .collect(),
         all_lines,
         log_end: 2,
+        history_generation: 0,
+        history_width: 30,
         cursor_row: 3,
         cursor_col: 8,
     };
@@ -256,6 +260,8 @@ fn full_render_cursor_uses_physical_viewport_start() {
             .collect(),
         all_lines,
         log_end: 2,
+        history_generation: 0,
+        history_width: 30,
         cursor_row: 3,
         cursor_col: 8,
     };
@@ -283,12 +289,16 @@ fn full_render_resize_to_larger_bottom_aligns_without_rubber() {
             .collect(),
         all_lines,
         log_end: 10,
+        history_generation: 0,
+        history_width: 30,
         cursor_row: 10,
         cursor_col: 8,
     };
     let mut model = TerminalModel {
         viewport_start: 6,
         rubber_height: 0,
+        history_generation: 0,
+        history_width: 30,
         known_lines: Vec::new(),
         known_sources: Vec::new(),
     };
@@ -1876,6 +1886,39 @@ fn virtual_term_renders_typed_input() {
     );
 }
 
+/// Editing the prompt after persistent history has scrolled away must keep the
+/// viewport stable and update only the prompt tail. This is the user-visible
+/// case protected by the cached-history redraw fast path.
+#[test]
+fn prompt_edit_after_scrolled_history_updates_prompt_tail() {
+    let buf = SharedBuffer::new();
+    let mut parser = vt100::Parser::new(5, 40, 80);
+
+    let (_term, handle, _input_tx) =
+        Term::new_virtual(40, 5, "> ", Box::new(buf.clone()), CursorShape::Bar);
+    flush_redraws(&handle, &buf, &mut parser);
+
+    for i in 0..20 {
+        handle.print_output("history", plain_block(format!("history line {i}")));
+    }
+    flush_redraws(&handle, &buf, &mut parser);
+
+    let full_render_count = handle.full_render_count();
+    handle.set_buffer("x".to_owned(), 1);
+    flush_redraws(&handle, &buf, &mut parser);
+
+    assert_eq!(
+        handle.full_render_count(),
+        full_render_count,
+        "prompt-only edits should stay on the incremental path"
+    );
+    assert!(
+        screen_contains(&parser, 40, "> x"),
+        "edited prompt should be visible, got: {:?}",
+        vt100_rows(&parser, 40)
+    );
+}
+
 /// Printed output blocks should be included in the virtual terminal frame, not
 /// only stored in the model.
 #[test]
@@ -2152,6 +2195,8 @@ fn full_redraw_queues_without_flushing_mid_frame() {
         all_lines,
         line_sources,
         log_end: 2,
+        history_generation: 0,
+        history_width: 40,
         cursor_row: 2,
         cursor_col: 8,
     };

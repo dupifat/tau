@@ -143,6 +143,10 @@ struct SharedState {
 
     /// Persistent output — append-only ordered list of block ids.
     history: Vec<BlockId>,
+    /// Reference count of block ids present in `history`.
+    history_refs: HashMap<BlockId, usize>,
+    /// Bumped whenever persistent history content, order, or layout changes.
+    history_generation: u64,
     /// Mutable blocks above the prompt (can be reordered).
     above_active: Vec<BlockId>,
     /// Blocks pinned right above the prompt.
@@ -213,6 +217,8 @@ impl SharedState {
             block_debug_ids: HashMap::new(),
             next_id: 0,
             history: Vec::new(),
+            history_refs: HashMap::new(),
+            history_generation: 0,
             above_active: Vec::new(),
             above_sticky: Vec::new(),
             suggestions: Vec::new(),
@@ -246,6 +252,41 @@ impl SharedState {
         let id = BlockId(self.next_id);
         self.next_id += 1;
         id
+    }
+
+    fn bump_history_generation(&mut self) {
+        self.history_generation = self.history_generation.wrapping_add(1);
+    }
+
+    fn add_history_ref(&mut self, id: BlockId) {
+        *self.history_refs.entry(id).or_insert(0) += 1;
+        self.bump_history_generation();
+    }
+
+    fn remove_history_refs(&mut self, id: BlockId, count: usize) {
+        if count == 0 {
+            return;
+        }
+        if let Some(existing) = self.history_refs.get_mut(&id) {
+            if *existing <= count {
+                self.history_refs.remove(&id);
+            } else {
+                *existing -= count;
+            }
+        }
+        self.bump_history_generation();
+    }
+
+    fn rebuild_history_refs(&mut self) {
+        self.history_refs.clear();
+        for &id in &self.history {
+            *self.history_refs.entry(id).or_insert(0) += 1;
+        }
+        self.bump_history_generation();
+    }
+
+    fn block_in_history(&self, id: BlockId) -> bool {
+        self.history_refs.contains_key(&id)
     }
 
     fn current_snapshot(&self) -> PromptSnapshot {
@@ -647,6 +688,12 @@ pub enum Event {
     ExternalEditor,
 }
 
+fn remove_all_from_zone(zone: &mut Vec<BlockId>, id: BlockId) -> usize {
+    let before = zone.len();
+    zone.retain(|&x| x != id);
+    before - zone.len()
+}
+
 /// Snapshot of terminal output zones, excluding prompt input/history state.
 #[derive(Clone, Debug, Default)]
 pub struct OutputSnapshot {
@@ -758,6 +805,7 @@ impl TermHandle {
         st.blocks = snapshot.blocks;
         st.block_debug_ids = snapshot.block_debug_ids;
         st.history = snapshot.history;
+        st.rebuild_history_refs();
         st.above_active = snapshot.above_active;
         st.above_sticky = snapshot.above_sticky;
         st.suggestions = snapshot.suggestions;
@@ -847,10 +895,14 @@ impl TermHandle {
         let block = block.into();
         let content_empty = block.content.is_empty();
         let mut st = self.lock();
+        let affects_history = st.block_in_history(id);
         st.blocks.insert(id, block);
         st.block_debug_ids
             .entry(id)
             .or_insert_with(|| format!("set-block-{}", id.0));
+        if affects_history {
+            st.bump_history_generation();
+        }
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, content_empty, "set block");
     }
 
@@ -860,7 +912,8 @@ impl TermHandle {
         let mut st = self.lock();
         let existed = st.blocks.remove(&id).is_some();
         let debug_id = st.block_debug_ids.remove(&id);
-        st.history.retain(|&x| x != id);
+        let removed_history_refs = remove_all_from_zone(&mut st.history, id);
+        st.remove_history_refs(id, removed_history_refs);
         st.above_active.retain(|&x| x != id);
         st.above_sticky.retain(|&x| x != id);
         st.suggestions.retain(|&x| x != id);
@@ -872,7 +925,9 @@ impl TermHandle {
 
     /// Appends a block id to the history (persistent output).
     pub fn push_history(&self, id: BlockId) {
-        self.lock().history.push(id);
+        let mut st = self.lock();
+        st.history.push(id);
+        st.add_history_ref(id);
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "history", "push block zone");
     }
 
@@ -956,6 +1011,7 @@ impl TermHandle {
         st.blocks.insert(id, block);
         st.block_debug_ids.insert(id, debug_id.clone());
         st.history.push(id);
+        st.add_history_ref(id);
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, debug_id, content_empty, zone = "history", "print output");
         let notify = st.redraw_suppression == 0;
         drop(st);
@@ -2295,6 +2351,60 @@ fn layout_id_list(
     }
 }
 
+/// Cached layout for persistent history blocks.
+#[derive(Default)]
+struct HistoryLayoutCache {
+    width: usize,
+    generation: u64,
+    lines: Vec<Vec<Cell>>,
+    sources: Vec<LineSource>,
+}
+
+impl HistoryLayoutCache {
+    fn refresh(&mut self, st: &SharedState) {
+        if self.width == st.width && self.generation == st.history_generation {
+            return;
+        }
+
+        let mut lines = Vec::new();
+        let mut sources = Vec::new();
+        layout_id_list(
+            "history",
+            &st.history,
+            &st.blocks,
+            &st.block_debug_ids,
+            st.width,
+            &mut lines,
+            &mut sources,
+        );
+
+        self.width = st.width;
+        self.generation = st.history_generation;
+        self.lines = lines;
+        self.sources = sources;
+    }
+}
+
+/// Layout for everything after persistent history.
+struct TailLayout {
+    /// Lines for above-active plus fixed prompt/status/suggestions rows.
+    lines: Vec<Vec<Cell>>,
+    /// Source block/zone for each tail line.
+    sources: Vec<LineSource>,
+    /// Number of leading `lines` entries that belong to above-active.
+    active_height: usize,
+    /// Absolute cursor row after persistent history is prepended.
+    cursor_row: usize,
+    /// Cursor column.
+    cursor_col: usize,
+}
+
+impl TailLayout {
+    fn fixed_height(&self) -> usize {
+        self.lines.len().saturating_sub(self.active_height)
+    }
+}
+
 /// Result of laying out all content.
 struct LayoutAll {
     /// All rendered lines without rubber (log + fixed area).
@@ -2308,6 +2418,10 @@ struct LayoutAll {
     /// this boundary to absorb visible log shrinkage without moving the fixed
     /// area upward.
     log_end: usize,
+    /// Persistent-history generation used to build this layout.
+    history_generation: u64,
+    /// Terminal width used to build persistent-history lines.
+    history_width: usize,
     /// Absolute cursor row in `all_lines`.
     cursor_row: usize,
     /// Cursor column.
@@ -2336,6 +2450,13 @@ impl ViewPlan {
     }
 }
 
+struct PlanMetrics {
+    viewport_start: usize,
+    rubber_height: usize,
+    render_len: usize,
+    cursor_row: usize,
+}
+
 /// Renderer-side model of the terminal content Tau believes it owns.
 ///
 /// `viewport_start` is the top row of the physical terminal viewport within
@@ -2348,6 +2469,8 @@ impl ViewPlan {
 struct TerminalModel {
     viewport_start: usize,
     rubber_height: usize,
+    history_generation: u64,
+    history_width: usize,
     known_lines: Vec<Vec<Cell>>,
     known_sources: Vec<LineSource>,
 }
@@ -2355,6 +2478,13 @@ struct TerminalModel {
 impl TerminalModel {
     fn desired_viewport_start(layout: &LayoutAll, height: usize) -> usize {
         layout.all_lines.len().saturating_sub(height)
+    }
+
+    fn history_cache_matches(&self, history: &HistoryLayoutCache) -> bool {
+        self.history_generation == history.generation
+            && self.history_width == history.width
+            && history.lines.len() <= self.known_lines.len()
+            && history.sources.len() <= self.known_sources.len()
     }
 
     fn hidden_prefix_changed(&self, layout: &LayoutAll) -> bool {
@@ -2424,10 +2554,15 @@ impl TerminalModel {
         plan
     }
 
-    fn plan_view(&self, layout: &LayoutAll, height: usize) -> ViewPlan {
-        let fixed_height = layout.all_lines.len().saturating_sub(layout.log_end);
-        let log_height = layout.log_end;
-        let mut viewport_start = self.viewport_start.min(log_height);
+    fn plan_metrics(
+        &self,
+        log_height: usize,
+        fixed_height: usize,
+        cursor_row: usize,
+        height: usize,
+    ) -> PlanMetrics {
+        let height = height.max(1);
+        let viewport_start = self.viewport_start.min(log_height);
         let mut rubber_height = self.rubber_height;
 
         if fixed_height < height {
@@ -2443,62 +2578,98 @@ impl TerminalModel {
                 let overflow = occupied - height;
                 let consume_rubber = rubber_height.min(overflow);
                 rubber_height -= consume_rubber;
-                viewport_start += overflow - consume_rubber;
             }
         } else {
-            viewport_start = log_height;
             rubber_height = 0;
         }
 
-        viewport_start = viewport_start.min(log_height);
-        let plan = Self::build_plan(layout, viewport_start, rubber_height);
-        Self::keep_cursor_visible(plan, height)
+        let render_len = log_height + rubber_height + fixed_height;
+        let cursor_row = if log_height <= cursor_row {
+            cursor_row + rubber_height
+        } else {
+            cursor_row
+        };
+        let bottom_start = render_len.saturating_sub(height);
+        let visible_start =
+            viewport_start_with_cursor(bottom_start, cursor_row, render_len, height);
+        let render_len = if visible_start < bottom_start {
+            (visible_start + height).min(render_len)
+        } else {
+            render_len
+        };
+
+        PlanMetrics {
+            viewport_start: render_len.saturating_sub(height),
+            rubber_height,
+            render_len,
+            cursor_row,
+        }
+    }
+
+    fn plan_view(&self, layout: &LayoutAll, height: usize) -> ViewPlan {
+        let fixed_height = layout.all_lines.len().saturating_sub(layout.log_end);
+        let metrics = self.plan_metrics(layout.log_end, fixed_height, layout.cursor_row, height);
+        let mut plan = Self::build_plan(layout, metrics.viewport_start, metrics.rubber_height);
+        plan.cursor_row = metrics.cursor_row;
+        plan.render_lines.truncate(metrics.render_len);
+        plan.viewport_start = metrics.viewport_start;
+        plan
+    }
+
+    fn apply_fast_plan(
+        &mut self,
+        history: &HistoryLayoutCache,
+        tail: &TailLayout,
+        metrics: &PlanMetrics,
+    ) {
+        self.viewport_start = metrics.viewport_start;
+        self.rubber_height = metrics.rubber_height;
+        self.history_generation = history.generation;
+        self.history_width = history.width;
+        self.known_lines.truncate(history.lines.len());
+        self.known_sources.truncate(history.sources.len());
+        self.known_lines
+            .extend_from_slice(&tail.lines[..tail.active_height]);
+        self.known_sources
+            .extend_from_slice(&tail.sources[..tail.active_height]);
     }
 
     fn reset_to_plan(&mut self, layout: LayoutAll, plan: &ViewPlan) {
         self.viewport_start = plan.viewport_start;
         self.rubber_height = plan.rubber_height;
+        self.history_generation = layout.history_generation;
+        self.history_width = layout.history_width;
         self.known_lines = layout.all_lines[..layout.log_end].to_vec();
         self.known_sources = layout.line_sources[..layout.log_end].to_vec();
     }
 }
 
-/// Lays out the full content (history + above + input + below).
-fn layout_all(st: &SharedState) -> LayoutAll {
+fn layout_tail(st: &SharedState, history_height: usize) -> TailLayout {
     let width = st.width;
-    let mut all_lines: Vec<Vec<Cell>> = Vec::new();
-    let mut line_sources: Vec<LineSource> = Vec::new();
+    let mut lines: Vec<Vec<Cell>> = Vec::new();
+    let mut sources: Vec<LineSource> = Vec::new();
 
-    layout_id_list(
-        "history",
-        &st.history,
-        &st.blocks,
-        &st.block_debug_ids,
-        width,
-        &mut all_lines,
-        &mut line_sources,
-    );
     layout_id_list(
         "above_active",
         &st.above_active,
         &st.blocks,
         &st.block_debug_ids,
         width,
-        &mut all_lines,
-        &mut line_sources,
+        &mut lines,
+        &mut sources,
     );
-    let log_end = all_lines.len();
+    let active_height = lines.len();
     layout_id_list(
         "above_sticky",
         &st.above_sticky,
         &st.blocks,
         &st.block_debug_ids,
         width,
-        &mut all_lines,
-        &mut line_sources,
+        &mut lines,
+        &mut sources,
     );
 
-    let above_end = all_lines.len();
+    let above_end = history_height + lines.len();
 
     let mut input_content = st.left_prompt.clone();
     if st.buffer.is_empty() {
@@ -2550,8 +2721,8 @@ fn layout_all(st: &SharedState) -> LayoutAll {
     let cursor_row = above_end + buffer_cursor_row;
 
     for (wrapped_row, line) in input_lines.into_iter().enumerate() {
-        line_sources.push(LineSource::Input { wrapped_row });
-        all_lines.push(line);
+        sources.push(LineSource::Input { wrapped_row });
+        lines.push(line);
     }
     layout_id_list(
         "suggestions",
@@ -2559,8 +2730,8 @@ fn layout_all(st: &SharedState) -> LayoutAll {
         &st.blocks,
         &st.block_debug_ids,
         width,
-        &mut all_lines,
-        &mut line_sources,
+        &mut lines,
+        &mut sources,
     );
     layout_id_list(
         "below",
@@ -2568,20 +2739,101 @@ fn layout_all(st: &SharedState) -> LayoutAll {
         &st.blocks,
         &st.block_debug_ids,
         width,
-        &mut all_lines,
-        &mut line_sources,
+        &mut lines,
+        &mut sources,
     );
 
-    LayoutAll {
-        all_lines,
-        line_sources,
-        log_end,
+    TailLayout {
+        lines,
+        sources,
+        active_height,
         cursor_row,
         cursor_col,
     }
 }
 
+fn layout_all_from_cached_history(history: &HistoryLayoutCache, tail: TailLayout) -> LayoutAll {
+    let log_end = history.lines.len() + tail.active_height;
+    let cursor_row = tail.cursor_row;
+    let cursor_col = tail.cursor_col;
+    let mut all_lines = Vec::with_capacity(history.lines.len() + tail.lines.len());
+    all_lines.extend_from_slice(&history.lines);
+    all_lines.extend(tail.lines);
+
+    let mut line_sources = Vec::with_capacity(history.sources.len() + tail.sources.len());
+    line_sources.extend_from_slice(&history.sources);
+    line_sources.extend(tail.sources);
+
+    LayoutAll {
+        all_lines,
+        line_sources,
+        log_end,
+        history_generation: history.generation,
+        history_width: history.width,
+        cursor_row,
+        cursor_col,
+    }
+}
+
+/// Lays out the full content (history + above + input + below).
+fn layout_all(st: &SharedState) -> LayoutAll {
+    let mut history = HistoryLayoutCache::default();
+    history.refresh(st);
+    let tail = layout_tail(st, history.lines.len());
+    layout_all_from_cached_history(&history, tail)
+}
+
+fn visible_lines_from_parts(
+    history_lines: &[Vec<Cell>],
+    tail: &TailLayout,
+    metrics: &PlanMetrics,
+) -> Vec<Vec<Cell>> {
+    let history_height = history_lines.len();
+    let log_height = history_height + tail.active_height;
+    let fixed_start = log_height + metrics.rubber_height;
+    let mut visible = Vec::with_capacity(metrics.render_len.saturating_sub(metrics.viewport_start));
+
+    for idx in metrics.viewport_start..metrics.render_len {
+        if idx < history_height {
+            visible.push(
+                history_lines
+                    .get(idx)
+                    .expect("visible history row should exist")
+                    .clone(),
+            );
+        } else if idx < log_height {
+            visible.push(
+                tail.lines
+                    .get(idx - history_height)
+                    .expect("visible active row should exist")
+                    .clone(),
+            );
+        } else if idx < fixed_start {
+            visible.push(Vec::new());
+        } else {
+            visible.push(
+                tail.lines
+                    .get(tail.active_height + idx - fixed_start)
+                    .expect("visible fixed row should exist")
+                    .clone(),
+            );
+        }
+    }
+
+    visible
+}
+
 // --- Redraw thread ---
+
+enum RenderFrame {
+    Fast {
+        tail: TailLayout,
+        metrics: PlanMetrics,
+    },
+    Full {
+        layout: LayoutAll,
+    },
+}
 
 fn redraw_loop(
     state: Arc<Mutex<SharedState>>,
@@ -2597,6 +2849,7 @@ fn redraw_loop(
     let mut screen = Screen::new(w);
     let mut prev_width = w;
     let mut prev_height = h;
+    let mut history_cache = HistoryLayoutCache::default();
     let mut terminal_model = TerminalModel::default();
 
     loop {
@@ -2664,7 +2917,24 @@ fn redraw_loop(
         let sync_gen = st.sync_requested;
         let pending_raw = std::mem::take(&mut st.pending_raw);
 
-        let layout = layout_all(&st);
+        history_cache.refresh(&st);
+        let tail = layout_tail(&st, history_cache.lines.len());
+        let log_height = history_cache.lines.len() + tail.active_height;
+        let fixed_height = tail.fixed_height();
+        let metrics =
+            terminal_model.plan_metrics(log_height, fixed_height, tail.cursor_row, height);
+        let can_fast = !size_changed
+            && !force_full
+            && terminal_model.history_cache_matches(&history_cache)
+            && metrics.viewport_start == terminal_model.viewport_start
+            && metrics.viewport_start <= history_cache.lines.len();
+        let frame = if can_fast {
+            RenderFrame::Fast { tail, metrics }
+        } else {
+            RenderFrame::Full {
+                layout: layout_all_from_cached_history(&history_cache, tail),
+            }
+        };
         drop(st);
 
         // Pending escape sequences: emit before the frame so they
@@ -2683,118 +2953,139 @@ fn redraw_loop(
             screen.invalidate();
         }
 
-        if size_changed || force_full {
-            // Path 2: Full render (resize, or post-external-program).
-            let reason = if size_changed {
-                "size_changed"
-            } else {
-                "force_full"
-            };
-            let plan = TerminalModel::full_redraw_plan(&layout, height);
-            let visible_start = plan.viewport_start;
-            mark_full_render(
-                &state,
-                &layout,
-                FullRenderMark {
-                    reason,
-                    prev_visible_start: terminal_model.viewport_start,
-                    visible_start,
-                    height,
-                    changed_line: None,
-                    previous_source: None,
-                },
-            );
-            if let Err(e) = full_render(&mut writer, &mut screen, &layout, &plan, width, height) {
-                tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
-            }
-            terminal_model.reset_to_plan(layout, &plan);
-        } else {
-            screen.set_width(width);
-
-            let hidden_prefix_changed = terminal_model.hidden_prefix_changed(&layout);
-            let incremental_plan = terminal_model.plan_view(&layout, height);
-            let incremental_visible_start = incremental_plan.viewport_start;
-            let plan;
-
-            if incremental_visible_start < terminal_model.viewport_start {
-                // The desired viewport moved upward to keep the input cursor
-                // visible. Rows that should re-enter the screen may currently
-                // exist only in terminal scrollback, which cannot be pulled
-                // back incrementally. Since we are repainting from scratch,
-                // discard any rubber and paint the new viewport directly.
-                plan = TerminalModel::full_redraw_plan(&layout, height);
-                let visible_start = plan.viewport_start;
-                mark_full_render(
-                    &state,
-                    &layout,
-                    FullRenderMark {
-                        reason: "viewport_moved_up",
-                        prev_visible_start: terminal_model.viewport_start,
-                        visible_start,
-                        height,
-                        changed_line: None,
-                        previous_source: None,
-                    },
-                );
-                if let Err(e) = full_render(&mut writer, &mut screen, &layout, &plan, width, height)
-                {
-                    tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
-                }
-            } else if hidden_prefix_changed {
-                // The terminal scrollback may contain rows whose logical
-                // content changed. Clear it instead of trying to patch it
-                // incrementally. Since we are repainting from scratch, discard
-                // any rubber and paint the new viewport directly.
-                plan = TerminalModel::full_redraw_plan(&layout, height);
-                let visible_start = plan.viewport_start;
-                let changed_line = terminal_model.changed_hidden_line(&layout);
-                let previous_source = changed_line
-                    .and_then(|idx| terminal_model.known_sources.get(idx))
-                    .cloned();
-                mark_full_render(
-                    &state,
-                    &layout,
-                    FullRenderMark {
-                        reason: "hidden_prefix_changed",
-                        prev_visible_start: terminal_model.viewport_start,
-                        visible_start,
-                        height,
-                        changed_line,
-                        previous_source,
-                    },
-                );
-                if let Err(e) = full_render(&mut writer, &mut screen, &layout, &plan, width, height)
-                {
-                    tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
-                }
-            } else if terminal_model.viewport_start < incremental_visible_start {
-                plan = incremental_plan;
-                // Content pushed log rows off the top. Use the scrolling
-                // renderer (Pi-style). Rubber is part of the virtual tail, so
-                // it shrinks before any extra log row enters scrollback.
-                if let Err(e) = screen.render_scrolling(
-                    &mut writer,
-                    &plan.render_lines,
-                    terminal_model.viewport_start,
-                    height,
-                    (plan.cursor_row, layout.cursor_col),
-                ) {
-                    tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "scroll render error");
-                }
-            } else {
-                plan = incremental_plan;
-                // No new scrollback rows — normal differential update. This
-                // includes visible shrinkage: rubber grows instead of moving
-                // the viewport upward.
-                let visible = plan.visible_lines(height);
-                let cursor_in_visible = plan.cursor_in_visible(height);
+        match frame {
+            RenderFrame::Fast { tail, metrics } => {
+                screen.set_width(width);
+                let visible = visible_lines_from_parts(&history_cache.lines, &tail, &metrics);
+                let cursor_in_visible = metrics.cursor_row.saturating_sub(metrics.viewport_start);
                 if let Err(e) =
-                    screen.update(&mut writer, visible, (cursor_in_visible, layout.cursor_col))
+                    screen.update(&mut writer, &visible, (cursor_in_visible, tail.cursor_col))
                 {
                     tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "update error");
                 }
+                terminal_model.apply_fast_plan(&history_cache, &tail, &metrics);
             }
-            terminal_model.reset_to_plan(layout, &plan);
+            RenderFrame::Full { layout } => {
+                if size_changed || force_full {
+                    // Path 2: Full render (resize, or post-external-program).
+                    let reason = if size_changed {
+                        "size_changed"
+                    } else {
+                        "force_full"
+                    };
+                    let plan = TerminalModel::full_redraw_plan(&layout, height);
+                    let visible_start = plan.viewport_start;
+                    mark_full_render(
+                        &state,
+                        &layout,
+                        FullRenderMark {
+                            reason,
+                            prev_visible_start: terminal_model.viewport_start,
+                            visible_start,
+                            height,
+                            changed_line: None,
+                            previous_source: None,
+                        },
+                    );
+                    if let Err(e) =
+                        full_render(&mut writer, &mut screen, &layout, &plan, width, height)
+                    {
+                        tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
+                    }
+                    terminal_model.reset_to_plan(layout, &plan);
+                } else {
+                    screen.set_width(width);
+
+                    let hidden_prefix_changed = terminal_model.hidden_prefix_changed(&layout);
+                    let incremental_plan = terminal_model.plan_view(&layout, height);
+                    let incremental_visible_start = incremental_plan.viewport_start;
+                    let plan;
+
+                    if incremental_visible_start < terminal_model.viewport_start {
+                        // The desired viewport moved upward to keep the input cursor
+                        // visible. Rows that should re-enter the screen may currently
+                        // exist only in terminal scrollback, which cannot be pulled
+                        // back incrementally. Since we are repainting from scratch,
+                        // discard any rubber and paint the new viewport directly.
+                        plan = TerminalModel::full_redraw_plan(&layout, height);
+                        let visible_start = plan.viewport_start;
+                        mark_full_render(
+                            &state,
+                            &layout,
+                            FullRenderMark {
+                                reason: "viewport_moved_up",
+                                prev_visible_start: terminal_model.viewport_start,
+                                visible_start,
+                                height,
+                                changed_line: None,
+                                previous_source: None,
+                            },
+                        );
+                        if let Err(e) =
+                            full_render(&mut writer, &mut screen, &layout, &plan, width, height)
+                        {
+                            tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
+                        }
+                    } else if hidden_prefix_changed {
+                        // The terminal scrollback may contain rows whose logical
+                        // content changed. Clear it instead of trying to patch it
+                        // incrementally. Since we are repainting from scratch, discard
+                        // any rubber and paint the new viewport directly.
+                        plan = TerminalModel::full_redraw_plan(&layout, height);
+                        let visible_start = plan.viewport_start;
+                        let changed_line = terminal_model.changed_hidden_line(&layout);
+                        let previous_source = changed_line
+                            .and_then(|idx| terminal_model.known_sources.get(idx))
+                            .cloned();
+                        mark_full_render(
+                            &state,
+                            &layout,
+                            FullRenderMark {
+                                reason: "hidden_prefix_changed",
+                                prev_visible_start: terminal_model.viewport_start,
+                                visible_start,
+                                height,
+                                changed_line,
+                                previous_source,
+                            },
+                        );
+                        if let Err(e) =
+                            full_render(&mut writer, &mut screen, &layout, &plan, width, height)
+                        {
+                            tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
+                        }
+                    } else if terminal_model.viewport_start < incremental_visible_start {
+                        plan = incremental_plan;
+                        // Content pushed log rows off the top. Use the scrolling
+                        // renderer (Pi-style). Rubber is part of the virtual tail, so
+                        // it shrinks before any extra log row enters scrollback.
+                        if let Err(e) = screen.render_scrolling(
+                            &mut writer,
+                            &plan.render_lines,
+                            terminal_model.viewport_start,
+                            height,
+                            (plan.cursor_row, layout.cursor_col),
+                        ) {
+                            tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "scroll render error");
+                        }
+                    } else {
+                        plan = incremental_plan;
+                        // No new scrollback rows — normal differential update. This
+                        // includes visible shrinkage: rubber grows instead of moving
+                        // the viewport upward.
+                        let visible = plan.visible_lines(height);
+                        let cursor_in_visible = plan.cursor_in_visible(height);
+                        if let Err(e) = screen.update(
+                            &mut writer,
+                            visible,
+                            (cursor_in_visible, layout.cursor_col),
+                        ) {
+                            tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "update error");
+                        }
+                    }
+                    terminal_model.reset_to_plan(layout, &plan);
+                }
+            }
         }
 
         if let Err(e) = writer.flush() {

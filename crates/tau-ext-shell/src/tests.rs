@@ -1015,6 +1015,31 @@ fn dir_lock_update_errors_when_same_agent_already_holds_overlapping_lock() {
 }
 
 #[test]
+fn dir_lock_waiting_progress_preserves_shell_mode() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let Event::ToolStarted(invoke) = tool_started(
+        "blocked-shell",
+        SHELL_TOOL_NAME,
+        cbor_text_map(vec![("mode", "rw"), ("command", "printf hello")]),
+        "agent-b",
+    ) else {
+        panic!("expected tool started");
+    };
+    let Event::ToolProgress(progress) =
+        crate::dir_lock::waiting_progress_event(&invoke, &[tempdir.path().to_path_buf()])
+    else {
+        panic!("expected tool progress");
+    };
+    let display = progress.display.expect("waiting display");
+
+    assert_eq!(display.mode, "rw");
+    assert_eq!(display.args, tempdir.path().display().to_string());
+    assert_eq!(display.info_chips, vec!["dir lock"]);
+    assert_eq!(display.status, ToolUseStatus::InProgress);
+    assert_eq!(display.status_text, "waiting");
+}
+
+#[test]
 fn shell_ro_bypasses_directory_update_lock() {
     // Read-only shell commands should behave like read tools for advisory
     // directory locking: they may run while another agent holds an update lock.
@@ -1022,7 +1047,6 @@ fn shell_ro_bypasses_directory_update_lock() {
     let lock_dir = tempdir.path().to_path_buf();
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
-
     writer
         .write_event(&tool_started(
             "lock-root",

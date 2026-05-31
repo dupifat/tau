@@ -141,6 +141,10 @@ fn wrap_pure(
 }
 
 pub(crate) fn initial_display(invoke: &tau_proto::ToolStarted) -> Option<ToolUseState> {
+    if invoke.tool_name == SHELL_TOOL_NAME || invoke.tool_name == GPT_SHELL_TOOL_NAME {
+        return Some(shell::initial_display(&invoke.arguments));
+    }
+
     let mode = String::new();
     let args = match invoke.tool_name.as_str() {
         READ_TOOL_NAME => {

@@ -800,21 +800,23 @@ pub(crate) fn automatic_lock_dirs_for_tool(
 /// a directory update lock.
 pub(crate) fn waiting_progress_event(invoke: &ToolStarted, dirs: &[PathBuf]) -> Event {
     let dirs_display = display_dirs(dirs);
+    let mut display = crate::tools::initial_display(invoke).unwrap_or_else(|| ToolUseState {
+        args: dirs_display.clone(),
+        ..Default::default()
+    });
+    display.args = dirs_display.clone();
+    display.info_chips.push("dir lock".to_owned());
+    display.status = ToolUseStatus::InProgress;
+    display.status_text = "waiting".to_owned();
+
     Event::ToolProgress(ToolProgress {
         call_id: invoke.call_id.clone(),
         tool_name: invoke.tool_name.clone(),
         message: Some(format!("waiting for directory lock: {dirs_display}")),
         progress: None,
-        display: Some(ToolUseState {
-            args: dirs_display,
-            info_chips: vec!["dir lock".to_owned()],
-            status: ToolUseStatus::InProgress,
-            status_text: "waiting".to_owned(),
-            ..Default::default()
-        }),
+        display: Some(display),
     })
 }
-
 /// Canonicalize `path` as an existing directory.
 pub(crate) fn canonical_existing_dir(path: &Path) -> Result<PathBuf, String> {
     let canonical = path

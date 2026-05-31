@@ -356,11 +356,9 @@ fn validate_ranges_with_total(
     total_lines: usize,
     display_args: &str,
 ) -> Result<(), ToolFailure> {
-    if total_lines == 0 {
-        return Ok(());
-    }
+    let max_read_start_line = total_lines.max(1);
     for range in ranges {
-        if total_lines < range.start_line {
+        if max_read_start_line < range.start_line {
             return Err(ToolFailure::new(format!(
                 "start_line {} is past end of file (total_lines: {total_lines})",
                 range.start_line

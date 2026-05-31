@@ -97,7 +97,8 @@ where
                  the first 1000 and last 1000 lines separated by a literal `...` line. \
                  Prefer one full read. Pass `start_line`/`line_count` only to \
                  fetch one specific known slice, or `ranges` for up to 100 disjoint slices; \
-                 range chunks are separated by one empty line. Returned content lines are prefixed \
+                 range chunks are separated by one empty line. `start_line` past EOF errors, \
+                 while `line_count` extending past EOF returns available lines. Returned content lines are prefixed \
                  by their 1-based line number and a space; \
                  CRLF, CR, and missing final line endings are marked after the number, e.g. \
                  `2(crlf)`, `3(cr)`, or `4(no_nl)`. Invalid UTF-8 and lines that would exceed \
@@ -166,9 +167,10 @@ where
                  appends. Missing files are treated as empty and missing parent \
                  directories are created, so use line 1 with line_count 1 to create a file. \
                  Optional per-edit `guard` must exactly match the first original line content, \
-                 excluding the line ending, or the edit fails and returns the current range contents. \
-                 Returns minimal status headers: replacements, changed, max_valid_start_line, \
-                 and total_bytes."
+                 excluding the line ending, and must not include newline characters. On mismatch, \
+                 the edit fails and returns the current range contents. Returns minimal status \
+                 headers: replacements, changed, new_max_valid_start_line after the edit, and \
+                 total_bytes."
                     .to_owned(),
             ),
             tool_type: tau_proto::ToolType::Function,
@@ -203,7 +205,7 @@ where
                                 },
                                 "guard": {
                                     "type": "string",
-                                    "description": "Optional exact expected content of the first original line in this range, excluding the line ending. Use an empty string for an empty, missing, or append line. If it does not match, the edit fails and returns the current requested range contents."
+                                    "description": "Optional exact expected content of the first original line in this range, excluding the line ending. Newline characters are invalid. Use an empty string for an empty, missing, or append line. If it does not match, the edit fails and returns the current requested range contents."
                                 }
                             },
                             "required": ["start_line", "line_count", "newText"],

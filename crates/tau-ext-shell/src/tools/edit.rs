@@ -322,6 +322,8 @@ fn guard_mismatch_failure(
             CborValue::Text("truncated".to_owned()),
             CborValue::Bool(true),
         ));
+    }
+    if truncated.was_truncated || truncated.content.is_empty() {
         details.push((
             CborValue::Text("total_lines".to_owned()),
             CborValue::Integer((rendered.total_lines as i64).into()),
@@ -399,6 +401,12 @@ fn parse_optional_guard<'a>(
             && key == "guard"
         {
             return match value {
+                CborValue::Text(value) if value.contains('\n') || value.contains('\r') => {
+                    Err(with_display_args(
+                        display_args,
+                        ToolFailure::new("guard must not include newline characters"),
+                    ))
+                }
                 CborValue::Text(value) => Ok(Some(value.as_str())),
                 _ => Err(with_display_args(
                     display_args,
@@ -434,7 +442,7 @@ fn edit_display_args(path: &str, ranges: &[String]) -> String {
 fn edit_result_value(
     replacements: usize,
     changed: bool,
-    max_valid_start_line: usize,
+    new_max_valid_start_line: usize,
     total_bytes: usize,
 ) -> CborValue {
     CborValue::Map(vec![
@@ -447,8 +455,8 @@ fn edit_result_value(
             CborValue::Bool(changed),
         ),
         (
-            CborValue::Text("max_valid_start_line".to_owned()),
-            CborValue::Integer((max_valid_start_line as i64).into()),
+            CborValue::Text("new_max_valid_start_line".to_owned()),
+            CborValue::Integer((new_max_valid_start_line as i64).into()),
         ),
         (
             CborValue::Text("total_bytes".to_owned()),

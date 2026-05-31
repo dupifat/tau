@@ -1724,10 +1724,11 @@ fn edit_result_reports_minimal_status_without_model_diff() {
     assert_eq!(cbor_int_field(&output.result, "replacements"), Some(1));
     assert_eq!(cbor_bool_field(&output.result, "changed"), Some(true));
     assert_eq!(
-        cbor_int_field(&output.result, "max_valid_start_line"),
+        cbor_int_field(&output.result, "new_max_valid_start_line"),
         Some(3)
     );
     assert!(cbor_map_field(&output.result, "available_lines").is_none());
+    assert!(cbor_map_field(&output.result, "max_valid_start_line").is_none());
     assert_eq!(cbor_int_field(&output.result, "total_bytes"), Some(22));
     assert!(cbor_map_text(&output.result, "output").is_none());
     assert!(cbor_map_text(&output.result, "diff").is_none());
@@ -1750,7 +1751,7 @@ fn edit_self_replacement_counts_without_diff() {
     assert_eq!(cbor_int_field(&output.result, "replacements"), Some(1));
     assert_eq!(cbor_bool_field(&output.result, "changed"), Some(false));
     assert_eq!(
-        cbor_int_field(&output.result, "max_valid_start_line"),
+        cbor_int_field(&output.result, "new_max_valid_start_line"),
         Some(2)
     );
     assert_eq!(cbor_int_field(&output.result, "total_bytes"), Some(5));
@@ -1772,7 +1773,7 @@ fn edit_new_file_reports_created_as_changed() {
 
     assert_eq!(cbor_int_field(&result, "replacements"), Some(1));
     assert_eq!(cbor_bool_field(&result, "changed"), Some(true));
-    assert_eq!(cbor_int_field(&result, "max_valid_start_line"), Some(2));
+    assert_eq!(cbor_int_field(&result, "new_max_valid_start_line"), Some(2));
     assert_eq!(cbor_int_field(&result, "total_bytes"), Some(8));
     assert!(cbor_map_text(&result, "output").is_none());
     assert_eq!(
@@ -2558,7 +2559,7 @@ fn edit_uses_original_line_numbers_for_multiple_replacements() {
     };
     assert_eq!(cbor_map_int(&result.result, "replacements"), Some(2));
     assert_eq!(
-        cbor_map_int(&result.result, "max_valid_start_line"),
+        cbor_map_int(&result.result, "new_max_valid_start_line"),
         Some(5)
     );
     assert_eq!(
@@ -2624,7 +2625,7 @@ fn edit_appends_to_line_after_trailing_newline() {
         .expect("edit")
         .result;
 
-    assert_eq!(cbor_int_field(&result, "max_valid_start_line"), Some(3));
+    assert_eq!(cbor_int_field(&result, "new_max_valid_start_line"), Some(3));
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
         "fish\ncat\n"
@@ -2644,7 +2645,7 @@ fn edit_replaces_empty_file_line_one() {
     .expect("edit")
     .result;
 
-    assert_eq!(cbor_int_field(&result, "max_valid_start_line"), Some(2));
+    assert_eq!(cbor_int_field(&result, "new_max_valid_start_line"), Some(2));
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
         "hello\n"
@@ -2720,7 +2721,7 @@ fn edit_guard_allows_matching_first_line() {
     .expect("edit")
     .result;
 
-    assert_eq!(cbor_int_field(&result, "max_valid_start_line"), Some(4));
+    assert_eq!(cbor_int_field(&result, "new_max_valid_start_line"), Some(4));
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
         "alpha\nBETA\ngamma\n"
@@ -2762,6 +2763,28 @@ fn edit_guard_rejects_stale_line_number_and_returns_current_ranges() {
 }
 
 #[test]
+fn edit_guard_mismatch_on_missing_file_reports_empty_actual_content() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("missing.txt");
+
+    // Missing files have no actual read lines. A non-empty guard should fail
+    // with explicit totals rather than implying a virtual line was rendered.
+    let error = edit_file(&edit_arguments(
+        &file_path,
+        vec![guarded_line_edit(1, 1, "created\n", "not-empty")],
+    ))
+    .expect_err("guard mismatch should fail");
+
+    assert_eq!(error.message, "guard for line 1 did not match");
+    let details = error.details.as_deref().expect("details");
+    assert_eq!(cbor_map_text(details, "line-numbered content"), Some(""));
+    assert_eq!(cbor_int_field(details, "guard_start_line"), Some(1));
+    assert_eq!(cbor_int_field(details, "total_lines"), Some(0));
+    assert_eq!(cbor_int_field(details, "total_bytes"), Some(0));
+    assert!(!file_path.exists());
+}
+
+#[test]
 fn edit_guard_rejects_non_string_guard_without_writing() {
     let tempdir = TempDir::new().expect("tempdir");
     let file_path = tempdir.path().join("edit.txt");
@@ -2786,6 +2809,29 @@ fn edit_guard_rejects_non_string_guard_without_writing() {
 }
 
 #[test]
+fn edit_guard_rejects_newline_characters_without_writing() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("edit.txt");
+    fs::write(&file_path, "alpha\n").expect("write");
+
+    // Guards describe one line's content only, so embedded line endings are
+    // malformed instead of being treated as ordinary mismatching text.
+    for guard in ["alpha\n", "alpha\r"] {
+        let error = edit_file(&edit_arguments(
+            &file_path,
+            vec![guarded_line_edit(1, 1, "ALPHA\n", guard)],
+        ))
+        .expect_err("guard with newline should fail");
+
+        assert_eq!(error.message, "guard must not include newline characters");
+        assert_eq!(
+            fs::read_to_string(&file_path).expect("read back"),
+            "alpha\n"
+        );
+    }
+}
+
+#[test]
 fn edit_guard_matches_crlf_line_without_ending() {
     let tempdir = TempDir::new().expect("tempdir");
     let file_path = tempdir.path().join("edit.txt");
@@ -2798,7 +2844,7 @@ fn edit_guard_matches_crlf_line_without_ending() {
     .expect("edit")
     .result;
 
-    assert_eq!(cbor_int_field(&result, "max_valid_start_line"), Some(3));
+    assert_eq!(cbor_int_field(&result, "new_max_valid_start_line"), Some(3));
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
         "one\r\nTWO\r\n"
@@ -2818,7 +2864,7 @@ fn edit_guard_allows_empty_append_line_after_trailing_newline() {
     .expect("edit")
     .result;
 
-    assert_eq!(cbor_int_field(&result, "max_valid_start_line"), Some(3));
+    assert_eq!(cbor_int_field(&result, "new_max_valid_start_line"), Some(3));
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
         "fish\ncat\n"
@@ -2838,7 +2884,7 @@ fn edit_handles_crlf_line_ranges() {
     .expect("edit")
     .result;
 
-    assert_eq!(cbor_int_field(&result, "max_valid_start_line"), Some(3));
+    assert_eq!(cbor_int_field(&result, "new_max_valid_start_line"), Some(3));
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
         "one\r\nTWO\r\n"
@@ -4270,6 +4316,30 @@ fn read_file_reports_empty_file_as_zero_lines() {
     assert_eq!(cbor_int_field(&result, "total_bytes"), Some(0));
     assert!(cbor_map_field(&result, "ends_with_newline").is_none());
     assert!(cbor_map_field(&result, "line_ending").is_none());
+}
+
+#[test]
+fn read_file_rejects_start_line_after_empty_file() {
+    let td = TempDir::new().expect("tempdir");
+    let path = td.path().join("empty.txt");
+    std::fs::write(&path, "").expect("write");
+
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("path".to_owned()),
+            CborValue::Text(path.display().to_string()),
+        ),
+        (
+            CborValue::Text("start_line".to_owned()),
+            CborValue::Integer(2.into()),
+        ),
+    ]);
+
+    let error = read_file(&args).expect_err("start_line after empty file should fail");
+    assert_eq!(
+        error.message,
+        "start_line 2 is past end of file (total_lines: 0)"
+    );
 }
 
 #[test]

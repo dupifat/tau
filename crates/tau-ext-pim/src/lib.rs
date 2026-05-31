@@ -64,9 +64,10 @@ where
                 }
             }
             Frame::Event(Event::ToolStarted(invoke)) => {
-                let event = runtime.dispatch_tool(invoke);
-                writer.write_frame(&Frame::Event(event))?;
-                writer.flush()?;
+                if let Some(event) = runtime.dispatch_tool(invoke) {
+                    writer.write_frame(&Frame::Event(event))?;
+                    writer.flush()?;
+                }
             }
             Frame::Event(Event::ActionInvoke(invoke)) => {
                 let event = runtime.dispatch_action(invoke);
@@ -132,20 +133,11 @@ impl RuntimeState {
             .configure_with_config(calendar_config, configure.state_dir, configure.secrets)
     }
 
-    fn dispatch_tool(&mut self, invoke: tau_proto::ToolStarted) -> Event {
-        let tool_name = invoke.tool_name.as_str().to_owned();
-        match tool_name.as_str() {
-            email::TOOL_NAME => self.email.dispatch(invoke),
-            calendar::TOOL_NAME => self.calendar.dispatch(invoke),
-            _ => Event::ToolError(tau_proto::ToolError {
-                call_id: invoke.call_id,
-                tool_name: invoke.tool_name,
-                tool_type: tau_proto::ToolType::Function,
-                message: format!("pim extension does not provide tool `{tool_name}`"),
-                details: None,
-                display: None,
-                originator: tau_proto::PromptOriginator::User,
-            }),
+    fn dispatch_tool(&mut self, invoke: tau_proto::ToolStarted) -> Option<Event> {
+        match invoke.tool_name.as_str() {
+            email::TOOL_NAME => Some(self.email.dispatch(invoke)),
+            calendar::TOOL_NAME => Some(self.calendar.dispatch(invoke)),
+            _ => None,
         }
     }
 
@@ -244,6 +236,25 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(roots, vec!["/email", "/calendar"]);
+    }
+
+    /// PIM subscribes to `tool.started` to receive its own email/calendar
+    /// calls, but the harness event stream can also contain starts for
+    /// tools owned by other extensions. Those foreign calls must be ignored
+    /// instead of producing terminal tool errors that race with the real
+    /// provider result.
+    #[test]
+    fn ignores_tool_started_for_tools_owned_by_other_extensions() {
+        let mut runtime = RuntimeState::default();
+        let invoke = tau_proto::ToolStarted {
+            call_id: tau_proto::ToolCallId::new("call-read"),
+            tool_name: tau_proto::ToolName::new("read"),
+            arguments: CborValue::Map(vec![]),
+            agent_id: tau_proto::AgentId::new("agent-1"),
+            originator: tau_proto::PromptOriginator::User,
+        };
+
+        assert!(runtime.dispatch_tool(invoke).is_none());
     }
 
     #[test]

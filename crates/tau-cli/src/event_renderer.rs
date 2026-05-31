@@ -839,18 +839,18 @@ fn tool_display_from_call(call: &ToolCallItem) -> tau_proto::ToolDisplay {
     in_progress_tool_display(args, None)
 }
 
-fn shell_tool_display_from_command(command: String, mode: &str) -> tau_proto::ToolDisplay {
+pub(crate) fn shell_tool_display_from_command(
+    command: String,
+    mode: &str,
+) -> tau_proto::ToolDisplay {
     // Mirror ext-shell's final display shape so `show-tools=full` does not
-    // change layout when a multiline command finishes.
-    let command_args = command.lines().next().unwrap_or_default();
-    let args = if command_args.is_empty() {
-        mode.to_owned()
-    } else {
-        format!("{mode} {command_args}")
-    };
+    // change layout or styling when a multiline command finishes.
+    let command_args = command.lines().next().unwrap_or_default().to_owned();
     let payload = (2 <= command.lines().count())
         .then_some(tau_proto::ToolDisplayPayload::Text { text: command });
-    in_progress_tool_display(args, payload)
+    let mut display = in_progress_tool_display(command_args, payload);
+    display.mode = mode.to_owned();
+    display
 }
 
 fn in_progress_tool_display(

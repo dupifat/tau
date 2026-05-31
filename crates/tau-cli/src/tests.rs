@@ -20,7 +20,7 @@ use super::chat::{
     DraftSlot, SUSPENDED_AGENT_PROMPT, agent_is_active_in_sets, invalidate_pending_draft,
     is_local_slash_command, next_active_agent, role_cycling_enabled, should_send_draft_snapshot,
 };
-use super::event_renderer::EventRenderer;
+use super::event_renderer::{EventRenderer, shell_tool_display_from_command};
 use super::tool_render::{
     CompactionStatus, ToolStatus, build_delegate_completion_display, build_osc1337_set_user_var,
     cache_hit_percent, format_turn_stats_line, render_action_error_block,
@@ -4284,6 +4284,28 @@ fn render_tool_display_assembles_chips_in_order() {
         rendered.suffixes.last().expect("status suffix").status,
         ToolStatus::Success
     ));
+}
+
+#[test]
+fn running_shell_display_keeps_mode_separate_for_dedicated_style() {
+    let theme = tau_themes::Theme::builtin();
+    let display = shell_tool_display_from_command("printf hello".to_owned(), "rw");
+
+    let rendered = render_tool_display("shell", &display);
+    assert_eq!(rendered.mode, "rw");
+    assert_eq!(rendered.args, "printf hello");
+
+    let block = render_tool_block(&theme, &rendered);
+    let mode_span = block
+        .content
+        .spans()
+        .iter()
+        .find(|span| span.text == "rw")
+        .expect("mode span");
+    assert_eq!(
+        mode_span.style,
+        tau_cli_term::resolve::resolve(&theme, tau_themes::names::TOOL_MODE)
+    );
 }
 
 #[test]

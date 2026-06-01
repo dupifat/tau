@@ -4497,7 +4497,7 @@ fn read_file_reads_multiple_disjoint_ranges_with_blank_separator() {
 }
 
 #[test]
-fn read_file_rejects_overlapping_ranges() {
+fn read_file_allows_overlapping_ranges_with_redundant_chunks() {
     let td = TempDir::new().expect("tempdir");
     let path = td.path().join("small.txt");
     std::fs::write(&path, "one\ntwo\nthree\n").expect("write");
@@ -4509,12 +4509,16 @@ fn read_file_rejects_overlapping_ranges() {
         ),
         (
             CborValue::Text("ranges".to_owned()),
-            CborValue::Array(vec![read_range(1, 2), read_range(2, 2)]),
+            CborValue::Array(vec![read_range(1, 2), read_range(2, 3)]),
         ),
     ]);
 
-    let error = read_file(&args).expect_err("overlap should fail");
-    assert_eq!(error.message, "overlapping ranges");
+    let output = read_file(&args).expect("overlap should be returned redundantly");
+    assert_eq!(output.display.args, format!("{} 1..2,2..3", path.display()));
+    assert_eq!(
+        cbor_map_text(&output.result, "line-numbered content"),
+        Some("1 one\n2 two\n\n2 two\n3 three")
+    );
 }
 
 #[test]

@@ -99,8 +99,8 @@ where
                  output is capped at 2000 lines / 50 KB. Truncated output keeps \
                  the first 1000 and last 1000 lines separated by a literal `...` line. \
                  Prefer one full read. Pass inclusive `start_line`/`end_line` only to \
-                 fetch one specific known slice, or `ranges` for up to 100 disjoint slices; \
-                 range chunks are separated by one empty line. `start_line` past EOF errors, \
+                 fetch one specific known slice, or `ranges` for up to 100 slices; \
+                 range chunks are separated by one empty line and may overlap. `start_line` past EOF errors, \
                  while `end_line` past EOF returns available lines. Returned content lines are prefixed \
                  by their 1-based line number and a space; \
                  CRLF, CR, and missing final line endings are marked after the number, e.g. \
@@ -130,7 +130,7 @@ where
                     },
                     "ranges": {
                         "type": "array",
-                        "description": "Optional list of disjoint inclusive line ranges to read. Cannot be combined with top-level start_line or end_line. Each chunk is separated by one empty line in the output.",
+                        "description": "Optional list of inclusive line ranges to read. Cannot be combined with top-level start_line or end_line. Each chunk is separated by one empty line in the output, and overlapping ranges are returned redundantly.",
                         "minItems": 1,
                         "maxItems": 100,
                         "items": {

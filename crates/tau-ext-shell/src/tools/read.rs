@@ -81,10 +81,6 @@ impl ReadLineRange {
             None => true,
         }
     }
-
-    fn end_line(&self) -> Option<usize> {
-        self.end_line
-    }
 }
 
 struct ReadRequest {
@@ -238,7 +234,7 @@ fn render_read_line(line: &ReadLine) -> String {
 fn parse_read_request(arguments: &CborValue) -> Result<ReadRequest, ToolFailure> {
     reject_legacy_line_count(arguments)?;
     if let Some(ranges) = optional_argument_array(arguments, "ranges")? {
-        return parse_disjoint_read_ranges(arguments, ranges);
+        return parse_read_ranges(arguments, ranges);
     }
 
     let start_line_arg = optional_argument_int(arguments, "start_line");
@@ -257,7 +253,7 @@ fn parse_read_request(arguments: &CborValue) -> Result<ReadRequest, ToolFailure>
     })
 }
 
-fn parse_disjoint_read_ranges(
+fn parse_read_ranges(
     arguments: &CborValue,
     ranges: &[CborValue],
 ) -> Result<ReadRequest, ToolFailure> {
@@ -288,7 +284,6 @@ fn parse_disjoint_read_ranges(
         });
         display_ranges.push(format_read_range(Some(start_line), Some(end_line)));
     }
-    validate_non_overlapping_read_ranges(&parsed)?;
     Ok(ReadRequest {
         ranges: parsed,
         display_ranges,
@@ -336,22 +331,6 @@ fn parse_required_range_line(range: &CborValue, key: &str) -> Result<usize, Tool
             "each range must have an integer {key}"
         ))),
     }
-}
-
-fn validate_non_overlapping_read_ranges(ranges: &[ReadLineRange]) -> Result<(), ToolFailure> {
-    let mut sorted: Vec<_> = ranges.iter().collect();
-    sorted.sort_by_key(|range| range.start_line);
-    for pair in sorted.windows(2) {
-        let Some(end_line) = pair[0].end_line() else {
-            return Err(ToolFailure::new(
-                "open-ended read ranges cannot be combined with other ranges",
-            ));
-        };
-        if pair[1].start_line <= end_line {
-            return Err(ToolFailure::new("overlapping ranges"));
-        }
-    }
-    Ok(())
 }
 
 fn validate_ranges_with_total(

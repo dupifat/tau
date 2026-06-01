@@ -3624,15 +3624,15 @@ fn logical_and_provider_tool_errors_render_one_terminal_line() {
     );
 
     renderer.handle_recorded_at(
-        &tool_started("overlap-read", "read", CborValue::Map(Vec::new())),
+        &tool_started("overlap-edit", "edit", CborValue::Map(Vec::new())),
         tau_proto::UnixMicros::new(1_000_000),
     );
     renderer.handle_recorded_at(
         &Event::ToolError(ToolError {
-            call_id: "overlap-read".into(),
-            tool_name: tau_proto::ToolName::new("read"),
+            call_id: "overlap-edit".into(),
+            tool_name: tau_proto::ToolName::new("edit"),
             tool_type: tau_proto::ToolType::Function,
-            message: "overlapping ranges".to_owned(),
+            message: "overlapping edits".to_owned(),
             details: None,
             originator: tau_proto::PromptOriginator::User,
 
@@ -3642,10 +3642,10 @@ fn logical_and_provider_tool_errors_render_one_terminal_line() {
     );
     renderer.handle_recorded_at(
         &Event::ProviderToolError(ToolError {
-            call_id: "overlap-read".into(),
-            tool_name: tau_proto::ToolName::new("read"),
+            call_id: "overlap-edit".into(),
+            tool_name: tau_proto::ToolName::new("edit"),
             tool_type: tau_proto::ToolType::Function,
-            message: "overlapping ranges".to_owned(),
+            message: "overlapping edits".to_owned(),
             details: None,
             originator: tau_proto::PromptOriginator::User,
 
@@ -3656,8 +3656,8 @@ fn logical_and_provider_tool_errors_render_one_terminal_line() {
     sync(&handle);
 
     let text = vt.screen_text(80).join("\n");
-    assert!(text.contains("read 1s err: overlapping ranges"));
-    assert_eq!(text.matches("overlapping ranges").count(), 1);
+    assert!(text.contains("edit 1s err: overlapping edits"));
+    assert_eq!(text.matches("overlapping edits").count(), 1);
 }
 
 /// Provider-facing errors must not finish live UI tool blocks. The harness is

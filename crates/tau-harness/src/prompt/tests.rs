@@ -48,7 +48,7 @@ fn cwd_prompt_fragment() -> tau_proto::PromptFragment {
 fn build_system_prompt_without_fragments_does_not_render_cwd_prose() {
     let skills = std::collections::HashMap::new();
     let prompt = build_system_prompt(&skills, &[]);
-    assert!(prompt.contains("expert coding assistant"));
+    assert!(prompt.contains("autonomous agent operating inside the Tau harness"));
     assert!(!prompt.contains("Current working directory: /tmp/work"));
 }
 
@@ -78,9 +78,20 @@ fn build_system_prompt_does_not_html_escape_cwd() {
 #[test]
 fn build_system_prompt_encourages_parallel_tool_calls() {
     let skills = std::collections::HashMap::new();
-    let prompt = build_system_prompt(&skills, &[]);
+    let prompt = build_system_prompt_with_tool_template_context(
+        BUILT_IN_SYSTEM_PROMPT_TEMPLATE,
+        &skills,
+        &[],
+        &[tau_proto::PromptFragment::new(
+            "tool.shell",
+            tau_proto::PromptPriority::new(100),
+            "shell tool docs",
+        )],
+        serde_json::json!({}),
+        RolePromptTemplateContext { role_name: "" },
+    );
     assert!(prompt.contains("parallel"));
-    assert!(prompt.contains("make all independent tool calls in parallel"));
+    assert!(prompt.contains("Maximize use of parallel tool calls"));
 }
 
 #[test]
@@ -88,8 +99,8 @@ fn build_system_prompt_explains_tau_internal_marker() {
     let skills = std::collections::HashMap::new();
     let prompt = build_system_prompt(&skills, &[]);
     assert!(prompt.contains("[tau-internal]"));
-    assert!(prompt.contains("background tool notifications"));
-    assert!(prompt.contains("deduplicated tool result pointers"));
+    assert!(prompt.contains("tool call was moved to run in the background"));
+    assert!(prompt.contains("tool output was deduplicated"));
 }
 
 /// Role prompts are configuration templates. They should be rendered just
@@ -369,7 +380,7 @@ fn tool_prompt_fragments_render_in_dedicated_section() {
     );
 
     let tool_heading = prompt
-        .find("# Tool-provided instructions")
+        .find("## Tool calling")
         .expect("tool section should render");
     let tool_fragment = prompt
         .find("TOOL FRAGMENT")
@@ -377,8 +388,8 @@ fn tool_prompt_fragments_render_in_dedicated_section() {
     let role_fragment = prompt
         .find("ROLE FRAGMENT")
         .expect("ordinary fragment should render");
+    assert!(role_fragment < tool_heading);
     assert!(tool_heading < tool_fragment);
-    assert!(tool_fragment < role_fragment);
 }
 
 /// Bad fragment templates are skipped rather than leaking raw unrendered
@@ -505,10 +516,11 @@ fn build_system_prompt_normalizes_prompt_fragment_spacing() {
         },
     );
 
-    assert!(prompt.contains("ROLE PROMPT\n\nCurrent working directory: /tmp/work"));
+    assert!(prompt.contains("ROLE PROMPT"));
+    assert!(prompt.contains("Current working directory: /tmp/work"));
     assert!(!prompt.contains("ROLE PROMPTCurrent working directory"));
     assert!(prompt.ends_with('\n'));
-    assert!(!prompt.ends_with("\n\n"));
+    assert!(!prompt.ends_with("\n\n\n"));
 }
 
 /// Empty hook entries are ignored without adding a blank prompt section.

@@ -146,7 +146,7 @@ fn daemon_mode_renders_system_prompt_for_requested_role() {
 
     let prompt =
         get_daemon_rendered_system_prompt(&sock, "senior-engineer").expect("render prompt");
-    assert!(prompt.contains("expert coding assistant"));
+    assert!(prompt.contains("expert software engineering agent"));
     assert!(
         !prompt.contains("Current working directory:"),
         "cwd is agent-scoped and rendered-system-prompt requests do not target an agent"

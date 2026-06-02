@@ -514,6 +514,7 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
             "tau-self-knowledge-ext-std-notifications",
             "tau-self-knowledge-ext-test-dummy",
             "tau-self-knowledge-ext-websearch",
+            "tau-self-knowledge-prompt-templating",
             "tau-self-knowledge-source-code",
             "tau-self-knowledge-community",
             "tau-self-knowledge-debugging",
@@ -553,6 +554,11 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
     );
     assert!(skill.content.contains("tau-self-knowledge-ext-test-dummy"));
     assert!(skill.content.contains("tau-self-knowledge-ext-websearch"));
+    assert!(
+        skill
+            .content
+            .contains("tau-self-knowledge-prompt-templating")
+    );
     assert!(skill.content.contains("tau-self-knowledge-source-code"));
     assert!(skill.content.contains("tau-self-knowledge-community"));
     assert!(skill.content.contains("tau-self-knowledge-debugging"));
@@ -570,6 +576,14 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
         .expect("built-in config skill");
     assert!(!config.add_to_prompt);
     assert!(config.content.contains("tau provider add"));
+
+    let prompt_templating = skills
+        .iter()
+        .find(|skill| skill.name == "tau-self-knowledge-prompt-templating")
+        .expect("built-in prompt templating skill");
+    assert!(!prompt_templating.add_to_prompt);
+    assert!(prompt_templating.content.contains("prompt_fragments"));
+    assert!(prompt_templating.content.contains("starts_with"));
 
     let email = skills
         .iter()

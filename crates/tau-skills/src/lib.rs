@@ -151,6 +151,10 @@ const BUILT_IN_SKILL_SOURCES: &[BuiltInSkillSource] = &[
         content: include_str!("../self-knowledge/tau-self-knowledge-ext-websearch.md"),
     },
     BuiltInSkillSource {
+        diagnostic_path: "tau-self-knowledge-prompt-templating.md",
+        content: include_str!("../self-knowledge/tau-self-knowledge-prompt-templating.md"),
+    },
+    BuiltInSkillSource {
         diagnostic_path: "tau-self-knowledge-source-code.md",
         content: include_str!("../self-knowledge/tau-self-knowledge-source-code.md"),
     },

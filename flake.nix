@@ -357,11 +357,11 @@
         tauPrebuiltSources = {
           x86_64-linux = {
             target = "x86_64-unknown-linux-gnu";
-            hash = "sha256-R8yKBaM66bg7LvXl2ghz9+Cpc1yYkOolbFQalaIzA+U=";
+            hash = "sha256-PfBeiNCY5jTF8ekZeyBdm8tcYm2FBuJm1c455V+CrUU=";
           };
           aarch64-linux = {
             target = "aarch64-unknown-linux-gnu";
-            hash = "sha256-3T4Sm7o0UuItcMK/4GXxvPqhuGJkYNMVm/2PeNfDlXg=";
+            hash = "sha256-0mcyl4jcdRVwzr79xlTpRlWP3G0x/Le2neEcsa/GhIo=";
           };
         };
 

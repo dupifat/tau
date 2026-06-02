@@ -1373,25 +1373,47 @@ fn discover_agents_files_walks_ancestor_chain_in_order() {
     fs::create_dir_all(&nested).expect("mkdir");
 
     let root_agents = root.join("AGENTS.md");
+    let root_extra_agents = root.join("AGENTS.extra.md");
+    let ignored_agents = root.join("AGENTS.txt");
+    let ignored_dir_agents = root.join("AGENTS.dir.md");
     let pkg_agents = root.join("pkg").join("AGENTS.md");
+    let pkg_extra_agents = root.join("pkg").join("AGENTS.zeta.md");
     let empty_agents = root.join("pkg").join("src").join("AGENTS.md");
 
     fs::write(&root_agents, "# Root\n- rule one\n").expect("write root");
+    fs::write(&root_extra_agents, "# Root extra\n- rule extra\n").expect("write root extra");
+    fs::write(&ignored_agents, "# Ignored\n").expect("write ignored");
+    fs::create_dir(&ignored_dir_agents).expect("create ignored agents dir");
     fs::write(&pkg_agents, "# Package\n- rule two\n").expect("write pkg");
+    fs::write(&pkg_extra_agents, "# Package extra\n- rule zeta\n").expect("write pkg extra");
     fs::write(&empty_agents, "   \n").expect("write empty");
 
     let discovered = discover_agents_files_from(&nested);
-    assert_eq!(discovered.len(), 2);
+    assert_eq!(discovered.len(), 4);
     assert_eq!(
         discovered[0].file_path,
         root_agents.canonicalize().expect("canonical root")
     );
     assert_eq!(
         discovered[1].file_path,
+        root_extra_agents
+            .canonicalize()
+            .expect("canonical root extra")
+    );
+    assert_eq!(
+        discovered[2].file_path,
         pkg_agents.canonicalize().expect("canonical pkg")
     );
+    assert_eq!(
+        discovered[3].file_path,
+        pkg_extra_agents
+            .canonicalize()
+            .expect("canonical pkg extra")
+    );
     assert!(discovered[0].content.contains("rule one"));
-    assert!(discovered[1].content.contains("rule two"));
+    assert!(discovered[1].content.contains("rule extra"));
+    assert!(discovered[2].content.contains("rule two"));
+    assert!(discovered[3].content.contains("rule zeta"));
 }
 
 #[test]

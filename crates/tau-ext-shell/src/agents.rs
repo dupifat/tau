@@ -1,4 +1,4 @@
-//! `AGENTS.md` discovery used at `SessionStarted` time.
+//! `AGENTS.md` and `AGENTS.*.md` discovery used at `SessionStarted` time.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -31,29 +31,60 @@ pub(crate) fn discover_agents_files_from_roots(
     let mut seen = std::collections::HashSet::new();
     let mut discovered = Vec::new();
     for dir in roots {
-        let candidate = dir.join("AGENTS.md");
-        let Ok(metadata) = fs::metadata(&candidate) else {
-            continue;
-        };
-        if !metadata.is_file() {
-            continue;
-        }
+        for candidate in agents_file_candidates(&dir) {
+            let Ok(metadata) = fs::metadata(&candidate) else {
+                continue;
+            };
+            if !metadata.is_file() {
+                continue;
+            }
 
-        let Ok(content) = fs::read_to_string(&candidate) else {
-            continue;
-        };
-        if content.trim().is_empty() {
-            continue;
-        }
+            let Ok(content) = fs::read_to_string(&candidate) else {
+                continue;
+            };
+            if content.trim().is_empty() {
+                continue;
+            }
 
-        let file_path = candidate.canonicalize().unwrap_or(candidate);
-        if !seen.insert(file_path.clone()) {
-            continue;
+            let file_path = candidate.canonicalize().unwrap_or(candidate);
+            if !seen.insert(file_path.clone()) {
+                continue;
+            }
+            discovered.push(DiscoveredAgentsFile { file_path, content });
         }
-        discovered.push(DiscoveredAgentsFile { file_path, content });
     }
 
     discovered
+}
+
+fn agents_file_candidates(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut candidates = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(is_agents_file_name)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|path| agents_file_sort_key(path));
+    candidates
+}
+
+fn is_agents_file_name(name: &str) -> bool {
+    name == "AGENTS.md" || (name.starts_with("AGENTS.") && name.ends_with(".md"))
+}
+
+fn agents_file_sort_key(path: &Path) -> (u8, String) {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let rank = if name == "AGENTS.md" { 0 } else { 1 };
+    (rank, name.to_owned())
 }
 
 fn ancestor_agents_roots(cwd: &Path) -> Vec<PathBuf> {

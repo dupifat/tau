@@ -37,9 +37,9 @@ Read-only shell mode is advisory unless `config.enforce_ro_mode: true` is set. E
 
 `core-shell` discovers and publishes project/user instructions and skills:
 
-- `$HOME/.agents/AGENTS.md`
-- `AGENTS.md` in current-working-directory ancestors
-- matching `.agents.local/AGENTS.md` directories
+- `$HOME/.agents/AGENTS.md` and `$HOME/.agents/AGENTS.*.md`
+- `AGENTS.md` and `AGENTS.*.md` in current-working-directory ancestors
+- matching `.agents.local/AGENTS.md` and `.agents.local/AGENTS.*.md` files
 - skills under `.agents/skills`, `.agents.local/skills`, `$HOME/.agents*/skills`, and `$HOME/.config/agents*/skills`
 
 `.local` locations are intended for machine- or user-specific instructions and are usually gitignored.

@@ -512,6 +512,8 @@ fn seed_assistant_tool_round(h: &mut Harness, cid: &crate::AgentId, calls: &[(&s
             error: None,
             usage: None,
             originator: tau_proto::PromptOriginator::User,
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
             backend: None,
             provider_response_id: None,
             ws_pool_delta: None,

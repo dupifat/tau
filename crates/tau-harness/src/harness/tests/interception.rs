@@ -385,6 +385,8 @@ fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
             error: None,
             usage: None,
             originator: tau_proto::PromptOriginator::User,
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
             backend: None,
             provider_response_id: None,
             ws_pool_delta: None,

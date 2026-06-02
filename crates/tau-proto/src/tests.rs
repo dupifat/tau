@@ -208,6 +208,8 @@ fn representative_events() -> Vec<Event> {
             usage: None,
             originator: PromptOriginator::User,
 
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
             backend: None,
             provider_response_id: None,
             ws_pool_delta: None,
@@ -607,6 +609,8 @@ fn execution_events_use_provider_wire_family() {
             Event::ProviderResponseUpdated(ProviderResponseUpdated {
                 agent_prompt_id: "sp-1".into(),
                 items: Vec::new(),
+                compaction_original_input_tokens: None,
+                compaction_compacted_input_tokens: None,
                 originator: PromptOriginator::User,
             }),
             "provider.response_updated",
@@ -782,6 +786,8 @@ fn event_defaults_to_transient_marks_progress_kinds() {
         Event::ProviderResponseUpdated(ProviderResponseUpdated {
             agent_prompt_id: "sp-1".into(),
             items: Vec::new(),
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
             originator: PromptOriginator::User,
         }),
         Event::ToolProgress(ToolProgress {

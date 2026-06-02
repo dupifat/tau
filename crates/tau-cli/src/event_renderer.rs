@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use tau_proto::{
-    CborValue, ContentPart, ContextItem, ContextRole, Event, InProgressCompactionStatus,
-    InProgressOutputItem, MessageItem, ProviderResponseItem, ToolCallItem, UnixMicros,
+    CborValue, ContentPart, ContextItem, ContextRole, Event, InProgressOutputItem, MessageItem,
+    ProviderResponseItem, ToolCallItem, UnixMicros,
 };
 
 use crate::action_commands::ActionCommandState;
@@ -767,11 +767,26 @@ fn push_status_chip(
 
 fn update_compaction_status(
     update: &tau_proto::ProviderResponseUpdated,
-) -> Option<InProgressCompactionStatus> {
+) -> Option<(CompactionStatus, String)> {
+    if update.items.iter().any(|item| {
+        matches!(
+            item,
+            ProviderResponseItem::Completed(ContextItem::Compaction(_))
+        )
+    }) {
+        return Some((
+            CompactionStatus::Success,
+            EventRenderer::compaction_success_status(
+                update.compaction_original_input_tokens,
+                update.compaction_compacted_input_tokens,
+            ),
+        ));
+    }
     update.items.iter().find_map(|item| match item {
-        ProviderResponseItem::InProgress(InProgressOutputItem::Compaction { status }) => {
-            Some(*status)
-        }
+        ProviderResponseItem::InProgress(InProgressOutputItem::Compaction { .. }) => Some((
+            CompactionStatus::Progress,
+            EventRenderer::compaction_progress_status(update.compaction_original_input_tokens),
+        )),
         _ => None,
     })
 }
@@ -1411,6 +1426,38 @@ impl EventRenderer {
 
     fn empty_block() -> tau_cli_term::StyledBlock {
         tau_cli_term::StyledBlock::new(tau_cli_term::StyledText::from(String::new()))
+    }
+
+    fn compaction_token_chip(tokens: u64) -> String {
+        format!("#{}", format_token_count(tokens))
+    }
+
+    fn compaction_progress_status(original_input_tokens: Option<u64>) -> String {
+        original_input_tokens
+            .map(|tokens| {
+                format!(
+                    "{} {}",
+                    Self::compaction_token_chip(tokens),
+                    tau_proto::PROGRESS_INDICATOR_TEXT
+                )
+            })
+            .unwrap_or_else(|| tau_proto::PROGRESS_INDICATOR_TEXT.to_owned())
+    }
+
+    fn compaction_success_status(
+        original_input_tokens: Option<u64>,
+        compacted_input_tokens: Option<u64>,
+    ) -> String {
+        match (original_input_tokens, compacted_input_tokens) {
+            (Some(original), Some(compacted)) => format!(
+                "{} ok: {}",
+                Self::compaction_token_chip(original),
+                Self::compaction_token_chip(compacted)
+            ),
+            (Some(original), None) => format!("{} ok", Self::compaction_token_chip(original)),
+            (None, Some(compacted)) => format!("ok: {}", Self::compaction_token_chip(compacted)),
+            (None, None) => "ok".to_owned(),
+        }
     }
 
     fn render_tool_history_block(&self, display: &ToolCallDisplay) -> tau_cli_term::StyledBlock {
@@ -3047,16 +3094,13 @@ impl EventRenderer {
     fn update_live_compaction_block(
         &mut self,
         spid: &str,
-        status: Option<InProgressCompactionStatus>,
+        status: Option<(CompactionStatus, String)>,
     ) {
-        let Some(status) = status else {
+        let Some((status, text)) = status else {
             self.remove_live_compaction_block(spid);
             return;
         };
-        let text = match status {
-            InProgressCompactionStatus::Started => tau_proto::PROGRESS_INDICATOR_TEXT,
-        };
-        let block = render_compaction_block(&self.theme, text, CompactionStatus::Progress);
+        let block = render_compaction_block(&self.theme, text, status);
         let existing_id = self.prompts.get(spid).and_then(|s| s.compaction_block_id);
         if let Some(block_id) = existing_id {
             self.handle.set_block(block_id, block);
@@ -3257,7 +3301,7 @@ impl EventRenderer {
         self.set_main_tools_visible(!tool_calls.is_empty());
         let summary_block_id = self.prepare_tool_summary_for_finished_calls(&tool_calls);
         for item in &finished.output_items {
-            self.render_finished_context_item(item, summary_block_id);
+            self.render_finished_context_item(item, summary_block_id, finished);
         }
         self.handle.redraw();
     }
@@ -3351,6 +3395,7 @@ impl EventRenderer {
         &mut self,
         item: &ContextItem,
         summary_block_id: Option<tau_cli_term::BlockId>,
+        finished: &tau_proto::ProviderResponseFinished,
     ) {
         use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
@@ -3368,9 +3413,13 @@ impl EventRenderer {
                 self.render_tool_call_placeholder(call, summary_block_id);
             }
             ContextItem::Compaction(_) => {
+                let status = Self::compaction_success_status(
+                    finished.compaction_original_input_tokens,
+                    finished.compaction_compacted_input_tokens,
+                );
                 self.handle.print_output(
                     "compaction-completed",
-                    render_compaction_block(&self.theme, "ok", CompactionStatus::Success),
+                    render_compaction_block(&self.theme, status, CompactionStatus::Success),
                 );
             }
             _ => {}

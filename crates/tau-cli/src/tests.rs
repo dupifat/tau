@@ -704,6 +704,8 @@ fn provider_response_update(
     ProviderResponseUpdated {
         agent_prompt_id: agent_prompt_id.into(),
         items,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
         originator,
     }
 }
@@ -728,6 +730,8 @@ fn finished_response(
         error: None,
         originator: tau_proto::PromptOriginator::User,
         usage: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
         backend: None,
         provider_response_id: None,
         ws_pool_delta: None,
@@ -2178,6 +2182,8 @@ fn model_status_shows_main_tool_usage_before_context() {
             query_id: "q1".to_owned(),
         },
         usage: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
         backend: None,
         provider_response_id: None,
         ws_pool_delta: None,
@@ -3462,11 +3468,13 @@ fn render_provider_compaction_update_as_compact_progress() {
                 status: tau_proto::InProgressCompactionStatus::Started,
             },
         )],
+        compaction_original_input_tokens: Some(226_200),
+        compaction_compacted_input_tokens: None,
         originator: tau_proto::PromptOriginator::User,
     }));
     sync(&handle);
 
-    let progress = format!("compact {}", tau_proto::PROGRESS_INDICATOR_TEXT);
+    let progress = format!("compact #226.2k {}", tau_proto::PROGRESS_INDICATOR_TEXT);
     assert!(vt.screen_contains(80, &progress));
     assert!(!vt.screen_contains(80, "compacting"));
 }
@@ -3483,15 +3491,18 @@ fn render_provider_compaction_item_when_response_finishes() {
     // Regression: a manual trigger event only records the user request. The UI
     // should show compaction after the provider returns the durable compaction
     // item, which means server-side compaction has actually completed.
-    renderer.handle(&Event::ProviderResponseFinished(finished_response(
+    let mut finished = finished_response(
         "sp-compact",
         vec![ContextItem::Compaction(OpaqueProviderItem(CborValue::Map(
             vec![],
         )))],
-    )));
+    );
+    finished.compaction_original_input_tokens = Some(226_200);
+    finished.compaction_compacted_input_tokens = Some(4_500);
+    renderer.handle(&Event::ProviderResponseFinished(finished));
     sync(&handle);
 
-    assert!(vt.screen_contains(80, "compact ok"));
+    assert!(vt.screen_contains(80, "compact #226.2k ok: #4.5k"));
     assert!(!vt.screen_contains(80, "compacted"));
 }
 

@@ -34,6 +34,8 @@ fn published_line_preserves_enriched_token_usage() {
             response_received_tokens: 42,
             stats: tau_proto::TokenUsageStats::default(),
         }),
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
         backend: None,
         provider_response_id: None,
         ws_pool_delta: None,
@@ -73,6 +75,8 @@ fn published_line_compacts_long_strings() {
                 text: format!("{}{}{}", "α".repeat(30), "middle", "ω".repeat(30)),
             }),
         ],
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
         originator: PromptOriginator::User,
     });
 
@@ -108,6 +112,8 @@ fn transient_from_connection_events_are_not_logged_twice() {
                 phase: None,
             },
         )],
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
         originator: PromptOriginator::User,
     });
 

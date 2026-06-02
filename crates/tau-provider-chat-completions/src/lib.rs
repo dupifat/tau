@@ -160,6 +160,8 @@ fn run_prompt<W: Write>(
                     ProviderResponseUpdated {
                         agent_prompt_id: agent_prompt_id.clone(),
                         items: state.response_items(),
+                        compaction_original_input_tokens: None,
+                        compaction_compacted_input_tokens: None,
                         originator: prompt.originator.clone(),
                     },
                 )));
@@ -198,6 +200,8 @@ fn emit_empty_response_retry_update<W: Write>(
             items: vec![ProviderResponseItem::InProgress(
                 InProgressOutputItem::Message { text, phase: None },
             )],
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
             originator: prompt.originator.clone(),
         },
     )));
@@ -1100,6 +1104,8 @@ fn finish_success(
         error: None,
         originator: prompt.originator.clone(),
         usage: state.usage(),
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
         backend: Some(backend_descriptor(provider)),
         provider_response_id: None,
         ws_pool_delta: None,
@@ -1120,6 +1126,8 @@ fn finish_error(
         error: Some(format!("LLM error: {error}")),
         originator: prompt.originator.clone(),
         usage: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
         backend: Some(backend_descriptor(provider)),
         provider_response_id: None,
         ws_pool_delta: None,

@@ -361,6 +361,8 @@ mod tests {
         ProviderResponseUpdated {
             agent_prompt_id: spid.into(),
             items,
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
             originator: PromptOriginator::User,
         }
     }

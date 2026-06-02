@@ -214,6 +214,103 @@ fn event_is_internal_restore_notice(event: &Event) -> bool {
     }
 }
 
+/// Estimate how many prompt/input tokens a compacted replay window will occupy
+/// when replayed on the next turn.
+///
+/// Tau does not carry a tokenizer in the harness, and providers do not always
+/// report usage for compaction items. For UI status we use the same coarse
+/// convention used by many provider dashboards: roughly four UTF-8 bytes per
+/// token, measured over the provider-owned items that prompt assembly will
+/// replay after compaction. This is not a billing counter.
+fn estimate_compacted_input_tokens(replay_window: &[ContextItem]) -> Option<u64> {
+    const APPROX_BYTES_PER_TOKEN: u64 = 4;
+
+    let bytes: u64 = replay_window
+        .iter()
+        .map(approx_context_item_provider_bytes)
+        .sum();
+    (0 < bytes).then_some(bytes.div_ceil(APPROX_BYTES_PER_TOKEN).max(1))
+}
+
+fn approx_context_item_provider_bytes(item: &ContextItem) -> u64 {
+    match item {
+        ContextItem::Message(message) => {
+            let content_bytes: u64 = message
+                .content
+                .iter()
+                .map(|part| match part {
+                    ContentPart::Text { text } => text.len() as u64,
+                })
+                .sum();
+            content_bytes + 16
+        }
+        ContextItem::ToolCall(call) => {
+            call.call_id.as_str().len() as u64
+                + call.name.as_str().len() as u64
+                + approx_cbor_json_bytes(&call.arguments)
+                + 16
+        }
+        ContextItem::ToolResult(result) => {
+            let status_bytes = match &result.status {
+                tau_proto::ToolResultStatus::Success => 0,
+                tau_proto::ToolResultStatus::Error { message }
+                | tau_proto::ToolResultStatus::Cancelled { reason: message } => {
+                    message.len() as u64
+                }
+            };
+            result.call_id.as_str().len() as u64
+                + status_bytes
+                + result.output.render().len() as u64
+                + 16
+        }
+        ContextItem::ReasoningText(reasoning) => reasoning.text.len() as u64 + 16,
+        ContextItem::Reasoning(item)
+        | ContextItem::Compaction(item)
+        | ContextItem::UnknownProviderItem(item) => approx_cbor_json_bytes(&item.0),
+        ContextItem::CompactionTrigger => 16,
+    }
+}
+
+fn latest_compaction_replay_window(items: &[ContextItem]) -> Option<&[ContextItem]> {
+    items
+        .iter()
+        .rposition(|item| matches!(item, ContextItem::Compaction(_)))
+        .map(|index| &items[index..])
+}
+
+fn approx_cbor_json_bytes(value: &CborValue) -> u64 {
+    match value {
+        CborValue::Null => 4,
+        CborValue::Bool(value) => {
+            if *value {
+                4
+            } else {
+                5
+            }
+        }
+        CborValue::Integer(value) => {
+            let value: i128 = (*value).into();
+            value.to_string().len() as u64
+        }
+        CborValue::Float(value) => value.to_string().len() as u64,
+        CborValue::Bytes(bytes) => (bytes.len() as u64).div_ceil(3) * 4,
+        CborValue::Text(text) => text.len() as u64,
+        CborValue::Array(values) => {
+            2 + values.iter().map(approx_cbor_json_bytes).sum::<u64>()
+                + values.len().saturating_sub(1) as u64
+        }
+        CborValue::Map(entries) => {
+            2 + entries
+                .iter()
+                .map(|(key, value)| approx_cbor_json_bytes(key) + approx_cbor_json_bytes(value) + 3)
+                .sum::<u64>()
+                + entries.len().saturating_sub(1) as u64
+        }
+        CborValue::Tag(_, value) => approx_cbor_json_bytes(value),
+        _ => 0,
+    }
+}
+
 fn restored_tool_call_error_message(call_id: &ToolCallId) -> String {
     format!(
         "{}: true\n\nTool call `{call_id}` was interrupted due to session restart. Side effects may have occurred.",
@@ -1066,6 +1163,8 @@ where
                             error: None,
                             originator: prompt.originator.clone(),
                             usage: None,
+                            compaction_original_input_tokens: None,
+                            compaction_compacted_input_tokens: None,
                             backend: None,
                             provider_response_id: None,
                             ws_pool_delta: None,
@@ -1132,6 +1231,8 @@ where
                             error: None,
                             originator: prompt.originator.clone(),
                             usage: None,
+                            compaction_original_input_tokens: None,
+                            compaction_compacted_input_tokens: None,
                             backend: None,
                             provider_response_id: None,
                             ws_pool_delta: None,
@@ -3610,7 +3711,7 @@ impl Harness {
                     self.publish_event(Some(source_id), Event::ProviderPromptSubmitted(submitted));
                 }
             }
-            Event::ProviderResponseUpdated(updated) => {
+            Event::ProviderResponseUpdated(mut updated) => {
                 if !self.canceled_prompts.contains(&updated.agent_prompt_id)
                     && self.provider_prompt_owner_matches(
                         source_id,
@@ -3618,6 +3719,7 @@ impl Harness {
                         tau_proto::EventName::PROVIDER_RESPONSE_UPDATED,
                     )
                 {
+                    self.enrich_provider_response_updated_compaction(&mut updated);
                     self.publish_event(Some(source_id), Event::ProviderResponseUpdated(updated));
                 }
             }
@@ -7558,6 +7660,49 @@ impl Harness {
         enabled && !role.disable_tools.iter().any(|name| name == &spec.name)
     }
 
+    fn compaction_original_input_tokens_for_prompt(
+        &self,
+        agent_prompt_id: &AgentPromptId,
+    ) -> Option<u64> {
+        let cid = self.agent_id_for_prompt(agent_prompt_id)?;
+        self.agents
+            .get(&cid)
+            .and_then(|conv| conv.context_input_tokens)
+    }
+
+    fn enrich_provider_response_updated_compaction(
+        &self,
+        updated: &mut tau_proto::ProviderResponseUpdated,
+    ) {
+        let has_compaction = updated.items.iter().any(|item| {
+            matches!(
+                item,
+                tau_proto::ProviderResponseItem::InProgress(
+                    tau_proto::InProgressOutputItem::Compaction { .. }
+                ) | tau_proto::ProviderResponseItem::Completed(ContextItem::Compaction(_))
+            )
+        });
+        if !has_compaction {
+            return;
+        }
+        updated.compaction_original_input_tokens = self
+            .compaction_original_input_tokens_for_prompt(&updated.agent_prompt_id)
+            .or(updated.compaction_original_input_tokens);
+        let completed_items: Vec<_> = updated
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                tau_proto::ProviderResponseItem::Completed(item) => Some(item.clone()),
+                _ => None,
+            })
+            .collect();
+        if let Some(replay_window) = latest_compaction_replay_window(&completed_items) {
+            updated.compaction_compacted_input_tokens =
+                estimate_compacted_input_tokens(replay_window)
+                    .or(updated.compaction_compacted_input_tokens);
+        }
+    }
+
     #[cfg(test)]
     fn handle_provider_response_finished(
         &mut self,
@@ -7594,6 +7739,13 @@ impl Harness {
             return Ok(());
         }
         let response_cid = self.agent_id_for_prompt(&response.agent_prompt_id);
+        let response_contains_compaction = response
+            .output_items
+            .iter()
+            .any(|item| matches!(item, ContextItem::Compaction(_)));
+        let compaction_original_input_tokens = response_contains_compaction
+            .then(|| self.compaction_original_input_tokens_for_prompt(&response.agent_prompt_id))
+            .flatten();
         // Per-conversation usage: separate from the global tracker
         // because side agents shouldn't clobber the user's
         // status bar, but the harness still needs their context %
@@ -7675,6 +7827,22 @@ impl Harness {
                 response_received_tokens: received_tokens,
                 stats: self.current_session_state.token_usage.clone(),
             });
+        }
+        if response_contains_compaction {
+            response.compaction_original_input_tokens = input_tokens
+                .or(response.compaction_original_input_tokens)
+                .or(compaction_original_input_tokens);
+            response.compaction_compacted_input_tokens = response
+                .usage
+                .as_ref()
+                .and_then(|usage| {
+                    (0 < usage.response_received_tokens).then_some(usage.response_received_tokens)
+                })
+                .or_else(|| {
+                    latest_compaction_replay_window(&response.output_items)
+                        .and_then(estimate_compacted_input_tokens)
+                })
+                .or(response.compaction_compacted_input_tokens);
         }
         if requested_tool_calls && tool_calls.is_empty() {
             self.emit_info(&format!(
@@ -9037,6 +9205,48 @@ pub(crate) fn selector_matches_event(selectors: &[EventSelector], event: &Event)
         EventSelector::Exact(expected) => *expected == target_name,
         EventSelector::Prefix(prefix) => target_name.matches_prefix(prefix),
     })
+}
+
+#[cfg(test)]
+mod compaction_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn compacted_estimate_uses_items_from_latest_compaction_forward() {
+        // Regression coverage for compaction UI metadata: provider replay keeps
+        // the latest compaction item and every later item, so fallback sizing
+        // must not estimate only the opaque compaction item itself.
+        let compaction =
+            ContextItem::Compaction(tau_proto::OpaqueProviderItem(CborValue::Map(vec![(
+                CborValue::Text("type".to_owned()),
+                CborValue::Text("compaction".to_owned()),
+            )])));
+        let after = ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+            content: vec![ContentPart::Text {
+                text: "large post-compaction assistant item".repeat(20),
+            }],
+            phase: None,
+        });
+        let items = vec![
+            ContextItem::Message(MessageItem {
+                role: ContextRole::User,
+                content: vec![ContentPart::Text {
+                    text: "pre-compaction item".to_owned(),
+                }],
+                phase: None,
+            }),
+            compaction.clone(),
+            after,
+        ];
+
+        let replay_window = latest_compaction_replay_window(&items).expect("compaction window");
+        assert_eq!(replay_window.len(), 2);
+        assert!(
+            estimate_compacted_input_tokens(replay_window).unwrap()
+                > estimate_compacted_input_tokens(&[compaction]).unwrap()
+        );
+    }
 }
 
 #[cfg(test)]

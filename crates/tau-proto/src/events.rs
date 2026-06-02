@@ -2382,6 +2382,16 @@ pub struct ProviderResponseUpdated {
     /// the live snapshot but are not durable transcript facts until the
     /// matching [`ProviderResponseFinished`] commits final `output_items`.
     pub items: Vec<ProviderResponseItem>,
+    /// Input-token count of the conversation before provider-side compaction,
+    /// if this update is reporting a compaction lifecycle item and the harness
+    /// knows the previous context size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_original_input_tokens: Option<u64>,
+    /// Prompt/input-token count of the compacted provider item in this live
+    /// update, if the provider has already completed the compaction item and
+    /// the harness can estimate its replay size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_compacted_input_tokens: Option<u64>,
     /// Echo of [`AgentPromptCreated::originator`]. UIs filter on
     /// `originator.is_user()` so the streaming text from a side
     /// conversation doesn't paint into the user's chat window.
@@ -2436,6 +2446,17 @@ pub struct ProviderResponseFinished {
     /// Provider-reported usage for this response, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<ProviderTokenUsage>,
+    /// Input-token count of the conversation before provider-side compaction,
+    /// if this finished response contains a durable compaction item and the
+    /// harness knows the previous context size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_original_input_tokens: Option<u64>,
+    /// Prompt/input-token count of the compacted provider item, if this
+    /// finished response contains a durable compaction item and the harness can
+    /// derive or estimate the replay size. This is UI context-size metadata,
+    /// not a billing counter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_compacted_input_tokens: Option<u64>,
     /// Which LLM backend handled this turn. Recorded once per turn
     /// (instead of in a trace line) so offline inspection of the
     /// event log can correlate cache-miss / retry patterns with the

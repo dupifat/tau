@@ -23,11 +23,13 @@ use super::tool::{
 
 const LIST_ACCOUNTS_FORMAT: &str = "account_id default_calendar display_name";
 const LIST_CALENDARS_FORMAT: &str = "account_id calendar_id flags display_name";
-const LIST_EVENTS_FORMAT: &str = "account calendar event_id start end flags status summary...";
-const FREE_BUSY_FORMAT: &str = "account calendar event_id start end flags";
+const LIST_EVENTS_FORMAT: &str = "event_id start end flags status summary...";
+const FREE_BUSY_FORMAT: &str = "event_id start end flags";
 const EVENT_DETAIL_FORMAT: &str = "key value...";
 const DEFAULT_EVENT_LIMIT: u32 = 50;
 const MAX_EVENT_LIMIT: u32 = 100;
+const DEFAULT_READ_LOOKBACK_DAYS: u8 = 2;
+const DEFAULT_READ_WINDOW_DAYS: i64 = 7;
 const CALENDAR_LOG_DEFAULT_LIMIT: usize = 20;
 const CALENDAR_LOG_MAX_LIMIT: usize = 200;
 const MAX_LOG_FIELD_CHARS: usize = 512;
@@ -583,11 +585,13 @@ impl Engine {
         entry.event_id = args
             .and_then(|args| cbor_text_field(args, "event_id"))
             .map(|value| safe_log_value(value, MAX_LOG_FIELD_CHARS));
-        entry.start = args
-            .and_then(|args| cbor_text_field(args, "start"))
+        entry.start = result_data
+            .and_then(|data| cbor_text_field(data, "start"))
+            .or_else(|| args.and_then(|args| cbor_nonblank_text_field(args, "start")))
             .map(|value| safe_log_value(value, MAX_LOG_FIELD_CHARS));
-        entry.end = args
-            .and_then(|args| cbor_text_field(args, "end"))
+        entry.end = result_data
+            .and_then(|data| cbor_text_field(data, "end"))
+            .or_else(|| args.and_then(|args| cbor_nonblank_text_field(args, "end")))
             .map(|value| safe_log_value(value, MAX_LOG_FIELD_CHARS));
         entry.limit = args.and_then(|args| cbor_u32_field(args, "limit"));
         entry.item_count = calendar_log_item_count(invocation.command, result);
@@ -736,6 +740,8 @@ impl Engine {
         let account = self.single_account(args.account.as_deref())?;
         let calendar = self.calendar_arg(account, args.calendar.as_deref())?;
         let range = parse_range(args, account)?;
+        let range_start = format_optional_read_bound(range.min, "start")?;
+        let range_end = format_optional_read_bound(range.max, "end")?;
         let page =
             self.events_for_account(account, calendar, range, limit, args.cursor.as_deref())?;
         let scanned_events = page.events.len();
@@ -745,12 +751,7 @@ impl Engine {
         let mut rows = Vec::new();
         for event in events {
             self.remember_event_etag(account, calendar, event);
-            rows.push(format_event_line(
-                &self.config.policy,
-                account,
-                calendar,
-                event,
-            ));
+            rows.push(format_event_line(&self.config.policy, event));
         }
         Ok(ok_envelope(
             "list_events",
@@ -759,6 +760,8 @@ impl Engine {
                 ("account", CborValue::Text(safe_display_line(&account.id))),
                 ("calendar", CborValue::Text(safe_display_line(calendar))),
                 ("format", CborValue::Text(LIST_EVENTS_FORMAT.to_owned())),
+                ("start", optional_text(range_start)),
+                ("end", optional_text(range_end)),
                 ("events", line_array(rows)),
                 (
                     "returned_events",
@@ -841,6 +844,8 @@ impl Engine {
         let account = self.single_account(args.account.as_deref())?;
         let calendar = self.calendar_arg(account, args.calendar.as_deref())?;
         let range = parse_range(args, account)?;
+        let range_start = format_optional_read_bound(range.min, "start")?;
+        let range_end = format_optional_read_bound(range.max, "end")?;
         let page =
             self.events_for_account(account, calendar, range, limit, args.cursor.as_deref())?;
         let events = filtered_events(&self.config.policy, &page.events, None);
@@ -848,12 +853,7 @@ impl Engine {
         let mut rows = Vec::new();
         for event in events {
             self.remember_event_etag(account, calendar, event);
-            rows.push(format_free_busy_line(
-                &self.config.policy,
-                account,
-                calendar,
-                event,
-            ));
+            rows.push(format_free_busy_line(&self.config.policy, event));
         }
         Ok(ok_envelope(
             "free_busy",
@@ -862,6 +862,8 @@ impl Engine {
                 ("account", CborValue::Text(safe_display_line(&account.id))),
                 ("calendar", CborValue::Text(safe_display_line(calendar))),
                 ("format", CborValue::Text(FREE_BUSY_FORMAT.to_owned())),
+                ("start", optional_text(range_start)),
+                ("end", optional_text(range_end)),
                 ("busy", line_array(rows)),
                 ("next_cursor", optional_text(page.next_cursor)),
                 ("truncated", CborValue::Bool(page.truncated)),
@@ -1388,20 +1390,27 @@ fn default_calendar_id_for_account(account: &ValidatedAccount) -> Option<&str> {
 }
 
 fn parse_range(args: &CalendarRangeArgs, account: &ValidatedAccount) -> Result<TimeRange, String> {
-    let start = parse_read_bound(
-        required_arg(args.start.as_deref(), "start")?,
-        "start",
-        account.timezone.as_deref(),
-    )?;
+    let start_value = optional_trimmed_line(args.start.as_deref(), "start")?;
+    let (start, default_end) = if let Some(start_value) = start_value.as_deref() {
+        (
+            parse_read_bound(start_value, "start", account.timezone.as_deref())?,
+            None,
+        )
+    } else {
+        let (start, end) = default_read_range(account.timezone.as_deref())?;
+        (start, Some(end))
+    };
     let end = match args.end.as_deref() {
         Some(end) if !end.trim().is_empty() => {
             parse_read_bound(end, "end", account.timezone.as_deref())?
         }
-        _ => default_read_end_bound(
-            required_arg(args.start.as_deref(), "start")?,
-            start,
-            account.timezone.as_deref(),
-        )?,
+        _ => {
+            if let Some(start_value) = start_value.as_deref() {
+                default_read_end_bound(start_value, start, account.timezone.as_deref())?
+            } else {
+                default_end.expect("default end present when start is absent")
+            }
+        }
     };
     if !is_datetime_before(start, end) {
         return Err("start must be before end".to_owned());
@@ -1432,6 +1441,43 @@ fn parse_read_bound(
     }
 }
 
+fn format_optional_read_bound(
+    value: Option<time::OffsetDateTime>,
+    field: &str,
+) -> Result<Option<String>, String> {
+    value
+        .map(|value| {
+            value
+                .format(&time::format_description::well_known::Rfc3339)
+                .map_err(|error| format!("{field} could not be formatted: {error}"))
+        })
+        .transpose()
+}
+
+fn default_read_range(
+    account_timezone: Option<&str>,
+) -> Result<(time::OffsetDateTime, time::OffsetDateTime), String> {
+    let timezone = timezone_for_read("start", account_timezone)?;
+    let today = time::OffsetDateTime::now_utc().to_timezone(timezone).date();
+    let start_date = date_days_before(today, DEFAULT_READ_LOOKBACK_DAYS)?;
+    let start_local = start_date.with_time(time::Time::MIDNIGHT);
+    let end_local = start_local
+        .checked_add(time::Duration::days(DEFAULT_READ_WINDOW_DAYS))
+        .ok_or_else(|| "default end is out of range".to_owned())?;
+    let start = local_read_bound_to_utc(start_local, "start", account_timezone)?;
+    let end = local_read_bound_to_utc(end_local, "end", account_timezone)?;
+    Ok((start, end))
+}
+
+fn date_days_before(mut date: time::Date, days: u8) -> Result<time::Date, String> {
+    for _ in 0..days {
+        date = date
+            .previous_day()
+            .ok_or_else(|| "default start is out of range".to_owned())?;
+    }
+    Ok(date)
+}
+
 fn default_read_end_bound(
     start_value: &str,
     start_utc: time::OffsetDateTime,
@@ -1441,17 +1487,17 @@ fn default_read_end_bound(
         .is_ok()
     {
         return start_utc
-            .checked_add(time::Duration::days(7))
+            .checked_add(time::Duration::days(DEFAULT_READ_WINDOW_DAYS))
             .ok_or_else(|| "default end is out of range".to_owned());
     }
     if let Ok(local_start) = parse_local_read_bound(start_value, "start", account_timezone) {
         let local = local_start
-            .checked_add(time::Duration::days(7))
+            .checked_add(time::Duration::days(DEFAULT_READ_WINDOW_DAYS))
             .ok_or_else(|| "default end is out of range".to_owned())?;
         return local_read_bound_to_utc(local, "end", account_timezone);
     }
     start_utc
-        .checked_add(time::Duration::days(7))
+        .checked_add(time::Duration::days(DEFAULT_READ_WINDOW_DAYS))
         .ok_or_else(|| "default end is out of range".to_owned())
 }
 
@@ -1983,17 +2029,10 @@ fn push_log_field(fields: &mut Vec<String>, name: &str, value: Option<&str>) {
     }
 }
 
-fn format_event_line(
-    policy: &ValidatedPolicy,
-    account: &ValidatedAccount,
-    calendar: &str,
-    event: &BackendEvent,
-) -> String {
+fn format_event_line(policy: &ValidatedPolicy, event: &BackendEvent) -> String {
     let status = event_status(event).unwrap_or("-");
     format!(
-        "{} {} {} {} {} {} {} {}",
-        safe_field(&account.id),
-        safe_field(calendar),
+        "{} {} {} {} {} {}",
         safe_field(event_id(event)),
         safe_field(event_start(event)),
         safe_field(event_end(event)),
@@ -2003,16 +2042,9 @@ fn format_event_line(
     )
 }
 
-fn format_free_busy_line(
-    policy: &ValidatedPolicy,
-    account: &ValidatedAccount,
-    calendar: &str,
-    event: &BackendEvent,
-) -> String {
+fn format_free_busy_line(policy: &ValidatedPolicy, event: &BackendEvent) -> String {
     format!(
-        "{} {} {} {} {} {}",
-        safe_field(&account.id),
-        safe_field(calendar),
+        "{} {} {} {}",
         safe_field(event_id(event)),
         safe_field(event_start(event)),
         safe_field(event_end(event)),
@@ -2678,6 +2710,10 @@ fn cbor_text_field<'a>(value: &'a CborValue, field: &str) -> Option<&'a str> {
         Some(CborValue::Text(value)) => Some(value.as_str()),
         _ => None,
     }
+}
+
+fn cbor_nonblank_text_field<'a>(value: &'a CborValue, field: &str) -> Option<&'a str> {
+    cbor_text_field(value, field).filter(|value| !value.trim().is_empty())
 }
 
 fn cbor_bool_field(value: &CborValue, field: &str) -> Option<bool> {

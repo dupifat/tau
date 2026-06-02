@@ -298,15 +298,64 @@ fn list_events_ignores_blank_title_filter() {
 }
 
 #[test]
-fn calendar_range_args_require_start() {
-    // Missing start used to create unbounded reads. Calendar reads should
-    // now always have an explicit lower bound.
+fn calendar_range_args_default_to_recent_week() {
+    // Regression coverage for weak models that omit `start` after a calendar
+    // error. Missing bounds must remain safe and bounded instead of failing
+    // into an auto-retry loop or creating an unbounded read.
     let temp = tempfile::TempDir::new().expect("tempdir");
     let engine = test_engine(temp.path());
     let account = engine.config.accounts.get("feed").expect("account");
+    let today_before = time::OffsetDateTime::now_utc().date();
 
-    let err = parse_range(&CalendarRangeArgs::default(), account).expect_err("missing start");
-    assert_eq!(err, "start is required");
+    let range = parse_range(&CalendarRangeArgs::default(), account).expect("default range");
+
+    let today_after = time::OffsetDateTime::now_utc().date();
+    let min = range.min.expect("min");
+    let max = range.max.expect("max");
+    let expected_before =
+        date_days_before(today_before, DEFAULT_READ_LOOKBACK_DAYS).expect("expected before date");
+    let expected_after =
+        date_days_before(today_after, DEFAULT_READ_LOOKBACK_DAYS).expect("expected after date");
+    assert!(
+        min.date() == expected_before || min.date() == expected_after,
+        "min {min:?} should default to midnight two days before today"
+    );
+    assert_eq!(min.time(), time::Time::MIDNIGHT);
+    assert_eq!(max - min, time::Duration::days(DEFAULT_READ_WINDOW_DAYS));
+}
+
+#[test]
+fn calendar_log_prefers_effective_default_range_over_blank_args() {
+    // Blank read bounds are treated like omission. The audit log should record
+    // the effective default range returned by the tool, not the model's blank
+    // raw arguments.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let engine = test_engine(temp.path());
+    let invocation = ToolInvocation {
+        command: CalendarCommand::ListEvents,
+        args: Some(cbor_map(vec![
+            ("start", CborValue::Text(" \t".to_owned())),
+            ("end", CborValue::Text("".to_owned())),
+        ])),
+    };
+    let result = ok_envelope(
+        "list_events",
+        "ok",
+        cbor_map(vec![
+            ("account", CborValue::Text("feed".to_owned())),
+            ("calendar", CborValue::Text("main".to_owned())),
+            ("start", CborValue::Text("2026-05-30T00:00:00Z".to_owned())),
+            ("end", CborValue::Text("2026-06-06T00:00:00Z".to_owned())),
+            ("events", CborValue::Array(Vec::new())),
+        ]),
+    );
+
+    let entry = engine
+        .calendar_log_entry(&invocation, &result)
+        .expect("log entry");
+
+    assert_eq!(entry.start.as_deref(), Some("2026-05-30T00:00:00Z"));
+    assert_eq!(entry.end.as_deref(), Some("2026-06-06T00:00:00Z"));
 }
 
 #[test]

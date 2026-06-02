@@ -161,7 +161,7 @@ pub fn calendar_tool_spec() -> ToolSpec {
     ToolSpec {
         name: tau_proto::ToolName::new(TOOL_NAME),
         model_visible_name: None,
-        description: Some("Controlled calendar access. Use list_accounts, list_calendars, list_events, read_event, free_busy, create_event, update_event, delete_event, or respond_invite. Results use ok/command/status/data envelopes with line arrays and format fields. For event ranges pass start; end is optional and defaults to 7 days after start. list_events accepts optional title substring filtering. Time values may be RFC3339 with offset, YYYY-MM-DD all-day dates, natural expressions like today/tomorrow/next week, or local YYYY-MM-DDTHH:MM:SS interpreted in the configured or system timezone. Existing event writes require event_id; ETags are handled internally.".to_owned()),
+        description: Some("Controlled calendar access. Use list_accounts, list_calendars, list_events, read_event, free_busy, create_event, update_event, delete_event, or respond_invite. Results use ok/command/status/data envelopes with line arrays and format fields. For event ranges, start is optional and defaults to midnight 2 days before the current date; omitted end defaults to 7 days after start. Results include effective data.start/data.end; reuse them with next_cursor pagination. list_events accepts optional title substring filtering. Time values may be RFC3339 with offset, YYYY-MM-DD all-day dates, natural expressions like today/tomorrow/next week, or local YYYY-MM-DDTHH:MM:SS interpreted in the configured or system timezone. Existing event writes require event_id; ETags are handled internally.".to_owned()),
         tool_type: tau_proto::ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
@@ -205,9 +205,7 @@ pub fn calendar_tool_spec() -> ToolSpec {
                 {
                     "if": {"properties": {"command": {"const": "list_events"}}, "required": ["command"]},
                     "then": {
-                        "required": ["args"],
                         "properties": {"args": {
-                            "required": ["start"],
                             "properties": {"account": {}, "calendar": {}, "start": {}, "end": {}, "limit": {}, "cursor": {}, "title": {}},
                             "additionalProperties": false
                         }}
@@ -216,9 +214,7 @@ pub fn calendar_tool_spec() -> ToolSpec {
                 {
                     "if": {"properties": {"command": {"const": "free_busy"}}, "required": ["command"]},
                     "then": {
-                        "required": ["args"],
                         "properties": {"args": {
-                            "required": ["start"],
                             "properties": {"account": {}, "calendar": {}, "start": {}, "end": {}, "limit": {}, "cursor": {}},
                             "additionalProperties": false
                         }}

@@ -93,7 +93,7 @@ Recommended defaults:
 - `calendar.policy.write.require_approval: true`
 - keep `calendar.accounts[*].calendars.allow` narrow
 
-Calendar tool results use the same `ok`, `command`, `status`, `data` envelope convention as email. Line arrays include `data.format`; paginated event commands include `data.next_cursor` and `data.truncated`.
+Calendar tool results use the same `ok`, `command`, `status`, `data` envelope convention as email. Line arrays include `data.format`; paginated event commands include `data.next_cursor` and `data.truncated`. `list_events` and `free_busy` are bounded reads; if `start` is omitted they default to midnight 2 days before the current date, and if `end` is omitted it defaults to 7 days after `start`. Read results include effective `data.start`/`data.end`; reuse those while paginating.
 
 Calendar writes should normally return `approval_required`; then the agent should wait for the user to inspect and approve with `/calendar change list`, `/calendar change open <id>`, and `/calendar change approve <id>`. Existing Google event writes use internally cached ETags; if the event changed, the agent should re-read it and retry.
 

@@ -1226,7 +1226,7 @@ fn skill_tool_spec() -> ToolSpec {
 }
 
 fn delegate_tool_spec() -> ToolSpec {
-    ToolSpec { name: ToolName::new(DELEGATE_TOOL_NAME), model_visible_name: None, description: Some("Delegate a self-contained sub-task to a new sub-agent, and return its final response. The instant background placeholder and final result include `self_agent_id` and `sub_agent_id` headers/values.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"task_name":{"type":"string","description":"Short user-visible label for the sub-task (a few words)."},"prompt":{"type":"string","description":"Self-contained task for the sub-agent."},"role":{"type":"string","description":"Optional sub-agent role to use."}},"required":["task_name","prompt"],"additionalProperties":false})), format: None, enabled_by_default: true, background_support: Some(BackgroundSupport::Never) }
+    ToolSpec { name: ToolName::new(DELEGATE_TOOL_NAME), model_visible_name: None, description: Some("Delegate a self-contained sub-task to a new sub-agent, and return its final response. The `prompt` must contain all information the sub-agent needs to complete the task. The instant background placeholder and final result include `self_agent_id` and `sub_agent_id`.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"task_name":{"type":"string","description":"Short user-visible label for the sub-task (a few words)."},"prompt":{"type":"string","description":"Self-contained task for the sub-agent."},"role":{"type":"string","description":"Optional sub-agent role to use."}},"required":["task_name","prompt"],"additionalProperties":false})), format: None, enabled_by_default: true, background_support: Some(BackgroundSupport::Never) }
 }
 
 fn message_tool_spec() -> ToolSpec {
@@ -1356,10 +1356,16 @@ mod tests {
         // response flows back through the delegate tool result.
         let instruction = delegate_instruction("engineer_parent", "inspect the change");
 
-        assert!(instruction.contains("You were started by this agent:\n\nengineer_parent"));
+        assert!(
+            instruction
+                .contains("You were started by agent `engineer_parent` using `delegate` tool")
+        );
         assert!(instruction.contains("Only your first final response"));
-        assert!(instruction.contains("Use the `message` tool to ask `engineer_parent`"));
-        assert!(instruction.contains("Task:\ninspect the change"));
+        assert!(
+            instruction
+                .contains("you can use `message` tool to communicate with any agent at any time")
+        );
+        assert!(instruction.contains("### Task\n\ninspect the change"));
     }
 
     #[test]

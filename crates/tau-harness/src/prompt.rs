@@ -30,6 +30,8 @@ pub(crate) fn built_in_system_prompt_templates() -> std::collections::HashMap<St
 pub(crate) struct RolePromptTemplateContext<'a> {
     /// Name of the role whose prompt is being rendered.
     pub(crate) role_name: &'a str,
+    /// Working directory associated with the agent receiving the prompt.
+    pub(crate) working_directory: Option<&'a std::path::Path>,
 }
 
 /// Builds the system prompt from Tau defaults plus role prompt and prompt
@@ -51,7 +53,10 @@ pub(crate) fn build_system_prompt(
         skills,
         prompt_fragments,
         serde_json::json!({}),
-        RolePromptTemplateContext { role_name: "" },
+        RolePromptTemplateContext {
+            role_name: "",
+            working_directory: None,
+        },
     )
 }
 
@@ -142,10 +147,20 @@ fn prompt_template_data(
     skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
     agent_context: serde_json::Value,
 ) -> serde_json::Value {
+    let cwd = context
+        .working_directory
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let working_directory = context
+        .working_directory
+        .map(working_directory_template_value)
+        .unwrap_or_else(empty_working_directory_template_value);
     serde_json::json!({
         "role": {
             "name": context.role_name,
         },
+        "cwd": cwd,
+        "working_directory": working_directory,
         "skills": prompt_template_skills(skills),
         "agent_context": agent_context,
     })
@@ -217,11 +232,40 @@ fn prompt_template_renderer() -> handlebars::Handlebars<'static> {
     handlebars.set_strict_mode(true);
     handlebars.register_escape_fn(handlebars::no_escape);
     handlebars.register_helper("sort", Box::new(SortHelper));
+    handlebars.register_helper("eq", Box::new(EqHelper));
+    handlebars.register_helper("starts_with", Box::new(StartsWithHelper));
     handlebars.register_helper("trim", Box::new(TrimHelper));
     handlebars.register_helper("xml_escape", Box::new(XmlEscapeHelper));
     handlebars
 }
 
+fn working_directory_template_value(path: &std::path::Path) -> serde_json::Value {
+    let display = path.display().to_string();
+    let basename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_owned();
+    let ancestors = path
+        .ancestors()
+        .map(|ancestor| ancestor.display().to_string())
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "present": true,
+        "path": display,
+        "basename": basename,
+        "ancestors": ancestors,
+    })
+}
+
+fn empty_working_directory_template_value() -> serde_json::Value {
+    serde_json::json!({
+        "present": false,
+        "path": "",
+        "basename": "",
+        "ancestors": [],
+    })
+}
 fn prompt_template_skills(
     skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
 ) -> Vec<serde_json::Value> {
@@ -245,6 +289,67 @@ fn prompt_template_skills(
         .collect();
     skills.sort_by(|a, b| compare_template_values(a, b, Some("name")));
     skills
+}
+
+struct EqHelper;
+
+impl handlebars::HelperDef for EqHelper {
+    fn call_inner<'reg: 'rc, 'rc>(
+        &self,
+        h: &handlebars::Helper<'rc>,
+        _: &'reg handlebars::Handlebars<'reg>,
+        _: &'rc handlebars::Context,
+        _: &mut handlebars::RenderContext<'reg, 'rc>,
+    ) -> Result<handlebars::ScopedJson<'rc>, handlebars::RenderError> {
+        use handlebars::JsonRender;
+
+        let Some(left) = h.param(0) else {
+            return Ok(handlebars::ScopedJson::Derived(serde_json::Value::Bool(
+                false,
+            )));
+        };
+        let Some(right) = h.param(1) else {
+            return Ok(handlebars::ScopedJson::Derived(serde_json::Value::Bool(
+                false,
+            )));
+        };
+        let equal = if left.value().is_string() || right.value().is_string() {
+            left.value().render() == right.value().render()
+        } else {
+            left.value() == right.value()
+        };
+        Ok(handlebars::ScopedJson::Derived(serde_json::Value::Bool(
+            equal,
+        )))
+    }
+}
+
+struct StartsWithHelper;
+
+impl handlebars::HelperDef for StartsWithHelper {
+    fn call_inner<'reg: 'rc, 'rc>(
+        &self,
+        h: &handlebars::Helper<'rc>,
+        _: &'reg handlebars::Handlebars<'reg>,
+        _: &'rc handlebars::Context,
+        _: &mut handlebars::RenderContext<'reg, 'rc>,
+    ) -> Result<handlebars::ScopedJson<'rc>, handlebars::RenderError> {
+        use handlebars::JsonRender;
+
+        let Some(value) = h.param(0) else {
+            return Ok(handlebars::ScopedJson::Derived(serde_json::Value::Bool(
+                false,
+            )));
+        };
+        let Some(prefix) = h.param(1) else {
+            return Ok(handlebars::ScopedJson::Derived(serde_json::Value::Bool(
+                false,
+            )));
+        };
+        Ok(handlebars::ScopedJson::Derived(serde_json::Value::Bool(
+            value.value().render().starts_with(&prefix.value().render()),
+        )))
+    }
 }
 
 struct TrimHelper;

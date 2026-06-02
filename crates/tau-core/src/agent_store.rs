@@ -458,6 +458,16 @@ impl AgentStore {
         self.agents.values().collect()
     }
 
+    /// Reads persisted sidecar metadata for one agent, if it exists.
+    pub fn agent_meta(&self, agent_id: &str) -> io::Result<Option<AgentMeta>> {
+        let path = self.agent_dir(agent_id).join("meta.json");
+        match read_meta(&path) {
+            Ok(meta) => Ok(Some(meta)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Records initial cwd metadata for an agent if not already
     /// present. Idempotent: subsequent calls only update
     /// `last_touched`.

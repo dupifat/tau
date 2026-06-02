@@ -997,6 +997,8 @@ pub struct Harness {
     pub(crate) discovered_agents_files: Vec<DiscoveredAgentsFile>,
     /// Session-scoped JSON context contributions published by extensions.
     pub(crate) agent_context: AgentContextStore,
+    /// Agent creation working directory, used as stable prompt-template input.
+    pub(crate) agent_working_directories: HashMap<tau_proto::AgentId, PathBuf>,
     /// Extensions that explicitly registered as per-agent prompt-context
     /// providers.
     pub(crate) agent_context_providers: HashSet<tau_proto::ConnectionId>,
@@ -1424,6 +1426,7 @@ impl Harness {
             discovered_skills: built_in_discovered_skills(),
             discovered_agents_files: Vec::new(),
             agent_context: AgentContextStore::default(),
+            agent_working_directories: HashMap::new(),
             agent_context_providers: HashSet::new(),
             pending_agent_context_ready: HashMap::new(),
             extension_prompt_fragments: BTreeMap::new(),
@@ -1661,6 +1664,7 @@ impl Harness {
             discovered_skills: built_in_discovered_skills(),
             discovered_agents_files: Vec::new(),
             agent_context: AgentContextStore::default(),
+            agent_working_directories: HashMap::new(),
             agent_context_providers: HashSet::new(),
             pending_agent_context_ready: HashMap::new(),
             extension_prompt_fragments: BTreeMap::new(),
@@ -6407,6 +6411,7 @@ impl Harness {
         self.agents.clear();
         self.agent_routes.clear();
         self.agent_states.clear();
+        self.agent_working_directories.clear();
         self.stopped_agent_ids.clear();
 
         self.current_session_id = new_session_id.clone();
@@ -7078,6 +7083,11 @@ impl Harness {
                         .and_then(|tree| tree.head())
                 });
             let cid: AgentId = agent_id_string.clone().into();
+            if let Ok(Some(meta)) = self.agent_store.agent_meta(agent_id.as_str())
+                && let Some(cwd) = meta.cwd
+            {
+                self.agent_working_directories.insert(agent_id.clone(), cwd);
+            }
             let role = self.agent_role_from_log(agent_id.as_str());
             let originator = self.agent_originator_from_log(agent_id.as_str());
             if let Some(conv) = self.agents.get_mut(&cid) {
@@ -7191,6 +7201,8 @@ impl Harness {
         conv.role = Some(role.to_owned());
         conv.agent_id = Some(agent_id.clone());
         self.agents.insert(cid.clone(), conv);
+        self.agent_working_directories
+            .insert(agent_id.clone().into(), cwd.clone());
         self.publish_delegate_roles_context();
         let _ = self.agent_store.record_agent_meta(&agent_id, Some(cwd));
         self.ensure_loaded_agent_for_agent(&cid, &agent_id);
@@ -7226,9 +7238,13 @@ impl Harness {
             .agents
             .get(cid)
             .map(|conv| self.role_name_for_agent(conv));
-        let _ = self
-            .agent_store
-            .record_agent_meta(agent_id, std::env::current_dir().ok());
+        let cwd = std::env::current_dir().ok();
+        if let Some(cwd) = cwd.as_ref() {
+            self.agent_working_directories
+                .entry(agent_id.to_owned().into())
+                .or_insert_with(|| cwd.clone());
+        }
+        let _ = self.agent_store.record_agent_meta(agent_id, cwd);
         let agent_id_proto: tau_proto::AgentId = agent_id.to_owned().into();
         let already_loaded = match self.store.load_session(self.current_session_id.as_str()) {
             Ok(Some(membership)) => membership.contains_agent(&agent_id_proto),
@@ -7456,13 +7472,21 @@ impl Harness {
         let (prompt_fragments, tool_prompt_fragments) =
             self.gather_prompt_fragment_groups_for_role(role_name);
         let system_template = self.system_template_for_role(role_name);
+        let working_directory = agent_id.and_then(|agent_id| {
+            self.agent_working_directories
+                .get(agent_id)
+                .map(PathBuf::as_path)
+        });
         build_system_prompt_with_tool_template_context(
             system_template,
             &self.discovered_skills,
             &prompt_fragments,
             &tool_prompt_fragments,
             self.agent_context.template_value(agent_id),
-            RolePromptTemplateContext { role_name },
+            RolePromptTemplateContext {
+                role_name,
+                working_directory,
+            },
         )
     }
 

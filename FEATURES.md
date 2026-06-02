@@ -295,7 +295,12 @@ Prompt fragments are composable too: top-level `harness.yaml`
 `promptFragments` apply to every role, while `roles.<name>.promptFragments`
 apply only to that role. Fragments are ordered by priority with extension- and
 tool-provided fragments, so global style instructions, role guidance, and
-tool-specific instructions share one prompt assembly path.
+tool-specific instructions share one prompt assembly path. Fragment templates
+also receive the durable agent working directory as `cwd` and
+`working_directory`, with `eq` and `starts_with` helpers for project-specific
+conditionals. `working_directory` contains `present`, `path`, `basename`, and
+`ancestors`; `ancestors` is ordered from the working directory up to the
+filesystem root.
 
 ### `std-pim` — PIM (email and calendar) extension
 

@@ -5,8 +5,10 @@
 
 # Optional prompt fragments applied to every role. Fragments are rendered as
 # Handlebars templates and sorted by priority together with role-, tool-, and
-# extension-provided fragments. Priorities below 100 render before generated
-# context such as skills and AGENTS.md.
+# extension-provided fragments. Templates can use `cwd`, `working_directory`
+# (`present`, `path`, `basename`, `ancestors`), `eq`, and `starts_with` for
+# project-specific conditionals. Priorities below
+# 100 render before generated context such as skills and AGENTS.md.
 # promptFragments:
 #   - name: user.short-plain-style
 #     priority: 65

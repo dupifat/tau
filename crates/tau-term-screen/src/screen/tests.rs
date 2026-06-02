@@ -1260,6 +1260,120 @@ fn scrolling_after_already_scrolled_does_not_rewrite_rows_that_will_drop() {
     );
 }
 
+/// Regression budget for differential rendering. A moderately complex TUI
+/// layout is first rendered far enough to populate scrollback; changing one
+/// visible character through the normal no-growth `update()` path must not
+/// accidentally fall back to full-screen output.
+#[test]
+fn scrolling_single_cell_change_has_bounded_output() {
+    const WIDTH: usize = 80;
+    const HEIGHT: usize = 20;
+    const MAX_DIFF_BYTES: usize = 1_200;
+
+    fn complex_lines(changed_char: char) -> Vec<Vec<Cell>> {
+        let mut all = Vec::new();
+        for i in 0..36 {
+            let mut text = StyledText::new();
+            text.push(Span::new(
+                format!("agent-{i:02} "),
+                Style::default().fg(Color::Cyan).bold(),
+            ));
+            text.push(Span::new(
+                "processed tool output with cached context and progress ",
+                Style::default(),
+            ));
+            let marker = if i == 28 { changed_char } else { 'a' };
+            text.push(Span::new(
+                format!("marker={marker} status=ready"),
+                Style::default().fg(Color::Yellow),
+            ));
+            let block = StyledBlock::new(text)
+                .right_content(Span::new(
+                    format!("#{i:03}"),
+                    Style::default().fg(Color::DarkGrey),
+                ))
+                .margins(1, 1)
+                .bg(if i % 2 == 0 {
+                    Color::DarkBlue
+                } else {
+                    Color::DarkGreen
+                });
+            all.extend(layout_block(&block, WIDTH));
+        }
+        all
+    }
+
+    let before = complex_lines('x');
+    assert!(HEIGHT < before.len(), "fixture must create scrollback");
+    let mut screen = Screen::new(WIDTH);
+    let mut term = vt100::Parser::new(HEIGHT as u16, WIDTH as u16, 200);
+    let mut initial = Vec::new();
+    screen
+        .render_scrolling(&mut initial, &before, 0, HEIGHT, (before.len() - 1, 0))
+        .expect("initial render should succeed");
+    term.process(&initial);
+
+    let after = complex_lines('y');
+    let changed_rows: Vec<_> = before
+        .iter()
+        .zip(after.iter())
+        .enumerate()
+        .filter_map(|(row, (old, new))| (old != new).then_some(row))
+        .collect();
+    assert_eq!(
+        changed_rows.len(),
+        1,
+        "fixture should change one physical row"
+    );
+    let prev_viewport_top = before.len().saturating_sub(HEIGHT);
+    assert!(
+        prev_viewport_top <= changed_rows[0] && changed_rows[0] < before.len(),
+        "changed row must be visible: changed={} viewport={}..{}",
+        changed_rows[0],
+        prev_viewport_top,
+        before.len()
+    );
+
+    let visible_after = &after[prev_viewport_top..];
+    let mut full_visible = Vec::new();
+    Screen::new(WIDTH)
+        .update(&mut full_visible, visible_after, (HEIGHT - 1, 0))
+        .expect("full visible render should succeed");
+
+    let mut diff = Vec::new();
+    screen
+        .update(&mut diff, visible_after, (HEIGHT - 1, 0))
+        .expect("differential render should succeed");
+    term.process(&diff);
+    let visible_text = term
+        .screen()
+        .rows(0, WIDTH as u16)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        visible_text.contains("marker=y"),
+        "updated viewport should contain new marker: {visible_text:?}"
+    );
+    assert!(
+        !visible_text.contains("marker=x"),
+        "updated viewport should not contain stale marker: {visible_text:?}"
+    );
+
+    assert!(!diff.is_empty(), "changed cell should emit output");
+    assert!(
+        diff.len() < MAX_DIFF_BYTES,
+        "single-cell update emitted {} bytes, expected < {MAX_DIFF_BYTES}; output={:?}",
+        diff.len(),
+        String::from_utf8_lossy(&diff)
+    );
+    assert!(
+        diff.len() * 4 < full_visible.len(),
+        "single-cell update should be much smaller than full visible render: diff={} full={}",
+        diff.len(),
+        full_visible.len()
+    );
+}
+
 /// Regression guard from `fix(term-screen): scroll when appending empty rows`:
 /// even an empty appended row must advance the viewport and scrollback.
 #[test]

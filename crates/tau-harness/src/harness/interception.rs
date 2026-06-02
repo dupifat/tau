@@ -120,6 +120,12 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     EventName::TOOL_ERROR,
 ];
 
+fn important_harness_info_was_modified(original: &Event, replacement: &Event) -> bool {
+    matches!(
+        original,
+        Event::HarnessInfo(info) if info.level == tau_proto::HarnessInfoLevel::Important
+    ) && original != replacement
+}
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct InterceptorRegistration {
     priority: InterceptionPriority,
@@ -453,6 +459,14 @@ impl Harness {
                         replacement = %new_event.name(),
                         "interceptor returned a different event type; \
                          falling back to the original",
+                    );
+                    Some(original_event)
+                } else if important_harness_info_was_modified(&original_event, &new_event) {
+                    tracing::warn!(
+                        target: "tau_harness::interception",
+                        event = %event_name,
+                        "interceptor tried to modify an Important harness.info; \
+                         publishing original instead",
                     );
                     Some(original_event)
                 } else {

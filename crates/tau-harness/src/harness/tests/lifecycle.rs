@@ -277,6 +277,58 @@ fn configure_includes_only_resolved_extension_secrets() {
 }
 
 #[test]
+fn extension_config_error_is_important_and_replayed_to_late_ui() {
+    // Extension config validation often runs during daemon startup, before the
+    // terminal UI has subscribed. This is regression coverage for the user
+    // contract: any extension `ConfigError` must become an Important
+    // `harness.info` visible to late UI clients, not just a debug-log line.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let conn_id = "config-bad-ext";
+    let _extension_sink = connect_handshaking_tool(&mut h, conn_id);
+
+    h.handle_extension_message(
+        conn_id,
+        Message::ConfigError(tau_proto::ConfigError {
+            message: "unknown field `enforce_ro_mode`".to_owned(),
+        }),
+    )
+    .expect("config error handled");
+
+    assert!(event_log_contains_source_event(
+        &h,
+        "harness",
+        |event| matches!(
+            event,
+            Event::HarnessInfo(info)
+                if info.level == tau_proto::HarnessInfoLevel::Important
+                    && info.message.contains("extension config-bad-ext rejected its config")
+                    && info.message.contains("unknown field `enforce_ro_mode`")
+        )
+    ));
+
+    let ui_conn: tau_proto::ConnectionId = "late-ui".into();
+    let ui_sink = connect_test_client(&mut h, ui_conn.as_str(), tau_proto::ClientKind::Ui);
+    h.handle_client_event(
+        &ui_conn,
+        Frame::Message(Message::Subscribe(Subscribe {
+            selectors: vec![EventSelector::Prefix("harness.".to_owned())],
+        })),
+    )
+    .expect("subscribe");
+
+    let frames = ui_sink.lock().expect("ui sink");
+    assert!(frames.iter().any(|routed| matches!(
+        &routed.frame,
+        Frame::Event(Event::HarnessInfo(info))
+            if info.level == tau_proto::HarnessInfoLevel::Important
+                && info.message.contains("extension config-bad-ext rejected its config")
+                && info.message.contains("unknown field `enforce_ro_mode`")
+    )));
+}
+
+#[test]
 fn handshaking_tool_register_is_not_active_before_ready() {
     // Capability staging: a tool announced during handshake must not enter the
     // live registry, prompt tool list, or prompt fragments until the extension

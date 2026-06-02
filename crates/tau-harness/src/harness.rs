@@ -882,6 +882,14 @@ pub struct Harness {
     /// model changes, etc.) surfaced to the UI as part of the next
     /// `InteractionOutcome`.
     pub(crate) lifecycle_messages: Vec<String>,
+    /// Important harness diagnostics that must be replayed to late UI clients.
+    ///
+    /// Extension config errors commonly happen during daemon startup, before
+    /// the terminal UI has subscribed. Keep these messages as explicit
+    /// current harness state instead of relying on the append-only event
+    /// log: a config parse failure must never be visible only in stderr or
+    /// historical debug logs.
+    pub(crate) replayable_harness_infos: Vec<tau_proto::HarnessInfo>,
     /// Every spawned or in-process extension, keyed by current
     /// `ConnectionId`. Supervises restart, shutdown, and per-extension
     /// ack state. Lookups by connection id (the hot per-event path —
@@ -1394,6 +1402,7 @@ impl Harness {
             event_log: EventLog::new(),
             client_writers: std::collections::HashMap::new(),
             lifecycle_messages: Vec::new(),
+            replayable_harness_infos: Vec::new(),
             extensions: std::collections::HashMap::new(),
             extension_activation_staging: std::collections::HashMap::new(),
             extension_order: Vec::new(),
@@ -1632,6 +1641,7 @@ impl Harness {
             event_log: EventLog::new(),
             client_writers: std::collections::HashMap::new(),
             lifecycle_messages: Vec::new(),
+            replayable_harness_infos: Vec::new(),
             extensions: std::collections::HashMap::new(),
             extension_activation_staging: std::collections::HashMap::new(),
             extension_order: Vec::new(),
@@ -3301,6 +3311,10 @@ impl Harness {
                     .get(source_id)
                     .map(|e| e.name.clone())
                     .unwrap_or_else(|| "extension".to_owned());
+                // This is the last line of defense for every extension's typed
+                // configuration schema. Do not downgrade, drop, or make this
+                // startup-only: invalid extension config must be visible in the
+                // UI even when it is reported before any UI client subscribes.
                 self.emit_info_important(&format!(
                     "extension {name} rejected its config: {}\ncheck \
                      `extensions.{name}.config` and `extensions.{name}.secrets` in harness.yaml; \
@@ -5167,12 +5181,23 @@ impl Harness {
     }
 
     fn emit_info_with_level(&mut self, message: &str, level: tau_proto::HarnessInfoLevel) {
-        self.publish_event(
+        let info = tau_proto::HarnessInfo {
+            message: message.to_owned(),
+            level,
+        };
+        let important = level == tau_proto::HarnessInfoLevel::Important;
+        if important {
+            self.replayable_harness_infos.push(info.clone());
+        }
+        // Important diagnostics include config parse failures. Mark them
+        // must-pass so an interceptor cannot turn a user-visible configuration
+        // problem into another silent fallback.
+        self.enqueue_publish(
             Some("harness"),
-            Event::HarnessInfo(tau_proto::HarnessInfo {
-                message: message.to_owned(),
-                level,
-            }),
+            Event::HarnessInfo(info),
+            false,
+            important,
+            None,
         );
     }
 

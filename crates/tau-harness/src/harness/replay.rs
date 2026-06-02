@@ -128,6 +128,12 @@ impl Harness {
 
     /// Replays current harness and extension state to a late-joining client.
     ///
+    /// Important `harness.info` diagnostics are replayed here too. In
+    /// particular, extension `ConfigError` messages can arrive during daemon
+    /// startup before the terminal UI subscribes; replaying them is the
+    /// contract that keeps extension config parse failures from becoming
+    /// silent fallback behavior.
+    ///
     /// Runtime-only historical events are intentionally not replayed here. The
     /// transcript catch-up path above comes from durable agent logs, while this
     /// method reconstructs current harness status snapshots.
@@ -141,6 +147,15 @@ impl Harness {
             let _ = self
                 .bus
                 .send_to(client_id, None, Frame::Event(session_dir_event));
+        }
+
+        for info in &self.replayable_harness_infos {
+            let event = Event::HarnessInfo(info.clone());
+            if selector_matches_event(selectors, &event) {
+                let _ = self
+                    .bus
+                    .send_to(client_id, Some("harness"), Frame::Event(event));
+            }
         }
 
         let extension_events: Vec<_> = self

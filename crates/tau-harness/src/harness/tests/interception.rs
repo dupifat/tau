@@ -122,6 +122,50 @@ fn interception_reply_can_modify_event() {
 }
 
 #[test]
+fn interception_cannot_modify_important_harness_info() {
+    // Important harness diagnostics include extension config parse failures.
+    // Interceptors may observe them, but must not be able to blank or downgrade
+    // the message and recreate the same silent-fallback failure for live UIs.
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        Frame::Message(Message::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::HARNESS_INFO)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+    let after_registration_seq = h.event_log.next_seq();
+
+    h.emit_info_important("extension core-shell rejected its config");
+    h.handle_extension_event(
+        "interceptor",
+        Frame::Message(Message::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(Event::HarnessInfo(
+                tau_proto::HarnessInfo {
+                    message: String::new(),
+                    level: tau_proto::HarnessInfoLevel::Normal,
+                },
+            )))),
+        })),
+    )
+    .expect("mutating reply");
+
+    let entry = h
+        .event_log
+        .get_next_from(after_registration_seq)
+        .expect("important info in log");
+    assert!(matches!(
+        entry.event,
+        Event::HarnessInfo(info)
+            if info.level == tau_proto::HarnessInfoLevel::Important
+                && info.message == "extension core-shell rejected its config"
+    ));
+}
+
+#[test]
 fn interception_priority_orders_lower_values_first() {
     let tmp = TempDir::new().expect("tempdir");
     let mut h = echo_harness(tmp.path()).expect("harness");

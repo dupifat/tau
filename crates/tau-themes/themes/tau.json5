@@ -101,13 +101,13 @@
     // -- Diffs --
     // Plain `+`/`-` lines tint the whole row. `Modify` lines (single-
     // line edits with intra-line word diff) paint context in the
-    // base color and use the `.inline` inverted styles to highlight
-    // just the changed tokens.
-    "diff.added":           { fg: "green" },
-    "diff.removed":         { fg: "red" },
+    // base color and overlay the `.inline` styles on just the changed
+    // tokens.
+    "diff.added":           { fg: "dark_green" },
+    "diff.removed":         { fg: "dark_red" },
     "diff.context":         { fg: "dark_grey" },
     "diff.hunk_header":     { fg: "cyan" },
-    "diff.added.inline":    { fg: "black", bg: "green", bold: true },
-    "diff.removed.inline":  { fg: "black", bg: "red",   bold: true },
+    "diff.added.inline":    { fg: "green", bold: true },
+    "diff.removed.inline":  { fg: "red", bold: true },
   }
 }

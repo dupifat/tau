@@ -59,8 +59,8 @@ pub enum DiffLine {
 }
 
 /// One sub-line slice inside a `DiffLine::Modify`. The renderer paints
-/// `Equal` plain, `Remove`/`Add` inverted in red/green so changed
-/// tokens pop out of the surrounding context.
+/// `Equal` with the line's base added/removed style and overlays the
+/// inline added/removed theme style on changed tokens so they stand out.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DiffSegment {

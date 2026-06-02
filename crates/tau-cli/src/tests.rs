@@ -4966,6 +4966,39 @@ fn render_diff_tool_block_uses_unified_diff_line_prefixes() {
     assert!(text.contains("\n-let x = 1;\n+let x = 2;"));
     assert!(!text.contains("\n-     old();"));
     assert!(!text.contains("\n+     new();"));
+    let removed_line = block
+        .content
+        .spans()
+        .iter()
+        .find(|span| span.text == "-    old();")
+        .expect("removed line uses one span");
+    assert_eq!(removed_line.style.fg, Some(tau_cli_term::Color::DarkRed));
+
+    let added_line = block
+        .content
+        .spans()
+        .iter()
+        .find(|span| span.text == "+    new();")
+        .expect("added line uses one span");
+    assert_eq!(added_line.style.fg, Some(tau_cli_term::Color::DarkGreen));
+
+    let changed_removed = block
+        .content
+        .spans()
+        .iter()
+        .find(|span| span.text == "1")
+        .expect("removed changed token is split into its own span");
+    assert_eq!(changed_removed.style.fg, Some(tau_cli_term::Color::Red));
+    assert!(changed_removed.style.bold);
+
+    let changed_added = block
+        .content
+        .spans()
+        .iter()
+        .find(|span| span.text == "2")
+        .expect("added changed token is split into its own span");
+    assert_eq!(changed_added.style.fg, Some(tau_cli_term::Color::Green));
+    assert!(changed_added.style.bold);
 }
 
 #[test]

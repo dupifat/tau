@@ -99,7 +99,7 @@
     "diff.removed":         { fg: "dark_red" },
     "diff.context":         { fg: "grey" },
     "diff.hunk_header":     { fg: "dark_cyan" },
-    "diff.added.inline":    { fg: "black", bg: "green", bold: true },
-    "diff.removed.inline":  { fg: "black", bg: "red",   bold: true },
+    "diff.added.inline":    { fg: "green", bold: true },
+    "diff.removed.inline":  { fg: "red", bold: true },
   }
 }

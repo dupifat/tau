@@ -913,8 +913,9 @@ pub(crate) fn render_diff_tool_block(
     let removed_style = resolve(theme, names::DIFF_REMOVED);
     let context_style = resolve(theme, names::DIFF_CONTEXT);
     let header_style = resolve(theme, names::DIFF_HUNK_HEADER);
-    let added_inline_style = resolve(theme, names::DIFF_ADDED_INLINE);
-    let removed_inline_style = resolve(theme, names::DIFF_REMOVED_INLINE);
+    let added_inline_style = overlay_style(added_style, resolve(theme, names::DIFF_ADDED_INLINE));
+    let removed_inline_style =
+        overlay_style(removed_style, resolve(theme, names::DIFF_REMOVED_INLINE));
 
     for hunk in &diff.hunks {
         spans.push(Span::new("\n", context_style));
@@ -973,6 +974,16 @@ fn push_segments(
                 spans.push(Span::new(text.clone(), inline));
             }
         }
+    }
+}
+
+fn overlay_style(base: tau_cli_term::Style, overlay: tau_cli_term::Style) -> tau_cli_term::Style {
+    tau_cli_term::Style {
+        fg: overlay.fg.or(base.fg),
+        bg: overlay.bg.or(base.bg),
+        bold: base.bold || overlay.bold,
+        underline: base.underline || overlay.underline,
+        italic: base.italic || overlay.italic,
     }
 }
 

@@ -245,8 +245,18 @@ fn local_slash_commands_are_identified_for_history_rendering() {
     assert!(is_local_slash_command("/new"));
     assert!(is_local_slash_command("/new now"));
     assert!(is_local_slash_command("/session new"));
-    assert!(!is_local_slash_command("/unknown please answer"));
+    assert!(is_local_slash_command("/version"));
+    assert!(is_local_slash_command("/version now"));
     assert!(!is_local_slash_command("hello /model engineer"));
+}
+
+#[test]
+fn runtime_version_label_matches_cli_version_shape() {
+    // `/version` uses this same label at runtime, so keep it aligned with the
+    // custom `tau --version` output instead of clap's default package version.
+    let label = super::version_label();
+    assert!(label.starts_with(concat!("tau ", env!("CARGO_PKG_VERSION"), " (")));
+    assert!(label.ends_with(')'));
 }
 
 #[test]

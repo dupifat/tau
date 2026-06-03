@@ -347,6 +347,7 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
         "/set",
         "Set a UI setting (e.g. /set show-diff true); Tab cycles names + values",
     ),
+    ("/version", "Print Tau version and build information"),
     (
         "/provider-auth",
         "Add or replace a provider profile (runs `tau provider add [kind]`)",
@@ -1239,6 +1240,14 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_utility_command(&self, text: &str) -> bool {
+        if text == "/version" {
+            self.output.system_info(&crate::version_label());
+            return true;
+        }
+        if text.starts_with("/version ") {
+            self.output.system_info("/version takes no arguments");
+            return true;
+        }
         if let Some(provider) = text.strip_prefix("/provider-auth ") {
             let provider = provider.trim();
             if !provider.is_empty() {
@@ -2100,6 +2109,7 @@ pub(crate) fn is_local_slash_command(text: &str) -> bool {
             | "/set"
             | "/role"
             | "/model"
+            | "/version"
     )
 }
 

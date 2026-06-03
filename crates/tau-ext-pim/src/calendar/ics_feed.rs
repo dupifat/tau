@@ -2,10 +2,17 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::time::Duration;
 
+use calcard::common::timezone::Tz;
+use calcard::icalendar::{
+    ICalendar, ICalendarComponent, ICalendarComponentType, ICalendarPeriod, ICalendarProperty,
+    ICalendarValue,
+};
+use calcard::{Entry, Parser};
+use chrono::TimeZone;
+use rrule::{RRule, RRuleSet, Unvalidated};
 use tau_proto::SecretValue;
-#[cfg(test)]
+use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 use url::Url;
 
 use super::config::{ValidatedAccount, ValidatedBackendConfig};
@@ -13,6 +20,8 @@ use super::config::{ValidatedAccount, ValidatedBackendConfig};
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_ICS_BYTES: u64 = 2 * 1024 * 1024;
 const ICS_CURSOR_PREFIX: &str = "ics:";
+const MAX_RANGE_ICS_OCCURRENCES: usize = 50_000;
+const MAX_RANGE_ICS_SCAN_OCCURRENCES: usize = 2_000_000;
 
 /// Read-only iCalendar feed backend.
 pub struct IcsFeedBackend {
@@ -43,13 +52,19 @@ pub struct IcsEvent {
     pub description: Option<String>,
     /// Event location.
     pub location: Option<String>,
-    /// Raw start value.
+    /// Model-visible start value.
+    ///
+    /// Timed events use UTC RFC3339. All-day events preserve `YYYY-MM-DD` date
+    /// shape so callers do not treat them as midnight appointments.
     pub start: String,
-    /// Raw end value.
+    /// Model-visible end value.
+    ///
+    /// Timed events use UTC RFC3339. All-day events preserve `YYYY-MM-DD` date
+    /// shape so callers do not treat them as midnight appointments.
     pub end: String,
-    /// Parsed start, when unambiguous.
+    /// Parsed start instant, when the event has a concrete time range.
     pub start_utc: Option<OffsetDateTime>,
-    /// Parsed end, when unambiguous.
+    /// Parsed end instant, when the event has a concrete time range.
     pub end_utc: Option<OffsetDateTime>,
     /// Event status.
     pub status: Option<String>,
@@ -59,7 +74,7 @@ pub struct IcsEvent {
     pub organizer: Option<String>,
     /// Attendee values.
     pub attendees: Vec<String>,
-    /// Whether parsing found recurrence data that is not expanded yet.
+    /// Whether the source component contains recurrence metadata.
     pub recurring: bool,
     /// Whether time filtering could not fully interpret this event's time.
     pub time_unparsed: bool,
@@ -137,7 +152,8 @@ impl IcsFeedBackend {
         ensure_calendar_allowed(account, calendar)?;
         let offset = parse_ics_cursor(cursor)?;
         let text = self.fetch_feed(account)?;
-        let mut events = parse_ics_events(&text)?;
+        let timezone = ics_default_timezone(account)?;
+        let mut events = parse_ics_events_in_range(&text, timezone, range)?;
         events.retain(|event| event_overlaps(event, range));
         events.sort_by_key(event_sort_key);
         let truncated = offset.saturating_add(limit) < events.len();
@@ -163,12 +179,33 @@ impl IcsFeedBackend {
     ) -> Result<IcsEvent, String> {
         ensure_calendar_allowed(account, calendar)?;
         let text = self.fetch_feed(account)?;
-        parse_ics_events(&text)?
+        let timezone = ics_default_timezone(account)?;
+        if let Some(event) = parse_ics_static_events(&text, timezone)?
             .into_iter()
             .find(|event| event.id == event_id)
-            .ok_or_else(|| format!("calendar event `{event_id}` was not found"))
+        {
+            return Ok(event);
+        }
+        let Some(timestamp) = recurring_event_timestamp(event_id) else {
+            return Err(format!("calendar event `{event_id}` was not found"));
+        };
+        let start = OffsetDateTime::from_unix_timestamp(timestamp)
+            .map_err(|_| "calendar event id timestamp is out of range".to_owned())?;
+        let end = start
+            .checked_add(time::Duration::seconds(1))
+            .ok_or_else(|| "calendar event id timestamp is out of range".to_owned())?;
+        parse_ics_events_in_range(
+            &text,
+            timezone,
+            TimeRange {
+                min: Some(start),
+                max: Some(end),
+            },
+        )?
+        .into_iter()
+        .find(|event| event.id == event_id)
+        .ok_or_else(|| format!("calendar event `{event_id}` was not found"))
     }
-
     fn fetch_feed(&self, account: &ValidatedAccount) -> Result<String, String> {
         let url = self.feed_url(account)?;
         let mut response = self
@@ -278,198 +315,557 @@ fn ensure_calendar_allowed(account: &ValidatedAccount, calendar: &str) -> Result
     ))
 }
 
+fn ics_default_timezone(account: &ValidatedAccount) -> Result<Tz, String> {
+    let Some(timezone) = account.timezone.as_deref() else {
+        return Ok(system_ics_timezone().unwrap_or(Tz::UTC));
+    };
+    timezone.parse::<Tz>().map_err(|_| {
+        format!("account timezone `{timezone}` is not recognized for iCalendar feed interpretation")
+    })
+}
+
+fn system_ics_timezone() -> Option<Tz> {
+    system_timezone_name()?.parse::<Tz>().ok()
+}
+
+fn system_timezone_name() -> Option<String> {
+    if let Ok(value) = std::env::var("TZ") {
+        let value = value.trim().trim_start_matches(':');
+        if !value.is_empty() {
+            return Some(value.to_owned());
+        }
+    }
+    let path = std::fs::read_link("/etc/localtime").ok()?;
+    let text = path.to_string_lossy();
+    text.split("zoneinfo/").nth(1).map(str::to_owned)
+}
+
+#[cfg(test)]
 fn parse_ics_events(text: &str) -> Result<Vec<IcsEvent>, String> {
-    let lines = unfold_ics_lines(text);
+    parse_ics_events_in_range(
+        text,
+        Tz::UTC,
+        TimeRange {
+            min: Some(OffsetDateTime::parse("1900-01-01T00:00:00Z", &Rfc3339).expect("time")),
+            max: Some(OffsetDateTime::parse("2100-01-01T00:00:00Z", &Rfc3339).expect("time")),
+        },
+    )
+}
+
+struct RangeEventSeed<'a> {
+    component: &'a ICalendarComponent,
+    uid: String,
+    start: chrono::DateTime<Tz>,
+    duration: chrono::Duration,
+    all_day: bool,
+    rrules: Vec<String>,
+    rdates: Vec<chrono::DateTime<Tz>>,
+    exdates: std::collections::BTreeSet<i64>,
+    recurrence_id: Option<i64>,
+}
+
+fn parse_ics_events_in_range(
+    text: &str,
+    timezone: Tz,
+    range: TimeRange,
+) -> Result<Vec<IcsEvent>, String> {
+    let (Some(range_min), Some(range_max)) = (range.min, range.max) else {
+        return Err("iCalendar list_events requires a bounded range".to_owned());
+    };
+    let mut parser = Parser::new(text);
     let mut events = Vec::new();
-    let mut current = Vec::new();
-    let mut in_event = false;
-    for line in lines {
-        let upper = line.to_ascii_uppercase();
-        match upper.as_str() {
-            "BEGIN:VEVENT" if !in_event => {
-                in_event = true;
-                current.clear();
+    loop {
+        match parser.entry() {
+            Entry::ICalendar(calendar) => {
+                events.extend(expand_calendar_events_in_range(
+                    &calendar, timezone, range_min, range_max,
+                )?);
             }
-            "END:VEVENT" if in_event => {
-                if let Some(event) = parse_event(&current) {
-                    events.push(event);
-                }
-                in_event = false;
-                current.clear();
+            Entry::UnexpectedComponentEnd { expected, found } => {
+                return Err(format!(
+                    "iCalendar component ended as `{}` while `{}` was open",
+                    found.as_str(),
+                    expected.as_str()
+                ));
             }
-            _ if in_event => current.push(line),
+            Entry::UnterminatedComponent(component) => {
+                return Err(format!(
+                    "iCalendar component `{component}` was not terminated"
+                ));
+            }
+            Entry::TooManyComponents => {
+                return Err("iCalendar feed contains too many components".to_owned());
+            }
+            Entry::VCard(_) => {}
+            Entry::Eof => break,
             _ => {}
         }
     }
     Ok(events)
 }
 
-fn unfold_ics_lines(text: &str) -> Vec<String> {
-    let mut lines = Vec::<String>::new();
-    for raw in text.lines() {
-        let line = raw.strip_suffix('\r').unwrap_or(raw);
-        if line.starts_with(' ') || line.starts_with('\t') {
-            if let Some(last) = lines.last_mut() {
-                last.push_str(&line[1..]);
+fn parse_ics_static_events(text: &str, timezone: Tz) -> Result<Vec<IcsEvent>, String> {
+    let mut parser = Parser::new(text);
+    let mut events = Vec::new();
+    loop {
+        match parser.entry() {
+            Entry::ICalendar(calendar) => {
+                let resolver = calendar.build_tz_resolver().with_default(timezone);
+                for (index, component) in calendar.components.iter().enumerate() {
+                    if component.component_type != ICalendarComponentType::VEvent {
+                        continue;
+                    }
+                    let Some(seed) = build_range_event_seed(component, index, &resolver) else {
+                        continue;
+                    };
+                    if seed.recurrence_id.is_none()
+                        && seed.rrules.is_empty()
+                        && seed.rdates.is_empty()
+                    {
+                        push_seed_occurrence_if_overlaps(
+                            &seed,
+                            seed.start,
+                            OffsetDateTime::from_unix_timestamp(-5_364_662_400)
+                                .unwrap_or(OffsetDateTime::UNIX_EPOCH),
+                            OffsetDateTime::from_unix_timestamp(253_402_300_799)
+                                .unwrap_or(OffsetDateTime::UNIX_EPOCH),
+                            &mut events,
+                        );
+                    }
+                }
             }
-        } else {
-            lines.push(line.to_owned());
-        }
-    }
-    lines
-}
-
-fn parse_event(lines: &[String]) -> Option<IcsEvent> {
-    let mut uid = None;
-    let mut summary = None;
-    let mut description = None;
-    let mut location = None;
-    let mut start = None;
-    let mut end = None;
-    let mut status = None;
-    let mut organizer = None;
-    let mut attendees = Vec::new();
-    let mut private = false;
-    let mut recurring = false;
-    let mut duration_unparsed = false;
-
-    for line in lines {
-        let Some(property) = parse_property(line) else {
-            continue;
-        };
-        match property.name.as_str() {
-            "UID" => uid = Some(unescape_text(&property.value)),
-            "SUMMARY" => summary = Some(unescape_text(&property.value)),
-            "DESCRIPTION" => description = Some(unescape_text(&property.value)),
-            "LOCATION" => location = Some(unescape_text(&property.value)),
-            "DTSTART" => start = Some(parse_ics_time(&property)),
-            "DTEND" => end = Some(parse_ics_time(&property)),
-            "DURATION" if end.is_none() => {
-                end = start.clone();
-                duration_unparsed = true;
+            Entry::UnexpectedComponentEnd { expected, found } => {
+                return Err(format!(
+                    "iCalendar component ended as `{}` while `{}` was open",
+                    found.as_str(),
+                    expected.as_str()
+                ));
             }
-            "STATUS" => status = Some(unescape_text(&property.value)),
-            "CLASS" => {
-                let value = property.value.trim();
-                private = value.eq_ignore_ascii_case("PRIVATE")
-                    || value.eq_ignore_ascii_case("CONFIDENTIAL");
+            Entry::UnterminatedComponent(component) => {
+                return Err(format!(
+                    "iCalendar component `{component}` was not terminated"
+                ));
             }
-            "ORGANIZER" => organizer = Some(unescape_text(&property.value)),
-            "ATTENDEE" => attendees.push(unescape_text(&property.value)),
-            "RRULE" | "RDATE" | "EXDATE" | "RECURRENCE-ID" => recurring = true,
+            Entry::TooManyComponents => {
+                return Err("iCalendar feed contains too many components".to_owned());
+            }
+            Entry::VCard(_) => {}
+            Entry::Eof => break,
             _ => {}
         }
     }
-
-    let uid = uid.unwrap_or_else(|| {
-        let digest = blake3::hash(lines.join("\n").as_bytes());
-        digest.to_hex()[..16].to_owned()
-    });
-    let start = start?;
-    let end = end.unwrap_or_else(|| start.clone());
-    let time_unparsed = duration_unparsed || start.utc.is_none() || end.utc.is_none();
-    Some(IcsEvent {
-        id: uid.clone(),
-        uid,
-        summary: summary.unwrap_or_else(|| "(untitled)".to_owned()),
-        description,
-        location,
-        start: start.raw,
-        end: end.raw,
-        start_utc: start.utc,
-        end_utc: end.utc,
-        status,
-        private,
-        organizer,
-        attendees,
-        recurring,
-        time_unparsed,
-    })
+    Ok(events)
 }
 
-struct IcsProperty {
-    name: String,
-    params: Vec<(String, String)>,
-    value: String,
+fn recurring_event_timestamp(event_id: &str) -> Option<i64> {
+    event_id.rsplit_once('#')?.1.parse::<i64>().ok()
 }
 
-#[derive(Clone)]
-struct ParsedIcsTime {
-    raw: String,
-    utc: Option<OffsetDateTime>,
-}
-
-fn parse_property(line: &str) -> Option<IcsProperty> {
-    let (left, value) = line.split_once(':')?;
-    let mut parts = left.split(';');
-    let name = parts.next()?.to_ascii_uppercase();
-    let mut params = Vec::new();
-    for part in parts {
-        if let Some((key, value)) = part.split_once('=') {
-            params.push((key.to_ascii_uppercase(), value.trim_matches('"').to_owned()));
+fn expand_calendar_events_in_range(
+    calendar: &ICalendar,
+    timezone: Tz,
+    range_min: OffsetDateTime,
+    range_max: OffsetDateTime,
+) -> Result<Vec<IcsEvent>, String> {
+    let resolver = calendar.build_tz_resolver().with_default(timezone);
+    let mut masters = Vec::new();
+    let mut overrides = BTreeMap::<String, BTreeMap<i64, RangeEventSeed<'_>>>::new();
+    for (index, component) in calendar.components.iter().enumerate() {
+        if component.component_type != ICalendarComponentType::VEvent {
+            continue;
+        }
+        let Some(seed) = build_range_event_seed(component, index, &resolver) else {
+            continue;
+        };
+        if let Some(recurrence_id) = seed.recurrence_id {
+            overrides
+                .entry(seed.uid.clone())
+                .or_default()
+                .insert(recurrence_id, seed);
+        } else {
+            masters.push(seed);
         }
     }
-    Some(IcsProperty {
-        name,
-        params,
-        value: value.to_owned(),
+
+    let mut events = Vec::new();
+    let mut emitted_override_ids = std::collections::BTreeSet::new();
+    for master in &masters {
+        let override_group = overrides.get(&master.uid);
+        expand_master_in_range(
+            master,
+            override_group,
+            range_min,
+            range_max,
+            &mut emitted_override_ids,
+            &mut events,
+        )?;
+    }
+    for override_group in overrides.values() {
+        for (recurrence_id, override_seed) in override_group {
+            if emitted_override_ids
+                .contains(&override_event_key(&override_seed.uid, *recurrence_id))
+                || is_cancelled(override_seed.component)
+            {
+                continue;
+            }
+            push_seed_occurrence_if_overlaps(
+                override_seed,
+                override_seed.start,
+                range_min,
+                range_max,
+                &mut events,
+            );
+        }
+    }
+    Ok(events)
+}
+
+fn build_range_event_seed<'a>(
+    component: &'a ICalendarComponent,
+    comp_index: usize,
+    resolver: &calcard::icalendar::timezone::TzResolver<&str>,
+) -> Option<RangeEventSeed<'a>> {
+    let mut dt_start = None;
+    let mut dt_start_tzid = None;
+    let mut dt_end = None;
+    let mut recurrence_id = None;
+    let mut recurrence_tzid = None;
+    let mut rrules = Vec::new();
+    let mut rdates = Vec::new();
+    let mut exdates = std::collections::BTreeSet::new();
+    for entry in &component.entries {
+        match (&entry.name, entry.values.first()) {
+            (ICalendarProperty::Dtstart, Some(ICalendarValue::PartialDateTime(dt))) => {
+                dt_start = dt.to_date_time();
+                dt_start_tzid = entry.tz_id();
+            }
+            (ICalendarProperty::Dtend, Some(ICalendarValue::PartialDateTime(dt))) => {
+                dt_end = dt.to_date_time();
+            }
+            (ICalendarProperty::RecurrenceId, Some(ICalendarValue::PartialDateTime(dt))) => {
+                recurrence_id = dt.to_date_time();
+                recurrence_tzid = entry.tz_id();
+            }
+            (ICalendarProperty::Rrule, Some(ICalendarValue::RecurrenceRule(rule))) => {
+                rrules.push(rule.to_string());
+            }
+            (ICalendarProperty::Rdate, _) => {
+                let tz_id = entry.tz_id().or(dt_start_tzid);
+                for value in &entry.values {
+                    if let Some(date) = value_partial_datetime(value)
+                        .and_then(|dt| dt.to_date_time())
+                        .and_then(|dt| dt.to_date_time_with_tz(resolver.resolve_or_default(tz_id)))
+                    {
+                        rdates.push(date);
+                    }
+                }
+            }
+            (ICalendarProperty::Exdate, _) => {
+                let tz_id = entry.tz_id().or(dt_start_tzid);
+                for value in &entry.values {
+                    if let Some(date) = value_partial_datetime(value)
+                        .and_then(|dt| dt.to_date_time())
+                        .and_then(|dt| dt.to_date_time_with_tz(resolver.resolve_or_default(tz_id)))
+                    {
+                        exdates.insert(date.timestamp());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let dt_start = dt_start?;
+    let start_tz = resolver.resolve_or_default(dt_start_tzid);
+    let start = dt_start.to_date_time_with_tz(start_tz)?;
+    let duration = if let Some(dt_end) = dt_end {
+        dt_end.date_time - dt_start.date_time
+    } else if component_is_all_day(component) {
+        chrono::Duration::days(1)
+    } else {
+        chrono::Duration::zero()
+    };
+    let recurrence_id = recurrence_id
+        .and_then(|dt| {
+            dt.to_date_time_with_tz(resolver.resolve_or_default(recurrence_tzid.or(dt_start_tzid)))
+        })
+        .map(|dt| dt.timestamp());
+    Some(RangeEventSeed {
+        component,
+        uid: component_uid(component, comp_index),
+        start,
+        duration,
+        all_day: component_is_all_day(component),
+        rrules,
+        rdates,
+        exdates,
+        recurrence_id,
     })
 }
 
-fn parse_ics_time(property: &IcsProperty) -> ParsedIcsTime {
-    let value = property.value.trim();
-    let is_date = property
-        .params
-        .iter()
-        .any(|(key, value)| key == "VALUE" && value.eq_ignore_ascii_case("DATE"));
-    let utc = if is_date || value.len() == 8 {
-        parse_ics_date(value)
-    } else if value.ends_with('Z') {
-        parse_ics_utc_datetime(value)
-    } else {
-        None
+fn value_partial_datetime(value: &ICalendarValue) -> Option<&calcard::common::PartialDateTime> {
+    match value {
+        ICalendarValue::PartialDateTime(dt) => Some(dt),
+        ICalendarValue::Period(ICalendarPeriod::Range { start, .. }) => Some(start),
+        ICalendarValue::Period(ICalendarPeriod::Duration { start, .. }) => Some(start),
+        _ => None,
+    }
+}
+
+fn expand_master_in_range(
+    master: &RangeEventSeed<'_>,
+    overrides: Option<&BTreeMap<i64, RangeEventSeed<'_>>>,
+    range_min: OffsetDateTime,
+    range_max: OffsetDateTime,
+    emitted_override_ids: &mut std::collections::BTreeSet<String>,
+    events: &mut Vec<IcsEvent>,
+) -> Result<(), String> {
+    if master.rrules.is_empty() && master.rdates.is_empty() {
+        push_seed_occurrence_if_overlaps(master, master.start, range_min, range_max, events);
+        return Ok(());
+    }
+    let mut starts = std::collections::BTreeMap::<i64, chrono::DateTime<Tz>>::new();
+    starts.insert(master.start.timestamp(), master.start);
+    for rdate in &master.rdates {
+        starts.insert(rdate.timestamp(), *rdate);
+    }
+    if !master.rrules.is_empty() {
+        let rrule_tz = rrule_timezone(master.start.timezone());
+        let dt_start = rrule_datetime(master.start, rrule_tz)?;
+        let after = offset_to_rrule_datetime(range_min, rrule_tz, -master.duration)?;
+        let before = offset_to_rrule_datetime(range_max, rrule_tz, chrono::Duration::zero())?;
+        let mut set = RRuleSet::new(dt_start).limit();
+        for rule in &master.rrules {
+            let rule = rule
+                .parse::<RRule<Unvalidated>>()
+                .map_err(|_| capped_range_error())?
+                .validate(dt_start)
+                .map_err(|_| capped_range_error())?;
+            set = set.rrule(rule);
+        }
+        let mut scanned = 0_usize;
+        let mut matched = 0_usize;
+        for date in &set {
+            scanned = scanned.saturating_add(1);
+            if MAX_RANGE_ICS_SCAN_OCCURRENCES < scanned {
+                return Err(capped_range_error());
+            }
+            if !rrule_datetime_is_before(date, before) {
+                break;
+            }
+            if !rrule_datetime_is_before(after, date) {
+                continue;
+            }
+            matched = matched.saturating_add(1);
+            if MAX_RANGE_ICS_OCCURRENCES < matched {
+                return Err(capped_range_error());
+            }
+            if let Some(start) =
+                calcard_datetime_from_timestamp(date.timestamp(), master.start.timezone())
+            {
+                starts.insert(start.timestamp(), start);
+            }
+        }
+    }
+    for (timestamp, start) in starts {
+        if master.exdates.contains(&timestamp) {
+            continue;
+        }
+        if let Some(override_seed) = overrides.and_then(|overrides| overrides.get(&timestamp)) {
+            emitted_override_ids.insert(override_event_key(&override_seed.uid, timestamp));
+            if is_cancelled(override_seed.component) {
+                continue;
+            }
+            push_seed_occurrence_if_overlaps(
+                override_seed,
+                override_seed.start,
+                range_min,
+                range_max,
+                events,
+            );
+        } else {
+            push_seed_occurrence_if_overlaps(master, start, range_min, range_max, events);
+        }
+    }
+    Ok(())
+}
+
+fn push_seed_occurrence_if_overlaps(
+    seed: &RangeEventSeed<'_>,
+    start: chrono::DateTime<Tz>,
+    range_min: OffsetDateTime,
+    range_max: OffsetDateTime,
+    events: &mut Vec<IcsEvent>,
+) {
+    let Some(start_utc) = chrono_to_offset_time(start) else {
+        return;
     };
-    ParsedIcsTime {
-        raw: value.to_owned(),
-        utc,
+    let Some(end_utc) = OffsetDateTime::from_unix_timestamp(
+        start
+            .timestamp()
+            .saturating_add(seed.duration.num_seconds()),
+    )
+    .ok() else {
+        return;
+    };
+    if !event_times_overlap(start_utc, end_utc, range_min, range_max) {
+        return;
+    }
+    let recurring =
+        !seed.rrules.is_empty() || !seed.rdates.is_empty() || seed.recurrence_id.is_some();
+    let id = if recurring {
+        format!("{}#{}", seed.uid, start_utc.unix_timestamp())
+    } else {
+        seed.uid.clone()
+    };
+    events.push(IcsEvent {
+        id,
+        uid: seed.uid.clone(),
+        summary: first_property_text(seed.component, &ICalendarProperty::Summary)
+            .unwrap_or_else(|| "(untitled)".to_owned()),
+        description: first_property_text(seed.component, &ICalendarProperty::Description),
+        location: first_property_text(seed.component, &ICalendarProperty::Location),
+        start: format_range_event_time(seed, start_utc, start),
+        end: format_range_event_time(seed, end_utc, start + seed.duration),
+        start_utc: Some(start_utc),
+        end_utc: Some(end_utc),
+        status: first_property_text(seed.component, &ICalendarProperty::Status),
+        private: first_property_text(seed.component, &ICalendarProperty::Class).is_some_and(
+            |class| {
+                class.eq_ignore_ascii_case("PRIVATE") || class.eq_ignore_ascii_case("CONFIDENTIAL")
+            },
+        ),
+        organizer: first_property_text(seed.component, &ICalendarProperty::Organizer),
+        attendees: property_texts(seed.component, &ICalendarProperty::Attendee).collect(),
+        recurring,
+        time_unparsed: false,
+    });
+}
+
+fn event_times_overlap(
+    start: OffsetDateTime,
+    end: OffsetDateTime,
+    range_min: OffsetDateTime,
+    range_max: OffsetDateTime,
+) -> bool {
+    is_before(range_min, end) && is_before(start, range_max)
+}
+
+fn format_range_event_time(
+    seed: &RangeEventSeed<'_>,
+    utc: OffsetDateTime,
+    local: chrono::DateTime<Tz>,
+) -> String {
+    if seed.all_day {
+        local.format("%Y-%m-%d").to_string()
+    } else {
+        format_offset_time(utc)
     }
 }
 
-fn parse_ics_date(value: &str) -> Option<OffsetDateTime> {
-    if value.len() != 8 || !value.chars().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    let year = value[0..4].parse::<i32>().ok()?;
-    let month = Month::try_from(value[4..6].parse::<u8>().ok()?).ok()?;
-    let day = value[6..8].parse::<u8>().ok()?;
-    let date = Date::from_calendar_date(year, month, day).ok()?;
-    Some(PrimitiveDateTime::new(date, Time::MIDNIGHT).assume_utc())
+fn is_cancelled(component: &ICalendarComponent) -> bool {
+    first_property_text(component, &ICalendarProperty::Status)
+        .is_some_and(|status| status.eq_ignore_ascii_case("CANCELLED"))
 }
 
-fn parse_ics_utc_datetime(value: &str) -> Option<OffsetDateTime> {
-    if value.len() != 16 || !value.ends_with('Z') {
-        return None;
-    }
-    let core = &value[..15];
-    if core.as_bytes().get(8) != Some(&b'T') {
-        return None;
-    }
-    if !core[..8].chars().all(|c| c.is_ascii_digit())
-        || !core[9..].chars().all(|c| c.is_ascii_digit())
-    {
-        return None;
-    }
-    let date = parse_ics_date(&core[..8])?;
-    let hour = core[9..11].parse::<u8>().ok()?;
-    let minute = core[11..13].parse::<u8>().ok()?;
-    let second = core[13..15].parse::<u8>().ok()?;
-    let time = Time::from_hms(hour, minute, second).ok()?;
-    Some(PrimitiveDateTime::new(date.date(), time).assume_utc())
+fn override_event_key(uid: &str, recurrence_id: i64) -> String {
+    format!("{uid}#{recurrence_id}")
+}
+
+fn rrule_timezone(tz: Tz) -> rrule::Tz {
+    tz.name()
+        .as_deref()
+        .and_then(|name| name.parse::<chrono_tz::Tz>().ok())
+        .map(rrule::Tz::Tz)
+        .unwrap_or(rrule::Tz::UTC)
+}
+
+fn rrule_datetime(
+    date: chrono::DateTime<Tz>,
+    timezone: rrule::Tz,
+) -> Result<chrono::DateTime<rrule::Tz>, String> {
+    timezone
+        .timestamp_opt(date.timestamp(), date.timestamp_subsec_nanos())
+        .single()
+        .ok_or_else(capped_range_error)
+}
+
+fn offset_to_rrule_datetime(
+    date: OffsetDateTime,
+    timezone: rrule::Tz,
+    offset: chrono::Duration,
+) -> Result<chrono::DateTime<rrule::Tz>, String> {
+    timezone
+        .timestamp_opt(
+            date.unix_timestamp().saturating_add(offset.num_seconds()),
+            date.nanosecond(),
+        )
+        .single()
+        .ok_or_else(capped_range_error)
+}
+
+fn calcard_datetime_from_timestamp(timestamp: i64, timezone: Tz) -> Option<chrono::DateTime<Tz>> {
+    timezone.timestamp_opt(timestamp, 0).single()
+}
+
+fn rrule_datetime_is_before(
+    left: chrono::DateTime<rrule::Tz>,
+    right: chrono::DateTime<rrule::Tz>,
+) -> bool {
+    left.timestamp() < right.timestamp()
+        || (left.timestamp() == right.timestamp()
+            && left.timestamp_subsec_nanos() < right.timestamp_subsec_nanos())
+}
+
+fn capped_range_error() -> String {
+    "iCalendar recurrence expansion for the requested range exceeded the safety limit; narrow the requested range".to_owned()
+}
+
+fn component_uid(component: &ICalendarComponent, index: usize) -> String {
+    component
+        .uid()
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("ics-component-{index}"))
+}
+
+fn first_property_text(
+    component: &ICalendarComponent,
+    property: &ICalendarProperty,
+) -> Option<String> {
+    property_texts(component, property).next()
+}
+
+fn property_texts<'a>(
+    component: &'a ICalendarComponent,
+    property: &'a ICalendarProperty,
+) -> impl Iterator<Item = String> + 'a {
+    component.properties(property).filter_map(|entry| {
+        entry
+            .values
+            .first()
+            .and_then(ICalendarValue::as_text)
+            .map(str::to_owned)
+    })
+}
+
+fn component_is_all_day(component: &ICalendarComponent) -> bool {
+    component
+        .property(&ICalendarProperty::Dtstart)
+        .and_then(|entry| entry.values.first())
+        .and_then(ICalendarValue::as_partial_date_time)
+        .is_some_and(|dt| dt.hour.is_none())
+}
+
+fn format_offset_time(time: OffsetDateTime) -> String {
+    time.format(&Rfc3339).unwrap_or_else(|_| time.to_string())
+}
+
+fn chrono_to_offset_time(time: chrono::DateTime<Tz>) -> Option<OffsetDateTime> {
+    OffsetDateTime::from_unix_timestamp(time.timestamp()).ok()
 }
 
 fn event_overlaps(event: &IcsEvent, range: TimeRange) -> bool {
     let (Some(start), Some(end)) = (event.start_utc, event.end_utc) else {
-        return true;
+        return false;
     };
     if let Some(min) = range.min
         && !is_before(min, end)
@@ -490,29 +886,6 @@ fn event_sort_key(event: &IcsEvent) -> Option<OffsetDateTime> {
 
 fn is_before(left: OffsetDateTime, right: OffsetDateTime) -> bool {
     left < right
-}
-
-fn unescape_text(value: &str) -> String {
-    let mut out = String::new();
-    let mut escaped = false;
-    for c in value.chars() {
-        if escaped {
-            match c {
-                'n' | 'N' => out.push('\n'),
-                '\\' | ',' | ';' => out.push(c),
-                _ => out.push(c),
-            }
-            escaped = false;
-        } else if c == '\\' {
-            escaped = true;
-        } else {
-            out.push(c);
-        }
-    }
-    if escaped {
-        out.push('\\');
-    }
-    out
 }
 
 #[cfg(test)]

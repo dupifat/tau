@@ -29,7 +29,7 @@ Calendar:
 - list calendars across accounts as flattened `<account>/<calendar>` ids
 - list bounded event rows and free/busy rows with cursor pagination
 - read one event by id
-- read-only ICS feed accounts for standard `.ics` calendars
+- read-only ICS feed accounts for standard `.ics` calendars, including timezone-aware event times and bounded recurrence expansion
 - Google Calendar native API reads and user-approved writes: create, update, delete, and RSVP
 - Google OAuth device authorization via `/calendar auth google start <account>` and `/calendar auth google finish <account>`
 - append sanitized calendar audit logs and queue writes for `/calendar change` approval by default

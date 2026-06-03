@@ -2236,7 +2236,7 @@ fn event_flags(policy: &ValidatedPolicy, event: &BackendEvent) -> String {
     match event {
         BackendEvent::Ics(event) => {
             if event.recurring {
-                flags.push("recurring_unexpanded");
+                flags.push("recurring");
             }
             if event.time_unparsed {
                 flags.push("time_unparsed");

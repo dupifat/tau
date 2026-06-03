@@ -17,12 +17,16 @@ workspace = true
 [dependencies]
 async-imap.workspace = true
 blake3.workspace = true
+calcard.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
 futures-util.workspace = true
 globset.workspace = true
 lettre.workspace = true
 mail-parser.workspace = true
 parse_datetime.workspace = true
 regex.workspace = true
+rrule.workspace = true
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true

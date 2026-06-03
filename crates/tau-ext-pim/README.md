@@ -261,8 +261,7 @@ Folder allowlists are glob patterns over mailbox folder names. Empty `folders.al
 
 The model-visible tool name is `email`. Commands are selected through the `command` argument:
 
-- `list_accounts` — returns `format: id flags from display_name...` plus one line per account.
-- `list_folders` — returns `format: name flags` plus one line per visible folder. Folder names are the full IMAP path returned by the server, such as `Archive/2026` or `Archive.2026`; whitespace in list row fields is percent-encoded so names remain single-column and reversible. Percent-decode token fields before passing them back as tool arguments.
+- `list_folders` — returns `format: folder flags` plus one line per visible folder across all enabled accounts. Folder ids are flattened as `<account>/<folder>`, such as `work/INBOX` or `work/Archive/2026`; whitespace in list row fields is percent-encoded so ids remain single-column and reversible. Percent-decode token fields before passing them back as tool arguments.
 - `list_recent`
 - `list_by_uid`
 - `read`
@@ -274,15 +273,12 @@ The model-visible tool name is `email`. Commands are selected through the `comma
 - `trash`
 - `send`
 
-`list_recent` accepts optional `account`, `folder`, `limit`, `cursor`, and `days`; omitted `account` and `folder` default to the first configured account and INBOX, and `days` defaults to 7. `list_by_uid` accepts optional `account`, `folder`, `limit`, and `cursor` with the same account/folder defaults. List-style commands return a `format` header and one safe line per listed item, with the follow-up key first and whitespace/control-safe fields so rows cannot forge extra columns or lines; percent-decode token fields before reusing them as arguments. `read`, `request_full`, `mark_read`, `mark_unread`, `star`, `unstar`, and `trash` take the same `account`/`folder`/`uid` target and default omitted account/folder the same way. `request_full` creates or reuses a pending incoming approval so the user can decide whether the agent may read the full message. Message-management commands do not require content approval. `trash` moves the message to the account's IMAP Trash mailbox.
-
-Use `list_accounts` to inspect configured account ids; normal single-account use can omit `account`.
+`list_recent` accepts optional `folder`, `limit`, `cursor`, and `days`; omitted `folder` defaults to the first configured account's INBOX, and `days` defaults to 7. `list_by_uid` accepts optional `folder`, `limit`, and `cursor` with the same folder default. List-style commands return a `format` header and one safe line per listed item, with the follow-up key first and whitespace/control-safe fields so rows cannot forge extra columns or lines; percent-decode token fields before reusing them as arguments. `read`, `request_full`, `mark_read`, `mark_unread`, `star`, `unstar`, and `trash` take the same flattened `folder` plus `uid` target. `request_full` creates or reuses a pending incoming approval so the user can decide whether the agent may read the full message. Message-management commands do not require content approval. `trash` moves the message to the account's IMAP Trash mailbox.
 
 The model-visible tool name for calendars is `calendar`. Commands are selected through the `command` argument:
 
-- `list_accounts` — returns configured calendar accounts.
-- `list_calendars` — returns calendars visible through configured accounts.
-- `list_events` — lists bounded event metadata for one account/calendar.
+- `list_calendars` — returns calendars visible through configured accounts as flattened `<account>/<calendar>` ids.
+- `list_events` — lists bounded event metadata for one calendar id.
 - `read_event` — reads one event by `event_id`; Google ETags are cached internally for safe writes.
 - `free_busy` — returns busy blocks without descriptions.
 - `create_event` — queues or applies a Google event create request.
@@ -290,10 +286,9 @@ The model-visible tool name for calendars is `calendar`. Commands are selected t
 - `delete_event` — queues or applies a Google event delete; requires `event_id`.
 - `respond_invite` — queues or applies an RSVP response; requires `event_id` and `response`.
 
-Calendar list-style results render as headers, one blank line, then plain unindented rows. Headers include `format`; `list_events` and `free_busy` also include `next_cursor` and `truncated`, so pass the cursor with the same account/calendar/range arguments to continue. If a list has no rows, the payload is `(no matches found)`.
+Calendar list-style results render as headers, one blank line, then plain unindented rows. Headers include `format`; `list_events` and `free_busy` also include `next_cursor` and `truncated`, so pass the cursor with the same calendar/range arguments to continue. If a list has no rows, the payload is `(no matches found)`.
 
 Calendar writes target Google accounts only. The default write policy queues `/calendar change` approvals; ICS feed accounts remain read-only. `list_events` accepts an optional `title` substring filter. `start` and `end` accept RFC3339 date-times with offsets, local `YYYY-MM-DDTHH:MM:SS` date-times interpreted in the configured or system timezone, natural expressions like `today`, `tomorrow`, or `next week`, and `YYYY-MM-DD` all-day dates.
-
 
 ## User approval actions
 

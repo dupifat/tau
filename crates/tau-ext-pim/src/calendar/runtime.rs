@@ -19,11 +19,10 @@ use super::ics_feed::{IcsEvent, IcsFeedBackend, TimeRange};
 use super::state::{CalendarChangeApproval, CalendarLogEntry, GooglePendingAuth, StateStore};
 use super::tool::{
     CalendarCommand, CalendarRangeArgs, CreateEventArgs, DeleteEventArgs, ListCalendarsArgs,
-    NoArgs, ReadEventArgs, RespondInviteArgs, ToolInvocation, UpdateEventArgs,
+    ReadEventArgs, RespondInviteArgs, ToolInvocation, UpdateEventArgs,
 };
 
-const LIST_ACCOUNTS_FORMAT: &str = "account_id default_calendar display_name";
-const LIST_CALENDARS_FORMAT: &str = "calendar_id account_id flags display_name";
+const LIST_CALENDARS_FORMAT: &str = "calendar_id flags display_name";
 const LIST_EVENTS_FORMAT: &str = "event_id start end flags status summary...";
 const FREE_BUSY_FORMAT: &str = "event_id start end flags";
 const EVENT_DETAIL_FORMAT: &str = "key value...";
@@ -171,7 +170,6 @@ enum CalendarMutationResult {
 }
 
 struct ChangeArgs {
-    account: Option<String>,
     calendar: Option<String>,
     event_id: Option<String>,
     title: Option<String>,
@@ -186,7 +184,6 @@ struct ChangeArgs {
 impl From<CreateEventArgs> for ChangeArgs {
     fn from(args: CreateEventArgs) -> Self {
         Self {
-            account: args.account,
             calendar: args.calendar,
             event_id: None,
             title: args.title,
@@ -203,7 +200,6 @@ impl From<CreateEventArgs> for ChangeArgs {
 impl From<UpdateEventArgs> for ChangeArgs {
     fn from(args: UpdateEventArgs) -> Self {
         Self {
-            account: args.account,
             calendar: args.calendar,
             event_id: args.event_id,
             title: args.title,
@@ -220,7 +216,6 @@ impl From<UpdateEventArgs> for ChangeArgs {
 impl From<DeleteEventArgs> for ChangeArgs {
     fn from(args: DeleteEventArgs) -> Self {
         Self {
-            account: args.account,
             calendar: args.calendar,
             event_id: args.event_id,
             title: None,
@@ -237,7 +232,6 @@ impl From<DeleteEventArgs> for ChangeArgs {
 impl From<RespondInviteArgs> for ChangeArgs {
     fn from(args: RespondInviteArgs) -> Self {
         Self {
-            account: args.account,
             calendar: args.calendar,
             event_id: args.event_id,
             title: None,
@@ -304,12 +298,9 @@ impl Engine {
         };
         let command = invocation.command;
         let result = match command {
-            CalendarCommand::ListAccounts => {
-                parse_invocation_args::<NoArgs>(&invocation).map(|_args| self.list_accounts())
-            }
             CalendarCommand::ListCalendars => {
                 parse_invocation_args::<ListCalendarsArgs>(&invocation)
-                    .and_then(|args| self.list_calendars(&args))
+                    .and_then(|_args| self.list_calendars())
             }
             CalendarCommand::ListEvents => parse_invocation_args::<CalendarRangeArgs>(&invocation)
                 .and_then(|args| self.list_events(&args, agent_id)),
@@ -569,9 +560,6 @@ impl Engine {
         invocation: &ToolInvocation,
         result: &CborValue,
     ) -> Option<CalendarLogEntry> {
-        if invocation.command == CalendarCommand::ListAccounts {
-            return None;
-        }
         let args = invocation.args.as_ref();
         let status = calendar_log_status(result);
         let result_data = cbor_field(result, "data");
@@ -606,81 +594,36 @@ impl Engine {
         args: Option<&CborValue>,
         result_data: Option<&CborValue>,
     ) -> Option<String> {
-        if let Some(account) = result_data.and_then(|data| cbor_text_field(data, "account")) {
-            return Some(account.to_owned());
-        }
-        if let Some(account) = args.and_then(|args| cbor_text_field(args, "account")) {
-            return Some(account.to_owned());
-        }
-        let mut accounts = self
-            .config
-            .account_order
-            .iter()
-            .filter_map(|id| self.config.accounts.get(id))
-            .filter(|account| account.enable);
-        let first = accounts.next()?;
-        if accounts.next().is_none() {
-            Some(first.id.clone())
-        } else {
-            None
-        }
+        result_data
+            .and_then(|data| cbor_text_field(data, "calendar"))
+            .or_else(|| args.and_then(|args| cbor_text_field(args, "calendar")))
+            .and_then(|calendar| {
+                split_flattened_calendar_id(calendar)
+                    .ok()
+                    .map(|(account, _)| account.to_owned())
+            })
     }
 
     fn log_calendar(
         &self,
         args: Option<&CborValue>,
         result_data: Option<&CborValue>,
-        account_id: Option<&str>,
+        _account_id: Option<&str>,
     ) -> Option<String> {
-        if let Some(calendar) = result_data.and_then(|data| cbor_text_field(data, "calendar")) {
-            return Some(calendar.to_owned());
-        }
-        args.and_then(|args| cbor_text_field(args, "calendar"))
-            .map(str::to_owned)
-            .or_else(|| {
-                account_id
-                    .and_then(|id| self.config.accounts.get(id))
-                    .and_then(default_calendar_id_for_account)
-                    .map(str::to_owned)
+        result_data
+            .and_then(|data| cbor_text_field(data, "calendar"))
+            .or_else(|| args.and_then(|args| cbor_text_field(args, "calendar")))
+            .and_then(|calendar| {
+                split_flattened_calendar_id(calendar)
+                    .ok()
+                    .map(|(_, calendar)| calendar.to_owned())
             })
     }
 
-    fn list_accounts(&self) -> CborValue {
+    fn list_calendars(&self) -> Result<CborValue, String> {
         let mut rows = Vec::new();
         if self.config.enable {
-            for account_id in &self.config.account_order {
-                let Some(account) = self.config.accounts.get(account_id) else {
-                    continue;
-                };
-                if !account.enable {
-                    continue;
-                }
-                let default_calendar = account.default_calendar.as_deref().unwrap_or("-");
-                let display_name = account.display_name.as_deref().unwrap_or("-");
-                rows.push(format!(
-                    "{} {} {}",
-                    safe_field(&account.id),
-                    safe_field(default_calendar),
-                    quoted_display_field(display_name)
-                ));
-            }
-        }
-        ok_line_envelope(
-            "list_accounts",
-            "ok",
-            vec![("format", CborValue::Text(LIST_ACCOUNTS_FORMAT.to_owned()))],
-            cbor_map(vec![
-                ("format", CborValue::Text(LIST_ACCOUNTS_FORMAT.to_owned())),
-                ("accounts", line_array(rows.clone())),
-            ]),
-            &rows,
-        )
-    }
-
-    fn list_calendars(&self, args: &ListCalendarsArgs) -> Result<CborValue, String> {
-        let mut rows = Vec::new();
-        if self.config.enable {
-            let accounts = self.accounts_for_read(args.account.as_deref())?;
+            let accounts = self.accounts_for_read(None)?;
             for account in accounts {
                 match &account.backend {
                     Some(ValidatedBackendConfig::IcsFeed { .. }) => {
@@ -691,9 +634,8 @@ impl Engine {
                                 "writable"
                             };
                             rows.push(format!(
-                                "{} {} {} {}",
-                                safe_field(&calendar.id),
-                                safe_field(&account.id),
+                                "{} {} {}",
+                                safe_field(&flatten_calendar_id(&account.id, &calendar.id)),
                                 flags,
                                 quoted_display_field(&calendar.display_name)
                             ));
@@ -711,9 +653,8 @@ impl Engine {
                                 "writable"
                             };
                             rows.push(format!(
-                                "{} {} {} {}",
-                                safe_field(&calendar.id),
-                                safe_field(&account.id),
+                                "{} {} {}",
+                                safe_field(&flatten_calendar_id(&account.id, &calendar.id)),
                                 flags,
                                 quoted_display_field(&calendar.summary)
                             ));
@@ -723,20 +664,14 @@ impl Engine {
                 }
             }
         }
-        let mut headers = vec![("format", CborValue::Text(LIST_CALENDARS_FORMAT.to_owned()))];
-        let mut data = vec![
-            ("format", CborValue::Text(LIST_CALENDARS_FORMAT.to_owned())),
-            ("calendars", line_array(rows.clone())),
-        ];
-        if let Some(account) = args.account.as_deref() {
-            headers.push(("account", CborValue::Text(safe_display_line(account))));
-            data.push(("account", CborValue::Text(safe_display_line(account))));
-        }
         Ok(ok_line_envelope(
             "list_calendars",
             "ok",
-            headers,
-            cbor_map(data),
+            vec![("format", CborValue::Text(LIST_CALENDARS_FORMAT.to_owned()))],
+            cbor_map(vec![
+                ("format", CborValue::Text(LIST_CALENDARS_FORMAT.to_owned())),
+                ("calendars", line_array(rows.clone())),
+            ]),
             &rows,
         ))
     }
@@ -748,8 +683,8 @@ impl Engine {
     ) -> Result<CborValue, String> {
         let limit = normalized_limit(args.limit)?;
         let title_filter = optional_trimmed_line(args.title.as_deref(), "title")?;
-        let account = self.single_account(args.account.as_deref())?;
-        let calendar = self.calendar_arg(account, args.calendar.as_deref())?;
+        let (account, calendar) = self.resolve_calendar_arg(args.calendar.as_deref())?;
+        let calendar = calendar.as_str();
         let range = parse_range(args, account)?;
         let range_start = format_optional_read_bound(range.min, "start")?;
         let range_end = format_optional_read_bound(range.max, "end")?;
@@ -765,8 +700,13 @@ impl Engine {
             rows.push(format_event_line(&self.config.policy, event));
         }
         let data = cbor_map(vec![
-            ("account", CborValue::Text(safe_display_line(&account.id))),
-            ("calendar", CborValue::Text(safe_display_line(calendar))),
+            (
+                "calendar",
+                CborValue::Text(safe_display_line(&flatten_calendar_id(
+                    &account.id,
+                    calendar,
+                ))),
+            ),
             ("format", CborValue::Text(LIST_EVENTS_FORMAT.to_owned())),
             ("start", optional_text(range_start.clone())),
             ("end", optional_text(range_end.clone())),
@@ -791,8 +731,13 @@ impl Engine {
             "list_events",
             "ok",
             vec![
-                ("account", CborValue::Text(safe_display_line(&account.id))),
-                ("calendar", CborValue::Text(safe_display_line(calendar))),
+                (
+                    "calendar",
+                    CborValue::Text(safe_display_line(&flatten_calendar_id(
+                        &account.id,
+                        calendar,
+                    ))),
+                ),
                 ("format", CborValue::Text(LIST_EVENTS_FORMAT.to_owned())),
                 ("start", optional_text(range_start)),
                 ("end", optional_text(range_end)),
@@ -818,8 +763,8 @@ impl Engine {
     }
 
     fn read_event(&self, args: &ReadEventArgs, agent_id: &AgentId) -> Result<CborValue, String> {
-        let account = self.single_account(args.account.as_deref())?;
-        let calendar = self.calendar_arg(account, args.calendar.as_deref())?;
+        let (account, calendar) = self.resolve_calendar_arg(args.calendar.as_deref())?;
+        let calendar = calendar.as_str();
         let implicit_event_id = args.event_id.is_none();
         let event_id =
             self.resolve_read_event_id(agent_id, account, calendar, args.event_id.as_deref())?;
@@ -846,8 +791,13 @@ impl Engine {
         };
         self.remember_event_etag(account, calendar, &event);
         let mut data = vec![
-            ("account", CborValue::Text(safe_display_line(&account.id))),
-            ("calendar", CborValue::Text(safe_display_line(calendar))),
+            (
+                "calendar",
+                CborValue::Text(safe_display_line(&flatten_calendar_id(
+                    &account.id,
+                    calendar,
+                ))),
+            ),
             ("event_id", CborValue::Text(safe_display_line(&event_id))),
             ("format", CborValue::Text(EVENT_DETAIL_FORMAT.to_owned())),
             (
@@ -876,8 +826,8 @@ impl Engine {
                 "free_busy does not accept `title`; use list_events for title filtering".to_owned(),
             );
         }
-        let account = self.single_account(args.account.as_deref())?;
-        let calendar = self.calendar_arg(account, args.calendar.as_deref())?;
+        let (account, calendar) = self.resolve_calendar_arg(args.calendar.as_deref())?;
+        let calendar = calendar.as_str();
         let range = parse_range(args, account)?;
         let range_start = format_optional_read_bound(range.min, "start")?;
         let range_end = format_optional_read_bound(range.max, "end")?;
@@ -891,8 +841,13 @@ impl Engine {
             rows.push(format_free_busy_line(&self.config.policy, event));
         }
         let data = cbor_map(vec![
-            ("account", CborValue::Text(safe_display_line(&account.id))),
-            ("calendar", CborValue::Text(safe_display_line(calendar))),
+            (
+                "calendar",
+                CborValue::Text(safe_display_line(&flatten_calendar_id(
+                    &account.id,
+                    calendar,
+                ))),
+            ),
             ("format", CborValue::Text(FREE_BUSY_FORMAT.to_owned())),
             ("start", optional_text(range_start.clone())),
             ("end", optional_text(range_end.clone())),
@@ -904,8 +859,13 @@ impl Engine {
             "free_busy",
             "ok",
             vec![
-                ("account", CborValue::Text(safe_display_line(&account.id))),
-                ("calendar", CborValue::Text(safe_display_line(calendar))),
+                (
+                    "calendar",
+                    CborValue::Text(safe_display_line(&flatten_calendar_id(
+                        &account.id,
+                        calendar,
+                    ))),
+                ),
                 ("format", CborValue::Text(FREE_BUSY_FORMAT.to_owned())),
                 ("start", optional_text(range_start)),
                 ("end", optional_text(range_end)),
@@ -936,8 +896,8 @@ impl Engine {
         command: CalendarCommand,
         args: ChangeArgs,
     ) -> Result<CalendarChangeApproval, String> {
-        let account = self.single_account(args.account.as_deref())?;
-        let calendar = self.calendar_arg(account, args.calendar.as_deref())?;
+        let (account, calendar) = self.resolve_calendar_arg(args.calendar.as_deref())?;
+        let calendar = calendar.as_str();
         self.ensure_calendar_allowed(account, calendar)?;
         if !matches!(
             &account.backend,
@@ -1021,8 +981,7 @@ impl Engine {
                 change.etag = Some(self.cached_etag_for_change(&change)?);
                 change.response = Some(required_response(args.response.as_deref())?);
             }
-            CalendarCommand::ListAccounts
-            | CalendarCommand::ListCalendars
+            CalendarCommand::ListCalendars
             | CalendarCommand::ListEvents
             | CalendarCommand::ReadEvent
             | CalendarCommand::FreeBusy => unreachable!("read commands are not calendar changes"),
@@ -1338,21 +1297,23 @@ impl Engine {
         Ok(account)
     }
 
-    fn calendar_arg<'a>(
+    fn resolve_calendar_arg(
         &self,
-        account: &'a ValidatedAccount,
-        calendar: Option<&'a str>,
-    ) -> Result<&'a str, String> {
-        if let Some(calendar) = calendar {
-            return Ok(calendar);
+        calendar: Option<&str>,
+    ) -> Result<(&ValidatedAccount, String), String> {
+        if let Some(calendar_id) = calendar {
+            let (account_id, calendar) = split_flattened_calendar_id(calendar_id)?;
+            let account = self.account_by_id(account_id)?;
+            return Ok((account, calendar.to_owned()));
         }
+        let account = self.single_account(None)?;
         let Some(calendar) = default_calendar_id_for_account(account) else {
             return Err(format!(
                 "calendar is required for account `{}` because no default calendar is configured",
                 account.id
             ));
         };
-        Ok(calendar)
+        Ok((account, calendar.to_owned()))
     }
 
     fn ensure_calendar_allowed(
@@ -2039,8 +2000,7 @@ fn calendar_log_item_count(command: CalendarCommand, result: &CborValue) -> Opti
         CalendarCommand::ListEvents => cbor_array_len(data, "events"),
         CalendarCommand::FreeBusy => cbor_array_len(data, "busy"),
         CalendarCommand::ReadEvent => Some(1),
-        CalendarCommand::ListAccounts
-        | CalendarCommand::CreateEvent
+        CalendarCommand::CreateEvent
         | CalendarCommand::UpdateEvent
         | CalendarCommand::DeleteEvent
         | CalendarCommand::RespondInvite => None,
@@ -2105,8 +2065,10 @@ fn format_event_detail(
     event: &BackendEvent,
 ) -> Vec<String> {
     let mut lines = vec![
-        format!("account {}", safe_field(&account.id)),
-        format!("calendar {}", safe_field(calendar)),
+        format!(
+            "calendar {}",
+            safe_field(&flatten_calendar_id(&account.id, calendar))
+        ),
         format!("event_id {}", safe_field(event_id(event))),
         format!("start {}", safe_field(event_start(event))),
         format!("end {}", safe_field(event_end(event))),
@@ -2305,12 +2267,11 @@ fn format_change_queued(id: &str, change: &CalendarChangeApproval) -> CborValue 
         ),
         ("approval_id", CborValue::Text(safe_display_line(id))),
         (
-            "account",
-            CborValue::Text(safe_display_line(&change.account)),
-        ),
-        (
             "calendar",
-            CborValue::Text(safe_display_line(&change.calendar)),
+            CborValue::Text(safe_display_line(&flatten_calendar_id(
+                &change.account,
+                &change.calendar,
+            ))),
         ),
     ];
     if let Some(event_id) = change.event_id.as_deref() {
@@ -2414,12 +2375,11 @@ fn format_mutation_result_envelope(
         ),
         ("change_id", CborValue::Text(safe_display_line(id))),
         (
-            "account",
-            CborValue::Text(safe_display_line(&change.account)),
-        ),
-        (
             "calendar",
-            CborValue::Text(safe_display_line(&change.calendar)),
+            CborValue::Text(safe_display_line(&flatten_calendar_id(
+                &change.account,
+                &change.calendar,
+            ))),
         ),
     ];
     match result {
@@ -2450,9 +2410,22 @@ fn mutation_result_status(command: &str, result: &CalendarMutationResult) -> &'s
     }
 }
 
+fn flatten_calendar_id(account: &str, calendar: &str) -> String {
+    format!("{account}/{calendar}")
+}
+
+fn split_flattened_calendar_id(calendar_id: &str) -> Result<(&str, &str), String> {
+    let Some((account, calendar)) = calendar_id.split_once('/') else {
+        return Err("calendar must be a flattened `<account>/<calendar>` id".to_owned());
+    };
+    if account.trim().is_empty() || calendar.trim().is_empty() {
+        return Err("calendar must be a flattened `<account>/<calendar>` id".to_owned());
+    }
+    Ok((account, calendar))
+}
+
 fn command_name(command: CalendarCommand) -> &'static str {
     match command {
-        CalendarCommand::ListAccounts => "list_accounts",
         CalendarCommand::ListCalendars => "list_calendars",
         CalendarCommand::ListEvents => "list_events",
         CalendarCommand::ReadEvent => "read_event",
@@ -2666,7 +2639,6 @@ fn calendar_display_stats(command: &str, data: Option<&CborValue>) -> ToolUseSta
         return ToolUseStats::default();
     };
     match command {
-        "list_accounts" => line_array_count_stats(data, "accounts"),
         "list_calendars" => line_array_count_stats(data, "calendars"),
         "list_events" => line_array_count_stats(data, "events"),
         "read_event" => line_array_count_stats(data, "event"),
@@ -2732,19 +2704,8 @@ fn calendar_args_text(command: &str, args: Option<&CborValue>) -> String {
 }
 
 fn calendar_scope_text(args: Option<&CborValue>) -> Option<String> {
-    let args = args?;
-    let account = cbor_text_field(args, "account");
-    let calendar = cbor_text_field(args, "calendar");
-    match (account, calendar) {
-        (Some(account), Some(calendar)) => Some(format!(
-            "{}/{}",
-            safe_display_line(account),
-            safe_display_line(calendar)
-        )),
-        (Some(account), None) => Some(safe_display_line(account)),
-        (None, Some(calendar)) => Some(format!("-/{}", safe_display_line(calendar))),
-        (None, None) => None,
-    }
+    args.and_then(|args| cbor_text_field(args, "calendar"))
+        .map(safe_display_line)
 }
 
 fn calendar_range_display(command: &str, args: Option<&CborValue>) -> Option<ToolUseRange> {

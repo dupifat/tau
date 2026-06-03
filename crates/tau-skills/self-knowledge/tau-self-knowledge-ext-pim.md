@@ -17,7 +17,7 @@ Use this skill when helping a user configure PIM. Do not include personal addres
 
 Email:
 
-- list accounts and folders
+- list folders across accounts as flattened `<account>/<folder>` ids
 - list recent messages or UID-ordered pages
 - read full mail only when policy or exact user approval allows it
 - send, trash, star/unstar, mark read/unread
@@ -26,7 +26,7 @@ Email:
 
 Calendar:
 
-- list accounts and calendars
+- list calendars across accounts as flattened `<account>/<calendar>` ids
 - list bounded event rows and free/busy rows with cursor pagination
 - read one event by id
 - read-only ICS feed accounts for standard `.ics` calendars
@@ -93,10 +93,9 @@ Recommended defaults:
 - `calendar.policy.write.require_approval: true`
 - keep `calendar.accounts[*].calendars.allow` narrow
 
-PIM list-style tool results should follow Tau's standard header-then-payload shape: headers such as `format: ...` first, one empty line, then plain unindented rows. The `format` header describes the space-separated payload columns, and each item row starts with the main item id. Empty lists use a single `(no matches found)` payload line. Email token fields percent-encode whitespace so follow-up keys stay one-column and reversible; percent-decode those email token fields before passing them back as tool arguments. Implicit/default values such as selected account/calendar or defaulted calendar range bounds are response headers instead of repeated in every row. Calendar `list_events` and `free_busy` are bounded reads; if `start` is omitted they default to midnight 2 days before the current date, and if `end` is omitted it defaults to 7 days after `start`. Range read results include effective `start`/`end` headers; reuse those while paginating.
+PIM list-style tool results should follow Tau's standard header-then-payload shape: headers such as `format: ...` first, one empty line, then plain unindented rows. The `format` header describes the space-separated payload columns, and each item row starts with the main item id. Empty lists use a single `(no matches found)` payload line. Email folder ids and calendar ids flatten account into `<account>/<folder>` or `<account>/<calendar>`; there is no separate model-visible account argument. Email token fields percent-encode whitespace so follow-up keys stay one-column and reversible; percent-decode those email token fields before passing them back as tool arguments. Implicit/default values such as selected folder/calendar or defaulted calendar range bounds are response headers instead of repeated in every row. Calendar `list_events` and `free_busy` are bounded reads; if `start` is omitted they default to midnight 2 days before the current date, and if `end` is omitted it defaults to 7 days after `start`. Range read results include effective `start`/`end` headers; reuse those while paginating.
 
 Calendar writes should normally return `approval_required`; then the agent should wait for the user to inspect and approve with `/calendar change list`, `/calendar change open <id>`, and `/calendar change approve <id>`. Existing Google event writes use internally cached ETags; if the event changed, the agent should re-read it and retry.
-
 
 ## Email policies and output safety
 

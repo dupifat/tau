@@ -248,6 +248,9 @@ impl CalendarExtensionConfig {
             if account.id.trim().is_empty() {
                 return Err("calendar account id must not be empty".to_owned());
             }
+            if account.id.contains('/') {
+                return Err("calendar account id must not contain `/`".to_owned());
+            }
             if !ids.insert(account.id.clone()) {
                 return Err(format!("duplicate calendar account id `{}`", account.id));
             }

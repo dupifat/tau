@@ -5,53 +5,27 @@ use crate::calendar::config::{
 };
 
 #[test]
-fn list_accounts_reports_enabled_configured_accounts() {
-    let cfg = CalendarExtensionConfig {
-        enable: true,
-        accounts: vec![CalendarAccountConfig {
-            id: "work".to_owned(),
-            enable: true,
-            display_name: Some("Work Calendar".to_owned()),
-            backend: Some(CalendarBackendConfig::Google {
-                client_id_secret: "google_client_id".to_owned(),
-                client_secret_secret: None,
-                refresh_token_secret: Some("google_refresh_token".to_owned()),
-                api_base: None,
-            }),
-            calendars: Default::default(),
-            timezone: Some("UTC".to_owned()),
-        }],
-        ..Default::default()
-    };
-    let config = cfg.validate().expect("valid calendar config");
+fn list_calendars_reports_flattened_calendar_ids() {
     let temp = tempfile::TempDir::new().expect("tempdir");
-    let engine = Engine {
-        config,
-        state: StateStore::open(temp.path().join("state")).expect("state"),
-        google: GoogleBackend::new(BTreeMap::new()),
-        ics_feed: IcsFeedBackend::new(BTreeMap::new()),
-        etags: RefCell::new(BTreeMap::new()),
-        last_events: RefCell::new(BTreeMap::new()),
-    };
+    let engine = test_engine(temp.path());
 
-    let output = engine.list_accounts();
+    let output = engine.list_calendars().expect("list calendars");
     let data = cbor_field(&output, "data").expect("data");
 
-    assert_eq!(cbor_text_field(&output, "command"), Some("list_accounts"));
+    assert_eq!(cbor_text_field(&output, "command"), Some("list_calendars"));
     assert_eq!(cbor_text_field(&output, "status"), Some("ok"));
-    assert_eq!(cbor_text_field(data, "format"), Some(LIST_ACCOUNTS_FORMAT));
-    assert_eq!(line_payload(data, "accounts"), "work - \"Work_Calendar\"");
+    assert_eq!(cbor_text_field(data, "format"), Some(LIST_CALENDARS_FORMAT));
     assert_eq!(
-        tau_proto::ToolResponse::from_cbor(&output).render(),
-        "ok: true\ncommand: list_accounts\nstatus: ok\nformat: account_id default_calendar display_name\n\nwork - \"Work_Calendar\""
+        line_payload(data, "calendars"),
+        "feed/main read_only \"Feed\""
     );
 }
 
 #[test]
 fn omitted_calendar_account_defaults_to_first_enabled_account() {
-    // Match email's default-account behavior so weaker local models that omit
-    // an account can continue. Calendar read outputs include account/calendar
-    // fields, so the selected default is visible to the model afterwards.
+    // Match email's default-scope behavior so weaker local models that omit
+    // a calendar can continue. Calendar read outputs include a flattened
+    // calendar id, so the selected default is visible to the model afterwards.
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut engine = test_engine(temp.path());
     engine.config.accounts.insert(
@@ -73,7 +47,9 @@ fn omitted_calendar_account_defaults_to_first_enabled_account() {
 
     let account = engine.single_account(None).expect("default account");
     assert_eq!(account.id, "feed");
-    assert_eq!(engine.calendar_arg(account, None), Ok("main"));
+    let (account, calendar) = engine.resolve_calendar_arg(None).expect("default calendar");
+    assert_eq!(account.id, "feed");
+    assert_eq!(calendar, "main");
 
     let invocation = ToolInvocation {
         command: CalendarCommand::ListEvents,
@@ -86,8 +62,7 @@ fn omitted_calendar_account_defaults_to_first_enabled_account() {
         "list_events",
         "ok",
         cbor_map(vec![
-            ("account", CborValue::Text("feed".to_owned())),
-            ("calendar", CborValue::Text("main".to_owned())),
+            ("calendar", CborValue::Text("feed/main".to_owned())),
             ("events", CborValue::Array(Vec::new())),
         ]),
     );
@@ -105,20 +80,14 @@ fn calendar_log_records_tool_reads_and_action_lists_them() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let engine = test_engine(temp.path());
 
-    let output = dispatch_test(
-        &engine,
-        command_args(
-            "list_calendars",
-            vec![("account", CborValue::Text("feed".to_owned()))],
-        ),
-    );
+    let output = dispatch_test(&engine, command_args("list_calendars", vec![]));
     let data = cbor_field(&output, "data").expect("data");
     assert_eq!(cbor_text_field(data, "format"), Some(LIST_CALENDARS_FORMAT));
     assert_eq!(
         tau_proto::ToolResponse::from_cbor(&output).render(),
-        "ok: true\ncommand: list_calendars\nstatus: ok\nformat: calendar_id account_id flags display_name\naccount: feed\n\nmain feed read_only \"Feed\""
+        "ok: true\ncommand: list_calendars\nstatus: ok\nformat: calendar_id flags display_name\n\nfeed/main read_only \"Feed\""
     );
-    assert_eq!(success_display(&output).args, "list_calendars feed");
+    assert_eq!(success_display(&output).args, "list_calendars");
 
     let log = engine.action_log_last(10).expect("log output");
 
@@ -126,7 +95,6 @@ fn calendar_log_records_tool_reads_and_action_lists_them() {
     assert!(log.contains("kind=tool"), "{log}");
     assert!(log.contains("command=list_calendars"), "{log}");
     assert!(log.contains("status=ok"), "{log}");
-    assert!(log.contains("account=feed"), "{log}");
     assert!(log.contains("items=1"), "{log}");
 }
 
@@ -153,14 +121,27 @@ fn calendar_success_display_keeps_queued_event_target() {
 }
 
 #[test]
+fn calendar_direct_write_result_uses_flattened_calendar_id() {
+    // When write approval is disabled, mutation results are directly visible to
+    // the model and must still hide the separate account concept.
+    let mut change = CalendarChangeApproval::pending("delete_event", "google", "primary");
+    change.event_id = Some("evt1".to_owned());
+
+    let result =
+        format_mutation_result_envelope("change1", &change, &CalendarMutationResult::Deleted);
+    let data = cbor_field(&result, "data").expect("data");
+
+    assert_eq!(cbor_text_field(data, "calendar"), Some("google/primary"));
+    assert!(cbor_text_field(data, "account").is_none());
+}
+#[test]
 fn calendar_initial_display_shows_scope_and_range() {
     // Calendar reads can be slow/networked; keep the live status chip useful by
     // showing the same scope/range information that matters for the result.
     let display = initial_display(&command_args(
         "list_events",
         vec![
-            ("account", CborValue::Text("feed".to_owned())),
-            ("calendar", CborValue::Text("main".to_owned())),
+            ("calendar", CborValue::Text("feed/main".to_owned())),
             ("start", CborValue::Text("2026-05-29".to_owned())),
             ("end", CborValue::Text("2026-05-30".to_owned())),
         ],
@@ -183,8 +164,7 @@ fn calendar_display_preserves_non_midnight_range_times() {
     let display = initial_display(&command_args(
         "list_events",
         vec![
-            ("account", CborValue::Text("feed".to_owned())),
-            ("calendar", CborValue::Text("main".to_owned())),
+            ("calendar", CborValue::Text("feed/main".to_owned())),
             (
                 "start",
                 CborValue::Text("2026-05-29T13:30:00-07:00".to_owned()),
@@ -213,7 +193,7 @@ fn calendar_display_does_not_panic_on_non_ascii_date_suffix() {
     let display = initial_display(&command_args(
         "list_events",
         vec![
-            ("account", CborValue::Text("feed".to_owned())),
+            ("calendar", CborValue::Text("feed/main".to_owned())),
             ("start", CborValue::Text("2026-05-29éééééé".to_owned())),
             ("end", CborValue::Text("2026-05-30Tnot-a-date".to_owned())),
         ],
@@ -235,8 +215,7 @@ fn calendar_error_display_keeps_range_separate_from_args() {
     let arguments = command_args(
         "free_busy",
         vec![
-            ("account", CborValue::Text("feed".to_owned())),
-            ("calendar", CborValue::Text("main".to_owned())),
+            ("calendar", CborValue::Text("feed/main".to_owned())),
             ("start", CborValue::Text("2026-05-29".to_owned())),
             ("end", CborValue::Text("2026-05-30".to_owned())),
         ],
@@ -264,8 +243,7 @@ fn calendar_success_display_keeps_list_events_compact() {
         "list_events",
         "ok",
         cbor_map(vec![
-            ("account", CborValue::Text("proton".to_owned())),
-            ("calendar", CborValue::Text("main".to_owned())),
+            ("calendar", CborValue::Text("proton/main".to_owned())),
             (
                 "start",
                 CborValue::Text("2026-06-10T00:00:00-07:00".to_owned()),
@@ -317,8 +295,7 @@ fn list_events_uses_start_end_range_names_and_rejects_old_names() {
     let invocation = ToolInvocation {
         command: CalendarCommand::ListEvents,
         args: Some(cbor_map(vec![
-            ("account", CborValue::Text("feed".to_owned())),
-            ("calendar", CborValue::Text("main".to_owned())),
+            ("calendar", CborValue::Text("feed/main".to_owned())),
             (
                 "start",
                 CborValue::Text("2026-05-29T00:00:00-07:00".to_owned()),
@@ -340,8 +317,7 @@ fn list_events_uses_start_end_range_names_and_rejects_old_names() {
         command_args(
             "list_events",
             vec![
-                ("account", CborValue::Text("feed".to_owned())),
-                ("calendar", CborValue::Text("main".to_owned())),
+                ("calendar", CborValue::Text("feed/main".to_owned())),
                 (
                     "time_min",
                     CborValue::Text("2026-05-29T00:00:00Z".to_owned()),
@@ -368,8 +344,7 @@ fn free_busy_rejects_title_filter_instead_of_ignoring_it() {
         command_args(
             "free_busy",
             vec![
-                ("account", CborValue::Text("feed".to_owned())),
-                ("calendar", CborValue::Text("main".to_owned())),
+                ("calendar", CborValue::Text("feed/main".to_owned())),
                 ("start", CborValue::Text("2026-05-29".to_owned())),
                 ("title", CborValue::Text("tau".to_owned())),
             ],
@@ -530,8 +505,7 @@ fn calendar_log_prefers_effective_default_range_over_blank_args() {
         "list_events",
         "ok",
         cbor_map(vec![
-            ("account", CborValue::Text("feed".to_owned())),
-            ("calendar", CborValue::Text("main".to_owned())),
+            ("calendar", CborValue::Text("feed/main".to_owned())),
             ("start", CborValue::Text("2026-05-30T00:00:00Z".to_owned())),
             ("end", CborValue::Text("2026-06-06T00:00:00Z".to_owned())),
             ("events", CborValue::Array(Vec::new())),
@@ -558,8 +532,7 @@ fn calendar_log_records_failed_write_attempts_without_payloads() {
         command_args(
             "create_event",
             vec![
-                ("account", CborValue::Text("feed".to_owned())),
-                ("calendar", CborValue::Text("main".to_owned())),
+                ("calendar", CborValue::Text("feed/main".to_owned())),
                 ("title", CborValue::Text("private title".to_owned())),
             ],
         ),
@@ -633,8 +606,7 @@ fn google_writes_queue_pending_calendar_changes() {
         command_args(
             "create_event",
             vec![
-                ("account", CborValue::Text("google".to_owned())),
-                ("calendar", CborValue::Text("primary".to_owned())),
+                ("calendar", CborValue::Text("google/primary".to_owned())),
                 ("title", CborValue::Text("Team Sync".to_owned())),
                 ("start", CborValue::Text("2026-05-28T12:00:00Z".to_owned())),
                 ("end", CborValue::Text("2026-05-28T13:00:00Z".to_owned())),
@@ -776,13 +748,7 @@ fn google_reads_without_stored_auth_report_auth_error() {
         last_events: RefCell::new(BTreeMap::new()),
     };
 
-    let output = dispatch_test(
-        &engine,
-        command_args(
-            "list_calendars",
-            vec![("account", CborValue::Text("google".to_owned()))],
-        ),
-    );
+    let output = dispatch_test(&engine, command_args("list_calendars", vec![]));
 
     assert_eq!(cbor_bool_field(&output, "ok"), Some(false));
     assert_eq!(
@@ -902,7 +868,7 @@ fn google_event_details_hide_etag_from_agent() {
 
     assert_eq!(
         format_event_detail(&policy, &account, "primary", &event).join("\n"),
-        "account google\ncalendar primary\nevent_id evt\nstart 2026-05-28T12:00:00Z\nend 2026-05-28T13:00:00Z\nflags read_only,recurring\nsummary Team_Sync\nuid uid@example.com\nstatus confirmed\nlocation Room_1\norganizer org@example.com\nattendees a@example.com,b@example.com\ndescription line 1 line 2"
+        "calendar google/primary\nevent_id evt\nstart 2026-05-28T12:00:00Z\nend 2026-05-28T13:00:00Z\nflags read_only,recurring\nsummary Team_Sync\nuid uid@example.com\nstatus confirmed\nlocation Room_1\norganizer org@example.com\nattendees a@example.com,b@example.com\ndescription line 1 line 2"
     );
 }
 
@@ -1115,6 +1081,20 @@ fn duplicate_account_ids_are_rejected() {
         Err(err) => err,
     };
     assert!(err.contains("duplicate calendar account id"), "{err}");
+
+    let slash_cfg = CalendarExtensionConfig {
+        enable: true,
+        accounts: vec![CalendarAccountConfig {
+            id: "work/account".to_owned(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let slash_err = slash_cfg.validate().err().expect("slash id rejected");
+    assert!(
+        slash_err.contains("calendar account id must not contain `/`"),
+        "{slash_err}"
+    );
 }
 
 #[test]

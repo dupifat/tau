@@ -19,9 +19,7 @@ pub(crate) struct ToolInvocation {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum CalendarCommand {
-    /// List configured calendar accounts.
-    ListAccounts,
-    /// List calendars visible within an account.
+    /// List configured calendars.
     ListCalendars,
     /// List events in a bounded time range.
     ListEvents,
@@ -39,26 +37,16 @@ pub(crate) enum CalendarCommand {
     RespondInvite,
 }
 
-/// Empty argument object for commands that do not accept arguments.
+/// Arguments for listing calendars.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct NoArgs {}
-
-/// Arguments for listing calendars in an account.
-#[derive(Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct ListCalendarsArgs {
-    /// Configured account id.
-    pub(crate) account: Option<String>,
-}
+pub(crate) struct ListCalendarsArgs {}
 
 /// Arguments for bounded calendar range reads.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct CalendarRangeArgs {
-    /// Configured account id.
-    pub(crate) account: Option<String>,
-    /// Calendar id within the account.
+    /// Flattened calendar id, `<account>/<calendar>`.
     pub(crate) calendar: Option<String>,
     /// Inclusive lower RFC3339 time bound.
     pub(crate) start: Option<String>,
@@ -76,9 +64,7 @@ pub(crate) struct CalendarRangeArgs {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct ReadEventArgs {
-    /// Configured account id.
-    pub(crate) account: Option<String>,
-    /// Calendar id within the account.
+    /// Flattened calendar id, `<account>/<calendar>`.
     pub(crate) calendar: Option<String>,
     /// Backend event id.
     pub(crate) event_id: Option<String>,
@@ -88,9 +74,7 @@ pub(crate) struct ReadEventArgs {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct CreateEventArgs {
-    /// Configured account id.
-    pub(crate) account: Option<String>,
-    /// Calendar id within the account.
+    /// Flattened calendar id, `<account>/<calendar>`.
     pub(crate) calendar: Option<String>,
     /// Event title.
     pub(crate) title: Option<String>,
@@ -110,9 +94,7 @@ pub(crate) struct CreateEventArgs {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct UpdateEventArgs {
-    /// Configured account id.
-    pub(crate) account: Option<String>,
-    /// Calendar id within the account.
+    /// Flattened calendar id, `<account>/<calendar>`.
     pub(crate) calendar: Option<String>,
     /// Backend event id.
     pub(crate) event_id: Option<String>,
@@ -134,9 +116,7 @@ pub(crate) struct UpdateEventArgs {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct DeleteEventArgs {
-    /// Configured account id.
-    pub(crate) account: Option<String>,
-    /// Calendar id within the account.
+    /// Flattened calendar id, `<account>/<calendar>`.
     pub(crate) calendar: Option<String>,
     /// Backend event id.
     pub(crate) event_id: Option<String>,
@@ -146,9 +126,7 @@ pub(crate) struct DeleteEventArgs {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct RespondInviteArgs {
-    /// Configured account id.
-    pub(crate) account: Option<String>,
-    /// Calendar id within the account.
+    /// Flattened calendar id, `<account>/<calendar>`.
     pub(crate) calendar: Option<String>,
     /// Backend event id.
     pub(crate) event_id: Option<String>,
@@ -161,22 +139,21 @@ pub fn calendar_tool_spec() -> ToolSpec {
     ToolSpec {
         name: tau_proto::ToolName::new(TOOL_NAME),
         model_visible_name: None,
-        description: Some("Controlled calendar access. Use list_accounts, list_calendars, list_events, read_event, free_busy, create_event, update_event, delete_event, or respond_invite. Results use ok/command/status/data envelopes with line arrays and format fields. For event ranges, start is optional and defaults to midnight 2 days before the current date; omitted end defaults to 7 days after start. Results include effective data.start/data.end; reuse them with next_cursor pagination. list_events accepts optional title substring filtering. Time values may be RFC3339 with offset, YYYY-MM-DD all-day dates, natural expressions like today/tomorrow/next week, or local YYYY-MM-DDTHH:MM:SS interpreted in the configured or system timezone. Existing event writes require event_id; ETags are handled internally.".to_owned()),
+        description: Some("Controlled calendar access. Use list_calendars, list_events, read_event, free_busy, create_event, update_event, delete_event, or respond_invite. Results use ok/command/status/data envelopes with line arrays and format fields. For event ranges, start is optional and defaults to midnight 2 days before the current date; omitted end defaults to 7 days after start. Results include effective data.start/data.end; reuse them with next_cursor pagination. list_events accepts optional title substring filtering. Time values may be RFC3339 with offset, YYYY-MM-DD all-day dates, natural expressions like today/tomorrow/next week, or local YYYY-MM-DDTHH:MM:SS interpreted in the configured or system timezone. Existing event writes require event_id; ETags are handled internally.".to_owned()),
         tool_type: tau_proto::ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
             "properties": {
                 "command": {
                     "type": "string",
-                    "enum": ["list_accounts", "list_calendars", "list_events", "read_event", "free_busy", "create_event", "update_event", "delete_event", "respond_invite"],
+                    "enum": ["list_calendars", "list_events", "read_event", "free_busy", "create_event", "update_event", "delete_event", "respond_invite"],
                     "description": "Calendar operation to perform."
                 },
                 "args": {
                     "type": "object",
-                    "description": "Command-specific arguments. account/calendar are optional when there is only one configured target.",
+                    "description": "Command-specific arguments. `calendar` is a flattened `<account>/<calendar>` id and may be omitted when there is only one configured target.",
                     "properties": {
-                        "account": {"type": "string", "description": "Configured calendar account id."},
-                        "calendar": {"type": "string", "description": "Calendar id within the account."},
+                        "calendar": {"type": "string", "description": "Flattened calendar id, `<account>/<calendar>`."},
                         "event_id": {"type": "string", "description": "Backend event id."},
                         "limit": {"type": "integer", "minimum": 1, "maximum": 100},
                         "cursor": {"type": "string", "description": "Cursor returned as next_cursor by list_events or free_busy."},
@@ -195,18 +172,14 @@ pub fn calendar_tool_spec() -> ToolSpec {
             "additionalProperties": false,
             "allOf": [
                 {
-                    "if": {"properties": {"command": {"const": "list_accounts"}}, "required": ["command"]},
-                    "then": {"properties": {"args": {"maxProperties": 0}}}
-                },
-                {
                     "if": {"properties": {"command": {"const": "list_calendars"}}, "required": ["command"]},
-                    "then": {"properties": {"args": {"properties": {"account": {}}, "additionalProperties": false}}}
+                    "then": {"properties": {"args": {"maxProperties": 0}}}
                 },
                 {
                     "if": {"properties": {"command": {"const": "list_events"}}, "required": ["command"]},
                     "then": {
                         "properties": {"args": {
-                            "properties": {"account": {}, "calendar": {}, "start": {}, "end": {}, "limit": {}, "cursor": {}, "title": {}},
+                            "properties": {"calendar": {}, "start": {}, "end": {}, "limit": {}, "cursor": {}, "title": {}},
                             "additionalProperties": false
                         }}
                     }
@@ -215,7 +188,7 @@ pub fn calendar_tool_spec() -> ToolSpec {
                     "if": {"properties": {"command": {"const": "free_busy"}}, "required": ["command"]},
                     "then": {
                         "properties": {"args": {
-                            "properties": {"account": {}, "calendar": {}, "start": {}, "end": {}, "limit": {}, "cursor": {}},
+                            "properties": {"calendar": {}, "start": {}, "end": {}, "limit": {}, "cursor": {}},
                             "additionalProperties": false
                         }}
                     }
@@ -225,7 +198,7 @@ pub fn calendar_tool_spec() -> ToolSpec {
                     "then": {
                         "required": ["args"],
                         "properties": {"args": {
-                            "properties": {"account": {}, "calendar": {}, "event_id": {}},
+                            "properties": {"calendar": {}, "event_id": {}},
                             "additionalProperties": false
                         }}
                     }
@@ -236,7 +209,7 @@ pub fn calendar_tool_spec() -> ToolSpec {
                         "required": ["args"],
                         "properties": {"args": {
                             "required": ["title", "start"],
-                            "properties": {"account": {}, "calendar": {}, "title": {}, "description": {}, "location": {}, "start": {}, "end": {}, "attendees": {}},
+                            "properties": {"calendar": {}, "title": {}, "description": {}, "location": {}, "start": {}, "end": {}, "attendees": {}},
                             "additionalProperties": false
                         }}
                     }
@@ -249,7 +222,7 @@ pub fn calendar_tool_spec() -> ToolSpec {
                             "required": ["event_id"],
                             "anyOf": [{"required": ["title"]}, {"required": ["description"]}, {"required": ["location"]}, {"required": ["start"]}, {"required": ["end"]}, {"required": ["attendees"]}],
                             "dependentRequired": {"end": ["start"]},
-                            "properties": {"account": {}, "calendar": {}, "event_id": {}, "title": {}, "description": {}, "location": {}, "start": {}, "end": {}, "attendees": {}},
+                            "properties": {"calendar": {}, "event_id": {}, "title": {}, "description": {}, "location": {}, "start": {}, "end": {}, "attendees": {}},
                             "additionalProperties": false
                         }}
                     }
@@ -260,7 +233,7 @@ pub fn calendar_tool_spec() -> ToolSpec {
                         "required": ["args"],
                         "properties": {"args": {
                             "required": ["event_id"],
-                            "properties": {"account": {}, "calendar": {}, "event_id": {}},
+                            "properties": {"calendar": {}, "event_id": {}},
                             "additionalProperties": false
                         }}
                     }
@@ -271,7 +244,7 @@ pub fn calendar_tool_spec() -> ToolSpec {
                         "required": ["args"],
                         "properties": {"args": {
                             "required": ["event_id", "response"],
-                            "properties": {"account": {}, "calendar": {}, "event_id": {}, "response": {}},
+                            "properties": {"calendar": {}, "event_id": {}, "response": {}},
                             "additionalProperties": false
                         }}
                     }

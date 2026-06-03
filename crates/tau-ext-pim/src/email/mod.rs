@@ -133,7 +133,7 @@ pub struct EmailExtensionConfig {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AccountConfig {
-    /// Stable account identifier used by tool commands.
+    /// Stable account identifier used in config and flattened folder ids.
     pub id: String,
     /// Per-account enable flag. Accounts are disabled unless explicitly
     /// enabled.
@@ -338,6 +338,9 @@ impl EmailExtensionConfig {
             if account.id.trim().is_empty() {
                 return Err("account id must not be empty".to_owned());
             }
+            if account.id.contains('/') {
+                return Err("account id must not contain `/`".to_owned());
+            }
             if !ids.insert(account.id.clone()) {
                 return Err(format!("duplicate account id `{}`", account.id));
             }
@@ -388,7 +391,7 @@ pub struct ValidatedConfig {
 
 /// Validated account configuration.
 pub struct ValidatedAccount {
-    /// Stable account identifier used by commands.
+    /// Stable account identifier used in config and flattened folder ids.
     pub id: String,
     /// Whether this account is enabled.
     pub enable: bool,
@@ -1888,7 +1891,7 @@ impl MessageFlagMutation {
 pub trait EmailBackend {
     /// List folders known to the backend for an account.
     fn list_folders(&self, account: &str) -> Result<Vec<BackendFolder>, String>;
-    /// List messages known to the backend for an account/folder.
+    /// List messages known to the backend for an internal account/folder.
     fn list_messages(&self, account: &str, folder: &str) -> Result<Vec<BackendMessage>, String>;
     /// List one redaction-safe metadata page in descending UID order.
     fn list_messages_by_uid_page(
@@ -2717,39 +2720,7 @@ fn paged_messages(
     })
 }
 
-fn format_account_line(account: &ValidatedAccount, extension_enabled: bool) -> CborValue {
-    let mut flags = Vec::new();
-    flags.push(if extension_enabled && account.enable {
-        "enabled"
-    } else {
-        "disabled"
-    });
-    flags.push(if account.imap_configured() {
-        "imap"
-    } else {
-        "noimap"
-    });
-    flags.push(if account.smtp_configured() {
-        "smtp"
-    } else {
-        "nosmtp"
-    });
-    let display_name = account
-        .display_name
-        .as_deref()
-        .map(|name| safe_model_line(name, MAX_HEADER_VALUE_CHARS))
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "-".to_owned());
-    CborValue::Text(format!(
-        "{} {} {} {}",
-        list_token(&account.id, MAX_HEADER_VALUE_CHARS),
-        flags.join(","),
-        list_token(&account.from_normalized, MAX_ADDRESS_CHARS),
-        display_name
-    ))
-}
-
-fn format_folder_line(folder: BackendFolder) -> CborValue {
+fn format_folder_line(account_id: &str, folder: BackendFolder) -> CborValue {
     let flags = if folder.selectable {
         "selectable"
     } else {
@@ -2763,7 +2734,10 @@ fn format_folder_line(folder: BackendFolder) -> CborValue {
     };
     CborValue::Text(format!(
         "{} {}",
-        list_token(&name, MAX_HEADER_VALUE_CHARS),
+        list_token(
+            &flatten_folder_id(account_id, &name),
+            MAX_HEADER_VALUE_CHARS
+        ),
         flags
     ))
 }
@@ -2903,8 +2877,7 @@ impl<B: EmailBackend> Engine<B> {
     fn dispatch(&mut self, command: EmailCommand) -> CborValue {
         let log_command = command.clone();
         let result = match command {
-            EmailCommand::ListAccounts => self.list_accounts(),
-            EmailCommand::ListFolders { account } => self.list_folders(&account),
+            EmailCommand::ListFolders { .. } => self.list_folders(),
             EmailCommand::ListByUid {
                 account,
                 folder,
@@ -3079,7 +3052,9 @@ impl<B: EmailBackend> Engine<B> {
                 subject,
                 ..
             } => {
-                entry.account = log_send_account(data, account.as_deref(), &self.config);
+                let resolved_account =
+                    self.resolve_send_account_id(account.clone(), from.as_deref());
+                entry.account = log_account(data, resolved_account.as_deref());
                 entry.from = from
                     .as_deref()
                     .map(|value| safe_model_line(value, MAX_ADDRESS_CHARS))
@@ -3100,7 +3075,7 @@ impl<B: EmailBackend> Engine<B> {
                     .collect();
                 entry.title = Some(email_log_title(subject));
             }
-            EmailCommand::ListAccounts | EmailCommand::ListFolders { .. } => return None,
+            EmailCommand::ListFolders { .. } => return None,
         }
         Some(entry)
     }
@@ -3137,71 +3112,39 @@ impl<B: EmailBackend> Engine<B> {
         Ok(account)
     }
 
-    fn list_accounts(&self) -> CborValue {
-        let accounts: Vec<CborValue> = self
-            .config
-            .account_order
-            .iter()
-            .filter_map(|id| self.config.accounts.get(id))
-            .map(|account| format_account_line(account, self.config.enable))
-            .collect();
-        ok_line_envelope(
-            "list_accounts",
-            "ok",
-            vec![(
-                "format",
-                CborValue::Text("id flags from display_name...".to_owned()),
-            )],
-            cbor_map(vec![
-                (
-                    "format",
-                    CborValue::Text("id flags from display_name...".to_owned()),
-                ),
-                ("accounts", CborValue::Array(accounts.clone())),
-            ]),
-            &accounts,
-        )
-    }
-
-    fn list_folders(&self, account_id: &str) -> CborValue {
-        let account_id = match self.resolve_account_id("list_folders", account_id) {
-            Ok(id) => id,
-            Err(e) => return e,
-        };
-        let account = match self.account("list_folders", account_id) {
-            Ok(a) => a,
-            Err(e) => return e,
-        };
-        match self.backend.list_folders(account_id) {
-            Ok(folders) => {
-                let visible: Vec<CborValue> = folders
+    fn list_folders(&self) -> CborValue {
+        let mut visible = Vec::new();
+        for account_id in &self.config.account_order {
+            let account = match self.account("list_folders", account_id) {
+                Ok(account) => account,
+                Err(_) => continue,
+            };
+            if !account.imap_configured() {
+                continue;
+            }
+            let folders = match self.backend.list_folders(account_id) {
+                Ok(folders) => folders,
+                Err(message) => {
+                    return backend_error_envelope(Some("list_folders"), "network_error", &message);
+                }
+            };
+            visible.extend(
+                folders
                     .into_iter()
                     .filter(|f| account.folders.allows(&f.name))
-                    .map(format_folder_line)
-                    .collect();
-                ok_line_envelope(
-                    "list_folders",
-                    "ok",
-                    vec![
-                        (
-                            "account",
-                            CborValue::Text(safe_model_line(account_id, MAX_HEADER_VALUE_CHARS)),
-                        ),
-                        ("format", CborValue::Text("name flags".to_owned())),
-                    ],
-                    cbor_map(vec![
-                        (
-                            "account",
-                            CborValue::Text(safe_model_line(account_id, MAX_HEADER_VALUE_CHARS)),
-                        ),
-                        ("format", CborValue::Text("name flags".to_owned())),
-                        ("folders", CborValue::Array(visible.clone())),
-                    ]),
-                    &visible,
-                )
-            }
-            Err(message) => backend_error_envelope(Some("list_folders"), "network_error", &message),
+                    .map(|folder| format_folder_line(account_id, folder)),
+            );
         }
+        ok_line_envelope(
+            "list_folders",
+            "ok",
+            vec![("format", CborValue::Text("folder flags".to_owned()))],
+            cbor_map(vec![
+                ("format", CborValue::Text("folder flags".to_owned())),
+                ("folders", CborValue::Array(visible.clone())),
+            ]),
+            &visible,
+        )
     }
 
     fn list_by_uid(
@@ -3305,12 +3248,11 @@ impl<B: EmailBackend> Engine<B> {
             "ok",
             vec![
                 (
-                    "account",
-                    CborValue::Text(safe_model_line(account_id, MAX_HEADER_VALUE_CHARS)),
-                ),
-                (
                     "folder",
-                    CborValue::Text(safe_model_line(folder, MAX_HEADER_VALUE_CHARS)),
+                    CborValue::Text(safe_model_line(
+                        &flatten_folder_id(account_id, folder),
+                        MAX_HEADER_VALUE_CHARS,
+                    )),
                 ),
                 (
                     "format",
@@ -3321,12 +3263,11 @@ impl<B: EmailBackend> Engine<B> {
             ],
             cbor_map(vec![
                 (
-                    "account",
-                    CborValue::Text(safe_model_line(account_id, MAX_HEADER_VALUE_CHARS)),
-                ),
-                (
                     "folder",
-                    CborValue::Text(safe_model_line(folder, MAX_HEADER_VALUE_CHARS)),
+                    CborValue::Text(safe_model_line(
+                        &flatten_folder_id(account_id, folder),
+                        MAX_HEADER_VALUE_CHARS,
+                    )),
                 ),
                 (
                     "format",
@@ -3396,12 +3337,11 @@ impl<B: EmailBackend> Engine<B> {
                     ("requested_access", CborValue::Text(ACCESS_FULL.to_owned())),
                     ("kind", CborValue::Text("incoming_read".to_owned())),
                     (
-                        "account",
-                        CborValue::Text(safe_model_line(&account_id, MAX_HEADER_VALUE_CHARS)),
-                    ),
-                    (
                         "folder",
-                        CborValue::Text(safe_model_line(folder, MAX_HEADER_VALUE_CHARS)),
+                        CborValue::Text(safe_model_line(
+                            &flatten_folder_id(&account_id, folder),
+                            MAX_HEADER_VALUE_CHARS,
+                        )),
                     ),
                     (
                         "uid",
@@ -3454,8 +3394,11 @@ impl<B: EmailBackend> Engine<B> {
                 "ok",
                 cbor_map(vec![
                     (
-                        "account",
-                        CborValue::Text(safe_model_line(&account_id, MAX_HEADER_VALUE_CHARS)),
+                        "folder",
+                        CborValue::Text(safe_model_line(
+                            &flatten_folder_id(&account_id, folder),
+                            MAX_HEADER_VALUE_CHARS,
+                        )),
                     ),
                     (
                         "headers",
@@ -3528,8 +3471,11 @@ impl<B: EmailBackend> Engine<B> {
             ACCESS_PREVIEW,
             cbor_map(vec![
                 (
-                    "account",
-                    CborValue::Text(safe_model_line(&account_id, MAX_HEADER_VALUE_CHARS)),
+                    "folder",
+                    CborValue::Text(safe_model_line(
+                        &flatten_folder_id(&account_id, folder),
+                        MAX_HEADER_VALUE_CHARS,
+                    )),
                 ),
                 (
                     "headers",
@@ -3572,8 +3518,11 @@ impl<B: EmailBackend> Engine<B> {
                 "already_full",
                 cbor_map(vec![
                     (
-                        "account",
-                        CborValue::Text(safe_model_line(&account_id, MAX_HEADER_VALUE_CHARS)),
+                        "folder",
+                        CborValue::Text(safe_model_line(
+                            &flatten_folder_id(&account_id, folder),
+                            MAX_HEADER_VALUE_CHARS,
+                        )),
                     ),
                     (
                         "message",
@@ -3604,8 +3553,11 @@ impl<B: EmailBackend> Engine<B> {
                 "approval_required",
                 cbor_map(vec![
                     (
-                        "account",
-                        CborValue::Text(safe_model_line(&account_id, MAX_HEADER_VALUE_CHARS)),
+                        "folder",
+                        CborValue::Text(safe_model_line(
+                            &flatten_folder_id(&account_id, folder),
+                            MAX_HEADER_VALUE_CHARS,
+                        )),
                     ),
                     (
                         "message",
@@ -3670,8 +3622,11 @@ impl<B: EmailBackend> Engine<B> {
                 command.status_name(),
                 cbor_map(vec![
                     (
-                        "account",
-                        CborValue::Text(safe_model_line(&account_id, MAX_HEADER_VALUE_CHARS)),
+                        "folder",
+                        CborValue::Text(safe_model_line(
+                            &flatten_folder_id(&account_id, folder),
+                            MAX_HEADER_VALUE_CHARS,
+                        )),
                     ),
                     (
                         "message",
@@ -3698,8 +3653,11 @@ impl<B: EmailBackend> Engine<B> {
                 "moved_to_trash",
                 cbor_map(vec![
                     (
-                        "account",
-                        CborValue::Text(safe_model_line(&account_id, MAX_HEADER_VALUE_CHARS)),
+                        "folder",
+                        CborValue::Text(safe_model_line(
+                            &flatten_folder_id(&account_id, folder),
+                            MAX_HEADER_VALUE_CHARS,
+                        )),
                     ),
                     (
                         "message",
@@ -3712,6 +3670,38 @@ impl<B: EmailBackend> Engine<B> {
             }
             Err(message) => backend_error_envelope(Some(command), "imap_error", &message),
         }
+    }
+    fn resolve_send_account_id(
+        &self,
+        account: Option<String>,
+        from: Option<&str>,
+    ) -> Option<String> {
+        if account.is_some() {
+            return account;
+        }
+        if let Some(from) = from {
+            let from_trimmed = from.trim();
+            let from_normalized = normalize_address(from);
+            if let Some(id) = self.config.account_order.iter().find(|id| {
+                let Some(account) = self.config.accounts.get(*id) else {
+                    return false;
+                };
+                account.enable
+                    && account.smtp_configured()
+                    && (from_trimmed == account.from_identity
+                        || from_normalized.as_deref() == Some(account.from_normalized.as_str()))
+            }) {
+                return Some(id.clone());
+            }
+        }
+        self.config.account_order.iter().find_map(|id| {
+            let account = self.config.accounts.get(id)?;
+            if account.enable && account.smtp_configured() {
+                Some(id.clone())
+            } else {
+                None
+            }
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3727,7 +3717,7 @@ impl<B: EmailBackend> Engine<B> {
         reply_to: Option<String>,
         in_reply_to: Option<String>,
     ) -> CborValue {
-        let account_id = match account.or_else(|| self.config.account_order.first().cloned()) {
+        let account_id = match self.resolve_send_account_id(account, from.as_deref()) {
             Some(id) => id,
             None => return error_envelope(Some("send"), "account_not_found", "account not found"),
         };
@@ -3820,17 +3810,7 @@ impl<B: EmailBackend> Engine<B> {
         let blocked = self.blocked_recipients(&message);
         if blocked.is_empty() {
             return match self.backend.send_message(&message) {
-                Ok(_id) => ok_envelope(
-                    "send",
-                    "sent",
-                    cbor_map(vec![
-                        (
-                            "account",
-                            CborValue::Text(safe_model_line(&account_id, MAX_HEADER_VALUE_CHARS)),
-                        ),
-                        ("message", CborValue::Text("Message sent.".to_owned())),
-                    ]),
-                ),
+                Ok(_id) => ok_envelope("send", "sent", cbor_map(vec![])),
                 Err(message) => backend_error_envelope(Some("send"), "smtp_error", &message),
             };
         }
@@ -3838,16 +3818,10 @@ impl<B: EmailBackend> Engine<B> {
             return ok_envelope(
                 "send",
                 "already_sent",
-                cbor_map(vec![
-                    (
-                        "account",
-                        CborValue::Text(safe_model_line(&account_id, MAX_HEADER_VALUE_CHARS)),
-                    ),
-                    (
-                        "message",
-                        CborValue::Text("Message already sent.".to_owned()),
-                    ),
-                ]),
+                cbor_map(vec![(
+                    "message",
+                    CborValue::Text("Message already sent.".to_owned()),
+                )]),
             );
         }
         let approval = OutgoingApproval {
@@ -3872,16 +3846,10 @@ impl<B: EmailBackend> Engine<B> {
             Ok(_id) => ok_envelope(
                 "send",
                 "approval_required",
-                cbor_map(vec![
-                    (
-                        "account",
-                        CborValue::Text(safe_model_line(&account_id, MAX_HEADER_VALUE_CHARS)),
-                    ),
-                    (
-                        "message",
-                        CborValue::Text("Message pending approval.".to_owned()),
-                    ),
-                ]),
+                cbor_map(vec![(
+                    "message",
+                    CborValue::Text("Message pending approval.".to_owned()),
+                )]),
             ),
             Err(message) => error_envelope(Some("send"), "internal_error", &message),
         }
@@ -4636,22 +4604,21 @@ pub fn email_tool_spec() -> ToolSpec {
     ToolSpec {
         name: tau_proto::ToolName::new(TOOL_NAME),
         model_visible_name: None,
-        description: Some("Controlled email access through configured accounts. Omit account/folder to use the first configured account and INBOX. Commands: list_accounts (no args, line-oriented), list_folders (optional account, line-oriented), list_recent (optional account/folder/limit/days, defaults to first account/INBOX/100/7 and searches by IMAP internal date), list_by_uid (optional account/folder/limit/cursor, pages by descending UID), read (uid required; account/folder optional, default to first account/INBOX), request_full (same target as read; asks the user to approve full content), mark_read, mark_unread, star, unstar, trash, send. List results are line-oriented and include a format header. request_full and sends can require approval; message-management commands do not.".to_owned()),
+        description: Some("Controlled email access. Folder ids are flattened `<account>/<folder>` values returned by list_folders; omit folder to use the first configured account and INBOX. Commands: list_folders (line-oriented), list_recent (optional folder/limit/days), list_by_uid (optional folder/limit/cursor), read, request_full, mark_read, mark_unread, star, unstar, trash, send. List results are line-oriented and include a format header. request_full and sends can require approval; message-management commands do not.".to_owned()),
         tool_type: tau_proto::ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
             "properties": {
                 "command": {
                     "type": "string",
-                    "enum": ["list_accounts", "list_folders", "list_recent", "list_by_uid", "read", "request_full", "mark_read", "mark_unread", "star", "unstar", "trash", "send"],
+                    "enum": ["list_folders", "list_recent", "list_by_uid", "read", "request_full", "mark_read", "mark_unread", "star", "unstar", "trash", "send"],
                     "description": "Email operation to perform."
                 },
                 "args": {
                     "type": "object",
-                    "description": "Command arguments. May be omitted when every command argument has a default. Use {} for list_accounts when args is present. For list_folders account is optional. For list_recent, account/folder/limit/days are optional and default to first configured account, INBOX, 100, and 7. For list_by_uid, account/folder/limit/cursor are optional. For read, request_full, mark_read, mark_unread, star, unstar, and trash, uid is required while account/folder default to first configured account and INBOX.",
+                    "description": "Command arguments. May be omitted when every command argument has a default. Folder targets use flattened `<account>/<folder>` ids returned by list_folders; omitted folder defaults to the first configured account and INBOX.",
                     "properties": {
-                        "account": {"type": "string", "description": "Configured account id. Optional for list_folders, list_recent, list_by_uid, read, request_full, mark_read, mark_unread, star, unstar, trash, and send; defaults to the first configured account."},
-                        "folder": {"type": "string", "description": "Mailbox folder. Optional for list_recent, list_by_uid, read, request_full, mark_read, mark_unread, star, unstar, and trash; defaults to INBOX."},
+                        "folder": {"type": "string", "description": "Flattened `<account>/<folder>` id from list_folders. Optional for folder-targeting commands; defaults to first account/INBOX."},
                         "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum messages to list. Optional; defaults to 100 and is capped at 100."},
                         "days": {"type": "integer", "minimum": 1, "maximum": 365, "description": "For list_recent, include messages with IMAP internal date in the last N calendar days. Optional; defaults to 7 and is capped at 365."},
                         "cursor": {"type": "string", "description": "Pagination cursor returned by list_recent or list_by_uid."},
@@ -4670,6 +4637,10 @@ pub fn email_tool_spec() -> ToolSpec {
             },
             "required": ["command"],
             "allOf": [
+                {
+                    "if": {"properties": {"command": {"const": "list_folders"}}, "required": ["command"]},
+                    "then": {"properties": {"args": {"maxProperties": 0}}}
+                },
                 {
                     "if": {"properties": {"command": {"enum": ["read", "request_full", "mark_read", "mark_unread", "star", "unstar", "trash"]}}, "required": ["command"]},
                     "then": {"required": ["args"], "properties": {"args": {"required": ["uid"]}}}
@@ -4896,7 +4867,6 @@ impl MessageManagementCommand {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum EmailCommand {
-    ListAccounts,
     ListFolders {
         account: String,
     },
@@ -4949,7 +4919,6 @@ enum EmailCommand {
 
 fn email_command_name(command: &EmailCommand) -> &'static str {
     match command {
-        EmailCommand::ListAccounts => "list_accounts",
         EmailCommand::ListFolders { .. } => "list_folders",
         EmailCommand::ListByUid { .. } => "list_by_uid",
         EmailCommand::ListRecent { .. } => "list_recent",
@@ -4970,7 +4939,7 @@ fn email_log_kind(command: &EmailCommand) -> Option<&'static str> {
         EmailCommand::ManageMessage { .. }
         | EmailCommand::Trash { .. }
         | EmailCommand::Send { .. } => Some("mutable"),
-        EmailCommand::ListAccounts | EmailCommand::ListFolders { .. } => None,
+        EmailCommand::ListFolders { .. } => None,
     }
 }
 
@@ -5000,17 +4969,6 @@ fn log_field(data: Option<&CborValue>, field: &str, fallback: Option<&str>) -> O
 
 fn log_account(data: Option<&CborValue>, fallback: Option<&str>) -> Option<String> {
     log_field(data, "account", fallback)
-}
-
-fn log_send_account(
-    data: Option<&CborValue>,
-    fallback: Option<&str>,
-    config: &ValidatedConfig,
-) -> Option<String> {
-    log_account(
-        data,
-        fallback.or_else(|| config.account_order.first().map(String::as_str)),
-    )
 }
 
 fn format_email_log_entry(entry: &EmailLogEntry) -> String {
@@ -5071,7 +5029,6 @@ type CommandEnvelope<'a> = (String, CborMapEntries<'a>);
 fn parse_command(arguments: &CborValue) -> Result<EmailCommand, CborValue> {
     let (command, args) = parse_command_envelope(arguments)?;
     match command.as_str() {
-        "list_accounts" => parse_list_accounts(&command, args),
         "list_folders" => parse_list_folders(&command, args),
         "list" | "list_by_uid" => parse_list_by_uid(&command, args),
         "list_recent" => parse_list_recent(&command, args),
@@ -5106,30 +5063,22 @@ fn parse_command_envelope(arguments: &CborValue) -> Result<CommandEnvelope<'_>, 
     Ok((command, args))
 }
 
-fn parse_list_accounts(
-    command: &str,
-    args: &[(CborValue, CborValue)],
-) -> Result<EmailCommand, CborValue> {
-    reject_extra(args, &BTreeSet::new(), Some(command))?;
-    Ok(EmailCommand::ListAccounts)
-}
 fn parse_list_folders(
     command: &str,
     args: &[(CborValue, CborValue)],
 ) -> Result<EmailCommand, CborValue> {
-    let mut seen = BTreeSet::new();
-    let account = optional_string(args, &mut seen, "account", Some(command))?.unwrap_or_default();
-    reject_extra(args, &seen, Some(command))?;
-    Ok(EmailCommand::ListFolders { account })
+    reject_extra(args, &BTreeSet::new(), Some(command))?;
+    Ok(EmailCommand::ListFolders {
+        account: String::new(),
+    })
 }
 fn parse_list_by_uid(
     command: &str,
     args: &[(CborValue, CborValue)],
 ) -> Result<EmailCommand, CborValue> {
     let mut seen = BTreeSet::new();
-    let account = optional_string(args, &mut seen, "account", Some(command))?.unwrap_or_default();
-    let folder = optional_string(args, &mut seen, "folder", Some(command))?
-        .unwrap_or_else(|| DEFAULT_FOLDER.to_owned());
+    let folder_arg = optional_string(args, &mut seen, "folder", Some(command))?;
+    let (account, folder) = parse_flattened_folder_arg(command, folder_arg.as_deref())?;
     let limit = optional_positive_u32(args, &mut seen, "limit", Some(command))?
         .unwrap_or(DEFAULT_LIST_LIMIT);
     let cursor = optional_string(args, &mut seen, "cursor", Some(command))?;
@@ -5146,9 +5095,8 @@ fn parse_list_recent(
     args: &[(CborValue, CborValue)],
 ) -> Result<EmailCommand, CborValue> {
     let mut seen = BTreeSet::new();
-    let account = optional_string(args, &mut seen, "account", Some(command))?.unwrap_or_default();
-    let folder = optional_string(args, &mut seen, "folder", Some(command))?
-        .unwrap_or_else(|| DEFAULT_FOLDER.to_owned());
+    let folder_arg = optional_string(args, &mut seen, "folder", Some(command))?;
+    let (account, folder) = parse_flattened_folder_arg(command, folder_arg.as_deref())?;
     let limit = optional_positive_u32(args, &mut seen, "limit", Some(command))?
         .unwrap_or(DEFAULT_LIST_LIMIT);
     let days = optional_positive_u32(args, &mut seen, "days", Some(command))?
@@ -5204,21 +5152,47 @@ fn parse_trash(command: &str, args: &[(CborValue, CborValue)]) -> Result<EmailCo
         uid,
     })
 }
+fn parse_flattened_folder_arg(
+    command: &str,
+    folder: Option<&str>,
+) -> Result<(String, String), CborValue> {
+    let Some(folder) = folder else {
+        return Ok((String::new(), DEFAULT_FOLDER.to_owned()));
+    };
+    let Some((account, folder)) = folder.split_once('/') else {
+        return Err(error_envelope(
+            Some(command),
+            "invalid_input",
+            "folder must be a flattened `<account>/<folder>` id",
+        ));
+    };
+    if account.trim().is_empty() || folder.trim().is_empty() {
+        return Err(error_envelope(
+            Some(command),
+            "invalid_input",
+            "folder must be a flattened `<account>/<folder>` id",
+        ));
+    }
+    Ok((account.to_owned(), folder.to_owned()))
+}
+
+fn flatten_folder_id(account: &str, folder: &str) -> String {
+    format!("{account}/{folder}")
+}
+
 fn parse_message_target(
     command: &str,
     args: &[(CborValue, CborValue)],
 ) -> Result<(String, String, String), CborValue> {
     let mut seen = BTreeSet::new();
-    let account = optional_string(args, &mut seen, "account", Some(command))?.unwrap_or_default();
-    let folder = optional_string(args, &mut seen, "folder", Some(command))?
-        .unwrap_or_else(|| DEFAULT_FOLDER.to_owned());
+    let folder_arg = optional_string(args, &mut seen, "folder", Some(command))?;
+    let (account, folder) = parse_flattened_folder_arg(command, folder_arg.as_deref())?;
     let uid = required_string(args, &mut seen, "uid", Some(command))?;
     reject_extra(args, &seen, Some(command))?;
     Ok((account, folder, uid))
 }
 fn parse_send(command: &str, args: &[(CborValue, CborValue)]) -> Result<EmailCommand, CborValue> {
     let mut seen = BTreeSet::new();
-    let account = optional_string(args, &mut seen, "account", Some(command))?;
     let from = optional_string(args, &mut seen, "from", Some(command))?;
     let to = required_string_array(args, &mut seen, "to", Some(command))?;
     let cc = optional_string_array(args, &mut seen, "cc", Some(command))?;
@@ -5230,7 +5204,7 @@ fn parse_send(command: &str, args: &[(CborValue, CborValue)]) -> Result<EmailCom
     reject_non_empty_array(args, &mut seen, "attachments", Some(command))?;
     reject_extra(args, &seen, Some(command))?;
     Ok(EmailCommand::Send {
-        account,
+        account: None,
         from,
         to,
         cc,
@@ -5818,21 +5792,13 @@ fn error_display(arguments: &CborValue, details: &CborValue, message: &str) -> T
 
 fn message_target_display(command: &str, args: Option<&CborValue>) -> Option<String> {
     let args = args?;
-    let account = cbor_text_field(args, "account");
     let folder = cbor_text_field(args, "folder");
     let uid = cbor_text_field(args, "uid")
         .map(str::to_owned)
         .or_else(|| cbor_integer_field_string(args, "uid"));
-    let mut display = match (account, folder) {
-        (Some(account), Some(folder)) => format!(
-            "{command} {}/{}",
-            safe_display_line(account),
-            safe_display_line(folder)
-        ),
-        (Some(account), None) => format!("{command} {}", safe_display_line(account)),
-        (None, Some(folder)) => format!("{command} {}", safe_display_line(folder)),
-        (None, None) => command.to_owned(),
-    };
+    let mut display = folder
+        .map(|folder| format!("{command} {}", safe_display_line(folder)))
+        .unwrap_or_else(|| command.to_owned());
     if let Some(uid) = uid {
         display.push_str(&format!(" uid={}", safe_display_line(&uid)));
     }
@@ -5862,25 +5828,17 @@ fn invocation_display_args(arguments: &CborValue) -> Option<String> {
     let command = cbor_text_field(arguments, "command")?;
     let args = cbor_field(arguments, "args");
     match command {
-        "list_accounts" => Some("list_accounts".to_owned()),
-        "list_folders" => args
-            .and_then(|args| cbor_text_field(args, "account"))
-            .map(|account| format!("list_folders {}", safe_display_line(account)))
-            .or_else(|| Some("list_folders".to_owned())),
+        "list_folders" => Some("list_folders".to_owned()),
         "list" | "list_by_uid" | "list_recent" => list_display_args(command, args),
         "read" | "request_full" | "mark_read" | "mark_unread" | "star" | "unstar" | "trash" => {
             message_target_display(command, args)
         }
         "send" => {
-            let account = args.and_then(|args| cbor_text_field(args, "account"));
             let recipients = args
                 .and_then(|args| cbor_array_len(args, "to"))
                 .map(|count| format!(" to={count}"))
                 .unwrap_or_default();
-            Some(match account {
-                Some(account) => format!("send {}{recipients}", safe_display_line(account)),
-                None => format!("send{recipients}"),
-            })
+            Some(format!("send{recipients}"))
         }
         other => Some(safe_display_line(other)),
     }
@@ -5892,35 +5850,21 @@ fn list_display_args(command: &str, args: Option<&CborValue>) -> Option<String> 
     } else {
         command
     };
-    let account = args.and_then(|args| cbor_text_field(args, "account"));
     let folder = args.and_then(|args| cbor_text_field(args, "folder"));
-    match (account, folder) {
-        (Some(account), Some(folder)) => Some(format!(
-            "{display_command} {}/{}",
-            safe_display_line(account),
-            safe_display_line(folder)
-        )),
-        (Some(account), None) => Some(format!("{display_command} {}", safe_display_line(account))),
-        (None, Some(folder)) => Some(format!("{display_command} {}", safe_display_line(folder))),
-        (None, None) => Some(display_command.to_owned()),
-    }
+    Some(match folder {
+        Some(folder) => format!("{display_command} {}", safe_display_line(folder)),
+        None => display_command.to_owned(),
+    })
 }
 
 fn email_display_args(command: &str, data: Option<&CborValue>) -> Option<String> {
     match command {
-        "list_accounts" => Some("list_accounts".to_owned()),
-        "list_folders" => data
-            .and_then(|data| cbor_text_field(data, "account"))
-            .map(|account| format!("list_folders {}", safe_display_line(account)))
-            .or_else(|| Some("list_folders".to_owned())),
+        "list_folders" => Some("list_folders".to_owned()),
         "list" | "list_by_uid" | "list_recent" => list_display_args(command, data),
         "read" | "request_full" | "mark_read" | "mark_unread" | "star" | "unstar" | "trash" => {
             message_target_display(command, data)
         }
-        "send" => data
-            .and_then(|data| cbor_text_field(data, "account"))
-            .map(|account| format!("send {}", safe_display_line(account)))
-            .or_else(|| data.map(|_| "send".to_owned())),
+        "send" => data.map(|_| "send".to_owned()),
         other => Some(safe_display_line(other)),
     }
 }
@@ -5930,7 +5874,6 @@ fn email_display_stats(command: &str, data: Option<&CborValue>) -> ToolUseStats 
         return ToolUseStats::default();
     };
     match command {
-        "list_accounts" => line_array_stats(data, "accounts"),
         "list_folders" => line_array_stats(data, "folders"),
         "list" | "list_by_uid" | "list_recent" => line_array_stats(data, "messages"),
         "read" => cbor_text_field(data, "body_text")
@@ -5978,7 +5921,6 @@ fn email_display_info(command: &str, data: Option<&CborValue>) -> Vec<String> {
     };
     let mut chips = Vec::new();
     match command {
-        "list_accounts" => push_count_chip(&mut chips, cbor_array_len(data, "accounts"), "account"),
         "list_folders" => push_count_chip(&mut chips, cbor_array_len(data, "folders"), "folder"),
         "list" | "list_by_uid" | "list_recent" => {
             push_count_chip(&mut chips, cbor_array_len(data, "messages"), "message");

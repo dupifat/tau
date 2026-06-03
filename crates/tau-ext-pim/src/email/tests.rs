@@ -463,13 +463,13 @@ fn registers_single_email_tool() {
     );
     assert_eq!(
         parameters
-            .pointer("/allOf/0/then/properties/args/required")
+            .pointer("/allOf/1/then/properties/args/required")
             .expect("uid target requirements"),
         &serde_json::json!(["uid"])
     );
     assert_eq!(
         parameters
-            .pointer("/allOf/1/then/properties/args/required")
+            .pointer("/allOf/2/then/properties/args/required")
             .expect("send requirements"),
         &serde_json::json!(["to", "subject", "body_text"])
     );
@@ -616,6 +616,11 @@ fn duplicate_account_ids_and_invalid_regex_are_rejected() {
     bad_regex.policy.incoming_allow = vec!["re:(".to_owned()];
     let regex_error = bad_regex.validate().err().expect("regex rejected");
     assert!(regex_error.contains("invalid regex"));
+
+    let mut slash_id = cfg();
+    slash_id.accounts[0].id = "work/account".to_owned();
+    let slash_error = slash_id.validate().err().expect("slash id rejected");
+    assert!(slash_error.contains("account id must not contain `/`"));
 }
 
 #[test]
@@ -667,39 +672,30 @@ fn folder_allowlist_behavior() {
 }
 
 #[test]
-fn list_accounts_returns_config_without_secrets_and_folders_are_whitelisted() {
+fn list_folders_returns_flattened_ids_and_hides_secrets() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut engine = engine(&temp);
-    let accounts = engine.dispatch(EmailCommand::ListAccounts);
-    assert_eq!(
-        data_field(&accounts, "format"),
-        &CborValue::Text("id flags from display_name...".to_owned())
-    );
-    let CborValue::Array(items) = data_field(&accounts, "accounts") else {
-        panic!("accounts array")
-    };
-    assert_eq!(
-        items[0],
-        CborValue::Text("work enabled,imap,smtp alice@company.com Work".to_owned())
-    );
-    assert!(format!("{accounts:?}").contains("alice@company.com"));
-    assert!(!format!("{accounts:?}").contains("email_password"));
-    assert!(!format!("{accounts:?}").contains("secret"));
 
     let folders_result = engine.dispatch(EmailCommand::ListFolders {
-        account: "work".to_owned(),
+        account: String::new(),
     });
     assert_eq!(
         data_field(&folders_result, "format"),
-        &CborValue::Text("name flags".to_owned())
+        &CborValue::Text("folder flags".to_owned())
     );
     let CborValue::Array(folders) = data_field(&folders_result, "folders") else {
         panic!("folders")
     };
-    assert_eq!(folders, &[CborValue::Text("INBOX selectable".to_owned())]);
+    assert_eq!(
+        folders,
+        &[CborValue::Text("work/INBOX selectable".to_owned())]
+    );
+    assert!(format!("{folders_result:?}").contains("work/INBOX"));
+    assert!(!format!("{folders_result:?}").contains("email_password"));
+    assert!(!format!("{folders_result:?}").contains("secret"));
     assert_eq!(
         ToolResponse::from_cbor(&folders_result).render(),
-        "ok: true\ncommand: list_folders\nstatus: ok\naccount: work\nformat: name flags\n\nINBOX selectable"
+        "ok: true\ncommand: list_folders\nstatus: ok\nformat: folder flags\n\nwork/INBOX selectable"
     );
 }
 
@@ -707,14 +703,21 @@ fn list_accounts_returns_config_without_secrets_and_folders_are_whitelisted() {
 fn folder_line_keeps_key_reversible_without_extra_columns() {
     // Folder names are follow-up keys. Percent-encode whitespace instead of
     // replacing it so `Sent Items` cannot collide with `Sent_Items`.
-    let line = format_folder_line(BackendFolder {
-        name: "Sent Items".to_owned(),
-        delimiter: "/".to_owned(),
-        selectable: true,
-    });
+    let line = format_folder_line(
+        "work",
+        BackendFolder {
+            name: "Sent Items".to_owned(),
+            delimiter: "/".to_owned(),
+            selectable: true,
+        },
+    );
 
-    assert_eq!(line, CborValue::Text("Sent%20Items selectable".to_owned()));
+    assert_eq!(
+        line,
+        CborValue::Text("work/Sent%20Items selectable".to_owned())
+    );
 }
+
 #[test]
 fn empty_list_render_uses_no_matches_payload() {
     let temp = tempfile::TempDir::new().expect("tempdir");
@@ -722,12 +725,12 @@ fn empty_list_render_uses_no_matches_payload() {
     engine.backend.folders.insert("work".to_owned(), Vec::new());
 
     let result = engine.dispatch(EmailCommand::ListFolders {
-        account: "work".to_owned(),
+        account: String::new(),
     });
 
     assert_eq!(
         ToolResponse::from_cbor(&result).render(),
-        "ok: true\ncommand: list_folders\nstatus: ok\naccount: work\nformat: name flags\n\n(no matches found)"
+        "ok: true\ncommand: list_folders\nstatus: ok\nformat: folder flags\n\n(no matches found)"
     );
 }
 
@@ -741,19 +744,18 @@ fn omitted_tool_scope_defaults_to_first_account_inbox_and_limit_100() {
 
     let folders = engine
         .dispatch(parse_command(&command_args("list_folders", vec![])).expect("parse folders"));
+    let CborValue::Array(folders) = data_field(&folders, "folders") else {
+        panic!("folders")
+    };
     assert_eq!(
-        data_field(&folders, "account"),
-        &CborValue::Text("work".to_owned())
+        folders,
+        &[CborValue::Text("work/INBOX selectable".to_owned())]
     );
 
     let listed = engine.dispatch(parse_command(&command_args("list", vec![])).expect("parse list"));
     assert_eq!(
-        data_field(&listed, "account"),
-        &CborValue::Text("work".to_owned())
-    );
-    assert_eq!(
         data_field(&listed, "folder"),
-        &CborValue::Text("INBOX".to_owned())
+        &CborValue::Text("work/INBOX".to_owned())
     );
     let CborValue::Array(messages) = data_field(&listed, "messages") else {
         panic!("messages")
@@ -763,12 +765,8 @@ fn omitted_tool_scope_defaults_to_first_account_inbox_and_limit_100() {
     let recent = engine
         .dispatch(parse_command(&command_args("list_recent", vec![])).expect("parse recent list"));
     assert_eq!(
-        data_field(&recent, "account"),
-        &CborValue::Text("work".to_owned())
-    );
-    assert_eq!(
         data_field(&recent, "folder"),
-        &CborValue::Text("INBOX".to_owned())
+        &CborValue::Text("work/INBOX".to_owned())
     );
     let CborValue::Array(messages) = data_field(&recent, "messages") else {
         panic!("messages")
@@ -784,8 +782,8 @@ fn omitted_tool_scope_defaults_to_first_account_inbox_and_limit_100() {
     );
     assert_eq!(cbor_text_field(&read, "status"), Some("ok"));
     assert_eq!(
-        data_field(&read, "account"),
-        &CborValue::Text("work".to_owned())
+        data_field(&read, "folder"),
+        &CborValue::Text("work/INBOX".to_owned())
     );
 }
 
@@ -793,11 +791,13 @@ fn omitted_tool_scope_defaults_to_first_account_inbox_and_limit_100() {
 fn failed_email_command_result_finishes_as_tool_error() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut engine = engine(&temp);
-    let result = engine.dispatch(EmailCommand::ListFolders {
+    let result = engine.dispatch(EmailCommand::Read {
         account: "missing".to_owned(),
+        folder: "INBOX".to_owned(),
+        uid: "1".to_owned(),
     });
 
-    let event = finish_tool_result(tool_started("list_folders", Vec::new()), result);
+    let event = finish_tool_result(tool_started("read", Vec::new()), result);
 
     let Event::ToolError(error) = event else {
         panic!("failed email command should be a tool error")
@@ -805,7 +805,7 @@ fn failed_email_command_result_finishes_as_tool_error() {
     assert_eq!(error.call_id.as_str(), "call-1");
     assert_eq!(
         error.message,
-        "email list_folders failed (account_not_found): account not found"
+        "email read failed (account_not_found): account not found"
     );
     let details = error.details.expect("details");
     assert_eq!(
@@ -887,8 +887,7 @@ fn failed_email_tool_results_show_invoked_command_scope() {
         tool_started(
             "read",
             vec![
-                ("account", CborValue::Text("work".to_owned())),
-                ("folder", CborValue::Text("INBOX".to_owned())),
+                ("folder", CborValue::Text("work/INBOX".to_owned())),
                 ("uid", CborValue::Text("6218".to_owned())),
             ],
         ),
@@ -2534,7 +2533,9 @@ fn email_log_records_agent_access_and_mutations() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let mut engine = engine(&temp);
 
-    let _ = engine.dispatch(EmailCommand::ListAccounts);
+    let _ = engine.dispatch(EmailCommand::ListFolders {
+        account: String::new(),
+    });
     let _ = engine.dispatch(EmailCommand::Read {
         account: "work".to_owned(),
         folder: "INBOX".to_owned(),
@@ -3504,10 +3505,7 @@ fn disabled_email_config_and_accounts_do_not_require_password_secrets() {
 
 #[test]
 fn parser_accepts_and_rejects_command_shapes() {
-    assert_eq!(
-        parse_command(&command_args("list_accounts", vec![])).expect("parse"),
-        EmailCommand::ListAccounts
-    );
+    assert!(parse_command(&command_args("list_accounts", vec![])).is_err());
     assert_eq!(
         parse_command(&command_args("list_folders", vec![])).expect("default account"),
         EmailCommand::ListFolders {

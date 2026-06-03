@@ -27,6 +27,24 @@ fn calendar_schema_hides_timezone_and_has_command_conditionals() {
             })
     );
 
+    let search_title_description = list_events_schema
+        .pointer("/properties/title/description")
+        .and_then(serde_json::Value::as_str)
+        .expect("search title description");
+    assert!(search_title_description.contains("substring filter"));
+    assert!(!search_title_description.contains("calendar_create"));
+
+    let create_schema = schemas
+        .iter()
+        .find(|spec| spec.name.as_str() == "calendar_create")
+        .and_then(|spec| spec.parameters.as_ref())
+        .expect("create parameters");
+    let create_title_description = create_schema
+        .pointer("/properties/title/description")
+        .and_then(serde_json::Value::as_str)
+        .expect("create title description");
+    assert_eq!(create_title_description, "Event title.");
+
     let free_busy_schema = schemas
         .iter()
         .find(|spec| spec.name.as_str() == "calendar_free_busy")

@@ -4708,9 +4708,10 @@ fn email_common_arg_properties() -> serde_json::Value {
             "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum messages to list. Optional; defaults to 100 and is capped at 100."},
             "days": {"type": "integer", "minimum": 1, "maximum": 365, "description": "For email_search, include messages with IMAP internal date in the last N calendar days. Optional; defaults to 7 and is capped at 365."},
             "cursor": {"type": "string", "description": "Pagination cursor returned by email_search."},
-            "email_id": {"type": "string", "description": "Message id from email list results."},            "to": {"type": "array", "items": {"type": "string"}, "description": "Recipients. Required for email_send."},
-            "cc": {"type": "array", "items": {"type": "string"}},
-            "bcc": {"type": "array", "items": {"type": "string"}},
+            "email_id": {"type": "string", "description": "Message id from email list results."},
+            "to": {"type": "array", "items": {"type": "string"}, "description": "Recipients. Required for email_send."},
+            "cc": {"type": "array", "items": {"type": "string"}, "description": "Cc recipients for email_send."},
+            "bcc": {"type": "array", "items": {"type": "string"}, "description": "Bcc recipients for email_send."},
             "subject": {"type": "string", "description": "Subject. Required for email_send; may be empty."},
             "body_text": {"type": "string", "description": "Plain text body. Required for email_send; may be empty."},
             "from": {"type": "string", "description": "Optional From identity; normally omit to use the account default."},
@@ -4744,14 +4745,14 @@ fn email_command_properties(command: &str) -> serde_json::Value {
             })
         }
         "send" => serde_json::json!({
-            "to": {"type": "array", "items": {"type": "string"}},
-            "cc": {"type": "array", "items": {"type": "string"}},
-            "bcc": {"type": "array", "items": {"type": "string"}},
-            "subject": {"type": "string"},
-            "body_text": {"type": "string"},
-            "from": {"type": "string"},
-            "reply_to": {"type": ["string", "null"]},
-            "in_reply_to": {"type": ["string", "null"]}
+            "to": {"type": "array", "items": {"type": "string"}, "description": "Recipient email addresses."},
+            "cc": {"type": "array", "items": {"type": "string"}, "description": "Cc recipient email addresses."},
+            "bcc": {"type": "array", "items": {"type": "string"}, "description": "Bcc recipient email addresses."},
+            "subject": {"type": "string", "description": "Message subject; may be empty."},
+            "body_text": {"type": "string", "description": "Plain text message body; may be empty."},
+            "from": {"type": "string", "description": "Optional From identity; normally omit."},
+            "reply_to": {"type": ["string", "null"], "description": "Optional Reply-To address."},
+            "in_reply_to": {"type": ["string", "null"], "description": "Optional message id this send replies to."}
         }),
         _ => serde_json::json!({}),
     }
@@ -4766,17 +4767,17 @@ fn email_tool_description(tool_name: &str, command: &str) -> &'static str {
             "List recent email messages. Optional folder, days, limit, and cursor; omit folder to use the default folder."
         }
         ("get", _) => {
-            "Get an email message preview or allowed full content by folder and email_id."
+            "Get an email by email_id. Returns full content only when policy or approval allows it; otherwise returns preview or approval_required."
         }
         ("request_full", _) => {
-            "Request user approval to read full content for an email message by folder and email_id."
+            "Request user approval to read full content for one email by email_id."
         }
-        ("mark_read", _) => "Mark an email message as read by folder and email_id.",
-        ("mark_unread", _) => "Mark an email message as unread by folder and email_id.",
-        ("star", _) => "Star an email message by folder and email_id.",
-        ("unstar", _) => "Unstar an email message by folder and email_id.",
-        ("delete", _) => "Delete/move an email message to trash by folder and email_id.",
-        ("send", _) => "Send a plain-text email draft. May require user approval.",
+        ("mark_read", _) => "Mark one email as read by email_id.",
+        ("mark_unread", _) => "Mark one email as unread by email_id.",
+        ("star", _) => "Star one email by email_id.",
+        ("unstar", _) => "Unstar one email by email_id.",
+        ("delete", _) => "Move one email to Trash by email_id.",
+        ("send", _) => "Send a plain-text email. May require user approval.",
         _ => "Run an email command.",
     }
 }

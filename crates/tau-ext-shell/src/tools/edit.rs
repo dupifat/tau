@@ -59,13 +59,24 @@ pub(crate) fn edit_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
         let end_line_exclusive = end_line.checked_add(1).ok_or_else(|| {
             with_display_args(&display_args, ToolFailure::new("end_line is too large"))
         })?;
+        let start_byte = original_lines.byte_start_for_line(start_line, original_bytes.len());
+        let end_byte = original_lines.byte_start_for_line(end_line_exclusive, original_bytes.len());
+        let mut new_text = new_text.as_bytes().to_vec();
+        let newline_added = maybe_add_line_ending(
+            &mut new_text,
+            &original_bytes,
+            &original_lines,
+            end_line,
+            end_byte,
+        );
         replacements.push(LineReplacement {
             start_line,
             end_line_exclusive,
-            start_byte: original_lines.byte_start_for_line(start_line, original_bytes.len()),
-            end_byte: original_lines.byte_start_for_line(end_line_exclusive, original_bytes.len()),
-            new_text: new_text.as_bytes(),
+            start_byte,
+            end_byte,
+            new_text,
             guard,
+            newline_added,
         });
     }
 
@@ -122,6 +133,9 @@ pub(crate) fn edit_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
             changed,
             result_lines.max_valid_start_line(),
             result.len(),
+            replacements
+                .iter()
+                .any(|replacement| replacement.newline_added),
         ),
         display,
     })
@@ -132,8 +146,31 @@ struct LineReplacement<'a> {
     end_line_exclusive: usize,
     start_byte: usize,
     end_byte: usize,
-    new_text: &'a [u8],
+    new_text: Vec<u8>,
     guard: &'a str,
+    newline_added: bool,
+}
+
+fn maybe_add_line_ending(
+    new_text: &mut Vec<u8>,
+    original_bytes: &[u8],
+    original_lines: &LineIndex,
+    end_line: usize,
+    end_byte: usize,
+) -> bool {
+    if new_text.is_empty()
+        || original_bytes.len() <= end_byte
+        || new_text.ends_with(b"\n")
+        || new_text.ends_with(b"\r")
+    {
+        return false;
+    }
+
+    let Some(line_ending) = original_lines.line_ending_for_line(end_line, original_bytes) else {
+        return false;
+    };
+    new_text.extend_from_slice(line_ending);
+    true
 }
 
 struct LineIndex {
@@ -189,6 +226,18 @@ impl LineIndex {
             spans,
             has_trailing_line_ending,
         }
+    }
+
+    fn line_ending_for_line<'a>(&self, line: usize, input: &'a [u8]) -> Option<&'a [u8]> {
+        let span = self.spans.get(line.checked_sub(1)?)?;
+        let next_start = self
+            .spans
+            .get(line)
+            .map_or(input.len(), |next_span| next_span.start);
+        if span.content_end == next_start {
+            return None;
+        }
+        Some(&input[span.content_end..next_start])
     }
 
     fn max_valid_start_line(&self) -> usize {
@@ -467,8 +516,9 @@ fn edit_result_value(
     changed: bool,
     new_max_valid_start_line: usize,
     total_bytes: usize,
+    newline_added: bool,
 ) -> CborValue {
-    CborValue::Map(vec![
+    let mut fields = vec![
         (
             CborValue::Text("replacements".to_owned()),
             CborValue::Integer((replacements as i64).into()),
@@ -485,5 +535,12 @@ fn edit_result_value(
             CborValue::Text("total_bytes".to_owned()),
             CborValue::Integer((total_bytes as i64).into()),
         ),
-    ])
+    ];
+    if newline_added {
+        fields.push((
+            CborValue::Text("newline_added".to_owned()),
+            CborValue::Bool(true),
+        ));
+    }
+    CborValue::Map(fields)
 }

@@ -1791,6 +1791,7 @@ fn edit_result_reports_minimal_status_without_model_diff() {
     assert!(cbor_map_field(&output.result, "max_valid_start_line").is_none());
     assert_eq!(cbor_int_field(&output.result, "total_bytes"), Some(22));
     assert!(cbor_map_text(&output.result, "output").is_none());
+    assert_eq!(cbor_bool_field(&output.result, "newline_added"), None);
     assert!(cbor_map_text(&output.result, "diff").is_none());
     assert!(matches!(
         output.display.payload,
@@ -2617,6 +2618,124 @@ fn edit_rejects_end_line_before_start_line() {
     );
 }
 
+#[test]
+fn edit_adds_missing_line_ending_before_following_content() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("edit.txt");
+    fs::write(&file_path, "before\ntarget\nafter\n").expect("write");
+
+    let result = edit_file(&edit_arguments(
+        &file_path,
+        vec![guarded_line_edit(2, 2, "replacement", "target")],
+    ))
+    .expect("replacement without line ending should be normalized")
+    .result;
+
+    assert_eq!(cbor_bool_field(&result, "newline_added"), Some(true));
+    assert_eq!(
+        fs::read_to_string(&file_path).expect("read back"),
+        "before\nreplacement\nafter\n"
+    );
+}
+
+#[test]
+fn edit_allows_no_final_newline_at_end_of_file() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("edit.txt");
+    fs::write(&file_path, "before\ntarget\n").expect("write");
+
+    let result = edit_file(&edit_arguments(
+        &file_path,
+        vec![guarded_line_edit(2, 2, "replacement", "target")],
+    ))
+    .expect("last line replacement may omit final newline")
+    .result;
+
+    assert_eq!(cbor_bool_field(&result, "newline_added"), None);
+
+    assert_eq!(
+        fs::read_to_string(&file_path).expect("read back"),
+        "before\nreplacement"
+    );
+}
+
+#[test]
+fn edit_preserves_original_crlf_when_adding_missing_line_ending() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("edit.txt");
+    fs::write(&file_path, b"before\r\ntarget\r\nafter\r\n").expect("write");
+
+    let result = edit_file(&edit_arguments(
+        &file_path,
+        vec![guarded_line_edit(2, 2, "replacement", "target")],
+    ))
+    .expect("replacement should reuse original line ending")
+    .result;
+
+    assert_eq!(cbor_bool_field(&result, "newline_added"), Some(true));
+    assert_eq!(
+        fs::read(&file_path).expect("read back"),
+        b"before\r\nreplacement\r\nafter\r\n"
+    );
+}
+
+#[test]
+fn edit_reports_newline_added_even_when_normalization_makes_no_change() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("edit.txt");
+    fs::write(&file_path, "a\nb\n").expect("write");
+
+    let result = edit_file(&edit_arguments(
+        &file_path,
+        vec![guarded_line_edit(1, 1, "a", "a")],
+    ))
+    .expect("normalization may make an edit a no-op")
+    .result;
+
+    assert_eq!(cbor_bool_field(&result, "changed"), Some(false));
+    assert_eq!(cbor_bool_field(&result, "newline_added"), Some(true));
+    assert_eq!(fs::read_to_string(&file_path).expect("read back"), "a\nb\n");
+}
+
+#[test]
+fn edit_deletion_before_following_content_does_not_add_newline_header() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("edit.txt");
+    fs::write(&file_path, "before\ntarget\nafter\n").expect("write");
+
+    let result = edit_file(&edit_arguments(
+        &file_path,
+        vec![guarded_line_edit(2, 2, "", "target")],
+    ))
+    .expect("deletion should not be normalized")
+    .result;
+
+    assert_eq!(cbor_bool_field(&result, "newline_added"), None);
+    assert_eq!(
+        fs::read_to_string(&file_path).expect("read back"),
+        "before\nafter\n"
+    );
+}
+
+#[test]
+fn edit_preserves_original_cr_when_adding_missing_line_ending() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("edit.txt");
+    fs::write(&file_path, b"before\rtarget\rafter\r").expect("write");
+
+    let result = edit_file(&edit_arguments(
+        &file_path,
+        vec![guarded_line_edit(2, 2, "replacement", "target")],
+    ))
+    .expect("replacement should reuse original CR line ending")
+    .result;
+
+    assert_eq!(cbor_bool_field(&result, "newline_added"), Some(true));
+    assert_eq!(
+        fs::read(&file_path).expect("read back"),
+        b"before\rreplacement\rafter\r"
+    );
+}
 #[test]
 fn edit_rejects_legacy_line_count() {
     let tempdir = TempDir::new().expect("tempdir");

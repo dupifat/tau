@@ -4048,7 +4048,12 @@ impl Harness {
         } else {
             PendingPrompt::user(prompt.text.clone())
         };
+        let is_user_interaction =
+            prompt.originator.is_user() && !prompt.message_class.is_internal();
         let submission = self.submit_prompt_to_agent(prompt.session_id, &agent_id, pending)?;
+        if !matches!(submission, PromptSubmission::Rejected { .. }) && is_user_interaction {
+            let _ = self.agent_store.record_agent_user_interaction(&agent_id);
+        }
         if matches!(submission, PromptSubmission::Queued) && !prompt.message_class.is_internal() {
             self.interrupt_active_waits();
         }

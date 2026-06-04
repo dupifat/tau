@@ -73,6 +73,63 @@ fn agent_store_rejects_empty_display_name() {
 }
 
 #[test]
+fn agent_meta_initializes_and_explicitly_bumps_last_user_interaction() {
+    // User-interaction time is metadata state, not derived from replayable
+    // transcript events. Background agent events must not refresh it when old
+    // agents are loaded or replayed; accepted UI prompts call the explicit bump.
+    let agents_dir = temp_dir("last-user-interaction");
+    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+
+    store
+        .record_agent_meta("agent-1", None)
+        .expect("record initial metadata");
+    let meta = store
+        .agent_meta("agent-1")
+        .expect("read initial agent meta")
+        .expect("agent meta exists");
+    assert_ne!(meta.created_at, 0);
+    assert_eq!(meta.last_user_interaction_time, meta.created_at);
+
+    let meta_path = agents_dir.join("agent-1").join("meta.json");
+    std::fs::write(
+        &meta_path,
+        r#"{
+  "created_at": 1,
+  "last_touched": 1,
+  "last_user_interaction_time": 1
+}"#,
+    )
+    .expect("seed deterministic metadata");
+
+    store
+        .append_agent_event(
+            "agent-1",
+            None,
+            Event::AgentDisplayNameSet(AgentDisplayNameSet {
+                agent_id: "agent-1".into(),
+                display_name: "Research".to_owned(),
+            }),
+        )
+        .expect("append display-name event");
+    let meta = store
+        .agent_meta("agent-1")
+        .expect("read meta after background event")
+        .expect("agent meta exists");
+    assert_eq!(meta.last_user_interaction_time, 1);
+
+    store
+        .record_agent_user_interaction("agent-1")
+        .expect("record explicit user interaction");
+    let meta = store
+        .agent_meta("agent-1")
+        .expect("read meta after user interaction")
+        .expect("agent meta exists");
+    assert!(meta.last_user_interaction_time > 1);
+
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+#[test]
 fn agent_store_persists_transcript_under_agent_directory() {
     let agents_dir = temp_dir("agents");
     let mut store = AgentStore::open(&agents_dir).expect("open agent store");

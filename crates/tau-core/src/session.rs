@@ -1014,6 +1014,8 @@ pub struct AgentMeta {
     pub created_at: u64,
     /// Unix epoch seconds of the most recent append.
     pub last_touched: u64,
+    /// Unix epoch seconds of the most recent human-authored interaction.
+    pub last_user_interaction_time: u64,
     /// Optional human-friendly name shown in UIs. Falls back to the agent id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,

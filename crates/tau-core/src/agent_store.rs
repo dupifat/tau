@@ -487,6 +487,25 @@ impl AgentStore {
             meta.cwd = cwd;
         }
         meta.last_touched = now;
+        if meta.last_user_interaction_time == 0 {
+            meta.last_user_interaction_time = now;
+        }
+        write_meta(&path, &meta)
+    }
+
+    /// Records that a human user interacted with an existing agent.
+    pub fn record_agent_user_interaction(&mut self, agent_id: &str) -> Result<(), AgentStoreError> {
+        self.ensure_locked(agent_id)?;
+        let path = self.agent_dir(agent_id).join("meta.json");
+        let now = unix_now();
+        let mut meta = read_meta(&path).unwrap_or_default();
+        if meta.created_at == 0 {
+            meta.created_at = now;
+        }
+        if meta.last_touched == 0 {
+            meta.last_touched = now;
+        }
+        meta.last_user_interaction_time = now;
         write_meta(&path, &meta)
     }
 }

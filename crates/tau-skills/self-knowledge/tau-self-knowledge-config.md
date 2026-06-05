@@ -53,6 +53,7 @@ agents:
 The built-in default is `{{random_alphanumeric 6}}`. Templates are rendered with Handlebars in strict mode and currently receive:
 
 - `role` — the role name for the new agent.
+- `role_group` — the name of the first configured role group containing the role, or the role name for ungrouped roles. `roleGroup` is also available as a camelCase alias.
 - `random_alphanumeric <len>` — helper that emits an ASCII alphanumeric random suffix of at least `<len>` characters.
 
 Rendered IDs must use only ASCII letters, digits, `_`, or `-`, and must fit Tau's agent ID length limit. If a configured template fails to render, renders an invalid ID, or keeps colliding, Tau warns and falls back to the built-in random template.

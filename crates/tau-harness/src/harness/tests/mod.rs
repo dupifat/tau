@@ -77,6 +77,7 @@ fn minting_agent_ids_renders_configured_template() {
     let mut warnings = Vec::new();
     let agent_id = super::mint_available_agent_id_for_role_with(
         "engineer",
+        "engineer",
         "{{role}}-{{random_alphanumeric 6}}",
         |_| false,
         |kind, warning| warnings.push((kind, warning)),
@@ -89,11 +90,31 @@ fn minting_agent_ids_renders_configured_template() {
 }
 
 #[test]
+fn minting_agent_ids_renders_role_group_in_configured_template() {
+    // Agent ID templates can include the navigation role group so related
+    // roles share an ID prefix while still retaining the exact role name.
+    let mut warnings = Vec::new();
+    let agent_id = super::mint_available_agent_id_for_role_with(
+        "staff-engineer",
+        "engineer",
+        "{{role_group}}-{{role}}-{{random_alphanumeric 4}}",
+        |_| false,
+        |kind, warning| warnings.push((kind, warning)),
+    );
+
+    assert!(agent_id.starts_with("engineer-staff-engineer-"));
+    assert_eq!(agent_id.len(), "engineer-staff-engineer-".len() + 4);
+    assert_agent_id_chars(&agent_id);
+    assert!(warnings.is_empty());
+}
+
+#[test]
 fn minting_agent_ids_falls_back_immediately_on_invalid_rendered_id() {
     // Invalid configured output must not be retried; it falls back to the safe
     // default template and reports a warning the harness can surface to users.
     let mut warnings = Vec::new();
     let agent_id = super::mint_available_agent_id_for_role_with(
+        "engineer",
         "engineer",
         "bad/id",
         |_| false,
@@ -118,6 +139,7 @@ fn minting_agent_ids_falls_back_after_configured_template_collisions() {
     // default random template.
     let mut warnings = Vec::new();
     let agent_id = super::mint_available_agent_id_for_role_with(
+        "engineer",
         "engineer",
         "taken",
         |agent_id| agent_id == "taken",
@@ -148,6 +170,7 @@ fn minting_agent_ids_skips_persisted_agent_dirs() {
 
     let mut warnings = Vec::new();
     let agent_id = super::mint_available_agent_id_for_role_with(
+        "engineer",
         "engineer",
         "engineer_0",
         |agent_id| store.agent_exists(agent_id),

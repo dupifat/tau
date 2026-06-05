@@ -469,20 +469,15 @@ impl<'de> Deserialize<'de> for HarnessSettings {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct HarnessRoleOverrides {
-    #[serde(default, rename = "session_retention_days")]
-    _session_retention_days: Option<serde::de::IgnoredAny>,
-    #[serde(default, rename = "extensions")]
-    _extensions: Option<serde::de::IgnoredAny>,
-    #[serde(default, rename = "defaultRole")]
-    _default_role: Option<serde::de::IgnoredAny>,
+    // This narrower pass extracts only role and prompt-fragment metadata after
+    // the main harness settings layer has already validated the full schema.
+    // Leave unrelated top-level fields permissive so future harness settings do
+    // not need duplicate ignore entries here.
     #[serde(default, rename = "roleGroups")]
     role_groups: RawRoleGroups,
     #[serde(default, rename = "promptFragments")]
     prompt_fragments: Vec<RolePromptFragment>,
-    #[serde(default)]
-    _agents: Option<serde::de::IgnoredAny>,
 }
 
 /// One ordered group in the role navigation palette.

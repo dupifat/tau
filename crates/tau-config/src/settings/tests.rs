@@ -225,6 +225,28 @@ fn harness_settings_user_override_wins_over_built_in() {
 }
 
 #[test]
+fn harness_settings_accept_agent_id_template_in_user_config() {
+    // The role-override merge pass rereads harness.yaml with a narrower wire
+    // type. It must ignore top-level agent settings rather than reject configs
+    // that are valid for the main harness settings layer.
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"{
+            agents: { idTemplate: "{{role}}-{{random_alphanumeric 4}}" },
+        }"#,
+    )
+    .expect("write");
+
+    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+    assert_eq!(
+        settings.agent_id_template,
+        "{{role}}-{{random_alphanumeric 4}}"
+    );
+}
+
+#[test]
 fn harness_config_cli_overrides_are_applied_last_and_typed() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();

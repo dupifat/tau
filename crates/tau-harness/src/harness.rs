@@ -605,7 +605,7 @@ fn random_alphanumeric(len: usize) -> String {
 }
 
 struct RandomAlphanumericHelper {
-    effective_len: usize,
+    collision_extra_len: usize,
 }
 
 impl handlebars::HelperDef for RandomAlphanumericHelper {
@@ -620,9 +620,9 @@ impl handlebars::HelperDef for RandomAlphanumericHelper {
             .param(0)
             .and_then(|param| param.value().as_u64())
             .and_then(|value| usize::try_from(value).ok())
-            .unwrap_or(0);
+            .unwrap_or(6);
         Ok(handlebars::ScopedJson::Derived(serde_json::Value::String(
-            random_alphanumeric(self.effective_len.max(requested)),
+            random_alphanumeric(requested.saturating_add(self.collision_extra_len)),
         )))
     }
 }
@@ -643,7 +643,8 @@ enum AgentIdMintWarning {
 fn render_agent_id_template(
     template: &str,
     role: &str,
-    effective_random_len: usize,
+    role_group: &str,
+    collision_extra_len: usize,
 ) -> Result<String, handlebars::RenderError> {
     let mut handlebars = handlebars::Handlebars::new();
     handlebars.set_strict_mode(true);
@@ -651,14 +652,18 @@ fn render_agent_id_template(
     handlebars.register_helper(
         "random_alphanumeric",
         Box::new(RandomAlphanumericHelper {
-            effective_len: effective_random_len,
+            collision_extra_len,
         }),
     );
-    handlebars.render_template(template, &serde_json::json!({ "role": role }))
+    handlebars.render_template(
+        template,
+        &serde_json::json!({ "role": role, "role_group": role_group, "roleGroup": role_group }),
+    )
 }
 
 fn mint_available_agent_id_for_role_with(
     role: &str,
+    role_group: &str,
     template: &str,
     mut is_taken: impl FnMut(&str) -> bool,
     mut warn: impl FnMut(AgentIdTemplateKind, AgentIdMintWarning),
@@ -682,19 +687,20 @@ fn mint_available_agent_id_for_role_with(
         };
         let mut exhausted_attempts = true;
         for attempt in 0..max_attempts {
-            let rendered = match render_agent_id_template(active_template, role, 6 + attempt) {
-                Ok(rendered) => rendered,
-                Err(error) => {
-                    warn(
-                        kind,
-                        AgentIdMintWarning::RenderFailed {
-                            error: error.to_string(),
-                        },
-                    );
-                    exhausted_attempts = false;
-                    break;
-                }
-            };
+            let rendered =
+                match render_agent_id_template(active_template, role, role_group, attempt) {
+                    Ok(rendered) => rendered,
+                    Err(error) => {
+                        warn(
+                            kind,
+                            AgentIdMintWarning::RenderFailed {
+                                error: error.to_string(),
+                            },
+                        );
+                        exhausted_attempts = false;
+                        break;
+                    }
+                };
             let agent_id = match rendered.parse::<AgentId>() {
                 Ok(agent_id) => agent_id,
                 Err(error) => {
@@ -730,7 +736,13 @@ fn mint_available_agent_id_for_role_with(
 
 #[cfg(test)]
 fn mint_agent_id_for_role(role: &str) -> String {
-    mint_available_agent_id_for_role_with(role, DEFAULT_AGENT_ID_TEMPLATE, |_| false, |_, _| {})
+    mint_available_agent_id_for_role_with(
+        role,
+        role,
+        DEFAULT_AGENT_ID_TEMPLATE,
+        |_| false,
+        |_, _| {},
+    )
 }
 
 fn built_in_discovered_skills() -> HashMap<tau_proto::SkillName, DiscoveredSkill> {
@@ -7462,11 +7474,21 @@ impl Harness {
                 .any(|pending| pending.agent_id == agent_id)
     }
 
+    fn role_group_name_for_role(&self, role: &str) -> String {
+        self.available_role_groups
+            .iter()
+            .find(|group| group.roles.iter().any(|group_role| group_role == role))
+            .map(|group| group.name.clone())
+            .unwrap_or_else(|| role.to_owned())
+    }
+
     pub(crate) fn mint_available_agent_id_for_role(&mut self, role: &str) -> String {
         let template = self.agent_id_template.clone();
         let mut warnings = Vec::new();
+        let role_group = self.role_group_name_for_role(role);
         let agent_id = mint_available_agent_id_for_role_with(
             role,
+            &role_group,
             &template,
             |agent_id| self.agent_id_is_taken(agent_id),
             |kind, warning| warnings.push((kind, warning)),

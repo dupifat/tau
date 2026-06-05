@@ -73,7 +73,7 @@ type OneShotWriter = FrameWriter<BufWriter<UnixStream>>;
 
 fn print_prompt_stdin_headers(session_id: &str, startup_role: Option<&str>) {
     eprintln!("session_id: {session_id}");
-    eprintln!("role: {}", startup_role.unwrap_or("default"));
+    eprintln!("role: {}", prompt_stdin_role(startup_role));
 }
 
 fn prompt_stdin_role(startup_role: Option<&str>) -> &str {

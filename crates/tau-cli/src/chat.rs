@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter};
+use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
@@ -16,7 +17,7 @@ use tau_proto::{
 };
 
 use crate::action_commands::ActionCommandState;
-use crate::daemon::{DaemonCliOverrides, daemon_output_for_session, resolve_daemon};
+use crate::daemon::{DaemonCliOverrides, DaemonHandle, daemon_output_for_session, resolve_daemon};
 use crate::event_renderer::{EventRenderer, ToolTimerNotifier, ToolTimerState};
 use crate::prompt_history::PromptHistoryStore;
 use crate::tool_render::ui_dir_block;
@@ -371,6 +372,7 @@ pub(crate) fn run_chat(
     let stream = UnixStream::connect(&socket_path)?;
     tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "connected to harness daemon socket");
     let read_stream = stream.try_clone()?;
+    let socket_shutdown_stream = read_stream.try_clone()?;
     let writer: WriterHandle = Arc::new(Mutex::new(FrameWriter::new(BufWriter::new(stream))));
 
     // Handshake.
@@ -395,7 +397,7 @@ pub(crate) fn run_chat(
     let socket_input_shutdown = input_shutdown_handle.clone();
     let remote_disconnected = Arc::new(AtomicBool::new(false));
     let socket_remote_disconnected = remote_disconnected.clone();
-    let _socket_reader = std::thread::spawn(move || {
+    let socket_reader = std::thread::spawn(move || {
         let mut reader = FrameReader::new(BufReader::new(read_stream));
         loop {
             match reader.read_frame() {
@@ -561,7 +563,7 @@ pub(crate) fn run_chat(
     let role_group_memory = renderer.role_group_memory();
     let editor_context = renderer.editor_context();
     term.set_editor_context_handle(editor_context.clone());
-    let _renderer = std::thread::spawn(move || {
+    let renderer_thread = std::thread::spawn(move || {
         let mut renderer = renderer;
         while let Ok(cmd) = renderer_rx.recv() {
             match cmd {
@@ -636,32 +638,14 @@ pub(crate) fn run_chat(
     }
     let _ = debounce_thread.join();
 
-    // Send disconnect (best effort). Reason differs so the daemon's
-    // debug log makes the distinction visible.
-    let reason = match exit {
-        InputLoopExit::Quit => "quit",
-        InputLoopExit::Detach => "detach",
-    };
-    let _ = send_frame(
-        &writer,
-        &Frame::Message(Message::Disconnect(Disconnect {
-            reason: Some(reason.to_owned()),
-        })),
+    let reason = shutdown_ui_connection(
+        writer,
+        socket_shutdown_stream,
+        socket_reader,
+        renderer_thread,
+        exit,
     );
-
-    // Drop the writer (closes the write half) which will cause the
-    // socket reader to get EOF and exit. The renderer drains remaining
-    // events and exits when the channel closes.
-    drop(writer);
-
-    // On detach, we explicitly leak the daemon child (if we own one)
-    // so it outlives this process. `DaemonHandle::Drop` would otherwise
-    // kill the child we spawned; `/detach` is exactly the case where
-    // we want it to keep running.
-    match exit {
-        InputLoopExit::Quit => drop(daemon),
-        InputLoopExit::Detach => daemon.leak(),
-    }
+    finish_daemon_for_exit(exit, daemon);
 
     tracing::info!(target: "tau_cli::ui", reason, "terminal UI exiting");
 
@@ -669,6 +653,7 @@ pub(crate) fn run_chat(
 }
 
 /// How the input loop ended. Controls daemon disposition on exit.
+#[derive(Clone, Copy)]
 enum InputLoopExit {
     /// User typed `/quit`, hit Ctrl-D, or the socket dropped. The
     /// daemon should be killed (if we own it) or just disconnected
@@ -677,6 +662,58 @@ enum InputLoopExit {
     /// User typed `/detach`. We leave the daemon running whether we
     /// spawned it or attached to it.
     Detach,
+}
+
+impl InputLoopExit {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Quit => "quit",
+            Self::Detach => "detach",
+        }
+    }
+}
+
+fn shutdown_ui_connection(
+    writer: WriterHandle,
+    socket_shutdown_stream: UnixStream,
+    socket_reader: std::thread::JoinHandle<()>,
+    renderer_thread: std::thread::JoinHandle<()>,
+    exit: InputLoopExit,
+) -> &'static str {
+    let reason = exit.reason();
+    let _ = send_frame(
+        &writer,
+        &Frame::Message(Message::Disconnect(Disconnect {
+            reason: Some(reason.to_owned()),
+        })),
+    );
+
+    // Drop the writer, then explicitly shut down the extra stream clone kept
+    // by the main thread so the socket reader unblocks even if the daemon does
+    // not close promptly after the best-effort disconnect.
+    drop(writer);
+    let _ = socket_shutdown_stream.shutdown(Shutdown::Both);
+
+    join_ui_thread(socket_reader, "socket reader");
+    join_ui_thread(renderer_thread, "renderer");
+    reason
+}
+
+fn join_ui_thread(handle: std::thread::JoinHandle<()>, name: &str) {
+    if handle.join().is_err() {
+        tracing::warn!(target: "tau_cli::ui", name, "UI worker thread panicked during shutdown");
+    }
+}
+
+fn finish_daemon_for_exit(exit: InputLoopExit, daemon: DaemonHandle) {
+    // On detach, we explicitly leak the daemon child (if we own one) so it
+    // outlives this process. `DaemonHandle::Drop` would otherwise kill the
+    // child we spawned; `/detach` is exactly the case where we want it to keep
+    // running.
+    match exit {
+        InputLoopExit::Quit => drop(daemon),
+        InputLoopExit::Detach => daemon.leak(),
+    }
 }
 
 fn tool_timer_loop(

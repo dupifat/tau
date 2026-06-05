@@ -13,12 +13,12 @@ fn no_context_returns_buffer_unchanged() {
 }
 
 #[test]
-fn roundtrip_strips_trailer_with_active_prompt() {
+fn roundtrip_strips_trailer_with_current_response() {
     let edited = append_prompt_trailer(
         "draft body",
         &ctx(EditorContext {
-            active_prompt: Some("agent draft".to_owned()),
-            last_agent_response: None,
+            current_response: Some("agent draft".to_owned()),
+            last_response: None,
             previous_prompt: None,
         }),
     );
@@ -32,13 +32,13 @@ fn roundtrip_strips_trailer_with_all_sections() {
     let edited = append_prompt_trailer(
         "user body",
         &ctx(EditorContext {
-            active_prompt: Some("in progress".to_owned()),
-            last_agent_response: Some("last".to_owned()),
+            current_response: Some("in progress".to_owned()),
+            last_response: Some("last".to_owned()),
             previous_prompt: Some("prev".to_owned()),
         }),
     );
     assert!(edited.contains("Current response in progress"));
-    assert!(edited.contains("Last agent response"));
+    assert!(edited.contains("Last response"));
     assert!(edited.contains("Previous prompt"));
     assert_eq!(strip_prompt_trailer(&edited), "user body");
 }
@@ -48,13 +48,13 @@ fn empty_section_strings_are_skipped() {
     let edited = append_prompt_trailer(
         "body",
         &ctx(EditorContext {
-            active_prompt: Some(String::new()),
-            last_agent_response: Some("kept".to_owned()),
+            current_response: Some(String::new()),
+            last_response: Some("kept".to_owned()),
             previous_prompt: Some(String::new()),
         }),
     );
     assert!(!edited.contains("Current response in progress"));
-    assert!(edited.contains("Last agent response"));
+    assert!(edited.contains("Last response"));
     assert!(!edited.contains("Previous prompt"));
 }
 

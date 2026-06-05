@@ -3011,7 +3011,7 @@ impl EventRenderer {
     }
 
     fn handle_agent_prompt_created(&mut self, prompt: &tau_proto::AgentPromptCreated) {
-        self.clear_editor_active_prompt_for_user_prompt(prompt.originator.is_user());
+        self.clear_editor_current_response_for_user_prompt(prompt.originator.is_user());
         self.last_user_block = None;
         self.prompts
             .entry(prompt.agent_prompt_id.to_string())
@@ -3021,14 +3021,14 @@ impl EventRenderer {
         self.create_live_response_block(prompt);
     }
 
-    fn clear_editor_active_prompt_for_user_prompt(&mut self, is_user_prompt: bool) {
+    fn clear_editor_current_response_for_user_prompt(&mut self, is_user_prompt: bool) {
         if is_user_prompt && let Ok(mut context) = self.editor_context.lock() {
-            context.active_prompt = None;
+            context.current_response = None;
         }
     }
 
     fn handle_agent_prompt_terminated(&mut self, terminated: &tau_proto::AgentPromptTerminated) {
-        self.clear_editor_active_prompt_for_user_prompt(terminated.originator.is_user());
+        self.clear_editor_current_response_for_user_prompt(terminated.originator.is_user());
         let Some(prompt_state) = self.prompts.remove(terminated.agent_prompt_id.as_str()) else {
             return;
         };
@@ -3099,13 +3099,13 @@ impl EventRenderer {
         let spid = update.agent_prompt_id.as_str();
         let text = assistant_text_from_update(update).unwrap_or_default();
         let thinking = reasoning_text_from_update(update);
-        self.update_editor_active_prompt(update, &text);
+        self.update_editor_current_response(update, &text);
         self.update_live_thinking_block(spid, thinking.as_deref());
         self.update_live_compaction_block(spid, update_compaction_status(update));
         self.update_live_response_block(spid, &text);
     }
 
-    fn update_editor_active_prompt(
+    fn update_editor_current_response(
         &mut self,
         update: &tau_proto::ProviderResponseUpdated,
         text: &str,
@@ -3113,7 +3113,7 @@ impl EventRenderer {
         if update.originator.is_user()
             && let Ok(mut context) = self.editor_context.lock()
         {
-            context.active_prompt = if text.is_empty() {
+            context.current_response = if text.is_empty() {
                 None
             } else {
                 Some(text.to_owned())
@@ -3329,8 +3329,8 @@ impl EventRenderer {
         if finished.originator.is_user()
             && let Ok(mut context) = self.editor_context.lock()
         {
-            context.last_agent_response = Some(text.to_owned());
-            context.active_prompt = None;
+            context.last_response = Some(text.to_owned());
+            context.current_response = None;
         }
     }
 

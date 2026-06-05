@@ -455,8 +455,14 @@ enum PromptShellAction {
 
 #[derive(Clone, Default)]
 pub struct EditorContext {
-    pub active_prompt: Option<String>,
-    pub last_agent_response: Option<String>,
+    /// Response text currently streaming or otherwise in progress, included as
+    /// read-only context when editing the next prompt.
+    pub current_response: Option<String>,
+    /// Most recent completed response text, included as read-only context when
+    /// editing the next prompt.
+    pub last_response: Option<String>,
+    /// Previous submitted prompt text, included as read-only context when
+    /// editing the next prompt.
     pub previous_prompt: Option<String>,
 }
 
@@ -721,8 +727,8 @@ fn append_prompt_trailer(current: &str, editor_context: &Arc<Mutex<EditorContext
         .lock()
         .expect("editor context mutex poisoned")
         .clone();
-    if context.active_prompt.is_none()
-        && context.last_agent_response.is_none()
+    if context.current_response.is_none()
+        && context.last_response.is_none()
         && context.previous_prompt.is_none()
     {
         return current.to_owned();
@@ -732,16 +738,16 @@ fn append_prompt_trailer(current: &str, editor_context: &Arc<Mutex<EditorContext
     out.push_str("\n\n");
     out.push_str(PROMPT_TRAILER_MARKER);
     out.push('\n');
-    if let Some(text) = context.active_prompt.as_deref().filter(|t| !t.is_empty()) {
-        out.push_str("\n## Current response in progress\n\n");
-        push_markdown_quote(&mut out, text);
-    }
     if let Some(text) = context
-        .last_agent_response
+        .current_response
         .as_deref()
         .filter(|t| !t.is_empty())
     {
-        out.push_str("\n## Last agent response\n\n");
+        out.push_str("\n## Current response in progress\n\n");
+        push_markdown_quote(&mut out, text);
+    }
+    if let Some(text) = context.last_response.as_deref().filter(|t| !t.is_empty()) {
+        out.push_str("\n## Last response\n\n");
         push_markdown_quote(&mut out, text);
     }
     if let Some(text) = context.previous_prompt.as_deref().filter(|t| !t.is_empty()) {

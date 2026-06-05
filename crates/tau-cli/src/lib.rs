@@ -4,6 +4,7 @@
 pub mod cli;
 
 mod action_commands;
+mod agent_activity;
 mod chat;
 mod daemon;
 mod event_renderer;

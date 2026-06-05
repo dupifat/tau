@@ -13,6 +13,7 @@ use tau_proto::{
 };
 
 use crate::action_commands::ActionCommandState;
+use crate::agent_activity::AgentActivity;
 use crate::build_banner;
 use crate::tool_render::{
     CompactionStatus, ToolCallDisplay, ToolSummaryDisplay, build_delegate_completion_display,
@@ -711,82 +712,6 @@ struct ShellBlockState {
     /// Output accumulated from `ShellCommandProgress` chunks. Rendered
     /// under the header each redraw.
     output: String,
-}
-
-/// Session/agent lifecycle state used to decide whether Ctrl-D is safe.
-#[derive(Default)]
-struct AgentActivity {
-    /// User submissions seen before the harness assigns a prompt id.
-    optimistic_submissions: usize,
-    /// Prompt ids currently being processed by any provider conversation.
-    active_prompts: HashSet<String>,
-    /// Tool call ids emitted by any agent and not finished yet.
-    active_tools: HashSet<String>,
-    /// Tool call ids whose foreground provider protocol has completed with a
-    /// synthetic placeholder, but whose real tool process is still running.
-    backgrounded_tools: HashSet<String>,
-}
-
-impl AgentActivity {
-    fn is_in_progress(&self) -> bool {
-        self.optimistic_submissions != 0
-            || !self.active_prompts.is_empty()
-            || !self.active_tools.is_empty()
-    }
-
-    fn mark_optimistic_submission(&mut self) {
-        self.optimistic_submissions = self.optimistic_submissions.saturating_add(1);
-    }
-
-    fn start_prompt(&mut self, agent_prompt_id: &tau_proto::AgentPromptId) {
-        self.optimistic_submissions = self.optimistic_submissions.saturating_sub(1);
-        self.active_prompts.insert(agent_prompt_id.to_string());
-    }
-
-    fn finish_prompt(
-        &mut self,
-        agent_prompt_id: &tau_proto::AgentPromptId,
-        output_items: &[ContextItem],
-    ) {
-        if self.active_prompts.remove(agent_prompt_id.as_str()) {
-            for call in tool_calls_from_output_items(output_items) {
-                self.active_tools.insert(call.call_id.to_string());
-            }
-        } else {
-            self.optimistic_submissions = self.optimistic_submissions.saturating_sub(1);
-        }
-    }
-
-    fn start_tool(&mut self, call_id: &tau_proto::ToolCallId) {
-        self.active_tools.insert(call_id.to_string());
-    }
-
-    fn background_tool(&mut self, call_id: &tau_proto::ToolCallId) {
-        self.backgrounded_tools.insert(call_id.to_string());
-        self.active_tools.insert(call_id.to_string());
-    }
-
-    fn finish_tool(&mut self, call_id: &tau_proto::ToolCallId) {
-        if !self.backgrounded_tools.contains(call_id.as_str()) {
-            self.active_tools.remove(call_id.as_str());
-        }
-    }
-
-    fn finish_background_tool(&mut self, call_id: &tau_proto::ToolCallId) {
-        self.backgrounded_tools.remove(call_id.as_str());
-        self.active_tools.remove(call_id.as_str());
-    }
-
-    fn clear_optimistic_submissions(&mut self) {
-        self.optimistic_submissions = 0;
-    }
-
-    fn clear(&mut self) {
-        self.optimistic_submissions = 0;
-        self.active_prompts.clear();
-        self.active_tools.clear();
-        self.backgrounded_tools.clear();
-    }
 }
 
 fn push_status_chip(
@@ -2192,7 +2117,7 @@ impl EventRenderer {
                 self.set_main_agent_turn_active(false);
             }
             Event::AgentPromptTerminated(terminated) if terminated.originator.is_user() => {
-                if self.agent_activity.active_prompts.is_empty() {
+                if !self.agent_activity.has_active_prompts() {
                     self.set_main_agent_turn_active(false);
                 }
             }

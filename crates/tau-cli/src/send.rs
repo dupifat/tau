@@ -4,11 +4,10 @@ use std::io::{self, BufWriter};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
-use tau_proto::{
-    ClientKind, Event, Frame, FrameWriter, Hello, Message, PROTOCOL_VERSION, UiCreateAgent,
-};
+use tau_proto::{ClientKind, Event, Frame, FrameWriter, Hello, Message, PROTOCOL_VERSION};
 
 use crate::CliError;
+use crate::ui_prompt::{DEFAULT_AGENT_ROLE, create_user_agent_prompt};
 
 pub(crate) fn run_send(session_id: &str, line: &str) -> Result<(), CliError> {
     let text = line.trim();
@@ -108,15 +107,11 @@ fn event_for_line(session_id: &str, text: &str) -> Option<Event> {
         return None;
     }
 
-    Some(Event::UiCreateAgent(UiCreateAgent {
-        session_id: session_id.into(),
-        role: "senior-engineer".to_owned(),
-        cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-        initial_prompt: Some(text.to_owned()),
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-    }))
+    Some(create_user_agent_prompt(
+        session_id,
+        DEFAULT_AGENT_ROLE,
+        text,
+    ))
 }
 
 fn role_event_for_command(rest: &str) -> Option<Event> {

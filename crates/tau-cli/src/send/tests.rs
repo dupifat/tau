@@ -1,6 +1,7 @@
 use tau_proto::{Event, PromptOriginator, UiRoleUpdateAction};
 
 use super::event_for_line;
+use crate::ui_prompt::DEFAULT_AGENT_ROLE;
 
 const SESSION_ID: &str = "test-session";
 
@@ -12,7 +13,7 @@ fn prompt_text(text: &str) -> String {
     match event(text).expect("prompt event") {
         Event::UiCreateAgent(req) => {
             assert_eq!(req.session_id, SESSION_ID);
-            assert_eq!(req.role, "senior-engineer");
+            assert_eq!(req.role, DEFAULT_AGENT_ROLE);
             assert_eq!(req.originator, PromptOriginator::User);
             assert_eq!(req.ctx_id, None);
             req.initial_prompt.expect("initial prompt")

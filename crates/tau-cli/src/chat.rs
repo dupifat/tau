@@ -11,8 +11,8 @@ use tau_config::settings::CliBindingAction;
 use tau_harness::SessionLaunchStatus;
 use tau_proto::{
     CborValue, ClientKind, Disconnect, Event, EventSelector, Frame, FrameReader, FrameWriter,
-    Hello, Message, PROTOCOL_VERSION, Subscribe, UiCreateAgent, UiFocusChanged, UiPromptDraft,
-    UiPromptSubmitted, UiSetAgentDisplayName, UnixMicros,
+    Hello, Message, PROTOCOL_VERSION, Subscribe, UiFocusChanged, UiPromptDraft, UiPromptSubmitted,
+    UiSetAgentDisplayName, UnixMicros,
 };
 
 use crate::action_commands::ActionCommandState;
@@ -20,6 +20,7 @@ use crate::daemon::{DaemonCliOverrides, daemon_output_for_session, resolve_daemo
 use crate::event_renderer::{EventRenderer, ToolTimerNotifier, ToolTimerState};
 use crate::prompt_history::PromptHistoryStore;
 use crate::tool_render::ui_dir_block;
+use crate::ui_prompt::{DEFAULT_AGENT_ROLE, create_user_agent_prompt};
 use crate::{CliError, MUTEX_POISONED, build_banner, locked, ui_logging};
 
 /// Shared writer handle: the input loop and the prompt-draft debounce
@@ -1641,17 +1642,8 @@ impl<'a> TerminalInputSession<'a> {
                 .lock()
                 .ok()
                 .and_then(|role| role.clone())
-                .unwrap_or_else(|| "engineer".to_owned());
-            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            Event::UiCreateAgent(UiCreateAgent {
-                session_id: self.session_id.as_str().into(),
-                role,
-                cwd,
-                initial_prompt: Some(text.to_owned()),
-                message_class: tau_proto::PromptMessageClass::User,
-                originator: tau_proto::PromptOriginator::User,
-                ctx_id: None,
-            })
+                .unwrap_or_else(|| DEFAULT_AGENT_ROLE.to_owned());
+            create_user_agent_prompt(self.session_id, role, text)
         };
         if send_event(self.writer, &event).is_err() {
             return Some(InputLoopExit::Quit);

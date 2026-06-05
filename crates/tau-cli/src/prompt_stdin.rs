@@ -8,11 +8,12 @@ use tau_harness::SessionLaunchStatus;
 use tau_proto::{
     AgentPromptTerminated, ClientKind, ContentPart, ContextItem, ContextRole, Event, EventName,
     EventSelector, Frame, FrameReader, FrameWriter, Hello, Message, PROTOCOL_VERSION,
-    PromptOriginator, ProviderResponseFinished, ProviderResponseUpdated, Subscribe, UiCreateAgent,
+    ProviderResponseFinished, ProviderResponseUpdated, Subscribe,
 };
 
 use crate::CliError;
 use crate::daemon::{DaemonCliOverrides, daemon_output_for_session, resolve_daemon};
+use crate::ui_prompt::{DEFAULT_AGENT_ROLE, create_user_agent_prompt};
 
 /// Read a single user prompt from stdin, submit it to a daemon, print the final
 /// reasoning snapshots and answer, then exit.
@@ -50,7 +51,8 @@ pub(crate) fn run_prompt_stdin(
         },
     )?;
     let (mut reader, mut writer) = connect_prompt_stdin_client(&daemon.socket_path())?;
-    submit_prompt(&mut writer, session_id, prompt)?;
+    let role = prompt_stdin_role(startup_role);
+    submit_prompt(&mut writer, session_id, role, prompt)?;
 
     let mut output = OneShotOutput::default();
     let result = read_one_shot_result(&mut reader, &mut output);
@@ -72,6 +74,10 @@ type OneShotWriter = FrameWriter<BufWriter<UnixStream>>;
 fn print_prompt_stdin_headers(session_id: &str, startup_role: Option<&str>) {
     eprintln!("session_id: {session_id}");
     eprintln!("role: {}", startup_role.unwrap_or("default"));
+}
+
+fn prompt_stdin_role(startup_role: Option<&str>) -> &str {
+    startup_role.unwrap_or(DEFAULT_AGENT_ROLE)
 }
 
 fn connect_prompt_stdin_client(
@@ -110,18 +116,15 @@ fn subscribe_to_prompt_stdin_events(writer: &mut OneShotWriter) -> io::Result<()
     )
 }
 
-fn submit_prompt(writer: &mut OneShotWriter, session_id: &str, prompt: String) -> io::Result<()> {
+fn submit_prompt(
+    writer: &mut OneShotWriter,
+    session_id: &str,
+    role: &str,
+    prompt: String,
+) -> io::Result<()> {
     send_frame(
         writer,
-        &Frame::Event(Event::UiCreateAgent(UiCreateAgent {
-            session_id: session_id.into(),
-            role: "senior-engineer".to_owned(),
-            cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-            initial_prompt: Some(prompt),
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: PromptOriginator::User,
-            ctx_id: None,
-        })),
+        &Frame::Event(create_user_agent_prompt(session_id, role, prompt)),
     )
 }
 

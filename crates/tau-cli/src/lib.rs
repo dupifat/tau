@@ -16,6 +16,7 @@ mod settings_registry;
 mod theme;
 mod tool_render;
 mod ui_logging;
+mod ui_prompt;
 
 use std::sync::{Mutex, MutexGuard};
 use std::{fmt, io};

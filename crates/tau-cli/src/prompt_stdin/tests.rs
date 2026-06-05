@@ -1,7 +1,12 @@
-use tau_proto::{MessageItem, ProviderStopReason};
+use tau_proto::{MessageItem, PromptOriginator, ProviderStopReason};
 
 use super::*;
 
+#[test]
+fn prompt_stdin_role_uses_startup_role_or_default() {
+    assert_eq!(prompt_stdin_role(Some("specialist")), "specialist");
+    assert_eq!(prompt_stdin_role(None), DEFAULT_AGENT_ROLE);
+}
 fn user_update(spid: &str, text: &str, thinking: Option<&str>) -> ProviderResponseUpdated {
     let mut items = Vec::new();
     if let Some(thinking) = thinking.filter(|thinking| !thinking.is_empty()) {

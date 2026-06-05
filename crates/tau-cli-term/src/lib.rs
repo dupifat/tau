@@ -50,16 +50,9 @@ pub enum Event {
     BackTab,
     /// Escape pressed outside an open completion menu.
     Escape,
-    /// A binding requested Fast mode toggle without touching the prompt draft.
-    FastToggle,
-    /// A binding requested cycling within the current agent role group.
-    CycleRole,
-    /// A binding requested cycling to the next agent role group.
-    CycleRoleGroup,
-    /// A binding requested switching to the previous active agent.
-    AgentPrevious,
-    /// A binding requested switching to the next active agent.
-    AgentNext,
+    /// A binding requested an application-defined action without touching the
+    /// prompt draft.
+    Action(String),
 }
 
 /// Higher-level terminal prompt with completion support.
@@ -361,20 +354,8 @@ impl HighTerm {
                 self.handle.set_buffer(buffer, cursor + text.len());
                 self.sync_menu_block();
             }
-            Ok(Some(PromptShellResult::FastToggle)) => {
-                return PromptActionOutcome::Return(Event::FastToggle);
-            }
-            Ok(Some(PromptShellResult::CycleRole)) => {
-                return PromptActionOutcome::Return(Event::CycleRole);
-            }
-            Ok(Some(PromptShellResult::CycleRoleGroup)) => {
-                return PromptActionOutcome::Return(Event::CycleRoleGroup);
-            }
-            Ok(Some(PromptShellResult::AgentPrevious)) => {
-                return PromptActionOutcome::Return(Event::AgentPrevious);
-            }
-            Ok(Some(PromptShellResult::AgentNext)) => {
-                return PromptActionOutcome::Return(Event::AgentNext);
+            Ok(Some(PromptShellResult::Action(action))) => {
+                return PromptActionOutcome::Return(Event::Action(action));
             }
             Ok(Some(PromptShellResult::History(delta))) => {
                 self.term.trigger_history_step(delta);
@@ -463,11 +444,7 @@ enum PromptShellAction {
     Insert(PromptShellCommand),
     Edit(PromptShellCommand),
     HistorySearch(PromptShellCommand),
-    FastToggle,
-    CycleRole,
-    CycleRoleGroup,
-    AgentPrevious,
-    AgentNext,
+    Action(String),
     PromptNext,
     PromptPrevious,
     PromptUndo,
@@ -487,11 +464,7 @@ enum PromptShellResult {
     Insert(String),
     Replace(String),
     ReplacePreservingUndo(String),
-    FastToggle,
-    CycleRole,
-    CycleRoleGroup,
-    AgentPrevious,
-    AgentNext,
+    Action(String),
     History(isize),
     Undo,
     Redo,
@@ -505,15 +478,10 @@ enum PromptActionOutcome {
 }
 
 impl PromptShellAction {
-    // Keep this action list, Term::trigger_named_action,
+    // Keep prompt-local action names, Term::trigger_named_action,
     // built-in.cli-bindings.yaml, and docs/cli-keybindings.md in sync.
     fn parse(action: &str) -> Option<Self> {
         match action {
-            "fast-toggle" => return Some(Self::FastToggle),
-            "cycle-role" => return Some(Self::CycleRole),
-            "cycle-role-group" => return Some(Self::CycleRoleGroup),
-            "agent-previous" => return Some(Self::AgentPrevious),
-            "agent-next" => return Some(Self::AgentNext),
             "prompt-next" => return Some(Self::PromptNext),
             "prompt-previous" => return Some(Self::PromptPrevious),
             "prompt-undo" => return Some(Self::PromptUndo),
@@ -524,8 +492,11 @@ impl PromptShellAction {
         }
         let mut parts = action.splitn(3, ':');
         let name = parts.next()?;
-        let mode = parts.next()?;
-        let command = parts.next()?.to_owned();
+        let (Some(mode), Some(command)) = (parts.next(), parts.next()) else {
+            return (!action.is_empty() && !action.contains(':'))
+                .then(|| Self::Action(action.to_owned()));
+        };
+        let command = command.to_owned();
         let command = PromptShellCommand {
             command,
             trim: mode == "trim",
@@ -552,13 +523,9 @@ fn run_prompt_shell_action(
         PromptShellAction::PromptPrevious => return Ok(Some(PromptShellResult::History(-1))),
         PromptShellAction::PromptUndo => return Ok(Some(PromptShellResult::Undo)),
         PromptShellAction::PromptRedo => return Ok(Some(PromptShellResult::Redo)),
-        PromptShellAction::FastToggle => return Ok(Some(PromptShellResult::FastToggle)),
-        PromptShellAction::CycleRole => return Ok(Some(PromptShellResult::CycleRole)),
-        PromptShellAction::CycleRoleGroup => {
-            return Ok(Some(PromptShellResult::CycleRoleGroup));
+        PromptShellAction::Action(action) => {
+            return Ok(Some(PromptShellResult::Action(action.clone())));
         }
-        PromptShellAction::AgentPrevious => return Ok(Some(PromptShellResult::AgentPrevious)),
-        PromptShellAction::AgentNext => return Ok(Some(PromptShellResult::AgentNext)),
         PromptShellAction::SubmitPrompt => {
             return Ok(Some(PromptShellResult::RawEvent(
                 term.trigger_submit_or_accept_completion(),
@@ -583,11 +550,7 @@ fn run_prompt_shell_action(
     let file_text = match &action {
         PromptShellAction::Edit(_) => append_prompt_trailer(&current, &editor_context),
         PromptShellAction::Insert(_) | PromptShellAction::HistorySearch(_) => current.clone(),
-        PromptShellAction::FastToggle
-        | PromptShellAction::CycleRole
-        | PromptShellAction::CycleRoleGroup
-        | PromptShellAction::AgentPrevious
-        | PromptShellAction::AgentNext
+        PromptShellAction::Action(_)
         | PromptShellAction::PromptNext
         | PromptShellAction::PromptPrevious
         | PromptShellAction::PromptUndo
@@ -710,11 +673,7 @@ fn run_prompt_shell_action(
                 .clone();
             Ok(Some(PromptShellResult::ReplacePreservingUndo(text)))
         }
-        PromptShellAction::FastToggle
-        | PromptShellAction::CycleRole
-        | PromptShellAction::CycleRoleGroup
-        | PromptShellAction::AgentPrevious
-        | PromptShellAction::AgentNext
+        PromptShellAction::Action(_)
         | PromptShellAction::PromptNext
         | PromptShellAction::PromptPrevious
         | PromptShellAction::PromptUndo

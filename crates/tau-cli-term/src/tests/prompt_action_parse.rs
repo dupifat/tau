@@ -69,40 +69,23 @@ fn parses_prompt_history_search_with_trim() {
 }
 
 #[test]
-fn parses_fast_toggle() {
-    assert!(matches!(
-        PromptShellAction::parse("fast-toggle"),
-        Some(PromptShellAction::FastToggle)
-    ));
+fn parses_application_actions_generically() {
+    match PromptShellAction::parse("fast-toggle") {
+        Some(PromptShellAction::Action(action)) => assert_eq!(action, "fast-toggle"),
+        _ => panic!("expected generic application action"),
+    }
+    match PromptShellAction::parse("cycle-role") {
+        Some(PromptShellAction::Action(action)) => assert_eq!(action, "cycle-role"),
+        _ => panic!("expected generic application action"),
+    }
+    match PromptShellAction::parse("agent-next") {
+        Some(PromptShellAction::Action(action)) => assert_eq!(action, "agent-next"),
+        _ => panic!("expected generic application action"),
+    }
 }
 
 #[test]
-fn parses_role_cycle() {
-    assert!(matches!(
-        PromptShellAction::parse("cycle-role"),
-        Some(PromptShellAction::CycleRole)
-    ));
-    assert!(matches!(
-        PromptShellAction::parse("cycle-role-group"),
-        Some(PromptShellAction::CycleRoleGroup)
-    ));
-}
-
-#[test]
-fn parses_agent_switching_actions() {
-    assert!(matches!(
-        PromptShellAction::parse("agent-previous"),
-        Some(PromptShellAction::AgentPrevious)
-    ));
-    assert!(matches!(
-        PromptShellAction::parse("agent-next"),
-        Some(PromptShellAction::AgentNext)
-    ));
-}
-
-#[test]
-fn unknown_action_returns_none() {
-    assert!(PromptShellAction::parse("not-a-real-action").is_none());
+fn malformed_shell_action_returns_none() {
     assert!(PromptShellAction::parse("shell-prompt-bogus:trim:cmd").is_none());
     assert!(PromptShellAction::parse("shell-prompt-edit:trim").is_none());
 }

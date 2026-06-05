@@ -984,13 +984,23 @@ impl<'a> TerminalInputSession<'a> {
             }
             TermEvent::FocusChanged { focused } => self.send_focus_changed(focused),
             TermEvent::BufferChanged => self.update_draft(),
-            TermEvent::FastToggle => self.toggle_fast_service_tier(),
-            TermEvent::CycleRole => self.cycle_role_inner(),
-            TermEvent::CycleRoleGroup | TermEvent::BackTab => self.cycle_role_group(),
-            TermEvent::AgentPrevious => self.switch_agent_by_delta(-1),
-            TermEvent::AgentNext => self.switch_agent_by_delta(1),
+            TermEvent::Action(action) => self.handle_binding_action(&action),
+            TermEvent::BackTab => self.cycle_role_group(),
             TermEvent::Escape => self.recall_queued_prompt(),
             TermEvent::Line(_) | TermEvent::Eof | TermEvent::CancelPrompt => {}
+        }
+    }
+
+    fn handle_binding_action(&self, action: &str) {
+        match action {
+            "fast-toggle" => self.toggle_fast_service_tier(),
+            "cycle-role" => self.cycle_role_inner(),
+            "cycle-role-group" => self.cycle_role_group(),
+            "agent-previous" => self.switch_agent_by_delta(-1),
+            "agent-next" => self.switch_agent_by_delta(1),
+            _ => self
+                .output
+                .system_info(&format!("binding: unknown application action `{action}`")),
         }
     }
 

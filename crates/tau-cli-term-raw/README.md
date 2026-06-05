@@ -164,15 +164,15 @@ ordered lists reference them for rendering (top to bottom):
 
 ## Threading model
 
-Three threads cooperate:
+Two execution contexts cooperate:
 
-- **Input reader** — blocks on `crossterm::event::read()`, forwards events to
-  the downstream loop.
+- **Downstream event loop** — the caller's thread. Calls
+  `Term::get_next_event()`, which reads `crossterm` events synchronously,
+  handles prompt editing internally, and surfaces high-level events. There is no
+  background input reader thread, so external programs such as `$EDITOR` do not
+  race Tau for stdin.
 - **Redraw thread** — blocks on a coalescing notify channel, wakes up, reads
   shared state under a mutex, and renders via one of the three paths above.
-- **Downstream event loop** — the caller's thread. Calls
-  `Term::get_next_event()` which handles editing internally and surfaces
-  high-level events.
 
 Any thread holding a `TermHandle` can mutate zones and trigger a redraw.
 Multiple redraws coalesce into one via the notify channel.

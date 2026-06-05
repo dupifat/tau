@@ -721,6 +721,27 @@ pub struct TermHandle {
     redraw: tau_blocking_notify_channel::Sender,
 }
 
+struct RedrawSuppressionGuard<'a> {
+    handle: &'a TermHandle,
+}
+
+impl<'a> RedrawSuppressionGuard<'a> {
+    fn new(handle: &'a TermHandle) -> Self {
+        {
+            let mut st = handle.lock();
+            st.redraw_suppression = st.redraw_suppression.saturating_add(1);
+        }
+        Self { handle }
+    }
+}
+
+impl Drop for RedrawSuppressionGuard<'_> {
+    fn drop(&mut self) {
+        let mut st = self.handle.lock();
+        st.redraw_suppression = st.redraw_suppression.saturating_sub(1);
+    }
+}
+
 impl TermHandle {
     fn lock(&self) -> MutexGuard<'_, SharedState> {
         self.state.lock().expect("term state mutex poisoned")
@@ -736,16 +757,8 @@ impl TermHandle {
     /// Used to update off-screen output snapshots without repainting the
     /// currently visible transcript.
     pub fn with_redraw_suppressed<R>(&self, f: impl FnOnce() -> R) -> R {
-        {
-            let mut st = self.lock();
-            st.redraw_suppression = st.redraw_suppression.saturating_add(1);
-        }
-        let result = f();
-        {
-            let mut st = self.lock();
-            st.redraw_suppression = st.redraw_suppression.saturating_sub(1);
-        }
-        result
+        let _guard = RedrawSuppressionGuard::new(self);
+        f()
     }
 
     /// Triggers a redraw of the terminal.
@@ -1046,7 +1059,7 @@ impl TermHandle {
     /// point.
     pub fn set_buffer(&self, text: String, cursor: usize) {
         let mut st = self.lock();
-        let new_cursor = cursor.min(text.len());
+        let new_cursor = clamp_cursor_to_grapheme_boundary(&text, cursor);
         st.buffer = text;
         st.history_nav = None;
         st.completion = None;
@@ -1072,7 +1085,7 @@ impl TermHandle {
     /// the replacement becomes the new editable draft.
     pub fn set_buffer_preserving_undo(&self, text: String, cursor: usize) {
         let mut st = self.lock();
-        let new_cursor = cursor.min(text.len());
+        let new_cursor = clamp_cursor_to_grapheme_boundary(&text, cursor);
         st.buffer = text;
         st.history_nav = None;
         st.completion = None;
@@ -1167,7 +1180,7 @@ impl std::ops::Deref for Term {
 impl Term {
     /// Creates a new terminal prompt.
     ///
-    /// Enters raw mode, spawns the input reader and redraw threads.
+    /// Enters raw mode and spawns the redraw thread.
     /// Returns the prompt engine and a cloneable [`TermHandle`].
     pub fn new(
         left_prompt: impl Into<StyledText>,
@@ -3468,6 +3481,22 @@ fn byte_offset_for_buffer_position(
     }
 
     s.len()
+}
+
+fn clamp_cursor_to_grapheme_boundary(s: &str, cursor: usize) -> usize {
+    let cursor = cursor.min(s.len());
+    if cursor == s.len() {
+        return cursor;
+    }
+
+    let mut boundary = 0;
+    for (idx, _) in UnicodeSegmentation::grapheme_indices(s, true) {
+        if cursor < idx {
+            break;
+        }
+        boundary = idx;
+    }
+    boundary
 }
 
 fn prev_char_boundary(s: &str, pos: usize) -> usize {

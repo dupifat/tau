@@ -448,6 +448,52 @@ fn input_history_navigates_submitted_and_draft_entries() {
     ));
     assert_eq!(handle.get_buffer(), "draft");
 }
+/// Public buffer setters accept byte offsets from higher-level UI code; invalid
+/// offsets inside a Unicode grapheme must be normalized before edit operations
+/// use them with `String::insert`/`drain`.
+#[test]
+fn set_buffer_clamps_cursor_to_grapheme_boundary() {
+    let buf = SharedBuffer::new();
+    let (term, handle, input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+
+    handle.set_buffer("éx".to_owned(), 1);
+    assert_eq!(handle.get_cursor(), 0);
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('z'),
+            KeyModifiers::NONE,
+        )))
+        .expect("send inserted char");
+    assert!(matches!(
+        term.get_next_event().expect("insert event"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "zéx");
+
+    handle.set_buffer_preserving_undo("éx".to_owned(), 1);
+    assert_eq!(handle.get_cursor(), 0);
+
+    drop(term);
+}
+
+/// Redraw suppression must be scoped: callers use it around arbitrary snapshot
+/// updates, and the counter must be restored after the closure returns so
+/// future redraws are not permanently suppressed.
+#[test]
+fn redraw_suppression_is_scoped() {
+    let buf = SharedBuffer::new();
+    let (term, handle, _input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+
+    handle.with_redraw_suppressed(|| {
+        assert_eq!(handle.lock().redraw_suppression, 1);
+    });
+
+    assert_eq!(handle.lock().redraw_suppression, 0);
+
+    drop(term);
+}
 
 /// Recalling a queued prompt should insert it immediately before the current
 /// draft in history navigation order so one Down restores the interrupted

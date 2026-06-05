@@ -1785,7 +1785,7 @@ fn stale_draft_snapshot_is_dropped_after_submit_epoch_bump() {
 /// requested off state. `reset` is the only textual way to clear a setting.
 #[test]
 fn role_setting_updates_are_typed_and_reset_aware() {
-    use super::chat::parse_role_setting_update;
+    use super::ui_commands::parse_role_setting_update;
 
     assert_eq!(
         parse_role_setting_update("effort", "off").expect("effort off"),

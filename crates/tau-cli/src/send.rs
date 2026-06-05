@@ -90,32 +90,7 @@ fn event_for_line(session_id: &str, text: &str) -> Option<Event> {
 }
 
 fn role_event_for_command(rest: &str) -> Option<Event> {
-    let mut parts = rest.split_whitespace();
-    let role = parts.next()?;
-    let command = parts.next();
-    let value = parts.next();
-    let extra = parts.next();
-
-    match command {
-        None => Some(crate::ui_events::role_select(role)),
-        Some("delete") => {
-            if value.is_some() {
-                return None;
-            }
-            Some(crate::ui_events::role_update(
-                role,
-                tau_proto::UiRoleUpdateAction::Delete,
-            ))
-        }
-        Some(setting) => {
-            let value = value?;
-            if extra.is_some() {
-                return None;
-            }
-            let action = crate::chat::parse_role_setting_update(setting, value).ok()?;
-            Some(crate::ui_events::role_update(role, action))
-        }
-    }
+    crate::ui_commands::parse_role_command(rest).ok()?
 }
 
 fn find_daemon_for_session(session_id: &str) -> Option<PathBuf> {

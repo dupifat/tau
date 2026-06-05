@@ -1638,15 +1638,34 @@ impl EventRenderer {
             self.handle
                 .set_block(*block_id, self.render_summary_block(summary));
         }
-        for state in self.tool_calls.values() {
+        let freeze_multiline_payloads = self.freeze_multiline_live_payloads();
+        let mut live_updates = Vec::new();
+        for state in self.tool_calls.values_mut() {
             if let Some(block_id) = state.block_id {
-                let block = state
-                    .live_display
-                    .as_ref()
-                    .map(|display| self.render_tool_history_block(display))
-                    .unwrap_or_else(Self::empty_block);
-                self.handle.set_block(block_id, block);
+                let display = if let Some(display) = state.live_display.as_ref() {
+                    let mut display = display.clone();
+                    let duration = Self::live_tool_duration(state);
+                    Self::normalize_live_tool_duration(
+                        freeze_multiline_payloads,
+                        &mut display,
+                        duration,
+                    );
+                    state.live_display = Some(display.clone());
+                    Some(display)
+                } else {
+                    None
+                };
+                live_updates.push((block_id, display));
             }
+        }
+        for (block_id, display) in live_updates {
+            let block = display
+                .as_ref()
+                .map(|display| self.render_tool_history_block(display))
+                .unwrap_or_else(Self::empty_block);
+            self.handle.set_block(block_id, block);
+        }
+        for state in self.tool_calls.values() {
             if let Some(block_id) = state.summary_block_id
                 && let Some(summary) = self.tool_summaries.get(&block_id)
             {
@@ -3600,11 +3619,14 @@ impl EventRenderer {
 
         if let Some(progress_display) = progress.display.as_ref() {
             let mut update = None;
+            let freeze_multiline_payloads = self.freeze_multiline_live_payloads();
             if let Some(state) = self.tool_calls.get_mut(progress.call_id.as_str())
                 && let Some(block_id) = state.block_id
             {
                 let mut display = render_tool_use_state(&progress.tool_name, progress_display);
-                if let Some(duration) = Self::live_tool_duration(state) {
+                if Self::use_static_live_duration(freeze_multiline_payloads, &display) {
+                    Self::upsert_static_tool_duration_suffix(&mut display);
+                } else if let Some(duration) = Self::live_tool_duration(state) {
                     Self::upsert_tool_duration_suffix(&mut display, duration);
                 }
                 state.live_display = Some(display.clone());
@@ -3640,11 +3662,21 @@ impl EventRenderer {
             else {
                 continue;
             };
+            if Self::use_static_live_duration(self.freeze_multiline_live_payloads(), display) {
+                continue;
+            }
             let Some(duration) = Self::live_tool_duration(state) else {
                 continue;
             };
             let mut display = display.clone();
             Self::upsert_tool_duration_suffix(&mut display, duration);
+            if state
+                .live_display
+                .as_ref()
+                .is_some_and(|current| Self::tool_displays_match_time(current, &display))
+            {
+                continue;
+            }
             updates.push((call_id.clone(), block_id, display));
         }
         for (call_id, block_id, display) in updates {
@@ -3660,6 +3692,50 @@ impl EventRenderer {
         }
     }
 
+    fn freeze_multiline_live_payloads(&self) -> bool {
+        matches!(self.show_tools, tau_config::settings::ShowTools::Full)
+    }
+
+    fn use_static_live_duration(
+        freeze_multiline_payloads: bool,
+        display: &ToolCallDisplay,
+    ) -> bool {
+        if !freeze_multiline_payloads {
+            return false;
+        }
+        display.payload.as_ref().is_some_and(|payload| {
+            matches!(payload, tau_proto::ToolUsePayload::Text { text } if text.contains('\n'))
+        })
+    }
+
+    fn normalize_live_tool_duration(
+        freeze_multiline_payloads: bool,
+        display: &mut ToolCallDisplay,
+        duration: Option<Duration>,
+    ) {
+        if Self::use_static_live_duration(freeze_multiline_payloads, display) {
+            Self::upsert_static_tool_duration_suffix(display);
+        } else if let Some(duration) = duration {
+            Self::upsert_tool_duration_suffix(display, duration);
+        }
+    }
+
+    fn tool_displays_match_time(current: &ToolCallDisplay, next: &ToolCallDisplay) -> bool {
+        use crate::tool_render::ToolStatus;
+
+        let current_time = current
+            .suffixes
+            .iter()
+            .find(|suffix| matches!(suffix.status, ToolStatus::Time))
+            .map(|suffix| suffix.text.as_str());
+        let next_time = next
+            .suffixes
+            .iter()
+            .find(|suffix| matches!(suffix.status, ToolStatus::Time))
+            .map(|suffix| suffix.text.as_str());
+        current_time == next_time
+    }
+
     fn live_tool_duration(state: &ToolCallState) -> Option<Duration> {
         if let Some(recorded_started_at) = state.recorded_started_at {
             let elapsed_micros = UnixMicros::now()
@@ -3671,6 +3747,20 @@ impl EventRenderer {
     }
 
     fn upsert_tool_duration_suffix(display: &mut ToolCallDisplay, duration: Duration) {
+        let suffix = tool_duration_suffix(duration);
+        Self::upsert_tool_duration_suffix_segment(display, suffix);
+    }
+
+    fn upsert_static_tool_duration_suffix(display: &mut ToolCallDisplay) {
+        let mut suffix = tool_duration_suffix(Duration::ZERO);
+        suffix.text = "-s".to_owned();
+        Self::upsert_tool_duration_suffix_segment(display, suffix);
+    }
+
+    fn upsert_tool_duration_suffix_segment(
+        display: &mut ToolCallDisplay,
+        mut suffix: crate::tool_render::ToolSuffixSegment,
+    ) {
         use crate::tool_render::ToolStatus;
 
         display
@@ -3692,7 +3782,6 @@ impl EventRenderer {
             })
             .unwrap_or(display.suffixes.len());
 
-        let mut suffix = tool_duration_suffix(duration);
         if insert_at == 0
             && display
                 .args
@@ -3717,6 +3806,7 @@ impl EventRenderer {
             // Snapshot the latest counters and ctx info regardless of whether the
             // block is still live; the `ToolResult` handler reuses them on the
             // completion line.
+            let freeze_multiline_payloads = self.freeze_multiline_live_payloads();
             let state = self.tool_calls.entry(call_id.to_owned()).or_default();
             state.delegate_last_progress = Some(progress.clone());
             let Some(bid) = state.block_id else {
@@ -3736,7 +3826,9 @@ impl EventRenderer {
                     progress.role.as_deref(),
                 ),
             };
-            if let Some(duration) = Self::live_tool_duration(state) {
+            if Self::use_static_live_duration(freeze_multiline_payloads, &display) {
+                Self::upsert_static_tool_duration_suffix(&mut display);
+            } else if let Some(duration) = Self::live_tool_duration(state) {
                 Self::upsert_tool_duration_suffix(&mut display, duration);
             }
             state.live_display = Some(display.clone());

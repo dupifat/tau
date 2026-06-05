@@ -4427,6 +4427,94 @@ fn live_tool_timer_updates_do_not_mutate_scrolled_history() {
 }
 
 #[test]
+fn live_multiline_payload_tool_uses_static_duration_placeholder() {
+    // Multi-line live tool payloads can extend above the visible active-tools
+    // area. Updating only the elapsed seconds would force visible churn without
+    // changing useful content, so keep the live duration stable until completion.
+    let (_term, handle, vt) = setup(80, 8);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+    renderer.apply_setting("show-tools", "compact");
+    let args = CborValue::Map(vec![(
+        CborValue::Text("path".into()),
+        CborValue::Text("src/main.rs".into()),
+    )]);
+    renderer.handle(&Event::ProviderResponseFinished(finished_response(
+        "sp-tool",
+        vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "call-1".into(),
+            name: tau_proto::ToolName::new("read"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: args.clone(),
+        })],
+    )));
+    renderer.handle(&tool_started("call-1", "read", args));
+    renderer.handle(&Event::ToolProgress(tau_proto::ToolProgress {
+        call_id: "call-1".into(),
+        tool_name: tau_proto::ToolName::new("read"),
+        message: None,
+        progress: None,
+        display: Some(tau_proto::ToolUseState {
+            args: "src/main.rs".into(),
+            status: tau_proto::ToolUseStatus::InProgress,
+            status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
+            payload: Some(tau_proto::ToolUsePayload::Text {
+                text: "line 1\nline 2".into(),
+            }),
+            ..Default::default()
+        }),
+    }));
+    sync(&handle);
+
+    assert!(vt.screen_contains(80, "read src/main.rs 0s"));
+
+    renderer.apply_setting("show-tools", "full");
+    sync(&handle);
+    assert!(vt.screen_contains(80, "read src/main.rs -s"));
+    assert!(vt.screen_contains(80, "line 1"));
+
+    renderer.apply_setting("show-tools", "compact");
+    sync(&handle);
+    assert!(vt.screen_contains(80, "read src/main.rs 0s"));
+
+    renderer.apply_setting("show-tools", "full");
+    sync(&handle);
+    assert!(vt.screen_contains(80, "read src/main.rs -s"));
+    assert!(vt.screen_contains(80, "line 1"));
+
+    let full_renders_before = handle.full_render_count();
+    renderer.handle_tool_timer_tick();
+    sync(&handle);
+
+    assert_eq!(handle.full_render_count(), full_renders_before);
+    assert!(vt.screen_contains(80, "read src/main.rs -s"));
+
+    renderer.handle(&Event::ToolResult(ToolResult {
+        call_id: "call-1".into(),
+        tool_name: tau_proto::ToolName::new("read"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Null,
+        kind: tau_proto::ToolResultKind::Final,
+        display: Some(tau_proto::ToolUseState {
+            args: "src/main.rs".into(),
+            status: tau_proto::ToolUseStatus::Success,
+            status_text: "ok".into(),
+            payload: Some(tau_proto::ToolUsePayload::Text {
+                text: "line 1\nline 2".into(),
+            }),
+            ..Default::default()
+        }),
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    sync(&handle);
+
+    assert!(vt.screen_contains(80, "read src/main.rs 0s ok"));
+}
+
+#[test]
 fn show_tools_summarize_turn_summarizes_tool_batch() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(

@@ -6032,6 +6032,7 @@ impl Harness {
     }
 
     fn refresh_provider_models_and_publish_state(&mut self) {
+        let had_provider_models = !self.provider_model_info.is_empty();
         let had_routable_model = self
             .selected_model
             .as_ref()
@@ -6039,11 +6040,15 @@ impl Harness {
         self.refresh_available_models();
         self.reconcile_selected_model_with_available();
         self.publish_available_model_state();
+        let has_provider_models = !self.provider_model_info.is_empty();
         let has_routable_model = self
             .selected_model
             .as_ref()
             .is_some_and(|model| self.provider_model_routes.contains_key(model));
-        if !had_routable_model && has_routable_model && self.turn_state.is_idle() {
+        if self.turn_state.is_idle()
+            && ((!had_routable_model && has_routable_model)
+                || (!had_provider_models && has_provider_models))
+        {
             self.try_advance_queue();
         }
     }
@@ -6224,7 +6229,7 @@ impl Harness {
             });
         self.preempt_blocking_ext_side_agents(&session_id);
         if !self.session_initialized(&session_id)
-            || self.selected_model.is_none()
+            || (self.selected_model.is_none() && self.provider_model_info.is_empty())
             || !self.turn_state.is_idle()
             || !self.extensions_all_ready()
         {
@@ -6269,7 +6274,7 @@ impl Harness {
         };
         self.set_agent_state(agent_id, AgentState::Active);
         if !self.session_initialized(&session_id)
-            || self.selected_model.is_none()
+            || (self.selected_model.is_none() && self.provider_model_info.is_empty())
             || !self.turn_state.is_idle()
             || !self.extensions_all_ready()
         {

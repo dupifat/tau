@@ -93,6 +93,9 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
+    h.provider_model_routes.clear();
+    h.provider_model_info.clear();
+    h.available_models.clear();
     h.selected_model = None;
 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {

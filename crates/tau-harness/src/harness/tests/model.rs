@@ -25,6 +25,19 @@ fn find_important_info(h: &Harness, needle: &str) -> Option<String> {
     None
 }
 
+fn find_info(h: &Harness, needle: &str) -> Option<String> {
+    let mut seq = tau_proto::EventLogSeq::new(0);
+    while let Some(entry) = h.event_log.get_next_from(seq) {
+        seq = entry.seq.next();
+        if let Event::HarnessInfo(info) = &entry.event
+            && info.message.contains(needle)
+        {
+            return Some(info.message.clone());
+        }
+    }
+    None
+}
+
 fn provider_model(id: ModelId, context_window: u64) -> ProviderModelInfo {
     ProviderModelInfo {
         id,
@@ -278,6 +291,55 @@ fn provider_models_snapshot_selects_first_model_and_drains_queue() {
         conv.turn_state,
         AgentTurnState::AgentThinking { .. }
     ));
+}
+
+/// A role with an explicit model that no provider advertised is a terminal
+/// configuration problem after provider metadata exists. The harness must not
+/// leave the first prompt in `pending_prompts` forever just because the
+/// selected model is `None`; it should attempt dispatch, surface the existing
+/// no-model diagnostic, and return the agent to idle.
+#[test]
+fn unavailable_explicit_role_model_does_not_stall_queued_prompt() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    clear_startup_echo_models(&mut h);
+    connect_provider_source(&mut h, "provider-ext");
+    assert!(h.provider_model_info.is_empty());
+    assert!(h.selected_model.is_none());
+
+    let missing_model: ModelId = "missing/provider-model".parse().expect("model id");
+    h.available_roles.insert(
+        "assistant".to_owned(),
+        tau_config::settings::AgentRole {
+            model: Some(missing_model),
+            ..Default::default()
+        },
+    );
+    h.selected_role = "assistant".to_owned();
+
+    assert_eq!(
+        h.submit_user_prompt("s1".into(), "hello".to_owned())
+            .expect("submit prompt"),
+        PromptSubmission::Queued,
+    );
+    assert_eq!(h.agents[&test_user_agent(&h)].pending_prompts.len(), 1);
+
+    let available_model: ModelId = "openai/available".parse().expect("model id");
+    h.handle_extension_event(
+        "provider-ext",
+        Frame::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+            models: vec![provider_model(available_model, 128_000)],
+        })),
+    )
+    .expect("handle provider snapshot");
+
+    let conv = &h.agents[&test_user_agent(&h)];
+    assert!(conv.pending_prompts.is_empty());
+    assert!(matches!(conv.turn_state, AgentTurnState::Idle));
+    assert!(
+        find_info(&h, "role `assistant` has no available model").is_some(),
+        "missing model should be visible instead of silently wedging"
+    );
 }
 
 /// Provider metadata must replace config compat data once a provider-owned

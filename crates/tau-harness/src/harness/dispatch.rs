@@ -140,7 +140,7 @@ impl Harness {
     pub(crate) fn try_advance_queue(&mut self) {
         if !self.turn_state.is_idle()
             || !self.extensions_all_ready()
-            || self.selected_model.is_none()
+            || (self.selected_model.is_none() && self.provider_model_info.is_empty())
         {
             return;
         }

@@ -84,7 +84,7 @@ fn role_infos_include_configured_role_description() {
         },
     );
     let provider_models = provider_models([provider_model(model.clone(), 128_000)]);
-    let infos = role_infos(&provider_models, &roles, &[model]);
+    let infos = role_infos(&provider_models, &roles, &[model.clone()]);
 
     assert_eq!(infos.len(), 1);
     assert!(infos[0].description.contains("model=openai/gpt-4.1"));
@@ -92,6 +92,9 @@ fn role_infos_include_configured_role_description() {
         infos[0].role_description.as_deref(),
         Some("Balanced coding helper")
     );
+    let details = infos[0].details.as_ref().expect("structured role details");
+    assert_eq!(details.model.as_ref(), Some(&model));
+    assert_eq!(details.params.effort, Effort::High);
 }
 
 /// Provider snapshots are runtime registry input, not just private extension

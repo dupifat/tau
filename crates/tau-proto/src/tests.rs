@@ -670,9 +670,24 @@ fn harness_role_info_role_description_is_optional_and_round_trips() {
         name: "deep".to_owned(),
         description: "model=openai/gpt-4.1, effort=xhigh".to_owned(),
         role_description: Some("Deep investigation mode".to_owned()),
+        details: Some(HarnessRoleDetails {
+            model: Some("openai/gpt-4.1".into()),
+            params: ModelParams {
+                effort: Effort::High,
+                verbosity: Verbosity::Medium,
+                thinking_summary: ThinkingSummary::Auto,
+                service_tier: Some(ServiceTier::Fast),
+            },
+            tools: Some(vec![ToolName::new("read")]),
+            enable_tools: vec![ToolName::new("web_search")],
+            disable_tools: vec![ToolName::new("shell")],
+        }),
     };
     let json = serde_json::to_value(&with_description).expect("serialize role info");
     assert_eq!(json["role_description"], "Deep investigation mode");
+    assert_eq!(json["details"]["model"], "openai/gpt-4.1");
+    assert_eq!(json["details"]["params"]["effort"], "high");
+    assert_eq!(json["details"]["enable_tools"][0], "web_search");
     let decoded: HarnessRoleInfo = serde_json::from_value(json).expect("decode role info");
     assert_eq!(decoded, with_description);
 

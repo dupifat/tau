@@ -368,7 +368,7 @@ struct ThinkingBlockEntry {
     text: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct RoleCompletionDetails {
     model: Option<String>,
     effort: Option<String>,
@@ -383,9 +383,36 @@ struct RoleCompletionDetails {
 
 impl RoleCompletionDetails {
     fn from_role_info(role: &tau_proto::HarnessRoleInfo) -> Self {
-        let mut details = Self::from_description(&role.description);
+        let mut details = role
+            .details
+            .as_ref()
+            .map(Self::from_structured_details)
+            .unwrap_or_else(|| Self::from_description(&role.description));
         details.role_description = role.role_description.clone();
         details
+    }
+
+    fn from_structured_details(details: &tau_proto::HarnessRoleDetails) -> Self {
+        if details.model.is_none() {
+            return Self::default();
+        }
+
+        Self {
+            model: details.model.as_ref().map(ToString::to_string),
+            effort: Some(details.params.effort.to_string()),
+            verbosity: Some(details.params.verbosity.to_string()),
+            thinking_summary: Some(details.params.thinking_summary.to_string()),
+            service_tier: details
+                .params
+                .service_tier
+                .map(|tier| tier.as_str().to_owned()),
+            tools: details.tools.as_ref().map(|tools| join_tool_names(tools)),
+            enable_tools: (!details.enable_tools.is_empty())
+                .then(|| join_tool_names(&details.enable_tools)),
+            disable_tools: (!details.disable_tools.is_empty())
+                .then(|| join_tool_names(&details.disable_tools)),
+            role_description: None,
+        }
     }
 
     fn from_description(description: &str) -> Self {
@@ -506,6 +533,14 @@ fn role_value_completion(setting: &str, value: &str) -> tau_cli_term::Completion
         _ => "",
     };
     tau_cli_term::CompletionItem::new(value, description)
+}
+
+fn join_tool_names(tools: &[tau_proto::ToolName]) -> String {
+    tools
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 fn role_completion_matches(value: &str, needle: &str) -> bool {

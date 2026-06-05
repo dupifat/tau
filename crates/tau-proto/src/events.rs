@@ -134,6 +134,37 @@ pub struct HarnessRoleInfo {
     /// Optional free-form role summary from harness configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role_description: Option<String>,
+    /// Structured settings backing `description`; preferred by UIs over parsing
+    /// the human-readable description string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<HarnessRoleDetails>,
+}
+
+/// Structured role settings for UI completions and status text.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HarnessRoleDetails {
+    /// Resolved model id for the role, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelId>,
+    /// Resolved model parameters after provider/model defaults are applied.
+    #[serde(default, skip_serializing_if = "ModelParams::is_default")]
+    pub params: ModelParams,
+    /// Explicit internal tool allow-list for this role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<ToolName>>,
+    /// Internal tools enabled in addition to the allow-list/default set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enable_tools: Vec<ToolName>,
+    /// Internal tools disabled for this role.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disable_tools: Vec<ToolName>,
+}
+
+impl HarnessRoleDetails {
+    /// Returns true when no structured role details are set.
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 /// One ordered role group used for keyboard navigation and grouped menus.
@@ -708,6 +739,13 @@ pub struct ModelParams {
     pub service_tier: Option<ServiceTier>,
 }
 
+impl ModelParams {
+    #[must_use]
+    /// Returns true when all model parameters are at their protocol defaults.
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
 /// The harness announces which efforts are valid for the selected role's
 /// resolved model. Updated on startup and whenever the resolved model changes.
 /// Empty list means no effort applies (the selected role has no resolved model,

@@ -288,10 +288,29 @@ pub(crate) fn role_infos(
 ) -> Vec<tau_proto::HarnessRoleInfo> {
     let mut out: Vec<_> = roles
         .keys()
-        .map(|name| tau_proto::HarnessRoleInfo {
-            name: name.clone(),
-            description: describe_role_inner(provider_models, roles, name, available),
-            role_description: roles.get(name).and_then(|role| role.description.clone()),
+        .map(|name| {
+            let role = roles.get(name);
+            let model = model_for_role(provider_models, roles, name);
+            let params = model
+                .as_ref()
+                .map(|model| selected_params_for_role(provider_models, roles, name, model))
+                .unwrap_or_default();
+            tau_proto::HarnessRoleInfo {
+                name: name.clone(),
+                description: describe_role_inner(provider_models, roles, name, available),
+                role_description: role.and_then(|role| role.description.clone()),
+                details: Some(tau_proto::HarnessRoleDetails {
+                    model,
+                    params,
+                    tools: role.and_then(|role| role.tools.clone()),
+                    enable_tools: role
+                        .map(|role| role.enable_tools.clone())
+                        .unwrap_or_default(),
+                    disable_tools: role
+                        .map(|role| role.disable_tools.clone())
+                        .unwrap_or_default(),
+                }),
+            }
         })
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));

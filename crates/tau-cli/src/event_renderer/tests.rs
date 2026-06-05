@@ -138,12 +138,53 @@ fn role_details_append_configured_role_description() {
             "model=codex-dpcpw/gpt-5.5, effort=xhigh, verbosity=medium, thinking-summary=off"
                 .to_owned(),
         role_description: Some("Investigate deeply, no rush = thorough".to_owned()),
+        details: None,
     });
 
     assert_eq!(
         details.short_description(),
         "codex-dpcpw/gpt-5.5 e=xhigh v=medium ts=off — Investigate deeply, no rush = thorough"
     );
+}
+
+#[test]
+fn role_details_prefer_structured_fields_over_description_text() {
+    let details = RoleCompletionDetails::from_role_info(&tau_proto::HarnessRoleInfo {
+        name: "deep".to_owned(),
+        description: "free-form text, not parsed as settings".to_owned(),
+        role_description: None,
+        details: Some(tau_proto::HarnessRoleDetails {
+            model: Some("provider/model".into()),
+            params: tau_proto::ModelParams {
+                effort: tau_proto::Effort::High,
+                verbosity: tau_proto::Verbosity::Low,
+                thinking_summary: tau_proto::ThinkingSummary::Concise,
+                service_tier: Some(tau_proto::ServiceTier::Fast),
+            },
+            tools: Some(vec![tau_proto::ToolName::new("read")]),
+            enable_tools: vec![tau_proto::ToolName::new("web_search")],
+            disable_tools: vec![tau_proto::ToolName::new("shell")],
+        }),
+    });
+
+    assert_eq!(
+        details.short_description(),
+        "provider/model e=high v=low ts=concise st=fast tools=read et=web_search dt=shell"
+    );
+}
+
+#[test]
+fn role_details_structured_role_without_model_renders_as_no_model() {
+    let details = RoleCompletionDetails::from_role_info(&tau_proto::HarnessRoleInfo {
+        name: "none".to_owned(),
+        description: "free-form fallback text".to_owned(),
+        role_description: None,
+        details: Some(tau_proto::HarnessRoleDetails::default()),
+    });
+
+    assert_eq!(details.short_description(), "no model");
+    assert_eq!(details.current_description("effort"), "unset");
+    assert_eq!(details.current_description("model"), "unset");
 }
 
 #[test]

@@ -62,11 +62,11 @@ pub fn pick_with_writer(
     pick_with_event_reader(prompt, items, writer, read_terminal_event, terminal_size)
 }
 
-/// Drives the picker against caller-provided IO.
+/// Drives the picker against caller-provided byte-stream IO.
 ///
-/// Does **not** toggle terminal raw mode. Intended for tests and for
-/// hosts that already own the terminal. `reader` should produce key
-/// presses as bytes; see `crate::key` for the supported encoding.
+/// Does **not** toggle terminal raw mode. Intended for tests and simple
+/// byte-stream hosts. Embedded crossterm/TUI hosts still need a public API that
+/// accepts host-provided events, resize notifications, and size samples.
 pub fn pick_with_io(
     prompt: &str,
     items: &[PickerItem],
@@ -161,12 +161,29 @@ fn render(
     selected: usize,
     terminal_height: usize,
 ) -> io::Result<()> {
-    // Reserve one row for the prompt; leave at least one item visible
-    // even on absurdly short terminals.
+    let (lines, cursor_row) =
+        picker_lines(prompt, items, selected, screen.width(), terminal_height);
+    screen.update(writer, &lines, (cursor_row, 0))?;
+    writer.flush()
+}
+
+fn picker_lines(
+    prompt: &str,
+    items: &[PickerItem],
+    selected: usize,
+    width: usize,
+    terminal_height: usize,
+) -> (Vec<Vec<tau_term_screen::style::Cell>>, usize) {
+    if terminal_height <= 1 {
+        let item = &items[selected];
+        let marker = if item.enabled { '>' } else { 'X' };
+        let line = truncate_to_width(&format!("{marker} {} — ? {prompt}", item.label), width);
+        return (vec![StyledText::from(line).to_cells()], 0);
+    }
+
+    // Reserve one row for the prompt; leave at least one item visible.
     let visible = terminal_height.saturating_sub(1).max(1);
     let (start, end) = visible_window(items.len(), selected, visible);
-
-    let width = screen.width();
     let mut lines = Vec::with_capacity(end - start + 1);
     lines.push(StyledText::from(truncate_to_width(&format!("? {prompt}"), width)).to_cells());
     for (idx, item) in items.iter().enumerate().take(end).skip(start) {
@@ -180,9 +197,7 @@ fn render(
         let line = truncate_to_width(&format!("{marker} {}", item.label), width);
         lines.push(StyledText::from(line).to_cells());
     }
-    let cursor_row = selected - start + 1;
-    screen.update(writer, &lines, (cursor_row, 0))?;
-    writer.flush()
+    (lines, selected - start + 1)
 }
 
 /// Returns `[start, end)` of the items to render, ensuring `selected`

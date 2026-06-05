@@ -3,7 +3,9 @@ use std::io::{self, Cursor};
 use std::sync::{Arc, Mutex};
 
 use crate::key::{LogicalKey, PickerEvent, PickerKey, logical_to_action, read_byte_key};
-use crate::{PickerError, PickerItem, pick_with_event_reader, pick_with_io, resize_dimension};
+use crate::{
+    PickerError, PickerItem, pick_with_event_reader, pick_with_io, picker_lines, resize_dimension,
+};
 
 fn items(labels: &[&str]) -> Vec<PickerItem> {
     labels.iter().map(|l| PickerItem::enabled(*l)).collect()
@@ -170,6 +172,40 @@ fn visible_window_centers_selection() {
     assert_eq!(visible_window(20, 0, 5), (0, 5));
     assert_eq!(visible_window(20, 10, 5), (8, 13));
     assert_eq!(visible_window(20, 19, 5), (15, 20));
+}
+
+fn line_text(line: &[tau_term_screen::style::Cell]) -> String {
+    line.iter().map(|cell| cell.ch).collect()
+}
+
+#[test]
+fn one_row_terminal_uses_compact_frame() {
+    let it = items(&["one", "two"]);
+    let (lines, cursor_row) = picker_lines("pick", &it, 1, 80, 1);
+
+    assert_eq!(lines.len(), 1);
+    assert_eq!(cursor_row, 0);
+    assert_eq!(line_text(&lines[0]), "> two — ? pick");
+}
+
+#[test]
+fn compact_frame_prioritizes_selected_item_when_truncated() {
+    let it = items(&["one", "selected-item"]);
+    let (lines, cursor_row) = picker_lines("very long prompt", &it, 1, 8, 1);
+
+    assert_eq!(cursor_row, 0);
+    assert_eq!(line_text(&lines[0]), "> selec…");
+}
+
+#[test]
+fn normal_terminal_uses_prompt_plus_items() {
+    let it = items(&["one", "two"]);
+    let (lines, cursor_row) = picker_lines("pick", &it, 1, 80, 3);
+
+    assert_eq!(lines.len(), 3);
+    assert_eq!(cursor_row, 2);
+    assert_eq!(line_text(&lines[0]), "? pick");
+    assert_eq!(line_text(&lines[2]), "> two");
 }
 
 #[derive(Clone, Default)]

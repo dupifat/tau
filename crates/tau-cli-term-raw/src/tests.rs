@@ -524,6 +524,20 @@ fn redraw_suppression_is_scoped() {
     drop(term);
 }
 
+/// Input shutdown requests must wake a virtual input loop without requiring an
+/// injected key event; the real terminal path checks the same flag between
+/// short crossterm polls.
+#[test]
+fn input_shutdown_request_returns_eof() {
+    let buf = SharedBuffer::new();
+    let (term, handle, _input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+
+    handle.request_input_shutdown();
+
+    assert!(matches!(term.get_next_event(), Ok(Event::Eof)));
+}
+
 /// Recalling a queued prompt should insert it immediately before the current
 /// draft in history navigation order so one Down restores the interrupted
 /// draft.

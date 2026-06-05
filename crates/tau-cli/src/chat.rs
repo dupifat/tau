@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter};
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -530,6 +531,11 @@ pub(crate) fn run_chat(
     // stream and never needs to share state with the input thread.
     let (event_tx, event_rx) = mpsc::channel::<RendererCmd>();
     let socket_event_tx = event_tx.clone();
+    let input_shutdown_handle: Arc<Mutex<Option<tau_cli_term::TermHandle>>> =
+        Arc::new(Mutex::new(None));
+    let socket_input_shutdown = input_shutdown_handle.clone();
+    let remote_disconnected = Arc::new(AtomicBool::new(false));
+    let socket_remote_disconnected = remote_disconnected.clone();
     let _socket_reader = std::thread::spawn(move || {
         let mut reader = FrameReader::new(BufReader::new(read_stream));
         loop {
@@ -545,6 +551,15 @@ pub(crate) fn run_chat(
                             recorded_at: log_recorded_at.unwrap_or_else(UnixMicros::now),
                         },
                         Frame::Message(Message::Disconnect(d)) => {
+                            socket_remote_disconnected.store(true, Ordering::Release);
+                            if let Some(handle) = socket_input_shutdown
+                                .lock()
+                                .expect(MUTEX_POISONED)
+                                .as_ref()
+                                .cloned()
+                            {
+                                handle.request_input_shutdown();
+                            }
                             RendererCmd::RemoteDisconnect(d.reason)
                         }
                         Frame::Message(_) => continue,
@@ -607,8 +622,11 @@ pub(crate) fn run_chat(
         bindings,
         input_history,
     )?;
+    *input_shutdown_handle.lock().expect(MUTEX_POISONED) = Some(handle.clone());
+    if remote_disconnected.load(Ordering::Acquire) {
+        handle.request_input_shutdown();
+    }
     handle.set_right_prompt(right_prompt);
-
     // Show logo if enabled.
     if settings.show_logo {
         handle.print_output(
@@ -736,6 +754,7 @@ pub(crate) fn run_chat(
             role_group_memory,
             theme,
             agent_in_progress,
+            remote_disconnected,
             renderer_tx: event_tx,
             editor_context,
             action_state,
@@ -876,6 +895,7 @@ struct TerminalInputLoopCtx {
     role_group_memory: Arc<Mutex<HashMap<String, String>>>,
     theme: tau_themes::Theme,
     agent_in_progress: Arc<std::sync::atomic::AtomicBool>,
+    remote_disconnected: Arc<AtomicBool>,
     renderer_tx: mpsc::Sender<RendererCmd>,
     editor_context: Arc<Mutex<tau_cli_term::EditorContext>>,
     action_state: ActionCommandState,
@@ -1661,10 +1681,11 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_eof(&self) -> Option<InputLoopExit> {
-        if self
-            .ctx
-            .agent_in_progress
-            .load(std::sync::atomic::Ordering::Relaxed)
+        if !self.ctx.remote_disconnected.load(Ordering::Acquire)
+            && self
+                .ctx
+                .agent_in_progress
+                .load(std::sync::atomic::Ordering::Relaxed)
         {
             self.output.system_info(EOF_DURING_AGENT_NOTICE);
             return None;

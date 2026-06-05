@@ -16,6 +16,9 @@ use std::collections::HashMap;
 use std::io::{self, BufWriter, Write};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
+
+const INPUT_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 use crossterm::cursor::{MoveToColumn, MoveUp, SetCursorStyle};
 use crossterm::event::{
@@ -186,6 +189,8 @@ struct SharedState {
     height: usize,
     /// Set by Term::drop to signal the redraw thread to exit.
     shutdown: bool,
+    /// Set by another UI owner to ask the blocking input loop to return EOF.
+    input_shutdown: bool,
     /// Set while the terminal is released to an external program.
     /// The redraw thread must not write to stdout in this state.
     external_paused: bool,
@@ -241,6 +246,7 @@ impl SharedState {
             width,
             height,
             shutdown: false,
+            input_shutdown: false,
             external_paused: false,
             invalidate_screen: false,
             sync_requested: 0,
@@ -779,6 +785,14 @@ impl TermHandle {
         if notify {
             self.redraw.notify();
         }
+    }
+
+    /// Requests that the prompt input loop stop and return EOF.
+    ///
+    /// Real terminals poll crossterm input periodically, so this wakes within a
+    /// short timeout even when the user does not press another key.
+    pub fn request_input_shutdown(&self) {
+        self.lock().input_shutdown = true;
     }
 
     /// Run `f` while redraw notifications from this handle are suppressed.
@@ -1410,9 +1424,24 @@ impl Term {
     /// from the test sender returned by `new_virtual`.
     fn next_raw(&self) -> Option<RawEvent> {
         if let Some(rx) = self.term_input_rx.as_ref() {
-            return rx.recv().ok();
+            loop {
+                if self.handle.lock().input_shutdown {
+                    return None;
+                }
+                match rx.recv_timeout(INPUT_SHUTDOWN_POLL_INTERVAL) {
+                    Ok(raw) => return Some(raw),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
+                }
+            }
         }
         loop {
+            if self.handle.lock().input_shutdown {
+                return None;
+            }
+            if !event::poll(INPUT_SHUTDOWN_POLL_INTERVAL).ok()? {
+                continue;
+            }
             let raw = event::read().ok()?;
             tracing::trace!(target: "tau_cli_term_raw::input", ?raw, "terminal raw input event");
             match raw {

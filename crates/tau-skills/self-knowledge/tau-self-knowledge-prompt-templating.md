@@ -18,9 +18,9 @@ Templates are plain prompt text, not HTML. Tau disables default HTML escaping so
 `~/.config/tau/harness.yaml` and `harness.d/*.yaml` can define prompt fragments:
 
 ```yaml
-roleGroups:
+role_groups:
   engineer:
-    promptFragments:
+    prompt_fragments:
       - name: engineers.review-requirement
         priority: 65
         text: |-
@@ -29,9 +29,9 @@ roleGroups:
           If your task involved code changes to a larger project, consider them work in progress until they pass review.
 ```
 
-Top-level `promptFragments` apply to every role. Role-level `promptFragments` apply only to that role or role group. Group-level fragments without `roles:` are mainly useful for overriding an existing built-in group; new groups should define roles. Fragments are sorted by ascending `priority`; priorities below `100` render before later generated system-prompt sections such as skills.
+Top-level `prompt_fragments` apply to every role. Role-level `prompt_fragments` apply only to that role or role group. Group-level fragments without `roles:` are mainly useful for overriding an existing built-in group; new groups should define roles. Fragments are sorted by ascending `priority`; priorities below `100` render before later generated system-prompt sections such as skills.
 
-Roles can also choose a full system prompt template with `promptOverride`; custom templates live under `~/.config/tau/prompts/<name>.hbs`.
+Roles can also choose a full system prompt template with `prompt_override`; custom templates live under `~/.config/tau/prompts/<name>.hbs`.
 
 ## Variables for prompt fragments
 
@@ -63,7 +63,7 @@ Tau registers these helpers:
 Project-specific prompt fragment:
 
 ```yaml
-promptFragments:
+prompt_fragments:
   - name: project.rust-extra
     priority: 80
     text: |-
@@ -79,7 +79,7 @@ promptFragments:
 Exact-directory conditional:
 
 ```yaml
-promptFragments:
+prompt_fragments:
   - name: project.root-only
     priority: 80
     text: |-
@@ -91,11 +91,11 @@ promptFragments:
 Role-specific style fragment:
 
 ```yaml
-roleGroups:
+role_groups:
   user:
     roles:
       assistant:
-        promptFragments:
+        prompt_fragments:
           - name: assistant.personal
             priority: 65
             text: |-
@@ -107,7 +107,7 @@ roleGroups:
 Skill listing fragment:
 
 ```yaml
-promptFragments:
+prompt_fragments:
   - name: debug.skills
     priority: 110
     text: |-

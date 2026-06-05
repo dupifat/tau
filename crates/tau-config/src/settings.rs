@@ -404,7 +404,7 @@ pub struct HarnessSettings {
 
     /// Role selected on startup when no explicit runtime selection has been
     /// made. If the configured role is missing, Tau warns and falls back to
-    /// the first role in `roleGroups` order.
+    /// the first role in `role_groups` order.
     pub default_role: Option<String>,
 
     /// Harness-owned role defaults. Each role is a partial set of model
@@ -434,19 +434,20 @@ pub struct HarnessSettings {
 struct HarnessSettingsWire {
     session_retention_days: u64,
     extensions: HashMap<String, ExtensionEntry>,
-    #[serde(default, rename = "defaultRole")]
+    #[serde(default, alias = "defaultRole")]
     default_role: Option<String>,
-    #[serde(default, rename = "roleGroups")]
+    #[serde(default, alias = "roleGroups")]
     role_groups: RawRoleGroups,
-    #[serde(default, rename = "promptFragments")]
+    #[serde(default, alias = "promptFragments")]
     prompt_fragments: Vec<RolePromptFragment>,
     agents: AgentsSettings,
 }
 #[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 struct AgentsSettings {
+    #[serde(alias = "idTemplate")]
     id_template: String,
-    #[serde(default)]
+    #[serde(default, alias = "displayNameTemplate")]
     display_name_template: Option<String>,
 }
 
@@ -480,16 +481,16 @@ struct HarnessRoleOverrides {
     // the main harness settings layer has already validated the full schema.
     // Leave unrelated top-level fields permissive so future harness settings do
     // not need duplicate ignore entries here.
-    #[serde(default, rename = "roleGroups")]
+    #[serde(default, alias = "roleGroups")]
     role_groups: RawRoleGroups,
-    #[serde(default, rename = "promptFragments")]
+    #[serde(default, alias = "promptFragments")]
     prompt_fragments: Vec<RolePromptFragment>,
 }
 
 /// One ordered group in the role navigation palette.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RoleGroup {
-    /// Stable group name from `roleGroups.<name>`.
+    /// Stable group name from `role_groups.<name>`.
     pub name: String,
     /// Globally unique role names in this group, in configured order.
     pub roles: Vec<String>,
@@ -498,7 +499,7 @@ pub struct RoleGroup {
 type RawRoleGroups = IndexMap<String, RawRoleGroup>;
 
 #[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+#[serde(default, deny_unknown_fields)]
 struct RawRoleGroup {
     // `enabled` was a mistaken old spelling. Keep it as a little bandaid for
     // reading old config during migration.
@@ -508,18 +509,19 @@ struct RawRoleGroup {
     model: Option<ModelId>,
     effort: Option<tau_proto::Effort>,
     verbosity: Option<tau_proto::Verbosity>,
-    #[serde(rename = "thinkingSummary")]
+    #[serde(alias = "thinkingSummary")]
     thinking_summary: Option<tau_proto::ThinkingSummary>,
-    #[serde(rename = "serviceTier")]
+    #[serde(alias = "serviceTier")]
     service_tier: Option<tau_proto::ServiceTier>,
     compaction: Option<RoleCompaction>,
+    #[serde(alias = "promptFragments")]
     prompt_fragments: Vec<RolePromptFragment>,
-    #[serde(rename = "promptOverride")]
+    #[serde(alias = "promptOverride")]
     prompt_override: Option<String>,
     tools: Option<Vec<ToolName>>,
-    #[serde(rename = "enableTools")]
+    #[serde(alias = "enableTools")]
     enable_tools: Vec<ToolName>,
-    #[serde(rename = "disableTools")]
+    #[serde(alias = "disableTools")]
     disable_tools: Vec<ToolName>,
     roles: IndexMap<String, AgentRole>,
 }
@@ -815,7 +817,7 @@ impl FromStr for HarnessConfigCliOverride {
 /// Partial harness role settings loaded from `harness.yaml` and persisted
 /// to state. `None` means "use the selected model's fallback" for every field.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+#[serde(default, deny_unknown_fields)]
 pub struct AgentRole {
     /// Whether this role is part of the effective runtime role set. Defaults to
     /// enabled; set to `false` in a higher-precedence config layer to hide a
@@ -838,10 +840,10 @@ pub struct AgentRole {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verbosity: Option<tau_proto::Verbosity>,
     /// Thinking-summary mode preferred by this role.
-    #[serde(skip_serializing_if = "Option::is_none", rename = "thinkingSummary")]
+    #[serde(skip_serializing_if = "Option::is_none", alias = "thinkingSummary")]
     pub thinking_summary: Option<tau_proto::ThinkingSummary>,
     /// Provider service tier preferred by this role.
-    #[serde(skip_serializing_if = "Option::is_none", rename = "serviceTier")]
+    #[serde(skip_serializing_if = "Option::is_none", alias = "serviceTier")]
     pub service_tier: Option<tau_proto::ServiceTier>,
     /// Automatic provider-side compaction policy for this role. Missing values
     /// inherit from lower-precedence role settings; effective roles default to
@@ -850,12 +852,12 @@ pub struct AgentRole {
     pub compaction: Option<RoleCompaction>,
     /// Prompt fragments contributed by this role. Fragments are rendered as
     /// Handlebars templates and ordered together with tool/extension fragments.
-    #[serde(skip_serializing_if = "Vec::is_empty", rename = "promptFragments")]
+    #[serde(skip_serializing_if = "Vec::is_empty", alias = "promptFragments")]
     pub prompt_fragments: Vec<RolePromptFragment>,
     /// Optional system prompt template name for this role. "built-in" selects
     /// Tau's embedded default template. Other names resolve to
     /// `<config_dir>/prompts/<name>.hbs`.
-    #[serde(skip_serializing_if = "Option::is_none", rename = "promptOverride")]
+    #[serde(skip_serializing_if = "Option::is_none", alias = "promptOverride")]
     pub prompt_override: Option<String>,
     /// Explicit internal tool names enabled for this role. When unset, tools
     /// use their own default enablement.
@@ -863,23 +865,20 @@ pub struct AgentRole {
     pub tools: Option<Vec<ToolName>>,
     /// Internal tool names enabled in addition to the `tools` allow-list or the
     /// default tool set.
-    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "enableTools")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty", alias = "enableTools")]
     pub enable_tools: Vec<ToolName>,
     /// Internal tool names disabled for this role even if selected or enabled
     /// by default.
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        rename = "disableTools"
-    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty", alias = "disableTools")]
     pub disable_tools: Vec<ToolName>,
 }
 
 /// Automatic provider-side compaction policy for a harness role.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub enum RoleCompaction {
     /// Ask the provider to use its model-specific default threshold.
+    #[serde(alias = "providerDefault")]
     ProviderDefault,
     /// Do not request provider-side automatic compaction.
     Disabled,
@@ -935,7 +934,7 @@ impl AgentRole {
 
 /// One prompt fragment configured on a harness role.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct RolePromptFragment {
     /// Stable fragment name, preferably namespaced by role or purpose.
     pub name: String,
@@ -974,7 +973,7 @@ impl fmt::Display for SettingsError {
                 second_group,
             } => write!(
                 f,
-                "role `{role}` appears in multiple roleGroups (`{first_group}` and `{second_group}`)"
+                "role `{role}` appears in multiple role_groups (`{first_group}` and `{second_group}`)"
             ),
             Self::UnknownRoleCliOverride(role) => {
                 write!(f, "unknown role in CLI override: `{role}`")
@@ -1214,6 +1213,53 @@ impl config::Source for HarnessConfigOverrideSource {
     }
 }
 
+fn normalize_alias_key(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+    alias: &str,
+    canonical: &str,
+) {
+    if let Some(value) = map.remove(alias) {
+        map.insert(canonical.to_owned(), value);
+    }
+}
+
+fn normalize_role_config_keys(value: &mut serde_json::Value) {
+    let serde_json::Value::Object(map) = value else {
+        return;
+    };
+    normalize_alias_key(map, "thinkingSummary", "thinking_summary");
+    normalize_alias_key(map, "serviceTier", "service_tier");
+    normalize_alias_key(map, "promptFragments", "prompt_fragments");
+    normalize_alias_key(map, "promptOverride", "prompt_override");
+    normalize_alias_key(map, "enableTools", "enable_tools");
+    normalize_alias_key(map, "disableTools", "disable_tools");
+}
+
+fn normalize_harness_config_value(value: &mut serde_json::Value) {
+    let serde_json::Value::Object(map) = value else {
+        return;
+    };
+    normalize_alias_key(map, "defaultRole", "default_role");
+    normalize_alias_key(map, "roleGroups", "role_groups");
+    normalize_alias_key(map, "promptFragments", "prompt_fragments");
+    if let Some(serde_json::Value::Object(agents)) = map.get_mut("agents") {
+        normalize_alias_key(agents, "idTemplate", "id_template");
+        normalize_alias_key(agents, "displayNameTemplate", "display_name_template");
+    }
+    if let Some(serde_json::Value::Object(role_groups)) = map.get_mut("role_groups") {
+        for group in role_groups.values_mut() {
+            normalize_role_config_keys(group);
+            if let serde_json::Value::Object(group_map) = group
+                && let Some(serde_json::Value::Object(roles)) = group_map.get_mut("roles")
+            {
+                for role in roles.values_mut() {
+                    normalize_role_config_keys(role);
+                }
+            }
+        }
+    }
+}
+
 fn load_yaml_layered_with_builtin_and_harness_overrides<T: for<'de> Deserialize<'de>>(
     built_in_text: &'static str,
     dir: Option<&Path>,
@@ -1226,10 +1272,11 @@ fn load_yaml_layered_with_builtin_and_harness_overrides<T: for<'de> Deserialize<
     for override_ in overrides {
         builder = builder.add_source(harness_config_override_source(override_)?);
     }
-    builder
-        .build()?
-        .try_deserialize()
-        .map_err(SettingsError::from)
+    let config = builder.build()?;
+    let mut value: serde_json::Value = config.try_deserialize()?;
+    normalize_harness_config_value(&mut value);
+    serde_json::from_value(value)
+        .map_err(|error| SettingsError::Config(config::ConfigError::Message(error.to_string())))
 }
 
 fn harness_role_cli_override_layers(

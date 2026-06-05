@@ -231,7 +231,9 @@ fn validate_cli_overrides_rejects_invalid_harness_config_override() {
 
     let err = validate_cli_overrides(&[], &[], &overrides).expect_err("wrong type fails");
 
-    assert!(err.to_string().contains("session_retention_days"));
+    let err = err.to_string();
+    assert!(err.contains("invalid type"));
+    assert!(err.contains("expected u64"));
 }
 
 #[test]

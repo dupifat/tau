@@ -1,14 +1,14 @@
 # Built-in HarnessSettings defaults. Harness-owned roles and prompt fragments
 # are provided as ordinary config so user partial overrides keep built-in fields.
 session_retention_days: 60
-defaultRole: senior-engineer
+default_role: senior-engineer
 extensions: {}
 agents:
-  idTemplate: "{{random_alphanumeric 6}}"
-  displayNameTemplate: "{{#if task_name_present}}{{role}}: {{task_name}}{{else}}{{role}}{{/if}}"
-roleGroups:
+  id_template: "{{random_alphanumeric 6}}"
+  display_name_template: "{{#if task_name_present}}{{role}}: {{task_name}}{{else}}{{role}}{{/if}}"
+role_groups:
   engineer:
-    promptFragments:
+    prompt_fragments:
       - name: engineer.instructions
         priority: 15
         text: |-
@@ -45,7 +45,7 @@ roleGroups:
         enable: true
         description: Role focused on splitting and delegation of tasks to other sub-agents.
         effort: low
-        promptFragments:
+        prompt_fragments:
           - name: manager.instructions
             priority: 5
             text: |-

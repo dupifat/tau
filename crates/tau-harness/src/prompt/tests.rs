@@ -382,7 +382,7 @@ fn prompt_fragments_order_by_priority_name_and_expose_priority() {
 }
 
 /// The revived larger system prompt is shipped as a built-in template so
-/// roles can select it with `promptOverride: big` without copying it into
+/// roles can select it with `prompt_override: big` without copying it into
 /// user configuration.
 #[test]
 fn big_system_prompt_template_is_builtin_and_renders_context() {

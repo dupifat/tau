@@ -170,7 +170,7 @@ impl HarnessRoleDetails {
 /// One ordered role group used for keyboard navigation and grouped menus.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HarnessRoleGroup {
-    /// Stable group name from harness `roleGroups` configuration.
+    /// Stable group name from harness `role_groups` configuration.
     pub name: String,
     /// Role names in navigation order. Names are accepted by `ui.role_select`.
     pub roles: Vec<String>,
@@ -810,7 +810,7 @@ pub struct ToolSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<ToolFormat>,
     /// Whether this tool should be advertised to the agent when the role has
-    /// no explicit `tools` allow-list and `disableTools` does not remove it.
+    /// no explicit `tools` allow-list and `disable_tools` does not remove it.
     #[serde(default = "tool_enabled_by_default", skip_serializing_if = "is_true")]
     pub enabled_by_default: bool,
     /// Whether the harness may close the model-visible foreground turn before

@@ -9,29 +9,29 @@
 # (`present`, `path`, `basename`, `ancestors`), `eq`, and `starts_with` for
 # project-specific conditionals. Priorities below
 # 100 render before generated context such as skills and AGENTS.md.
-# promptFragments:
+# prompt_fragments:
 #   - name: user.short-plain-style
 #     priority: 65
 #     text: Keep answers short and plain, using only simple words.
 
 # Optional startup role. If omitted, Tau starts on the first role in
-# `roleGroups` order. If the named role is missing, Tau warns and falls back to
+# `role_groups` order. If the named role is missing, Tau warns and falls back to
 # that first role.
-# defaultRole: senior-engineer
+# default_role: senior-engineer
 
 # Optional grouped role defaults. Role names are globally unique across all
 # groups. Tab cycles between groups; Shift-Tab cycles within the selected
 # role's group. Group-level fields are defaults for every role in `roles`.
 # `description` is shown in `/role ...` completions. `compaction` controls
-# provider-side automatic compaction: omit it or set `providerDefault` for the
+# provider-side automatic compaction: omit it or set `provider_default` for the
 # provider's model-specific default, `disabled` to turn it off, or `{ threshold:
 # 200000 }` for an explicit token threshold.
-# Per-role `promptFragments` add instructions only for that role.
-# `promptOverride` selects a system prompt template. `tools` and `disableTools`
+# Per-role `prompt_fragments` add instructions only for that role.
+# `prompt_override` selects a system prompt template. `tools` and `disable_tools`
 # customize internal tool availability for the role.
-# roleGroups:
+# role_groups:
 #   engineer:
-#     promptFragments:
+#     prompt_fragments:
 #       - name: engineer.careful
 #         priority: 80
 #         text: You are a careful coding agent.
@@ -43,7 +43,7 @@
 #         model: chatgpt/gpt-5.5
 #         compaction: { threshold: 200000 }
 #         tools: [read, grep]
-#         disableTools: [shell]
+#         disable_tools: [shell]
 #       staff-engineer:
 #         effort: xhigh
 #       old-role:

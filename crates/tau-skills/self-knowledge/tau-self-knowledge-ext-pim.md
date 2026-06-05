@@ -49,7 +49,7 @@ Important migration from old email-only config:
 - Move old email fields from `extensions.std-email.config.*` to `extensions.std-pim.config.email.*`.
 - Put calendar config under `extensions.std-pim.config.calendar.*`.
 - Keep secret declarations under `extensions.std-pim.secrets`.
-- Add the needed split tool names to any role's `enableTools` list, for example `email_list_folders`, `email_get`, `email_send`, `calendar_list_calendars`, `calendar_search`, and `calendar_get`.
+- Add the needed split tool names to any role's `enable_tools` list, for example `email_list_folders`, `email_get`, `email_send`, `calendar_list_calendars`, `calendar_search`, and `calendar_get`.
 
 
 ## Secrets

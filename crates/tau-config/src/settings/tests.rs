@@ -235,8 +235,8 @@ fn harness_settings_accept_agent_id_template_in_user_config() {
         dir.join("harness.yaml"),
         r#"{
             agents: {
-                idTemplate: "{{role}}-{{random_alphanumeric 4}}",
-                displayNameTemplate: "{{role_group}} {{task_name}}",
+                id_template: "{{role}}-{{random_alphanumeric 4}}",
+                display_name_template: "{{role_group}} {{task_name}}",
             },
         }"#,
     )
@@ -250,6 +250,59 @@ fn harness_settings_accept_agent_id_template_in_user_config() {
     assert_eq!(
         settings.agent_display_name_template.as_deref(),
         Some("{{role_group}} {{task_name}}")
+    );
+}
+
+#[test]
+fn harness_settings_accept_legacy_camel_case_overrides_over_snake_case_builtins() {
+    // Built-in defaults now use snake_case. Legacy user layers still need to
+    // override them instead of becoming duplicate alias fields after layering.
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"{
+            defaultRole: "manager",
+            agents: { idTemplate: "legacy-{{random_alphanumeric 4}}" },
+            roleGroups: {
+                engineer: {
+                    promptFragments: [{ name: "legacy.group", priority: 80, text: "group" }],
+                    roles: {
+                        "senior-engineer": {
+                            enableTools: ["web_search"],
+                            promptFragments: [{ name: "legacy.role", priority: 90, text: "role" }],
+                        },
+                    },
+                },
+            },
+        }"#,
+    )
+    .expect("write");
+
+    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+    assert_eq!(settings.default_role.as_deref(), Some("manager"));
+    assert_eq!(
+        settings.agent_id_template,
+        "legacy-{{random_alphanumeric 4}}"
+    );
+    let senior = settings.roles.get("senior-engineer").expect("senior role");
+    assert!(
+        senior
+            .enable_tools
+            .iter()
+            .any(|tool| tool.as_str() == "web_search")
+    );
+    assert!(
+        senior
+            .prompt_fragments
+            .iter()
+            .any(|fragment| fragment.name.as_str() == "legacy.group")
+    );
+    assert!(
+        senior
+            .prompt_fragments
+            .iter()
+            .any(|fragment| fragment.name.as_str() == "legacy.role")
     );
 }
 
@@ -306,7 +359,7 @@ fn harness_config_cli_overrides_can_update_roles() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     let overrides = [HarnessConfigCliOverride::from_str(
-        "roleGroups.engineer.roles.senior-engineer.effort=low",
+        "role_groups.engineer.roles.senior-engineer.effort=low",
     )
     .expect("override")];
 
@@ -332,10 +385,10 @@ fn harness_settings_load_role_tool_lists() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            roleGroups: {
+            role_groups: {
                 engineer: {
                     roles: {
-                        engineer: { tools: ["read", "grep"], enableTools: ["web_search"], disableTools: ["grep"] },
+                        engineer: { tools: ["read", "grep"], enable_tools: ["web_search"], disable_tools: ["grep"] },
                     },
                 },
             },
@@ -368,7 +421,7 @@ fn harness_settings_load_role_compaction() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            roleGroups: {
+            role_groups: {
                 engineer: {
                     compaction: { threshold: 70000 },
                     roles: {
@@ -404,8 +457,8 @@ fn harness_settings_load_role_group_default_tool_overrides_without_relisting_rol
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            roleGroups: {
-                engineer: { enableTools: ["email_search"], disableTools: ["email"] },
+            role_groups: {
+                engineer: { enable_tools: ["email_search"], disable_tools: ["email"] },
             },
         }"#,
     )
@@ -431,9 +484,9 @@ fn harness_settings_allow_new_role_group() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            roleGroups: {
+            role_groups: {
                 reviewers: {
-                    disableTools: ["email"],
+                    disable_tools: ["email"],
                     roles: {
                         reviewer: { effort: "high" },
                     },
@@ -458,7 +511,7 @@ fn harness_settings_rejects_role_in_multiple_groups() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            roleGroups: {
+            role_groups: {
                 reviewers: {
                     roles: {
                         senior-engineer: { effort: "high" },
@@ -474,7 +527,7 @@ fn harness_settings_rejects_role_in_multiple_groups() {
     assert!(
         error
             .to_string()
-            .contains("role `senior-engineer` appears in multiple roleGroups"),
+            .contains("role `senior-engineer` appears in multiple role_groups"),
         "error should mention duplicate role: {error}"
     );
 }
@@ -504,7 +557,7 @@ fn harness_settings_rejects_unknown_role_fields() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            roleGroups: {
+            role_groups: {
                 engineer: {
                     roles: {
                         senior-engineer: { staleRoleField: true },
@@ -532,7 +585,7 @@ fn harness_settings_rejects_unknown_prompt_fragment_fields() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            promptFragments: [
+            prompt_fragments: [
                 { name: "global.typo", priority: 50, text: "x", staleFragmentField: true },
             ],
         }"#,
@@ -554,7 +607,7 @@ fn harness_settings_role_cli_overrides_apply_in_order_after_config() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            roleGroups: {
+            role_groups: {
                 manager: {
                     roles: {
                         manager: { enable: false },
@@ -665,13 +718,13 @@ fn harness_drop_in_layers_merge_through_domain_overrides() {
             extensions: {
                 mything: { command: ["mything"] },
             },
-            promptFragments: [
+            prompt_fragments: [
                 { name: "global.local", priority: 60, text: "Local global instruction." },
             ],
-            roleGroups: {
+            role_groups: {
                 manager: {
                     roles: {
-                        manager: { promptFragments: [{ name: "manager.local", priority: 170, text: "Local manager instruction." }] },
+                        manager: { prompt_fragments: [{ name: "manager.local", priority: 170, text: "Local manager instruction." }] },
                     },
                 },
             },
@@ -686,13 +739,13 @@ fn harness_drop_in_layers_merge_through_domain_overrides() {
             extensions: {
                 mything: { suffix: ["--flag"] },
             },
-            promptFragments: [
+            prompt_fragments: [
                 { name: "global.drop-in", priority: 70, text: "Drop-in global instruction." },
             ],
-            roleGroups: {
+            role_groups: {
                 manager: {
                     roles: {
-                        manager: { promptFragments: [{ name: "manager.drop-in", priority: 180, text: "Drop-in manager instruction." }] },
+                        manager: { prompt_fragments: [{ name: "manager.drop-in", priority: 180, text: "Drop-in manager instruction." }] },
                     },
                 },
             },
@@ -763,10 +816,10 @@ fn harness_global_prompt_fragments_apply_to_all_roles() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            promptFragments: [
+            prompt_fragments: [
                 { name: "global.simple", priority: 65, text: "Use simple words." },
             ],
-            roleGroups: {
+            role_groups: {
                 custom: {
                     roles: {
                         custom: { model: "openai/custom" },
@@ -780,7 +833,7 @@ fn harness_global_prompt_fragments_apply_to_all_roles() {
     std::fs::write(
         dir.join("harness.d").join("01-repeat.yaml"),
         r#"{
-            promptFragments: [
+            prompt_fragments: [
                 { name: "global.simple", priority: 65, text: "Use simple words." },
             ],
         }"#,
@@ -817,11 +870,11 @@ fn harness_roles_merge_with_built_ins() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            roleGroups: {
+            role_groups: {
                 engineer: {
                     roles: {
                         engineer: { model: "openai/gpt-5.5", tools: ["read"] },
-                        custom: { description: "Custom local role", effort: "medium", disableTools: ["shell"] },
+                        custom: { description: "Custom local role", effort: "medium", disable_tools: ["shell"] },
                     },
                 },
                 manager: {
@@ -888,7 +941,7 @@ fn harness_manager_partial_override_keeps_built_in_prompt_fragments() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            roleGroups: {
+            role_groups: {
                 manager: {
                     roles: {
                         manager: { model: "openai/gpt-5.5" },
@@ -923,10 +976,10 @@ fn harness_manager_prompt_fragments_extend_built_in_prompt_fragments() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            roleGroups: {
+            role_groups: {
                 manager: {
                     roles: {
-                        manager: { promptFragments: [{ name: "manager.custom", priority: 100, text: "Custom manager prompt." }] },
+                        manager: { prompt_fragments: [{ name: "manager.custom", priority: 100, text: "Custom manager prompt." }] },
                     },
                 },
             },
@@ -959,19 +1012,19 @@ fn harness_role_group_fields_apply_as_role_defaults() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            roleGroups: {
+            role_groups: {
                 review: {
                     effort: "low",
                     tools: ["read"],
-                    enableTools: ["grep"],
-                    promptFragments: [
+                    enable_tools: ["grep"],
+                    prompt_fragments: [
                         { name: "review.shared", priority: 80, text: "Review carefully." },
                     ],
                     roles: {
                         quick: {},
                         deep: {
                             effort: "xhigh",
-                            promptFragments: [
+                            prompt_fragments: [
                                 { name: "review.deep", priority: 90, text: "Look for subtle issues." },
                             ],
                         },
@@ -1017,11 +1070,11 @@ fn harness_role_prompt_fragments_parse_as_plain_strings() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            roleGroups: {
+            role_groups: {
                 review: {
                     roles: {
                         custom: {
-                            promptFragments: [
+                            prompt_fragments: [
                                 { name: "custom.reviewer", priority: 100, text: "You are a focused reviewer." },
                                 { name: "custom.patch-style", priority: 200, text: "Prefer small patches." },
                             ],
@@ -1116,7 +1169,7 @@ fn harness_role_groups_load_custom_roles() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            roleGroups: {
+            role_groups: {
                 coding: {
                     roles: {
                         custom: { effort: "medium", tools: ["read"] },
@@ -1160,7 +1213,7 @@ fn harness_role_groups_reject_duplicate_role_names() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            roleGroups: {
+            role_groups: {
                 coding: { roles: { engineer: {} } },
                 review: { roles: { engineer: {} } },
             },
@@ -1169,7 +1222,7 @@ fn harness_role_groups_reject_duplicate_role_names() {
     .expect("write");
 
     let err = load_harness_settings_in(&dirs_with_config(dir)).expect_err("duplicate role");
-    assert!(err.to_string().contains("appears in multiple roleGroups"));
+    assert!(err.to_string().contains("appears in multiple role_groups"));
 }
 
 #[test]
@@ -1206,8 +1259,8 @@ fn harness_role_enable_false_filters_built_in_roles_after_merging() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            defaultRole: "senior-engineer",
-            roleGroups: {
+            default_role: "senior-engineer",
+            role_groups: {
                 engineer: {
                     roles: {
                         "junior-engineer": { enable: false },
@@ -1244,7 +1297,7 @@ fn harness_role_enabled_alias_is_kept_for_old_config() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            roleGroups: {
+            role_groups: {
                 legacy: {
                     enabled: false,
                     roles: {
@@ -1278,12 +1331,12 @@ fn harness_role_enable_can_be_reenabled_by_later_layers() {
     std::fs::create_dir_all(dir.join("harness.d")).expect("mkdir drop-ins");
     std::fs::write(
         dir.join("harness.yaml"),
-        r#"{ roleGroups: { engineer: { roles: { "staff-engineer": { enable: false } } } } }"#,
+        r#"{ role_groups: { engineer: { roles: { "staff-engineer": { enable: false } } } } }"#,
     )
     .expect("write base");
     std::fs::write(
         dir.join("harness.d/10-enable.yaml"),
-        r#"{ roleGroups: { engineer: { roles: { "staff-engineer": { enable: true, effort: "xhigh" } } } } }"#,
+        r#"{ role_groups: { engineer: { roles: { "staff-engineer": { enable: true, effort: "xhigh" } } } } }"#,
     )
     .expect("write drop-in");
 

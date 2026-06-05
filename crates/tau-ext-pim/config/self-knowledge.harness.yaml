@@ -79,11 +79,11 @@ extensions:
           write:
             require_approval: true
             max_attendees: 50
-roleGroups:
+role_groups:
   user:
     roles:
       assistant:
-        enableTools:
+        enable_tools:
           - email_list_folders
           - email_search
           - email_get

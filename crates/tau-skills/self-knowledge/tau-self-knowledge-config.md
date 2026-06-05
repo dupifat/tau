@@ -43,12 +43,12 @@ Tau layers these defaults underneath user config and `*.d/*.yaml` drop-ins.
 
 ## Agent IDs and display names
 
-Tau mints durable agent IDs from the harness setting `agents.idTemplate`. Tau can also name newly created agents with optional `agents.displayNameTemplate`:
+Tau mints durable agent IDs from the harness setting `agents.id_template`. Tau can also name newly created agents with optional `agents.display_name_template`:
 
 ```yaml
 agents:
-  idTemplate: "{{{{role_group}}}}-{{{{random_alphanumeric 4}}}}"
-  displayNameTemplate: "{{{{role_group}}}}: {{{{task_name}}}}"
+  id_template: "{{{{role_group}}}}-{{{{random_alphanumeric 4}}}}"
+  display_name_template: "{{{{role_group}}}}: {{{{task_name}}}}"
 ```
 
 The built-in ID template is `{{{{random_alphanumeric 6}}}}`; the built-in display-name template is `{{{{#if task_name_present}}}}{{{{role}}}}: {{{{task_name}}}}{{{{else}}}}{{{{role}}}}{{{{/if}}}}`. Both template types are rendered with Handlebars in strict mode.

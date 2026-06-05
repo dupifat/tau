@@ -5392,7 +5392,7 @@ impl Harness {
         }) = missing
         {
             self.emit_info_important(&format!(
-                "defaultRole `{requested}` is not configured; selected `{fallback}` instead"
+                "default_role `{requested}` is not configured; selected `{fallback}` instead"
             ));
         }
     }

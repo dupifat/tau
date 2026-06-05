@@ -487,8 +487,8 @@ fn load_roles_ignores_stale_harness_state() {
     std::fs::write(
         config_dir.join("harness.yaml"),
         r#"{
-            defaultRole: "engineer",
-            roleGroups: {
+            default_role: "engineer",
+            role_groups: {
                 engineer: {
                     roles: {
                         engineer: { model: "openai/gpt-4.1", effort: "high", verbosity: "medium" },
@@ -595,8 +595,8 @@ fn load_roles_falls_back_to_engineer_role_while_models_are_provider_owned() {
     std::fs::write(
         config_dir.join("harness.yaml"),
         r#"{
-            defaultRole: "engineer",
-            roleGroups: {
+            default_role: "engineer",
+            role_groups: {
                 engineer: {
                     roles: {
                         engineer: { model: "local/engineer" },
@@ -668,8 +668,8 @@ fn role_missing_fields_use_model_defaults() {
     std::fs::write(
         config_dir.join("harness.yaml"),
         r#"{
-            defaultRole: "plain",
-            roleGroups: {
+            default_role: "plain",
+            role_groups: {
                 engineer: {
                     roles: {
                         engineer: { model: "local/engineer", effort: "high" },
@@ -807,7 +807,7 @@ fn harness_startup_errors_when_no_roles_are_enabled() {
     std::fs::write(
         config_dir.join("harness.yaml"),
         r#"{
-            roleGroups: {
+            role_groups: {
                 engineer: {
                     roles: {
                         "senior-engineer": { enable: false },
@@ -853,15 +853,15 @@ fn missing_default_role_emits_important_info_and_falls_back() {
     std::fs::write(
         config_dir.join("harness.yaml"),
         r#"{
-            defaultRole: "ghost",
+            default_role: "ghost",
         }"#,
     )
     .expect("write harness config");
 
     let h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
     assert_eq!(h.selected_role, "junior-engineer");
-    let message = find_important_info(&h, "defaultRole `ghost`")
-        .expect("expected Important HarnessInfo about missing defaultRole");
+    let message = find_important_info(&h, "default_role `ghost`")
+        .expect("expected Important HarnessInfo about missing default_role");
     assert!(
         message.contains("selected `junior-engineer` instead"),
         "message should name the fallback role, got: {message}"

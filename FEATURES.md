@@ -122,15 +122,15 @@ backends thread through to the provider request:
 Defaults are normally selected through agent roles in `harness.yaml`:
 
 ```yaml
-promptFragments:
+prompt_fragments:
   - name: user.short-plain-style
     priority: 65
     text: Keep answers short and plain, using only simple words.
 
-defaultRole: senior-engineer
-roleGroups:
+default_role: senior-engineer
+role_groups:
   engineer:
-    promptFragments:
+    prompt_fragments:
       - name: engineer.workflow
         priority: 66
         text: Focus on implementation details.
@@ -143,7 +143,7 @@ roleGroups:
         model: chatgpt/gpt-5.5
         effort: medium
         tools: [read, grep]
-        enableTools: [web_search]
+        enable_tools: [web_search]
       staff-engineer:
         description: Maximum-reasoning engineer
         effort: xhigh
@@ -152,22 +152,22 @@ roleGroups:
   manager:
     roles:
       manager:
-        promptFragments:
+        prompt_fragments:
           - name: manager.workflow
             priority: 66
             text: Delegate non-trivial work.
 ```
 
 Roles can include a `description` shown after the model/knob summary in
-`/role ...` completions. Top-level `promptFragments` apply to every role;
+`/role ...` completions. Top-level `prompt_fragments` apply to every role;
 group-level fields apply as defaults to that group's roles; per-role
-`promptFragments` apply only to that role. Roles can set
+`prompt_fragments` apply only to that role. Roles can set
 `compaction` to use provider-default automatic compaction, disable it, or set
 an explicit token threshold, and can also
-use `tools`, `enableTools`, and `disableTools` to customize internal tool availability. `tools` overrides the default set when present, `enableTools` adds to the selected set, and `disableTools` removes from it.
+use `tools`, `enable_tools`, and `disable_tools` to customize internal tool availability. `tools` overrides the default set when present, `enable_tools` adds to the selected set, and `disable_tools` removes from it.
 
-`defaultRole` selects the startup role; if it is omitted Tau starts on the
-first role in `roleGroups` order. `tau --role <role>` overrides the startup role
+`default_role` selects the startup role; if it is omitted Tau starts on the
+first role in `role_groups` order. `tau --role <role>` overrides the startup role
 for one newly spawned session. `/model <role>` switches roles for the current
 run; `/role <role> <setting> <value>` edits role settings for the current
 process only. See
@@ -292,7 +292,7 @@ machine- or user-specific instructions and skills that should usually be added
 to `.gitignore` instead of checked in.
 
 Prompt fragments are composable too: top-level `harness.yaml`
-`promptFragments` apply to every role, while `roles.<name>.promptFragments`
+`prompt_fragments` apply to every role, while `roles.<name>.prompt_fragments`
 apply only to that role. Fragments are ordered by priority with extension- and
 tool-provided fragments, so global style instructions, role guidance, and
 tool-specific instructions share one prompt assembly path. Fragment templates

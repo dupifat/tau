@@ -1311,15 +1311,18 @@ impl Term {
                     self.handle.redraw.notify();
                 }
                 RawEvent::Resize(w, h) => {
-                    {
+                    let (width, height) = {
                         let mut st = self.handle.lock();
-                        st.width = w as usize;
-                        st.height = h as usize;
-                    }
+                        let width = effective_resize_dimension(w, st.width);
+                        let height = effective_resize_dimension(h, st.height);
+                        st.width = width;
+                        st.height = height;
+                        (width, height)
+                    };
                     self.handle.redraw.notify();
                     return Ok(Event::Resize {
-                        width: w,
-                        height: h,
+                        width: size_event_dimension(width),
+                        height: size_event_dimension(height),
                     });
                 }
                 RawEvent::FocusChanged { focused } => {
@@ -1376,7 +1379,13 @@ impl Term {
                 }
                 Some(RawEvent::Key(key))
             }
-            CtEvent::Resize(w, h) => Some(RawEvent::Resize(w, h)),
+            CtEvent::Resize(w, h) => {
+                let (actual_w, actual_h) = raw_term_size().unwrap_or((0, 0));
+                Some(RawEvent::Resize(
+                    resample_resize_dimension(w, actual_w),
+                    resample_resize_dimension(h, actual_h),
+                ))
+            }
             CtEvent::FocusGained => Some(RawEvent::FocusChanged { focused: true }),
             CtEvent::FocusLost => Some(RawEvent::FocusChanged { focused: false }),
             CtEvent::Paste(text) => Some(RawEvent::Paste(text)),
@@ -3300,9 +3309,30 @@ fn move_cursor_vertical(st: &SharedState, delta: isize, target_col: usize) -> Op
 }
 
 fn term_size() -> (usize, usize) {
-    terminal::size()
-        .map(|(w, h)| (w as usize, h as usize))
+    raw_term_size()
+        .map(|(w, h)| (usize::from(w).max(1), usize::from(h).max(1)))
         .unwrap_or((80, 24))
+}
+
+fn raw_term_size() -> io::Result<(u16, u16)> {
+    terminal::size()
+}
+
+fn resample_resize_dimension(reported: u16, actual: u16) -> u16 {
+    if 0 < reported { reported } else { actual }
+}
+
+fn effective_resize_dimension(reported: u16, fallback: usize) -> usize {
+    let reported = usize::from(reported);
+    if 0 < reported {
+        reported
+    } else {
+        fallback.max(1)
+    }
+}
+
+fn size_event_dimension(value: usize) -> u16 {
+    u16::try_from(value).unwrap_or(u16::MAX)
 }
 
 fn normalize_paste_text(text: String) -> String {

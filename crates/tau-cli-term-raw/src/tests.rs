@@ -2660,6 +2660,60 @@ fn resize_full_redraw_discards_rubber_gap() {
     );
 }
 
+#[test]
+fn resize_resampling_uses_actual_size_without_hiding_zero() {
+    assert_eq!(resample_resize_dimension(0, 80), 80);
+    assert_eq!(resample_resize_dimension(120, 80), 120);
+    assert_eq!(resample_resize_dimension(0, 0), 0);
+}
+
+/// Transient zero-sized resize reports from terminals/tmux are ignored so the
+/// prompt does not get stuck wrapping every character as its own row.
+#[test]
+fn zero_resize_keeps_previous_tracked_size() {
+    let buf = SharedBuffer::new();
+    let mut parser = vt100::Parser::new(5, 40, 50);
+    let (term, handle, input_tx) =
+        Term::new_virtual(40, 5, "> ", Box::new(buf.clone()), CursorShape::Bar);
+    flush_redraws(&handle, &buf, &mut parser);
+
+    input_tx
+        .send(RawEvent::Resize(0, 0))
+        .expect("send zero resize event");
+    assert!(matches!(
+        term.get_next_event().expect("resize event"),
+        Event::Resize {
+            width: 40,
+            height: 5
+        }
+    ));
+    assert_eq!(handle.size(), (40, 5));
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+        )))
+        .expect("send first key");
+    assert!(matches!(
+        term.get_next_event().expect("first key event"),
+        Event::BufferChanged
+    ));
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('b'),
+            KeyModifiers::NONE,
+        )))
+        .expect("send second key");
+    assert!(matches!(
+        term.get_next_event().expect("second key event"),
+        Event::BufferChanged
+    ));
+    flush_redraws(&handle, &buf, &mut parser);
+
+    assert_terminal_rows_match(&mut parser, 40, 5, &["> ab"]);
+}
+
 /// Resize full redraw must rebuild terminal scrollback correctly even when rows
 /// exactly fill the old or new width.
 #[test]

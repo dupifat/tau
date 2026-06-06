@@ -25,6 +25,18 @@ use crate::tool_render::{
     ui_dir_block,
 };
 
+pub(crate) const UI_IO_MEDIUM_BYTES_PER_SEC: u64 = 10 * 1024;
+const UI_IO_HIGH_BYTES_PER_SEC: u64 = 100 * 1024;
+
+/// Rolling UI↔harness socket throughput maxima for one terminal UI.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct UiIoStats {
+    /// Maximum bytes per second sent from this UI to the harness.
+    pub(crate) uplink_max_bytes_per_sec: u64,
+    /// Maximum bytes per second received by this UI from the harness.
+    pub(crate) downlink_max_bytes_per_sec: u64,
+}
+
 pub(crate) struct EventRenderer {
     handle: tau_cli_term::TermHandle,
     completion_data: tau_cli_term::CompletionData,
@@ -183,6 +195,10 @@ pub(crate) struct EventRenderer {
     show_turn_stats: bool,
     /// Whether to show a temporary full-redraw counter in the status bar.
     redraw_counter: bool,
+    /// Whether to show UI↔harness socket throughput in the status bar.
+    show_ui_io: bool,
+    /// Latest rolling UI↔harness socket throughput maxima.
+    ui_io_stats: UiIoStats,
     last_full_render_count: u64,
     last_full_render_at: Option<Instant>,
     /// Tool block visibility mode.
@@ -767,6 +783,68 @@ fn push_status_chip(
     *needs_space = true;
 }
 
+fn push_ui_io_status_chip(
+    themed: &mut tau_themes::ThemedText,
+    needs_space: &mut bool,
+    stats: UiIoStats,
+    low_style: tau_themes::StyleIdx,
+    medium_style: tau_themes::StyleIdx,
+    high_style: tau_themes::StyleIdx,
+) {
+    let style = ui_io_status_style(stats, low_style, medium_style, high_style);
+    push_status_chip(
+        themed,
+        style,
+        needs_space,
+        format!(
+            "io ↑{} ↓{}",
+            format_ui_io_rate(stats.uplink_max_bytes_per_sec),
+            format_ui_io_rate(stats.downlink_max_bytes_per_sec)
+        ),
+    );
+}
+
+fn ui_io_status_style(
+    stats: UiIoStats,
+    low_style: tau_themes::StyleIdx,
+    medium_style: tau_themes::StyleIdx,
+    high_style: tau_themes::StyleIdx,
+) -> tau_themes::StyleIdx {
+    let max_bytes_per_sec = stats
+        .uplink_max_bytes_per_sec
+        .max(stats.downlink_max_bytes_per_sec);
+    if max_bytes_per_sec < UI_IO_MEDIUM_BYTES_PER_SEC {
+        low_style
+    } else if max_bytes_per_sec < UI_IO_HIGH_BYTES_PER_SEC {
+        medium_style
+    } else {
+        high_style
+    }
+}
+
+fn format_ui_io_rate(bytes_per_sec: u64) -> String {
+    if bytes_per_sec == 0 {
+        return "0".to_owned();
+    }
+    if bytes_per_sec < 1024 {
+        return format!("{bytes_per_sec}B");
+    }
+    if bytes_per_sec < 1024 * 1024 {
+        return format_ui_io_scaled_rate(bytes_per_sec, 1024, "K");
+    }
+    format_ui_io_scaled_rate(bytes_per_sec, 1024 * 1024, "M")
+}
+
+fn format_ui_io_scaled_rate(bytes_per_sec: u64, divisor: u64, suffix: &str) -> String {
+    let whole = bytes_per_sec / divisor;
+    let tenth = bytes_per_sec % divisor * 10 / divisor;
+    if whole < 10 && tenth != 0 {
+        format!("{whole}.{tenth}{suffix}")
+    } else {
+        format!("{whole}{suffix}")
+    }
+}
+
 fn update_compaction_status(
     update: &tau_proto::ProviderResponseUpdated,
 ) -> Option<(CompactionStatus, String)> {
@@ -960,6 +1038,8 @@ impl EventRenderer {
             show_turn_stats: state.show_turn_stats,
             show_tools: state.show_tools,
             show_messages: state.show_messages,
+            show_ui_io: state.show_ui_io,
+            ui_io_stats: UiIoStats::default(),
             tool_summaries: HashMap::new(),
             prompt_tool_summary: None,
             prompt_tool_summary_active: false,
@@ -1260,6 +1340,7 @@ impl EventRenderer {
             show_thinking: self.show_thinking,
             show_turn_stats: self.show_turn_stats,
             redraw_counter: self.redraw_counter,
+            show_ui_io: self.show_ui_io,
             show_tools: self.show_tools,
             show_messages: self.show_messages,
         };
@@ -1334,6 +1415,7 @@ impl EventRenderer {
             "show-thinking" => self.set_show_thinking(on),
             "show-turn-stats" => self.set_show_turn_stats(on),
             "redraw-counter" => self.set_redraw_counter(on),
+            "show-ui-io" => self.set_show_ui_io(on),
             "show-tools" => {
                 if let Some(show_tools) = tau_config::settings::ShowTools::parse(value) {
                     self.set_show_tools(show_tools);
@@ -1424,6 +1506,25 @@ impl EventRenderer {
         self.redraw_counter = on;
         self.render_model_status();
         self.save_cli_state();
+    }
+
+    fn set_show_ui_io(&mut self, on: bool) {
+        if self.show_ui_io == on {
+            return;
+        }
+        self.show_ui_io = on;
+        self.render_model_status();
+        self.save_cli_state();
+    }
+
+    pub(crate) fn handle_ui_io_sample(&mut self, stats: UiIoStats) {
+        if self.ui_io_stats == stats {
+            return;
+        }
+        self.ui_io_stats = stats;
+        if self.show_ui_io {
+            self.render_model_status();
+        }
     }
 
     fn set_show_turn_stats(&mut self, on: bool) {
@@ -1813,6 +1914,9 @@ impl EventRenderer {
         let tools_style = right_themed.add_style(names::STATUS_TOOLS);
         let agents_style = right_themed.add_style(names::STATUS_AGENTS);
         let context_style = right_themed.add_style(names::STATUS_CONTEXT);
+        let ui_io_low_style = right_themed.add_style(names::STATUS_UI_IO_LOW);
+        let ui_io_medium_style = right_themed.add_style(names::STATUS_UI_IO_MEDIUM);
+        let ui_io_high_style = right_themed.add_style(names::STATUS_UI_IO_HIGH);
         let redraw_style = right_themed.add_style(names::REDRAW_COUNTER);
         let mut needs_space = false;
         let mut right_needs_space = false;
@@ -1931,6 +2035,16 @@ impl EventRenderer {
                 context_style,
                 &mut right_needs_space,
                 format!("#{context}"),
+            );
+        }
+        if self.show_ui_io {
+            push_ui_io_status_chip(
+                &mut right_themed,
+                &mut right_needs_space,
+                self.ui_io_stats,
+                ui_io_low_style,
+                ui_io_medium_style,
+                ui_io_high_style,
             );
         }
 

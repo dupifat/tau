@@ -65,6 +65,9 @@ pub const STATUS_VERBOSITY: &str = "status.verbosity";
 pub const STATUS_SERVICE_TIER: &str = "status.service_tier";
 pub const STATUS_TOOLS: &str = "status.tools";
 pub const STATUS_AGENTS: &str = "status.agents";
+pub const STATUS_UI_IO_LOW: &str = "status.ui_io.low";
+pub const STATUS_UI_IO_MEDIUM: &str = "status.ui_io.medium";
+pub const STATUS_UI_IO_HIGH: &str = "status.ui_io.high";
 pub const REDRAW_COUNTER: &str = "redraw.counter";
 
 // -- Token stats --

@@ -121,6 +121,12 @@ pub const SETTINGS: &[SettingDef] = &[
         get: |s| bool_str(s.redraw_counter),
     },
     SettingDef {
+        name: "show-ui-io",
+        description: "UI↔harness socket throughput in the status bar",
+        values: BOOL_VALUES,
+        get: |s| bool_str(s.show_ui_io),
+    },
+    SettingDef {
         name: "show-tools",
         description: "Tool block visibility",
         values: SHOW_TOOLS_VALUES,

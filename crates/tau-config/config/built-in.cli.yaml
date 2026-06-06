@@ -7,6 +7,7 @@ show_diff: false
 show_thinking: true
 show_turn_stats: false
 redraw_counter: false
+show_ui_io: false
 show_tools: full
 show_messages: all-full
 theme: auto

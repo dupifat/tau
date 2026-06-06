@@ -122,6 +122,7 @@ fn cli_state_round_trip_through_save_and_load() {
         show_thinking: false,
         show_turn_stats: true,
         redraw_counter: true,
+        show_ui_io: true,
         show_tools: crate::settings::ShowTools::SummarizeTurn,
         show_messages: crate::settings::ShowMessages::AllSummary,
     };
@@ -166,7 +167,7 @@ fn cli_state_defaults_to_cli_config_when_state_file_is_missing() {
     std::fs::create_dir_all(&state_dir).expect("mkdir state");
     std::fs::write(
         config_dir.join("cli.yaml"),
-        r#"{ show_diff: true, show_thinking: false, show_turn_stats: true, redraw_counter: true, show_tools: "compact", show_messages: "self-full" }"#,
+        r#"{ show_diff: true, show_thinking: false, show_turn_stats: true, redraw_counter: true, show_ui_io: true, show_tools: "compact", show_messages: "self-full" }"#,
     )
     .expect("write");
 
@@ -181,6 +182,7 @@ fn cli_state_defaults_to_cli_config_when_state_file_is_missing() {
             show_thinking: false,
             show_turn_stats: true,
             redraw_counter: true,
+            show_ui_io: true,
             show_tools: ShowTools::Compact,
             show_messages: ShowMessages::SelfFull,
         }

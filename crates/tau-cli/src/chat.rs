@@ -1,7 +1,7 @@
 //! Interactive chat as a socket client of the harness daemon: input
 //! loop, draft debouncer, and the threading glue that joins them.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{self, BufReader, BufWriter};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
@@ -18,11 +18,189 @@ use tau_proto::{
 
 use crate::action_commands::ActionCommandState;
 use crate::daemon::{DaemonCliOverrides, DaemonHandle, daemon_output_for_session, resolve_daemon};
-use crate::event_renderer::{EventRenderer, ToolTimerNotifier, ToolTimerState};
+use crate::event_renderer::{EventRenderer, ToolTimerNotifier, ToolTimerState, UiIoStats};
 use crate::prompt_history::PromptHistoryStore;
 use crate::tool_render::ui_dir_block;
 use crate::ui_prompt::{DEFAULT_AGENT_ROLE, create_user_agent_prompt};
 use crate::{CliError, MUTEX_POISONED, build_banner, locked, ui_logging};
+
+const UI_IO_SAMPLE_WINDOW_SECS: usize = 30;
+
+#[derive(Clone, Default)]
+struct UiIoMeter {
+    buckets: Arc<Mutex<UiIoBuckets>>,
+}
+
+impl UiIoMeter {
+    fn record_uplink_frame(&self, frame: &Frame) {
+        self.record_frame(UiIoDirection::Uplink, frame);
+    }
+
+    fn record_downlink_frame(&self, frame: &Frame) {
+        self.record_frame(UiIoDirection::Downlink, frame);
+    }
+
+    fn record_frame(&self, direction: UiIoDirection, frame: &Frame) {
+        let Some(bytes) = ui_io_frame_len(frame) else {
+            return;
+        };
+        let key = ui_io_frame_key(frame);
+        let mut buckets = locked(&self.buckets);
+        let entries = match direction {
+            UiIoDirection::Uplink => &mut buckets.uplink,
+            UiIoDirection::Downlink => &mut buckets.downlink,
+        };
+        *entries.entry(key).or_insert(0) += bytes;
+    }
+
+    fn take_sample(&self) -> UiIoSample {
+        let buckets = std::mem::take(&mut *locked(&self.buckets));
+        UiIoSample::from_buckets(buckets)
+    }
+}
+
+#[derive(Default)]
+struct UiIoBuckets {
+    uplink: BTreeMap<String, u64>,
+    downlink: BTreeMap<String, u64>,
+}
+
+struct UiIoSample {
+    uplink_bytes: u64,
+    downlink_bytes: u64,
+    uplink_breakdown: BTreeMap<String, u64>,
+    downlink_breakdown: BTreeMap<String, u64>,
+}
+
+impl UiIoSample {
+    fn from_buckets(buckets: UiIoBuckets) -> Self {
+        Self {
+            uplink_bytes: buckets.uplink.values().sum(),
+            downlink_bytes: buckets.downlink.values().sum(),
+            uplink_breakdown: buckets.uplink,
+            downlink_breakdown: buckets.downlink,
+        }
+    }
+
+    fn status_pair(&self) -> (u64, u64) {
+        (self.uplink_bytes, self.downlink_bytes)
+    }
+
+    fn exceeds_yellow(&self) -> bool {
+        self.uplink_bytes >= crate::event_renderer::UI_IO_MEDIUM_BYTES_PER_SEC
+            || self.downlink_bytes >= crate::event_renderer::UI_IO_MEDIUM_BYTES_PER_SEC
+    }
+
+    fn exceeded_direction(&self) -> &'static str {
+        match (
+            self.uplink_bytes >= crate::event_renderer::UI_IO_MEDIUM_BYTES_PER_SEC,
+            self.downlink_bytes >= crate::event_renderer::UI_IO_MEDIUM_BYTES_PER_SEC,
+        ) {
+            (true, true) => "both",
+            (true, false) => "uplink",
+            (false, true) => "downlink",
+            (false, false) => "none",
+        }
+    }
+
+    fn log_if_yellow(&self) {
+        if !self.exceeds_yellow() {
+            return;
+        }
+        tracing::info!(
+            target: "tau_cli::ui_io",
+            direction = self.exceeded_direction(),
+            uplink_bytes = self.uplink_bytes,
+            downlink_bytes = self.downlink_bytes,
+            uplink_breakdown = %format_ui_io_breakdown(&self.uplink_breakdown),
+            downlink_breakdown = %format_ui_io_breakdown(&self.downlink_breakdown),
+            "ui io exceeded yellow threshold"
+        );
+    }
+}
+
+#[derive(Clone, Copy)]
+enum UiIoDirection {
+    Uplink,
+    Downlink,
+}
+
+struct UiIoTracker {
+    meter: UiIoMeter,
+    samples: VecDeque<(u64, u64)>,
+    next_sample_at: Instant,
+}
+
+impl UiIoTracker {
+    fn new(meter: UiIoMeter) -> Self {
+        Self {
+            meter,
+            samples: VecDeque::with_capacity(UI_IO_SAMPLE_WINDOW_SECS),
+            next_sample_at: Instant::now() + Duration::from_secs(1),
+        }
+    }
+
+    fn recv_timeout(&self) -> Duration {
+        self.next_sample_at
+            .saturating_duration_since(Instant::now())
+    }
+
+    fn sample_if_due(&mut self, renderer: &mut EventRenderer) {
+        let now = Instant::now();
+        if now < self.next_sample_at {
+            return;
+        }
+        self.sample_at(renderer, now);
+    }
+
+    fn sample_now(&mut self, renderer: &mut EventRenderer) {
+        self.sample_at(renderer, Instant::now());
+    }
+
+    fn sample_at(&mut self, renderer: &mut EventRenderer, now: Instant) {
+        let sample = self.meter.take_sample();
+        let status_pair = sample.status_pair();
+        sample.log_if_yellow();
+
+        if self.samples.len() == UI_IO_SAMPLE_WINDOW_SECS {
+            self.samples.pop_front();
+        }
+        self.samples.push_back(status_pair);
+        self.next_sample_at = now + Duration::from_secs(1);
+
+        renderer.handle_ui_io_sample(self.rolling_max());
+    }
+
+    fn rolling_max(&self) -> UiIoStats {
+        let mut stats = UiIoStats::default();
+        for &(uplink, downlink) in &self.samples {
+            stats.uplink_max_bytes_per_sec = stats.uplink_max_bytes_per_sec.max(uplink);
+            stats.downlink_max_bytes_per_sec = stats.downlink_max_bytes_per_sec.max(downlink);
+        }
+        stats
+    }
+}
+
+struct UiWriter {
+    writer: FrameWriter<BufWriter<UnixStream>>,
+    meter: UiIoMeter,
+}
+
+impl UiWriter {
+    fn new(stream: UnixStream, meter: UiIoMeter) -> Self {
+        Self {
+            writer: FrameWriter::new(BufWriter::new(stream)),
+            meter,
+        }
+    }
+
+    fn send_frame(&mut self, frame: &Frame) -> io::Result<()> {
+        self.writer.write_frame(frame).map_err(io::Error::other)?;
+        self.writer.flush()?;
+        self.meter.record_uplink_frame(frame);
+        Ok(())
+    }
+}
 
 /// Shared writer handle: the input loop and the prompt-draft debounce
 /// thread both need to send events on the same socket. Stream
@@ -31,20 +209,127 @@ use crate::{CliError, MUTEX_POISONED, build_banner, locked, ui_logging};
 /// instead of risking a long draft burst interleaving with a
 /// `UiPromptSubmitted` mid-byte. Contention is essentially zero —
 /// debounce fires at most once per second per typing burst.
-pub(crate) type WriterHandle = Arc<Mutex<FrameWriter<BufWriter<UnixStream>>>>;
+type WriterHandle = Arc<Mutex<UiWriter>>;
 
 /// Lock the writer, write one frame and flush. Returns the underlying
 /// `io::Error` on failure so callers can use `?` or discard with
 /// `let _ = …`.
 fn send_frame(writer: &WriterHandle, frame: &Frame) -> io::Result<()> {
-    let mut w = locked(writer);
-    w.write_frame(frame).map_err(io::Error::other)?;
-    w.flush()
+    locked(writer).send_frame(frame)
 }
 
 /// Convenience wrapper around [`send_frame`] for [`Event`] payloads.
 fn send_event(writer: &WriterHandle, event: &Event) -> io::Result<()> {
     send_frame(writer, &Frame::Event(event.clone()))
+}
+
+fn ui_io_frame_len(frame: &Frame) -> Option<u64> {
+    tau_proto::encode_frame_to_vec(frame)
+        .ok()
+        .map(|bytes| bytes.len() as u64)
+}
+
+fn ui_io_frame_key(frame: &Frame) -> String {
+    match frame {
+        Frame::Event(event) => event.name().to_string(),
+        Frame::Message(Message::LogEvent(log)) => log.event.name().to_string(),
+        Frame::Message(message) => format!("message.{}", ui_io_message_name(message)),
+    }
+}
+
+fn ui_io_message_name(message: &Message) -> &'static str {
+    match message {
+        Message::Hello(_) => "hello",
+        Message::Subscribe(_) => "subscribe",
+        Message::Intercept(_) => "intercept",
+        Message::Ready(_) => "ready",
+        Message::Disconnect(_) => "disconnect",
+        Message::Configure(_) => "configure",
+        Message::ConfigError(_) => "config_error",
+        Message::Emit(_) => "emit",
+        Message::InterceptRequest(_) => "intercept_request",
+        Message::InterceptReply(_) => "intercept_reply",
+        Message::GetAgentPromptCreated(_) => "get_agent_prompt_created",
+        Message::AgentPromptCreatedResult(_) => "agent_prompt_created_result",
+        Message::GetRenderedSystemPrompt(_) => "get_rendered_system_prompt",
+        Message::RenderedSystemPromptResult(_) => "rendered_system_prompt_result",
+        Message::GetRenderedToolDefinitions(_) => "get_rendered_tool_definitions",
+        Message::RenderedToolDefinitionsResult(_) => "rendered_tool_definitions_result",
+        Message::LogEvent(_) => "log_event",
+        Message::Ack(_) => "ack",
+    }
+}
+
+fn format_ui_io_breakdown(breakdown: &BTreeMap<String, u64>) -> String {
+    if breakdown.is_empty() {
+        return "none".to_owned();
+    }
+
+    let mut entries = breakdown.iter().collect::<Vec<_>>();
+    entries.sort_by(|(left_name, left_bytes), (right_name, right_bytes)| {
+        right_bytes
+            .cmp(left_bytes)
+            .then_with(|| left_name.cmp(right_name))
+    });
+    entries
+        .into_iter()
+        .map(|(name, bytes)| format!("{name}={}", format_ui_io_bytes(*bytes)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_ui_io_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        return format!("{bytes}B");
+    }
+    if bytes < 1024 * 1024 {
+        return format_ui_io_scaled_bytes(bytes, 1024, "K");
+    }
+    format_ui_io_scaled_bytes(bytes, 1024 * 1024, "M")
+}
+
+fn format_ui_io_scaled_bytes(bytes: u64, divisor: u64, suffix: &str) -> String {
+    let whole = bytes / divisor;
+    let tenth = bytes % divisor * 10 / divisor;
+    if whole < 10 && tenth != 0 {
+        format!("{whole}.{tenth}{suffix}")
+    } else {
+        format!("{whole}{suffix}")
+    }
+}
+
+#[cfg(test)]
+mod ui_io_tests {
+    use super::*;
+
+    /// Downlink frames often arrive as `LogEvent` envelopes; attribution should
+    /// charge those bytes to the inner event name so the breakdown points at
+    /// the event family worth optimizing rather than the transport
+    /// envelope.
+    #[test]
+    fn ui_io_frame_key_uses_inner_log_event_name() {
+        let frame = Frame::Message(Message::LogEvent(tau_proto::LogEvent {
+            seq: tau_proto::EventLogSeq::new(1),
+            recorded_at: UnixMicros::new(1),
+            event: Box::new(Event::TermBell(tau_proto::TermBell {})),
+        }));
+
+        assert_eq!(ui_io_frame_key(&frame), "term.bell");
+    }
+
+    /// Breakdown logging should put the largest contributors first so a noisy
+    /// one-second sample immediately shows the best optimization target.
+    #[test]
+    fn ui_io_breakdown_formats_largest_first() {
+        let mut breakdown = BTreeMap::new();
+        breakdown.insert("small.event".to_owned(), 512);
+        breakdown.insert("large.event".to_owned(), 12 * 1024);
+
+        assert_eq!(
+            format_ui_io_breakdown(&breakdown),
+            "large.event=12K, small.event=512B"
+        );
+    }
 }
 
 fn peel_log_with_timestamp(
@@ -373,7 +658,8 @@ pub(crate) fn run_chat(
     tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "connected to harness daemon socket");
     let read_stream = stream.try_clone()?;
     let socket_shutdown_stream = read_stream.try_clone()?;
-    let writer: WriterHandle = Arc::new(Mutex::new(FrameWriter::new(BufWriter::new(stream))));
+    let ui_io_meter = UiIoMeter::default();
+    let writer: WriterHandle = Arc::new(Mutex::new(UiWriter::new(stream, ui_io_meter.clone())));
 
     // Handshake.
     send_frame(&writer, &crate::ui_client::hello_frame("tau-chat")).map_err(CliError::Io)?;
@@ -397,11 +683,13 @@ pub(crate) fn run_chat(
     let socket_input_shutdown = input_shutdown_handle.clone();
     let remote_disconnected = Arc::new(AtomicBool::new(false));
     let socket_remote_disconnected = remote_disconnected.clone();
+    let socket_ui_io_meter = ui_io_meter.clone();
     let socket_reader = std::thread::spawn(move || {
         let mut reader = FrameReader::new(BufReader::new(read_stream));
         loop {
             match reader.read_frame() {
                 Ok(Some(frame)) => {
+                    socket_ui_io_meter.record_downlink_frame(&frame);
                     // Peel the LogEvent wrapper so downstream renderers
                     // see the inner payload directly. The UI is a
                     // best-effort consumer and does not ack.
@@ -561,20 +849,29 @@ pub(crate) fn run_chat(
     let role_group_memory = renderer.role_group_memory();
     let editor_context = renderer.editor_context();
     term.set_editor_context_handle(editor_context.clone());
+    let renderer_ui_io_meter = ui_io_meter.clone();
     let renderer_thread = std::thread::spawn(move || {
         let mut renderer = renderer;
-        while let Ok(cmd) = renderer_rx.recv() {
-            match cmd {
-                RendererCmd::Remote { event, recorded_at } => {
-                    renderer.handle_recorded_at(&event, recorded_at);
+        let mut ui_io_tracker = UiIoTracker::new(renderer_ui_io_meter);
+        loop {
+            match renderer_rx.recv_timeout(ui_io_tracker.recv_timeout()) {
+                Ok(cmd) => {
+                    match cmd {
+                        RendererCmd::Remote { event, recorded_at } => {
+                            renderer.handle_recorded_at(&event, recorded_at);
+                        }
+                        RendererCmd::RemoteDisconnect(reason) => renderer.handle_disconnect(reason),
+                        RendererCmd::Set { name, value } => renderer.apply_setting(&name, &value),
+                        RendererCmd::SwitchAgent { agent_id } => renderer.switch_agent(agent_id),
+                        RendererCmd::SuspendAgent { agent_id } => renderer.suspend_agent(&agent_id),
+                        RendererCmd::ResumeAgent { agent_id } => renderer.resume_agent(agent_id),
+                        RendererCmd::ClearSelectedAgent => renderer.clear_selected_agent(),
+                        RendererCmd::ToolTimerTick => renderer.handle_tool_timer_tick(),
+                    }
+                    ui_io_tracker.sample_if_due(&mut renderer);
                 }
-                RendererCmd::RemoteDisconnect(reason) => renderer.handle_disconnect(reason),
-                RendererCmd::Set { name, value } => renderer.apply_setting(&name, &value),
-                RendererCmd::SwitchAgent { agent_id } => renderer.switch_agent(agent_id),
-                RendererCmd::SuspendAgent { agent_id } => renderer.suspend_agent(&agent_id),
-                RendererCmd::ResumeAgent { agent_id } => renderer.resume_agent(agent_id),
-                RendererCmd::ClearSelectedAgent => renderer.clear_selected_agent(),
-                RendererCmd::ToolTimerTick => renderer.handle_tool_timer_tick(),
+                Err(mpsc::RecvTimeoutError::Timeout) => ui_io_tracker.sample_now(&mut renderer),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
     });

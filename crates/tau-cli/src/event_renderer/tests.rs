@@ -17,6 +17,19 @@ fn agent_message(sender_id: &str, recipient: &str, message: &str) -> tau_proto::
     })
 }
 
+/// UI I/O status values are compact because they live in the status bar.
+/// Zero stays bare for the idle `io ↑0 ↓0` display, while nonzero byte
+/// rates carry short binary unit suffixes.
+#[test]
+fn ui_io_rates_format_for_status_bar() {
+    assert_eq!(super::format_ui_io_rate(0), "0");
+    assert_eq!(super::format_ui_io_rate(999), "999B");
+    assert_eq!(super::format_ui_io_rate(1024), "1K");
+    assert_eq!(super::format_ui_io_rate(1536), "1.5K");
+    assert_eq!(super::format_ui_io_rate(10 * 1024), "10K");
+    assert_eq!(super::format_ui_io_rate(1024 * 1024 + 512 * 1024), "1.5M");
+}
+
 /// `/set show-messages` must hide, summarize, or fully render durable
 /// message events based on whether they involve the user. User-directed
 /// messages are broadcasts and always render fully, while agent-to-agent

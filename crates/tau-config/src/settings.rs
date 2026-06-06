@@ -70,6 +70,9 @@ pub struct CliSettings {
     /// Whether to render the full-redraw debug counter in the model
     /// status bar by default.
     pub redraw_counter: bool,
+    /// Whether to render UI↔harness socket throughput in the model
+    /// status bar by default.
+    pub show_ui_io: bool,
     /// How tool calls are rendered in the transcript by default.
     pub show_tools: ShowTools,
     /// How inter-agent and user-agent messages are rendered in the transcript.
@@ -100,6 +103,7 @@ impl CliSettings {
             show_thinking: self.show_thinking,
             show_turn_stats: self.show_turn_stats,
             redraw_counter: self.redraw_counter,
+            show_ui_io: self.show_ui_io,
             show_tools: self.show_tools,
             show_messages: self.show_messages,
         }
@@ -207,6 +211,9 @@ pub struct CliState {
     /// Whether to render the full-redraw debug counter in the model
     /// status bar. Controlled by `/set redraw-counter <true|false>`.
     pub redraw_counter: bool,
+    /// Whether to render UI↔harness socket throughput in the model
+    /// status bar. Controlled by `/set show-ui-io <true|false>`.
+    pub show_ui_io: bool,
     /// How tool calls are rendered in the transcript. Controlled by
     /// `/set show-tools <off|summarize-turn|summarize-prompt|compact|full>`.
     pub show_tools: ShowTools,
@@ -316,6 +323,7 @@ impl Default for CliState {
             show_thinking: true,
             show_turn_stats: false,
             redraw_counter: false,
+            show_ui_io: false,
             show_tools: ShowTools::Full,
             show_messages: ShowMessages::AllFull,
         }

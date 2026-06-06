@@ -57,6 +57,9 @@
     "status.service_tier":  { fg: "dark_green" },
     "status.tools":         { fg: "dark_yellow" },
     "status.agents":        { fg: "blue" },
+    "status.ui_io.low":     { fg: "grey" },
+    "status.ui_io.medium":  { fg: "yellow" },
+    "status.ui_io.high":    { fg: "dark_red" },
     "redraw.counter":       { fg: "dark_red" },
 
     // -- Token stats --

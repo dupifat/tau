@@ -75,6 +75,7 @@ pub enum LlmError {
     HttpStatus(u16, String),
     Io(std::io::Error),
     Json(serde_json::Error),
+    Vcr(tau_vcr::VcrError),
 }
 
 impl std::fmt::Display for LlmError {
@@ -84,11 +85,22 @@ impl std::fmt::Display for LlmError {
             Self::HttpStatus(code, body) => write!(f, "HTTP {code}: {body}"),
             Self::Io(e) => write!(f, "I/O error: {e}"),
             Self::Json(e) => write!(f, "JSON error: {e}"),
+            Self::Vcr(e) => write!(f, "VCR error: {e}"),
         }
     }
 }
 
-impl std::error::Error for LlmError {}
+impl std::error::Error for LlmError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Http(e) => Some(e),
+            Self::Io(e) => Some(e),
+            Self::Json(e) => Some(e),
+            Self::Vcr(e) => Some(e),
+            Self::HttpStatus(_, _) => None,
+        }
+    }
+}
 
 impl LlmError {
     /// Whether this error is plausibly transient and worth retrying.
@@ -103,7 +115,7 @@ impl LlmError {
         match self {
             Self::Http(_) => Some(Duration::ZERO),
             Self::Io(_) => Some(Duration::ZERO),
-            Self::Json(_) => None,
+            Self::Json(_) | Self::Vcr(_) => None,
             Self::HttpStatus(code, body) => match *code {
                 408 | 425 => Some(Duration::ZERO),
                 429 => usage_limit_retry_after(body),

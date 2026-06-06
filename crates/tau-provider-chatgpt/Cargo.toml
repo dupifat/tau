@@ -25,6 +25,7 @@ serde_json.workspace = true
 tau-config.workspace = true
 tau-proto.workspace = true
 tau-provider.workspace = true
+tau-vcr.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 tracing.workspace = true

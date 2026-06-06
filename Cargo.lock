@@ -2808,6 +2808,7 @@ dependencies = [
  "tau-config",
  "tau-proto",
  "tau-provider",
+ "tau-vcr",
  "tokio",
  "tokio-tungstenite",
  "tracing",
@@ -2881,6 +2882,16 @@ version = "0.1.0"
 dependencies = [
  "json5",
  "serde",
+]
+
+[[package]]
+name = "tau-vcr"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "tempfile",
 ]
 
 [[package]]

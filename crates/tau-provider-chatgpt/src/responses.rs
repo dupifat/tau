@@ -157,10 +157,7 @@ fn debug_write_provider_request(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_micros();
-    let transport_label = match transport {
-        tau_proto::ProviderBackendTransport::HttpSse => "http-sse",
-        tau_proto::ProviderBackendTransport::Websocket => "websocket",
-    };
+    let transport_label = provider_backend_transport_label(transport);
     let path = dir.join(format!(
         "{ts}-{agent_prompt_id}-{transport_label}-request.json"
     ));
@@ -194,17 +191,53 @@ pub fn responses_stream(
     request: &PromptPayload<'_>,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<StreamState, LlmError> {
-    let url = config.surface.responses_url(&config.base_url);
-
     let body = build_request(config, request, None);
+    let vcr_config = load_vcr_config()?;
+    let vcr_turn = if let Some(vcr_config) = vcr_config.as_ref() {
+        let request_body = serde_json::to_value(&body).map_err(LlmError::Json)?;
+        begin_vcr_turn(
+            vcr_config,
+            request,
+            agent_prompt_id,
+            tau_proto::ProviderBackendTransport::HttpSse,
+            request_body,
+        )?
+    } else {
+        tau_vcr::VcrTurn::Off
+    };
+    match vcr_turn {
+        tau_vcr::VcrTurn::Off => {
+            responses_stream_live(agent_prompt_id, config, request, &body, None, on_update)
+        }
+        tau_vcr::VcrTurn::Record(recording) => responses_stream_live(
+            agent_prompt_id,
+            config,
+            request,
+            &body,
+            Some(recording),
+            on_update,
+        ),
+        tau_vcr::VcrTurn::Replay(replay) => responses_stream_replay(replay, on_update),
+    }
+}
+
+fn responses_stream_live(
+    agent_prompt_id: &str,
+    config: &ResponsesConfig,
+    request: &PromptPayload<'_>,
+    body: &ResponsesRequest,
+    mut recording: Option<tau_vcr::Recording>,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<StreamState, LlmError> {
     maybe_debug_write_provider_request(
         agent_prompt_id,
         config,
         request,
         tau_proto::ProviderBackendTransport::HttpSse,
-        &body,
+        body,
     );
-    let body_str = serde_json::to_string(&body).map_err(LlmError::Json)?;
+    let url = config.surface.responses_url(&config.base_url);
+    let body_str = serde_json::to_string(body).map_err(LlmError::Json)?;
 
     let mut req = tau_provider::oauth::proxy_agent()
         .post(&url)
@@ -231,26 +264,98 @@ pub fn responses_stream(
 
     for line in reader.lines() {
         let line = line.map_err(LlmError::Io)?;
-
-        let Some(data) = line.strip_prefix("data: ") else {
+        if !line.starts_with("data: ") {
             continue;
-        };
-
-        if data == "[DONE]" {
-            break;
         }
-
-        let event: serde_json::Value = match serde_json::from_str(data) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        if apply_event(&mut state, &event, on_update)? {
+        let data = line
+            .strip_prefix("data: ")
+            .expect("line starts with data prefix");
+        if let Some(recording) = recording.as_mut() {
+            recording.record_raw_event(format!("{line}\n\n"));
+        }
+        if apply_sse_data(&mut state, data, on_update)? {
             break;
         }
     }
 
+    if let Some(recording) = recording {
+        recording.finish().map_err(LlmError::Vcr)?;
+    }
+
     Ok(state)
+}
+
+fn responses_stream_replay(
+    replay: tau_vcr::Replay,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<StreamState, LlmError> {
+    let mut state = StreamState::new();
+    for event in replay.events_at_speed(100.0) {
+        std::thread::sleep(event.delay);
+        if apply_raw_sse_event(&mut state, event.raw, on_update)? {
+            break;
+        }
+    }
+    Ok(state)
+}
+
+fn apply_raw_sse_event(
+    state: &mut StreamState,
+    raw: &str,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<bool, LlmError> {
+    let Some(data) = raw.lines().find_map(|line| line.strip_prefix("data: ")) else {
+        return Ok(false);
+    };
+    apply_sse_data(state, data, on_update)
+}
+
+fn apply_sse_data(
+    state: &mut StreamState,
+    data: &str,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<bool, LlmError> {
+    let data = data.trim_end();
+    if data == "[DONE]" {
+        return Ok(true);
+    }
+    let event: serde_json::Value = match serde_json::from_str(data) {
+        Ok(v) => v,
+        Err(_) => return Ok(false),
+    };
+    apply_event(state, &event, on_update)
+}
+
+fn load_vcr_config() -> Result<Option<tau_vcr::VcrConfig>, LlmError> {
+    tau_vcr::VcrConfig::from_env().map_err(LlmError::Vcr)
+}
+
+fn begin_vcr_turn(
+    vcr_config: &tau_vcr::VcrConfig,
+    request: &PromptPayload<'_>,
+    agent_prompt_id: &str,
+    transport: tau_proto::ProviderBackendTransport,
+    request_body: serde_json::Value,
+) -> Result<tau_vcr::VcrTurn, LlmError> {
+    tau_vcr::begin(
+        vcr_config,
+        tau_vcr::TurnKey::new(
+            request.session_id.as_str(),
+            agent_prompt_id,
+            provider_backend_transport_label(transport),
+        ),
+        request_body,
+    )
+    .map_err(LlmError::Vcr)
+}
+
+fn provider_backend_transport_label(
+    transport: tau_proto::ProviderBackendTransport,
+) -> &'static str {
+    match transport {
+        tau_proto::ProviderBackendTransport::HttpSse => "http-sse",
+        tau_proto::ProviderBackendTransport::Websocket => "websocket",
+    }
 }
 
 /// Apply one decoded `response.*` event from the upstream stream to

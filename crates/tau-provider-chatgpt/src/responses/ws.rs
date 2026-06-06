@@ -39,9 +39,9 @@ use futures_util::stream::{SplitSink, SplitStream, StreamExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::AbortHandle;
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::handshake::client::Request;
+use tokio_tungstenite::tungstenite::{Message, Utf8Bytes};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite};
 
 use super::{ResponsesConfig, apply_event, build_ws_envelope};
@@ -98,8 +98,11 @@ enum WsCommand {
 /// unparseable frames can be quietly dropped at the source (same
 /// behavior as the SSE line-level resync).
 enum InboundEvent {
-    /// One parsed `response.*` event.
-    Event(serde_json::Value),
+    /// One parsed `response.*` event and its upstream text frame.
+    Event {
+        text: Utf8Bytes,
+        value: serde_json::Value,
+    },
     /// Server sent a `Close` frame (or the stream ended cleanly
     /// without one). The string is the close-frame reason for
     /// logging.
@@ -212,11 +215,32 @@ impl WsConn {
         config: &ResponsesConfig,
         agent_prompt_id: &str,
         request: &PromptPayload<'_>,
+        vcr_config: Option<&tau_vcr::VcrConfig>,
         should_abort: &mut impl FnMut() -> bool,
         on_update: &mut impl FnMut(&StreamState),
     ) -> Result<StreamState, LlmError> {
         let cached_response_id = self.cached_response_id.as_deref();
         let envelope = build_ws_envelope(config, request, cached_response_id, None);
+        let recording = if let Some(vcr_config) = vcr_config {
+            let request_body = serde_json::to_value(&envelope).map_err(LlmError::Json)?;
+            match super::begin_vcr_turn(
+                vcr_config,
+                request,
+                agent_prompt_id,
+                tau_proto::ProviderBackendTransport::Websocket,
+                request_body,
+            )? {
+                tau_vcr::VcrTurn::Record(recording) => Some(recording),
+                tau_vcr::VcrTurn::Off => None,
+                tau_vcr::VcrTurn::Replay(replay) => {
+                    let state = run_replay(replay, on_update)?;
+                    self.cached_response_id = state.response_id.clone();
+                    return Ok(state);
+                }
+            }
+        } else {
+            None
+        };
         super::maybe_debug_write_provider_request(
             agent_prompt_id,
             config,
@@ -224,7 +248,7 @@ impl WsConn {
             tau_proto::ProviderBackendTransport::Websocket,
             &envelope,
         );
-        let state = self.run_envelope(envelope, Some(should_abort), on_update)?;
+        let state = self.run_envelope(envelope, recording, Some(should_abort), on_update)?;
         self.cached_response_id = state.response_id.clone();
         Ok(state)
     }
@@ -238,12 +262,13 @@ impl WsConn {
         request: &PromptPayload<'_>,
     ) -> Result<StreamState, LlmError> {
         let envelope = build_ws_envelope(config, request, None, Some(false));
-        self.run_envelope(envelope, None::<&mut fn() -> bool>, &mut |_| {})
+        self.run_envelope(envelope, None, None::<&mut fn() -> bool>, &mut |_| {})
     }
 
     fn run_envelope(
         &mut self,
         envelope: super::WsResponseCreate,
+        mut recording: Option<tau_vcr::Recording>,
         mut should_abort: Option<&mut impl FnMut() -> bool>,
         on_update: &mut impl FnMut(&StreamState),
     ) -> Result<StreamState, LlmError> {
@@ -285,7 +310,10 @@ impl WsConn {
             };
             last_event_at = Instant::now();
             match event {
-                InboundEvent::Event(value) => {
+                InboundEvent::Event { text, value } => {
+                    if let Some(recording) = recording.as_mut() {
+                        recording.record_raw_event(text.to_string());
+                    }
                     if apply_event(&mut state, &value, on_update)? {
                         break;
                     }
@@ -301,10 +329,12 @@ impl WsConn {
                 }
             }
         }
+        if let Some(recording) = recording {
+            recording.finish().map_err(LlmError::Vcr)?;
+        }
         Ok(state)
     }
 }
-
 impl Drop for WsConn {
     fn drop(&mut self) {
         // Stops the two background tasks at the next await point —
@@ -313,6 +343,95 @@ impl Drop for WsConn {
         self.reader_abort.abort();
         self.writer_abort.abort();
     }
+}
+
+pub(super) enum PreparedVcrTurn {
+    Off,
+    Record(tau_vcr::VcrConfig),
+    Replay(Box<StreamState>),
+}
+
+pub(super) fn prepare_vcr_turn(
+    vcr_config: Option<&tau_vcr::VcrConfig>,
+    config: &ResponsesConfig,
+    agent_prompt_id: &str,
+    request: &PromptPayload<'_>,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<PreparedVcrTurn, LlmError> {
+    let Some(vcr_config) = vcr_config else {
+        return Ok(PreparedVcrTurn::Off);
+    };
+    let key = tau_vcr::TurnKey::new(
+        request.session_id.as_str(),
+        agent_prompt_id,
+        super::provider_backend_transport_label(tau_proto::ProviderBackendTransport::Websocket),
+    );
+    if vcr_config.mode == tau_vcr::VcrMode::RecordIfMissing
+        && !vcr_config.cassette_path(&key).exists()
+    {
+        return Ok(PreparedVcrTurn::Record(vcr_config.clone()));
+    }
+
+    let cached_response_id = latest_response_id(request);
+    let envelope = build_ws_envelope(config, request, cached_response_id, None);
+    let request_body = serde_json::to_value(&envelope).map_err(LlmError::Json)?;
+    match tau_vcr::begin(vcr_config, key.clone(), request_body).map_err(LlmError::Vcr) {
+        Ok(turn) => prepared_from_vcr_turn(turn, vcr_config, on_update),
+        Err(LlmError::Vcr(tau_vcr::VcrError::RequestMismatch { .. }))
+            if cached_response_id.is_some() =>
+        {
+            let envelope = build_ws_envelope(config, request, None, None);
+            let request_body = serde_json::to_value(&envelope).map_err(LlmError::Json)?;
+            let turn = tau_vcr::begin(vcr_config, key, request_body).map_err(LlmError::Vcr)?;
+            prepared_from_vcr_turn(turn, vcr_config, on_update)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn prepared_from_vcr_turn(
+    turn: tau_vcr::VcrTurn,
+    vcr_config: &tau_vcr::VcrConfig,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<PreparedVcrTurn, LlmError> {
+    match turn {
+        tau_vcr::VcrTurn::Replay(replay) => {
+            run_replay(replay, on_update).map(|state| PreparedVcrTurn::Replay(Box::new(state)))
+        }
+        tau_vcr::VcrTurn::Record(_) => Ok(PreparedVcrTurn::Record(vcr_config.clone())),
+        tau_vcr::VcrTurn::Off => Ok(PreparedVcrTurn::Off),
+    }
+}
+fn latest_response_id<'a>(request: &'a PromptPayload<'_>) -> Option<&'a str> {
+    request
+        .context
+        .blocks
+        .iter()
+        .rev()
+        .find_map(|block| match block {
+            tau_proto::ContextBlock::AssistantResponse(response) => {
+                response.provider_response_id.as_deref()
+            }
+            tau_proto::ContextBlock::UserInput(_) | tau_proto::ContextBlock::ToolResults(_) => None,
+        })
+}
+
+fn run_replay(
+    replay: tau_vcr::Replay,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<StreamState, LlmError> {
+    let mut state = StreamState::new();
+    for event in replay.events_at_speed(100.0) {
+        std::thread::sleep(event.delay);
+        let value: serde_json::Value = match serde_json::from_str(event.raw) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if apply_event(&mut state, &value, on_update)? {
+            break;
+        }
+    }
+    Ok(state)
 }
 
 /// Build the client `Request` for the WS upgrade — URL + bearer +
@@ -346,12 +465,14 @@ fn build_request(config: &ResponsesConfig, thread_id: &str) -> Result<Request, L
 async fn read_loop(mut stream: Stream, tx: std_mpsc::Sender<InboundEvent>) {
     while let Some(item) = stream.next().await {
         let (event, terminal) = match item {
-            Ok(Message::Text(text)) => match serde_json::from_str::<serde_json::Value>(&text) {
-                Ok(value) => (InboundEvent::Event(value), false),
-                // Unparseable frames are skipped on the SSE path too
-                // (line-level resync). Mirror it here.
-                Err(_) => continue,
-            },
+            Ok(Message::Text(text)) => {
+                match serde_json::from_str::<serde_json::Value>(text.as_ref()) {
+                    Ok(value) => (InboundEvent::Event { text, value }, false),
+                    // Unparseable frames are skipped on the SSE path too
+                    // (line-level resync). Mirror it here.
+                    Err(_) => continue,
+                }
+            }
             Ok(Message::Close(frame)) => {
                 let reason = frame
                     .as_ref()

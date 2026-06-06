@@ -29,6 +29,7 @@ members = [
   "crates/tau-term-screen",
   "crates/tau-test-support",
   "crates/tau-themes",
+  "crates/tau-vcr",
 ]
 resolver = "2"
 
@@ -83,6 +84,7 @@ tau-supervisor = { path = "crates/tau-supervisor" }
 tau-term-screen = { path = "crates/tau-term-screen" }
 tau-test-support = { path = "crates/tau-test-support" }
 tau-themes = { path = "crates/tau-themes" }
+tau-vcr = { path = "crates/tau-vcr" }
 
 # External crates
 async-imap = { version = "0.11", default-features = false, features = [

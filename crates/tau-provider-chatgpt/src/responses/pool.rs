@@ -133,7 +133,6 @@ impl WsPool {
             stats: WsPoolStats::default(),
         }
     }
-
     /// Snapshot the running counters. Cheap (`Copy`); intended for
     /// tracing emission and tests.
     pub fn stats(&self) -> WsPoolStats {
@@ -338,6 +337,34 @@ impl WsTurnError {
     }
 }
 
+fn store_ws_vcr_recording(
+    vcr_config: Option<&tau_vcr::VcrConfig>,
+    request: &crate::common::PromptPayload<'_>,
+    agent_prompt_id: &str,
+    request_body: Option<serde_json::Value>,
+    stream: Option<super::ProviderRawEventStream>,
+) -> Result<(), LlmError> {
+    let Some(vcr_config) = vcr_config else {
+        return Ok(());
+    };
+    let (Some(request_body), Some(stream)) = (request_body, stream) else {
+        return Ok(());
+    };
+    let key = super::provider_vcr_key(
+        request,
+        agent_prompt_id,
+        tau_proto::ProviderBackendTransport::Websocket,
+    );
+    let cassette = super::ProviderStreamCassette {
+        version: super::PROVIDER_STREAM_CASSETTE_VERSION,
+        request: request_body,
+        stream,
+    };
+    vcr_config
+        .store()
+        .put(&key, &cassette)
+        .map_err(LlmError::Vcr)
+}
 /// Test-only convenience wrapper that wires `checkout` → `WsConn::run_turn` →
 /// `release` together with reopen-on-miss semantics without the production
 /// mutex wrapper.
@@ -358,18 +385,16 @@ pub fn run_turn_through_pool(
     on_update: &mut impl FnMut(&crate::common::StreamState),
 ) -> Result<crate::common::StreamState, WsTurnError> {
     let vcr_config = super::load_vcr_config().map_err(WsTurnError::Other)?;
-    let vcr_record_config = match super::ws::prepare_vcr_turn(
-        vcr_config.as_ref(),
-        config,
-        agent_prompt_id,
-        request,
-        on_update,
-    )
-    .map_err(WsTurnError::Other)?
-    {
-        super::ws::PreparedVcrTurn::Replay(state) => return Ok(*state),
-        super::ws::PreparedVcrTurn::Record(config) => Some(config),
-        super::ws::PreparedVcrTurn::Off => None,
+    let vcr_record_config = if let Some(vcr_config) = vcr_config.as_ref() {
+        if let Some(state) =
+            super::ws::run_vcr_replay_turn(vcr_config, config, agent_prompt_id, request, on_update)
+                .map_err(WsTurnError::Other)?
+        {
+            return Ok(state);
+        }
+        (vcr_config.mode == tau_vcr::VcrMode::RecordIfMissing).then(|| vcr_config.clone())
+    } else {
+        None
     };
 
     let key = PoolKey::for_request(config, request);
@@ -377,16 +402,29 @@ pub fn run_turn_through_pool(
     // First attempt: prefer a warm cached connection so the
     // connection-local chain cache stays useful.
     if let Some(mut conn) = pool.checkout(&key, &config.api_key) {
+        let mut recording_stream = vcr_record_config
+            .as_ref()
+            .map(|_| super::ProviderRawEventStream::default());
         match conn.run_turn(
             config,
             agent_prompt_id,
             request,
-            vcr_record_config.as_ref(),
+            recording_stream.as_mut(),
             &mut || false,
             on_update,
         ) {
-            Ok(state) => {
+            Ok(turn) => {
+                let state = turn.state;
+                let request_body = turn.request_body;
                 pool.release(key, conn);
+                store_ws_vcr_recording(
+                    vcr_record_config.as_ref(),
+                    request,
+                    agent_prompt_id,
+                    request_body,
+                    recording_stream,
+                )
+                .map_err(WsTurnError::Other)?;
                 return Ok(state);
             }
             // Recording intentionally does not silently reconnect: a retry can
@@ -422,16 +460,29 @@ pub fn run_turn_through_pool(
     // switching to HTTP and staying cold.
     let mut conn = WsConn::connect(config, &key.thread_id).map_err(WsTurnError::Other)?;
     pool.stats.upgrades += 1;
+    let mut recording_stream = vcr_record_config
+        .as_ref()
+        .map(|_| super::ProviderRawEventStream::default());
     match conn.run_turn(
         config,
         agent_prompt_id,
         request,
-        vcr_record_config.as_ref(),
+        recording_stream.as_mut(),
         &mut || false,
         on_update,
     ) {
-        Ok(state) => {
+        Ok(turn) => {
+            let state = turn.state;
+            let request_body = turn.request_body;
             pool.release(key, conn);
+            store_ws_vcr_recording(
+                vcr_record_config.as_ref(),
+                request,
+                agent_prompt_id,
+                request_body,
+                recording_stream,
+            )
+            .map_err(WsTurnError::Other)?;
             Ok(state)
         }
         Err(err) => {
@@ -455,18 +506,16 @@ pub fn run_turn_through_shared_pool(
     on_update: &mut impl FnMut(&crate::common::StreamState),
 ) -> Result<crate::common::StreamState, WsTurnError> {
     let vcr_config = super::load_vcr_config().map_err(WsTurnError::Other)?;
-    let vcr_record_config = match super::ws::prepare_vcr_turn(
-        vcr_config.as_ref(),
-        config,
-        agent_prompt_id,
-        request,
-        on_update,
-    )
-    .map_err(WsTurnError::Other)?
-    {
-        super::ws::PreparedVcrTurn::Replay(state) => return Ok(*state),
-        super::ws::PreparedVcrTurn::Record(config) => Some(config),
-        super::ws::PreparedVcrTurn::Off => None,
+    let vcr_record_config = if let Some(vcr_config) = vcr_config.as_ref() {
+        if let Some(state) =
+            super::ws::run_vcr_replay_turn(vcr_config, config, agent_prompt_id, request, on_update)
+                .map_err(WsTurnError::Other)?
+        {
+            return Ok(state);
+        }
+        (vcr_config.mode == tau_vcr::VcrMode::RecordIfMissing).then(|| vcr_config.clone())
+    } else {
+        None
     };
 
     let session_id = request.session_id.as_str();
@@ -477,16 +526,29 @@ pub fn run_turn_through_shared_pool(
             pool.release(key, conn)?;
             return Err(WsTurnError::Canceled);
         }
+        let mut recording_stream = vcr_record_config
+            .as_ref()
+            .map(|_| super::ProviderRawEventStream::default());
         match conn.run_turn(
             config,
             agent_prompt_id,
             request,
-            vcr_record_config.as_ref(),
+            recording_stream.as_mut(),
             should_abort,
             on_update,
         ) {
-            Ok(state) => {
+            Ok(turn) => {
+                let state = turn.state;
+                let request_body = turn.request_body;
                 pool.release(key, conn)?;
+                store_ws_vcr_recording(
+                    vcr_record_config.as_ref(),
+                    request,
+                    agent_prompt_id,
+                    request_body,
+                    recording_stream,
+                )
+                .map_err(WsTurnError::Other)?;
                 return Ok(state);
             }
             // Recording intentionally does not silently reconnect: a retry can
@@ -533,16 +595,29 @@ pub fn run_turn_through_shared_pool(
         return Err(WsTurnError::Canceled);
     }
     pool.record_fresh_open()?;
+    let mut recording_stream = vcr_record_config
+        .as_ref()
+        .map(|_| super::ProviderRawEventStream::default());
     match conn.run_turn(
         config,
         agent_prompt_id,
         request,
-        vcr_record_config.as_ref(),
+        recording_stream.as_mut(),
         should_abort,
         on_update,
     ) {
-        Ok(state) => {
+        Ok(turn) => {
+            let state = turn.state;
+            let request_body = turn.request_body;
             pool.release(key, conn)?;
+            store_ws_vcr_recording(
+                vcr_record_config.as_ref(),
+                request,
+                agent_prompt_id,
+                request_body,
+                recording_stream,
+            )
+            .map_err(WsTurnError::Other)?;
             Ok(state)
         }
         Err(err) => {

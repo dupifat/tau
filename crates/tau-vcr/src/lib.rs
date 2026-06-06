@@ -1,26 +1,24 @@
-//! Minimal cassette recording and replay helpers for Tau provider tests.
+//! Minimal YAML cassette storage helpers for Tau tests.
 //!
-//! `tau-vcr` deliberately stays provider-agnostic: callers choose the
-//! deterministic cassette name and pass the exact upstream request body they
-//! want validated. Provider crates own semantic request construction; this
-//! crate owns durable YAML storage, raw event timing, and replay delay scaling.
-
-use std::borrow::Cow;
+//! `tau-vcr` deliberately stays below provider and tool semantics. It owns VCR
+//! mode parsing, cassette directory/key handling, key validation, and YAML
+//! `get`/`put` operations. Callers own cassette schemas, request validation,
+//! live-vs-replay branching, timing, and response replay.
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
-const CASSETTE_VERSION: u32 = 1;
 const ENV_MODE: &str = "TAU_VCR";
 const ENV_DIR: &str = "TAU_VCR_DIR";
+
 /// VCR operating mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VcrMode {
     /// Do not read or write cassettes.
     Off,
-    /// Replay an existing cassette, otherwise record a new one.
+    /// Replay an existing cassette, otherwise let the caller record a new one.
     RecordIfMissing,
     /// Require an existing cassette and replay it.
     ReplayOnly,
@@ -39,7 +37,7 @@ impl VcrMode {
     }
 }
 
-/// VCR cassette storage configuration.
+/// VCR mode and cassette storage directory.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VcrConfig {
     /// Operating mode for cassette reads/writes.
@@ -50,6 +48,7 @@ pub struct VcrConfig {
 
 impl VcrConfig {
     /// Creates a VCR config rooted at `dir`.
+    #[must_use]
     pub fn new(mode: VcrMode, dir: impl Into<PathBuf>) -> Self {
         Self {
             mode,
@@ -76,230 +75,85 @@ impl VcrConfig {
         Ok(Some(Self::new(mode, PathBuf::from(dir))))
     }
 
-    /// Returns the cassette path for `key`.
-    pub fn cassette_path(&self, key: &TurnKey) -> PathBuf {
-        self.dir.join(key.file_name())
+    /// Returns a cassette store rooted at this config's directory.
+    #[must_use]
+    pub fn store(&self) -> VcrStore {
+        VcrStore::new(&self.dir)
     }
 }
 
-/// Opens a cassette turn, validating or storing `request_body` for `key`
-/// according to `config`.
-pub fn begin(
-    config: &VcrConfig,
-    key: TurnKey,
-    request_body: serde_json::Value,
-) -> Result<VcrTurn, VcrError> {
-    let path = config.cassette_path(&key);
-    let should_record = match config.mode {
-        VcrMode::Off => return Ok(VcrTurn::Off),
-        VcrMode::ReplayOnly => false,
-        VcrMode::RecordIfMissing => !path.exists(),
-    };
+/// Filesystem-backed YAML cassette key/value store.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VcrStore {
+    dir: PathBuf,
+}
 
-    if should_record {
+impl VcrStore {
+    /// Creates a cassette store rooted at `dir`.
+    #[must_use]
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self { dir: dir.into() }
+    }
+
+    /// Returns the cassette path for `key`.
+    ///
+    /// Keys are logical identifiers, not paths. Only ASCII alphanumeric
+    /// characters, `-`, and `_` are accepted.
+    fn path(&self, key: &str) -> Result<PathBuf, VcrError> {
+        if key.is_empty()
+            || !key
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
+            return Err(VcrError::InvalidKey(key.to_owned()));
+        }
+        Ok(self.dir.join(format!("{key}.yaml")))
+    }
+
+    /// Reads and parses the cassette for `key`.
+    ///
+    /// Returns `Ok(None)` when the cassette does not exist.
+    pub fn get<T>(&self, key: &str) -> Result<Option<T>, VcrError>
+    where
+        T: DeserializeOwned,
+    {
+        let path = self.path(key)?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        read_yaml(&path).map(Some)
+    }
+
+    /// Serializes and writes the cassette for `key`, replacing any existing
+    /// file.
+    pub fn put<T>(&self, key: &str, value: &T) -> Result<(), VcrError>
+    where
+        T: Serialize,
+    {
+        let path = self.path(key)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|source| VcrError::CreateDir {
                 path: parent.to_path_buf(),
                 source,
             })?;
         }
-        return Ok(VcrTurn::Record(Recording {
-            path,
-            cassette: Cassette {
-                version: CASSETTE_VERSION,
-                request: RecordedRequest { body: request_body },
-                response: RecordedResponse {
-                    raw_events: Vec::new(),
-                },
-            },
-            last_event_at: Instant::now(),
-        }));
-    }
-
-    let cassette = read_cassette(&path)?;
-    if cassette.version != CASSETTE_VERSION {
-        return Err(VcrError::UnsupportedVersion {
-            path,
-            version: cassette.version,
-        });
-    }
-    if cassette.request.body != request_body {
-        return Err(VcrError::RequestMismatch {
-            path,
-            expected: cassette.request.body,
-            actual: request_body,
-        });
-    }
-    Ok(VcrTurn::Replay(Replay { cassette }))
-}
-
-/// Stable identifier for one provider request cassette.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TurnKey {
-    /// Deterministic Tau session id for the test or run.
-    pub session_id: String,
-    /// Deterministic Tau agent prompt id, e.g. `ap-{agent_id}-{index}`.
-    pub agent_prompt_id: String,
-    /// Provider transport label, e.g. `http-sse` or `websocket`.
-    pub transport: String,
-}
-
-impl TurnKey {
-    /// Creates a cassette key from session, prompt, and transport labels.
-    pub fn new(
-        session_id: impl Into<String>,
-        agent_prompt_id: impl Into<String>,
-        transport: impl Into<String>,
-    ) -> Self {
-        Self {
-            session_id: session_id.into(),
-            agent_prompt_id: agent_prompt_id.into(),
-            transport: transport.into(),
-        }
-    }
-
-    /// Returns the cassette file name for this key.
-    pub fn file_name(&self) -> String {
-        format!(
-            "{}-{}-{}.yaml",
-            sanitize_path_component(&self.session_id),
-            sanitize_path_component(&self.agent_prompt_id),
-            sanitize_path_component(&self.transport),
-        )
+        write_yaml(&path, value)
     }
 }
 
-/// Result of opening a VCR turn.
-#[derive(Debug)]
-pub enum VcrTurn {
-    /// VCR is disabled; caller should use the live upstream path.
-    Off,
-    /// Caller should use the live upstream path and record raw events.
-    ///
-    /// This variant is only returned by [`VcrMode::RecordIfMissing`] when no
-    /// cassette exists for the requested turn.
-    Record(Recording),
-    /// Caller should replay recorded raw events instead of using upstream.
-    Replay(Replay),
-}
-
-/// In-progress cassette recording.
-#[derive(Debug)]
-pub struct Recording {
-    path: PathBuf,
-    cassette: Cassette,
-    last_event_at: Instant,
-}
-
-impl Recording {
-    /// Returns the path this recording will write on [`finish`](Self::finish).
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// Records one raw upstream event with elapsed wall-clock timing.
-    pub fn record_raw_event(&mut self, raw: impl Into<String>) {
-        let now = Instant::now();
-        let delta = now.saturating_duration_since(self.last_event_at);
-        self.last_event_at = now;
-        self.record_raw_event_after(delta, raw);
-    }
-
-    /// Records one raw upstream event with an explicit delay since the
-    /// previous event.
-    pub fn record_raw_event_after(&mut self, delta: Duration, raw: impl Into<String>) {
-        self.cassette.response.raw_events.push(RecordedRawEvent {
-            delta_micros: duration_micros_u64(delta),
-            raw: raw.into(),
-        });
-    }
-
-    /// Returns the cassette currently being built.
-    pub fn cassette(&self) -> &Cassette {
-        &self.cassette
-    }
-
-    /// Writes the cassette to disk.
-    pub fn finish(self) -> Result<(), VcrError> {
-        write_cassette(&self.path, &self.cassette)
+pub fn request_mismatch<T, U>(key: impl Into<String>, expected: &T, actual: &U) -> VcrError
+where
+    T: Serialize,
+    U: Serialize,
+{
+    VcrError::RequestMismatch {
+        key: key.into(),
+        expected: mismatch_payload(expected),
+        actual: mismatch_payload(actual),
     }
 }
 
-/// Replayable cassette contents.
-#[derive(Clone, Debug)]
-pub struct Replay {
-    cassette: Cassette,
-}
-
-impl Replay {
-    /// Returns the loaded cassette.
-    pub fn cassette(&self) -> &Cassette {
-        &self.cassette
-    }
-
-    /// Iterates over raw upstream events with their delays scaled by `speed`.
-    ///
-    /// A speed of `100.0` makes a 100 ms recorded gap replay as 1 ms.
-    /// Non-finite or non-positive speeds fall back to real-time speed
-    /// (`1.0`).
-    pub fn events_at_speed(&self, speed: f64) -> impl Iterator<Item = ReplayEvent<'_>> {
-        self.cassette
-            .response
-            .raw_events
-            .iter()
-            .map(move |event| ReplayEvent {
-                delay: scale_delay(Duration::from_micros(event.delta_micros), speed),
-                raw: &event.raw,
-            })
-    }
-}
-
-/// One raw event to replay.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ReplayEvent<'a> {
-    /// Delay to wait before emitting [`raw`](Self::raw).
-    pub delay: Duration,
-    /// Raw upstream event payload exactly as recorded.
-    pub raw: &'a str,
-}
-
-/// On-disk cassette file.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Cassette {
-    /// Cassette schema version.
-    pub version: u32,
-    /// Exact request body this cassette was recorded for.
-    pub request: RecordedRequest,
-    /// Raw upstream response stream captured for replay.
-    pub response: RecordedResponse,
-}
-
-/// Exact request captured for cassette validation.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct RecordedRequest {
-    /// Provider-owned upstream request body. The provider decides whether this
-    /// is raw or normalized before passing it to `tau-vcr`.
-    pub body: serde_json::Value,
-}
-
-/// Raw upstream response stream captured for replay.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct RecordedResponse {
-    /// Ordered raw upstream events with inter-event delays.
-    pub raw_events: Vec<RecordedRawEvent>,
-}
-
-/// One raw upstream event in a cassette.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct RecordedRawEvent {
-    /// Delay since the previously recorded event, in microseconds.
-    pub delta_micros: u64,
-    /// Raw upstream event payload, e.g. one SSE `data: ...\n\n` block or one
-    /// WebSocket text frame.
-    pub raw: String,
-}
-
-/// Error returned by cassette recording and replay.
+/// Error returned by cassette storage and mode parsing.
 #[derive(Debug)]
 pub enum VcrError {
     /// `TAU_VCR` contained an unknown mode.
@@ -308,6 +162,13 @@ pub enum VcrError {
     MissingEnv(&'static str),
     /// Environment variable was not valid Unicode.
     EnvNotUnicode(&'static str),
+    /// Cassette key contained unsupported characters.
+    InvalidKey(String),
+    /// Requested cassette was not found.
+    Missing {
+        /// Logical cassette key.
+        key: String,
+    },
     /// Failed to create a cassette directory.
     CreateDir {
         /// Directory path that could not be created.
@@ -343,21 +204,21 @@ pub enum VcrError {
         /// Underlying YAML error.
         source: serde_yaml_ng::Error,
     },
-    /// Cassette schema version is not supported by this crate.
+    /// Cassette schema version is not supported by the caller.
     UnsupportedVersion {
-        /// Cassette path.
-        path: PathBuf,
+        /// Logical cassette key.
+        key: String,
         /// Version found in the cassette.
         version: u32,
     },
     /// Replay cassette request did not match the actual request.
     RequestMismatch {
-        /// Cassette path.
-        path: PathBuf,
-        /// Request stored in the cassette.
-        expected: serde_json::Value,
-        /// Actual request supplied by the caller.
-        actual: serde_json::Value,
+        /// Logical cassette key.
+        key: String,
+        /// Request stored in the cassette, serialized for diagnostics.
+        expected: String,
+        /// Actual request supplied by the caller, serialized for diagnostics.
+        actual: String,
     },
 }
 
@@ -365,8 +226,13 @@ impl fmt::Display for VcrError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidMode(mode) => write!(f, "invalid TAU_VCR mode `{mode}`"),
+            Self::InvalidKey(key) => write!(
+                f,
+                "invalid cassette key `{key}`; expected only a-z, A-Z, 0-9, -, or _"
+            ),
             Self::MissingEnv(name) => write!(f, "{name} must be set when TAU_VCR is enabled"),
             Self::EnvNotUnicode(name) => write!(f, "{name} is not valid Unicode"),
+            Self::Missing { key } => write!(f, "missing cassette `{key}`"),
             Self::CreateDir { path, source } => {
                 write!(
                     f,
@@ -390,13 +256,11 @@ impl fmt::Display for VcrError {
                     path.display()
                 )
             }
-            Self::UnsupportedVersion { path, version } => write!(
-                f,
-                "cassette {} has unsupported version {version}",
-                path.display()
-            ),
-            Self::RequestMismatch { path, .. } => {
-                write!(f, "cassette {} request does not match", path.display())
+            Self::UnsupportedVersion { key, version } => {
+                write!(f, "cassette `{key}` has unsupported version {version}")
+            }
+            Self::RequestMismatch { key, .. } => {
+                write!(f, "cassette `{key}` request does not match")
             }
         }
     }
@@ -410,6 +274,8 @@ impl std::error::Error for VcrError {
             | Self::Write { source, .. } => Some(source),
             Self::Parse { source, .. } | Self::Serialize { source, .. } => Some(source),
             Self::InvalidMode(_)
+            | Self::InvalidKey(_)
+            | Self::Missing { .. }
             | Self::MissingEnv(_)
             | Self::EnvNotUnicode(_)
             | Self::UnsupportedVersion { .. }
@@ -418,7 +284,10 @@ impl std::error::Error for VcrError {
     }
 }
 
-fn read_cassette(path: &Path) -> Result<Cassette, VcrError> {
+fn read_yaml<T>(path: &Path) -> Result<T, VcrError>
+where
+    T: DeserializeOwned,
+{
     let bytes = std::fs::read(path).map_err(|source| VcrError::Read {
         path: path.to_path_buf(),
         source,
@@ -429,7 +298,10 @@ fn read_cassette(path: &Path) -> Result<Cassette, VcrError> {
     })
 }
 
-fn write_cassette(path: &Path, cassette: &Cassette) -> Result<(), VcrError> {
+fn write_yaml<T>(path: &Path, cassette: &T) -> Result<(), VcrError>
+where
+    T: Serialize,
+{
     let text = serde_yaml_ng::to_string(cassette).map_err(|source| VcrError::Serialize {
         path: path.to_path_buf(),
         source,
@@ -440,38 +312,11 @@ fn write_cassette(path: &Path, cassette: &Cassette) -> Result<(), VcrError> {
     })
 }
 
-fn sanitize_path_component(value: &str) -> Cow<'_, str> {
-    if value
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-    {
-        return Cow::Borrowed(value);
-    }
-    Cow::Owned(
-        value
-            .bytes()
-            .map(|byte| {
-                if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' {
-                    byte as char
-                } else {
-                    '_'
-                }
-            })
-            .collect(),
-    )
-}
-
-fn duration_micros_u64(duration: Duration) -> u64 {
-    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
-}
-
-fn scale_delay(delay: Duration, speed: f64) -> Duration {
-    let speed = if speed.is_finite() && 0.0 < speed {
-        speed
-    } else {
-        1.0
-    };
-    Duration::from_secs_f64(delay.as_secs_f64() / speed)
+fn mismatch_payload<T>(value: &T) -> String
+where
+    T: Serialize,
+{
+    serde_yaml_ng::to_string(value).unwrap_or_else(|error| format!("<serialize error: {error}>"))
 }
 
 #[cfg(test)]

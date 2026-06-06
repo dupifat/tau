@@ -13,8 +13,9 @@
 
 use std::io::BufRead;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tau_proto::{ContentPart, ContextItem, ContextRole, ToolResponseHeader, ToolResultStatus};
 
 use crate::common::{LlmError, PromptPayload, StreamState, cbor_to_json, effort_wire};
@@ -23,6 +24,7 @@ pub mod pool;
 pub mod ws;
 pub mod ws_runtime;
 
+const PROVIDER_STREAM_CASSETTE_VERSION: u32 = 1;
 /// Which ChatGPT/Codex Responses surface a model is served through.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResponsesSurface {
@@ -41,6 +43,35 @@ impl ResponsesSurface {
         let _ = self;
         false
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(super) struct ProviderStreamCassette {
+    version: u32,
+    request: serde_json::Value,
+    stream: ProviderRawEventStream,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub(super) struct ProviderRawEventStream {
+    raw_events: Vec<ProviderRawEvent>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+struct ProviderRawEvent {
+    delta_micros: u64,
+    raw: String,
+}
+
+pub(super) fn record_provider_raw_event_after(
+    stream: &mut ProviderRawEventStream,
+    delta: Duration,
+    raw: impl Into<String>,
+) {
+    stream.raw_events.push(ProviderRawEvent {
+        delta_micros: duration_micros_u64(delta),
+        raw: raw.into(),
+    });
 }
 
 /// Config for the ChatGPT/Codex Responses API.
@@ -193,32 +224,41 @@ pub fn responses_stream(
 ) -> Result<StreamState, LlmError> {
     let body = build_request(config, request, None);
     let vcr_config = load_vcr_config()?;
-    let vcr_turn = if let Some(vcr_config) = vcr_config.as_ref() {
+    if let Some(vcr_config) = vcr_config.as_ref() {
         let request_body = serde_json::to_value(&body).map_err(LlmError::Json)?;
-        begin_vcr_turn(
+        if let Some(cassette) = load_provider_stream_cassette(
             vcr_config,
             request,
             agent_prompt_id,
             tau_proto::ProviderBackendTransport::HttpSse,
-            request_body,
-        )?
-    } else {
-        tau_vcr::VcrTurn::Off
-    };
-    match vcr_turn {
-        tau_vcr::VcrTurn::Off => {
-            responses_stream_live(agent_prompt_id, config, request, &body, None, on_update)
+            &request_body,
+        )? {
+            return responses_stream_replay(&cassette.stream, on_update);
         }
-        tau_vcr::VcrTurn::Record(recording) => responses_stream_live(
+        let store = vcr_config.store();
+        let key = provider_vcr_key(
+            request,
+            agent_prompt_id,
+            tau_proto::ProviderBackendTransport::HttpSse,
+        );
+        let mut stream = ProviderRawEventStream::default();
+        let state = responses_stream_live(
             agent_prompt_id,
             config,
             request,
             &body,
-            Some(recording),
+            Some(&mut stream),
             on_update,
-        ),
-        tau_vcr::VcrTurn::Replay(replay) => responses_stream_replay(replay, on_update),
+        )?;
+        let cassette = ProviderStreamCassette {
+            version: PROVIDER_STREAM_CASSETTE_VERSION,
+            request: request_body,
+            stream,
+        };
+        store.put(&key, &cassette).map_err(LlmError::Vcr)?;
+        return Ok(state);
     }
+    responses_stream_live(agent_prompt_id, config, request, &body, None, on_update)
 }
 
 fn responses_stream_live(
@@ -226,7 +266,7 @@ fn responses_stream_live(
     config: &ResponsesConfig,
     request: &PromptPayload<'_>,
     body: &ResponsesRequest,
-    mut recording: Option<tau_vcr::Recording>,
+    mut recording_stream: Option<&mut ProviderRawEventStream>,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<StreamState, LlmError> {
     maybe_debug_write_provider_request(
@@ -261,7 +301,7 @@ fn responses_stream_live(
 
     let reader = std::io::BufReader::new(response.body_mut().as_reader());
     let mut state = StreamState::new();
-
+    let mut recording_last_event_at = Instant::now();
     for line in reader.lines() {
         let line = line.map_err(LlmError::Io)?;
         if !line.starts_with("data: ") {
@@ -270,29 +310,31 @@ fn responses_stream_live(
         let data = line
             .strip_prefix("data: ")
             .expect("line starts with data prefix");
-        if let Some(recording) = recording.as_mut() {
-            recording.record_raw_event(format!("{line}\n\n"));
+        if let Some(stream) = recording_stream.as_deref_mut() {
+            let now = Instant::now();
+            let delta = now.saturating_duration_since(recording_last_event_at);
+            recording_last_event_at = now;
+            record_provider_raw_event_after(stream, delta, format!("{line}\n\n"));
         }
         if apply_sse_data(&mut state, data, on_update)? {
             break;
         }
     }
 
-    if let Some(recording) = recording {
-        recording.finish().map_err(LlmError::Vcr)?;
-    }
-
     Ok(state)
 }
 
 fn responses_stream_replay(
-    replay: tau_vcr::Replay,
+    stream: &ProviderRawEventStream,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<StreamState, LlmError> {
     let mut state = StreamState::new();
-    for event in replay.events_at_speed(100.0) {
-        std::thread::sleep(event.delay);
-        if apply_raw_sse_event(&mut state, event.raw, on_update)? {
+    for event in &stream.raw_events {
+        std::thread::sleep(scale_delay(
+            Duration::from_micros(event.delta_micros),
+            100.0,
+        ));
+        if apply_raw_sse_event(&mut state, &event.raw, on_update)? {
             break;
         }
     }
@@ -330,23 +372,63 @@ fn load_vcr_config() -> Result<Option<tau_vcr::VcrConfig>, LlmError> {
     tau_vcr::VcrConfig::from_env().map_err(LlmError::Vcr)
 }
 
-fn begin_vcr_turn(
+pub(super) fn load_provider_stream_cassette(
     vcr_config: &tau_vcr::VcrConfig,
     request: &PromptPayload<'_>,
     agent_prompt_id: &str,
     transport: tau_proto::ProviderBackendTransport,
-    request_body: serde_json::Value,
-) -> Result<tau_vcr::VcrTurn, LlmError> {
-    tau_vcr::begin(
-        vcr_config,
-        tau_vcr::TurnKey::new(
-            request.session_id.as_str(),
-            agent_prompt_id,
-            provider_backend_transport_label(transport),
-        ),
-        request_body,
+    request_body: &serde_json::Value,
+) -> Result<Option<ProviderStreamCassette>, LlmError> {
+    let store = vcr_config.store();
+    let key = provider_vcr_key(request, agent_prompt_id, transport);
+    let cassette = store
+        .get::<ProviderStreamCassette>(&key)
+        .map_err(LlmError::Vcr)?;
+    match (vcr_config.mode, cassette) {
+        (tau_vcr::VcrMode::Off, _) => Ok(None),
+        (tau_vcr::VcrMode::ReplayOnly, None) => {
+            Err(LlmError::Vcr(tau_vcr::VcrError::Missing { key }))
+        }
+        (tau_vcr::VcrMode::ReplayOnly | tau_vcr::VcrMode::RecordIfMissing, Some(cassette)) => {
+            validate_provider_stream_cassette(&key, &cassette, request_body)?;
+            Ok(Some(cassette))
+        }
+        (tau_vcr::VcrMode::RecordIfMissing, None) => Ok(None),
+    }
+}
+
+pub(super) fn provider_vcr_key(
+    request: &PromptPayload<'_>,
+    agent_prompt_id: &str,
+    transport: tau_proto::ProviderBackendTransport,
+) -> String {
+    format!(
+        "{}-{}-{}",
+        request.session_id.as_str(),
+        agent_prompt_id,
+        provider_backend_transport_label(transport)
     )
-    .map_err(LlmError::Vcr)
+}
+
+fn validate_provider_stream_cassette(
+    key: &str,
+    cassette: &ProviderStreamCassette,
+    request_body: &serde_json::Value,
+) -> Result<(), LlmError> {
+    if cassette.version != PROVIDER_STREAM_CASSETTE_VERSION {
+        return Err(LlmError::Vcr(tau_vcr::VcrError::UnsupportedVersion {
+            key: key.to_owned(),
+            version: cassette.version,
+        }));
+    }
+    if cassette.request != *request_body {
+        return Err(LlmError::Vcr(tau_vcr::request_mismatch(
+            key,
+            &cassette.request,
+            request_body,
+        )));
+    }
+    Ok(())
 }
 
 fn provider_backend_transport_label(
@@ -1191,6 +1273,19 @@ fn convert_context_item(
         }
         ContextItem::Message(_) => {}
     }
+}
+
+fn duration_micros_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
+pub(super) fn scale_delay(delay: Duration, speed: f64) -> Duration {
+    let speed = if speed.is_finite() && 0.0 < speed {
+        speed
+    } else {
+        1.0
+    };
+    Duration::from_secs_f64(delay.as_secs_f64() / speed)
 }
 
 #[cfg(test)]

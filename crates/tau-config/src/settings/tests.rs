@@ -105,7 +105,34 @@ fn cli_settings_user_binding_keeps_built_in_chords() {
     assert_eq!(s.bind.get("C-p").expect("C-p").action, "prompt-previous");
     assert_eq!(s.bind.get("C-n").expect("C-n").action, "prompt-next");
 }
+#[test]
+fn cli_settings_user_completion_keeps_built_in_prefixes() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("cli.yaml"),
+        r##"{ completions: { "#/": "complete_with_command fzf" } }"##,
+    )
+    .expect("write");
 
+    let s = load_cli_settings_in(&dirs_with_config(dir)).expect("load");
+    assert_eq!(
+        s.completions.get("#/").map(String::as_str),
+        Some("complete_with_command fzf")
+    );
+    assert_eq!(
+        s.completions.get("@").map(String::as_str),
+        Some("complete_agents")
+    );
+    assert_eq!(
+        s.completions.get("~").map(String::as_str),
+        Some("complete_path")
+    );
+    assert_eq!(
+        s.completions.get("./").map(String::as_str),
+        Some("complete_path")
+    );
+}
 #[test]
 fn cli_state_load_returns_default_when_file_missing() {
     let td = TempDir::new().expect("tempdir");

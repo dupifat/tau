@@ -750,6 +750,16 @@ pub(crate) fn run_chat(
     } else {
         tau_cli_term::CursorShape::Block
     };
+    let completions = settings
+        .completions
+        .iter()
+        .map(|(prefix, spec)| {
+            tau_cli_term::CompletionRule::parse(prefix.clone(), spec).ok_or_else(|| {
+                CliError::Participant(format!("invalid completion rule `{prefix}: {spec}`"))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let completion_rules = tau_cli_term::CompletionRules::new(completions);
     let bindings = settings
         .bind
         .iter()
@@ -765,13 +775,14 @@ pub(crate) fn run_chat(
             Vec::new()
         }
     };
-    let (mut term, handle, completion_data) = HighTerm::new_with_input_history(
+    let (mut term, handle, completion_data) = HighTerm::new_with_completion_rules(
         prompt,
         commands,
         theme.clone(),
         cursor_shape,
         bindings,
         input_history,
+        completion_rules,
     )?;
     *input_shutdown_handle.lock().expect(MUTEX_POISONED) = Some(handle.clone());
     if remote_disconnected.load(Ordering::Acquire) {

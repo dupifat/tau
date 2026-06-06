@@ -1,7 +1,8 @@
 use std::fs;
 
 use crate::completion::{
-    self, CompletionData, SlashCommand, build_candidates, build_candidates_with_home,
+    self, CompletionData, CompletionRule, CompletionRules, SlashCommand, build_candidates,
+    build_candidates_with_home, build_candidates_with_rules,
 };
 
 #[test]
@@ -144,6 +145,49 @@ fn at_mentions_remain_agent_completion_after_dotslash_fuzzy_port() {
     assert_eq!(mentions.len(), 1);
     assert_eq!(mentions[0].replacement, "ask @worker");
 }
+#[test]
+fn leading_whitespace_slash_command_preserves_prefix() {
+    let cands = build_candidates(
+        &[SlashCommand::new("/model", "Switch model")],
+        &CompletionData::new(),
+        "  /mod",
+        "  /mod".len(),
+    );
+    assert_eq!(cands.len(), 1);
+    assert_eq!(cands[0].replacement, "  /model");
+}
+
+#[test]
+fn configured_actions_preserve_surrounding_prompt_text() {
+    let rules = CompletionRules::new(vec![
+        CompletionRule::parse("/", "complete_actions").expect("rule parses"),
+    ]);
+    let cands = build_candidates_with_rules(
+        &[SlashCommand::new("/model", "Switch model")],
+        &CompletionData::new(),
+        &rules,
+        "ask /mod now",
+        "ask /mod".len(),
+    );
+    assert_eq!(cands.len(), 1);
+    assert_eq!(cands[0].replacement, "ask /model now");
+}
+
+#[test]
+fn command_completion_requires_whole_token_and_loses_to_leading_slash_actions() {
+    let rules = CompletionRules::new(vec![
+        CompletionRule::parse("#/", "complete_with_command fzf").expect("rule parses"),
+        CompletionRule::parse("/", "complete_with_command fzf").expect("rule parses"),
+    ]);
+    assert!(rules.command_for_exact_token("#/foo", "#/".len()).is_none());
+    assert!(rules.command_for_exact_token("/", "/".len()).is_none());
+    assert!(
+        rules
+            .command_for_exact_token("ask #/", "ask #/".len())
+            .is_some()
+    );
+}
+
 #[test]
 fn non_slash_non_path_buffer_returns_nothing() {
     let cands = build_candidates(

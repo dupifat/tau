@@ -16,7 +16,10 @@ mod tests;
 use std::io::{self, Write as _};
 use std::sync::{Arc, Mutex};
 
-pub use completion::{ArgCompleter, CommandName, CompletionData, CompletionItem, SlashCommand};
+pub use completion::{
+    ArgCompleter, CommandName, CompletionData, CompletionItem, CompletionRule, CompletionRules,
+    SlashCommand,
+};
 #[cfg(test)]
 pub(crate) use tau_cli_term_raw::RawEvent as TestRawEvent;
 pub use tau_cli_term_raw::{
@@ -73,6 +76,8 @@ pub struct HighTerm {
     /// from persistent history at startup and extended with submitted
     /// prompts from this process.
     prompt_history: Vec<String>,
+    completion_rules: CompletionRules,
+    last_command_completion_token: Option<String>,
 }
 
 impl HighTerm {
@@ -88,13 +93,14 @@ impl HighTerm {
         cursor_shape: CursorShape,
         bindings: impl IntoIterator<Item = (String, String)>,
     ) -> io::Result<(Self, TermHandle, CompletionData)> {
-        Self::new_with_input_history(
+        Self::new_with_completion_rules(
             left_prompt,
             commands,
             theme,
             cursor_shape,
             bindings,
             std::iter::empty(),
+            CompletionRules::default(),
         )
     }
 
@@ -107,6 +113,27 @@ impl HighTerm {
         bindings: impl IntoIterator<Item = (String, String)>,
         input_history: impl IntoIterator<Item = String>,
     ) -> io::Result<(Self, TermHandle, CompletionData)> {
+        Self::new_with_completion_rules(
+            left_prompt,
+            commands,
+            theme,
+            cursor_shape,
+            bindings,
+            input_history,
+            CompletionRules::default(),
+        )
+    }
+
+    /// Creates a new terminal with explicit prompt completion rules.
+    pub fn new_with_completion_rules(
+        left_prompt: impl Into<StyledText>,
+        commands: Vec<SlashCommand>,
+        theme: Theme,
+        cursor_shape: CursorShape,
+        bindings: impl IntoIterator<Item = (String, String)>,
+        input_history: impl IntoIterator<Item = String>,
+        completion_rules: CompletionRules,
+    ) -> io::Result<(Self, TermHandle, CompletionData)> {
         let input_history: Vec<String> = input_history.into_iter().collect();
         let (mut term, handle) = tau_cli_term_raw::Term::new(left_prompt, cursor_shape)?;
         term.seed_input_history(input_history.clone());
@@ -114,7 +141,11 @@ impl HighTerm {
         let handle_clone = handle.clone();
         let data = CompletionData::new();
         let data_clone = data.clone();
-        term.set_completion_source(Some(make_completion_source(commands, data)));
+        term.set_completion_source(Some(make_completion_source(
+            commands,
+            data,
+            completion_rules.clone(),
+        )));
         let external_editor = resolve_external_editor();
         Ok((
             Self {
@@ -128,6 +159,8 @@ impl HighTerm {
                     .into_iter()
                     .filter(|entry| !entry.is_empty())
                     .collect(),
+                completion_rules,
+                last_command_completion_token: None,
             },
             handle_clone,
             data_clone,
@@ -144,7 +177,11 @@ impl HighTerm {
     ) -> (Self, CompletionData) {
         let data = CompletionData::new();
         let data_clone = data.clone();
-        term.set_completion_source(Some(make_completion_source(commands, data)));
+        term.set_completion_source(Some(make_completion_source(
+            commands,
+            data,
+            CompletionRules::default(),
+        )));
         term.set_bindings(bindings);
         (
             Self {
@@ -155,6 +192,8 @@ impl HighTerm {
                 external_editor: None,
                 menu_block_id: None,
                 prompt_history: Vec::new(),
+                completion_rules: CompletionRules::default(),
+                last_command_completion_token: None,
             },
             data_clone,
         )
@@ -197,6 +236,11 @@ impl HighTerm {
 
             match raw {
                 RawEvent::BufferChanged => {
+                    if self.maybe_run_command_completion() {
+                        self.sync_menu_block();
+                        self.handle.redraw_sync();
+                        return Ok(Event::BufferChanged);
+                    }
                     self.sync_menu_block();
                     self.handle.redraw();
                     return Ok(Event::BufferChanged);
@@ -415,6 +459,40 @@ impl HighTerm {
         }
     }
 
+    fn maybe_run_command_completion(&mut self) -> bool {
+        let buffer = self.handle.get_buffer();
+        let cursor = self.handle.get_cursor();
+        let Some((command, before, after)) = self
+            .completion_rules
+            .command_for_exact_token(&buffer, cursor)
+            .map(|(command, before, after)| {
+                (command.to_vec(), before.to_owned(), after.to_owned())
+            })
+        else {
+            self.last_command_completion_token = None;
+            return false;
+        };
+        let token_key = format!("{before}\0{cursor}");
+        if self.last_command_completion_token.as_deref() == Some(token_key.as_str()) {
+            return false;
+        }
+        self.last_command_completion_token = Some(token_key);
+        match run_completion_command(&self.term, &command) {
+            Ok(Some(text)) => {
+                let new_text = format!("{before}{text}{after}");
+                let new_cursor = before.len() + text.len();
+                self.handle.set_buffer(new_text, new_cursor);
+                self.last_command_completion_token = None;
+                true
+            }
+            Ok(None) => false,
+            Err(msg) => {
+                self.print_local(&format!("completion command: {msg}"));
+                true
+            }
+        }
+    }
+
     fn print_local(&self, message: &str) {
         let block = resolve::themed_block(
             &self.theme,
@@ -428,11 +506,49 @@ impl HighTerm {
 fn make_completion_source(
     commands: Vec<SlashCommand>,
     data: CompletionData,
+    rules: CompletionRules,
 ) -> Box<dyn tau_cli_term_raw::CompletionSource> {
     let commands = Arc::new(commands);
+    let rules = Arc::new(rules);
     Box::new(move |buffer: &str, cursor: usize| -> Vec<Candidate> {
-        completion::build_candidates(&commands, &data, buffer, cursor)
+        completion::build_candidates_with_rules(&commands, &data, &rules, buffer, cursor)
     })
+}
+
+fn run_completion_command(
+    term: &tau_cli_term_raw::Term,
+    command: &[String],
+) -> Result<Option<String>, String> {
+    let Some((program, args)) = command.split_first() else {
+        return Err("empty command".to_owned());
+    };
+    term.pause_for_external()
+        .map_err(|e| format!("could not release terminal: {e}"))?;
+    struct ResumeGuard<'a>(&'a tau_cli_term_raw::Term);
+    impl Drop for ResumeGuard<'_> {
+        fn drop(&mut self) {
+            let _ = self.0.resume_after_external();
+        }
+    }
+    let _guard = ResumeGuard(term);
+    let output = std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| format!("could not spawn command: {e}"))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let text = String::from_utf8(output.stdout)
+        .map_err(|e| format!("command output was not utf-8: {e}"))?;
+    let text = text.trim().to_owned();
+    if text.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(text))
+    }
 }
 
 struct PromptShellCommand {

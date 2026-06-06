@@ -225,25 +225,156 @@ impl CompletionData {
     }
 }
 
+/// Named completion behavior selected by prompt completion config.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CompletionRuleKind {
+    /// Complete active agent mentions from harness-provided agent data.
+    Agents,
+    /// Complete filesystem paths by reading the matching directory.
+    Path,
+    /// Complete filesystem paths, preferring fuzzy git-tracked file matches for
+    /// `./<partial>` inside a repository.
+    PathFuzzy,
+    /// Complete action/slash-command names.
+    Actions,
+    /// Run an external command when the trigger token is typed exactly.
+    Command(Vec<String>),
+}
+
+/// A single prompt completion rule keyed by the word prefix that activates it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompletionRule {
+    /// Word prefix that activates this completion rule.
+    pub prefix: String,
+    /// Completion behavior selected for the prefix.
+    pub kind: CompletionRuleKind,
+}
+
+impl CompletionRule {
+    /// Parses a `cli.yaml` completion entry such as `complete_path` or
+    /// `complete_with_command fzf --filter foo`.
+    pub fn parse(prefix: impl Into<String>, spec: &str) -> Option<Self> {
+        let prefix = prefix.into();
+        let mut parts = spec.split_whitespace();
+        let name = parts.next()?;
+        let kind = match name {
+            "complete_agents" => CompletionRuleKind::Agents,
+            "complete_path" => CompletionRuleKind::Path,
+            "complete_path_fuzzy" => CompletionRuleKind::PathFuzzy,
+            "complete_actions" => CompletionRuleKind::Actions,
+            "complete_with_command" => {
+                let args = parts.map(ToOwned::to_owned).collect::<Vec<_>>();
+                if args.is_empty() {
+                    return None;
+                }
+                CompletionRuleKind::Command(args)
+            }
+            _ => return None,
+        };
+        Some(Self { prefix, kind })
+    }
+}
+
+/// Prompt completion rules. If multiple rules match, the longest prefix wins.
+#[derive(Clone, Debug)]
+pub struct CompletionRules {
+    rules: Vec<CompletionRule>,
+}
+
+impl CompletionRules {
+    /// Creates rules sorted so the longest matching prefix wins.
+    pub fn new(mut rules: Vec<CompletionRule>) -> Self {
+        rules.sort_by(|a, b| {
+            b.prefix
+                .len()
+                .cmp(&a.prefix.len())
+                .then(a.prefix.cmp(&b.prefix))
+        });
+        Self { rules }
+    }
+
+    /// Built-in prompt completion defaults used when no config is supplied.
+    pub fn built_in() -> Self {
+        Self::new(vec![
+            CompletionRule::parse("@", "complete_agents").expect("valid built-in completion"),
+            CompletionRule::parse("./", "complete_path").expect("valid built-in completion"),
+            CompletionRule::parse("../", "complete_path").expect("valid built-in completion"),
+            CompletionRule::parse("/", "complete_path").expect("valid built-in completion"),
+            CompletionRule::parse("~", "complete_path").expect("valid built-in completion"),
+            CompletionRule::parse("~/", "complete_path").expect("valid built-in completion"),
+        ])
+    }
+
+    fn matching_rule(&self, token_prefix: &str) -> Option<&CompletionRule> {
+        self.rules
+            .iter()
+            .find(|rule| token_prefix.starts_with(&rule.prefix))
+    }
+
+    /// Returns the argv and replacement surroundings for an exact command
+    /// trigger token at the cursor.
+    pub fn command_for_exact_token<'a>(
+        &'a self,
+        buffer: &'a str,
+        cursor: usize,
+    ) -> Option<(&'a [String], &'a str, &'a str)> {
+        if first_non_whitespace_starts_action(buffer) {
+            return None;
+        }
+        let token = word_token(buffer, cursor)?;
+        if buffer
+            .get(cursor..)?
+            .chars()
+            .next()
+            .is_some_and(|ch| !ch.is_whitespace())
+        {
+            return None;
+        }
+        let rule = self.rules.iter().find(|rule| rule.prefix == token.prefix)?;
+        match &rule.kind {
+            CompletionRuleKind::Command(command) => {
+                Some((command.as_slice(), token.before, token.after))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl Default for CompletionRules {
+    fn default() -> Self {
+        Self::built_in()
+    }
+}
+
 /// Builds the candidate list for the given buffer/cursor.
-///
-/// - Buffer starting with `./`, `../`, `~`, or `~/` → filesystem path
-///   candidates.
-/// - Buffer not starting with `/` → no slash-command candidates.
-/// - Buffer with no space → match against the static slash-command registry by
-///   prefix.
-/// - Buffer with `<cmd> <arg-prefix>` → look up the dynamic `CompletionData`
-///   for `<cmd>` and rank prefix matches before substring matches
-///   (case-insensitive).
 pub fn build_candidates(
     commands: &[SlashCommand],
     data: &CompletionData,
     buffer: &str,
     cursor: usize,
 ) -> Vec<Candidate> {
-    build_candidates_with_home(commands, data, buffer, cursor, home_dir().as_deref())
+    build_candidates_with_rules(commands, data, &CompletionRules::default(), buffer, cursor)
 }
 
+/// Builds candidates using explicit prompt completion rules.
+pub fn build_candidates_with_rules(
+    commands: &[SlashCommand],
+    data: &CompletionData,
+    rules: &CompletionRules,
+    buffer: &str,
+    cursor: usize,
+) -> Vec<Candidate> {
+    build_candidates_with_home_and_rules(
+        commands,
+        data,
+        rules,
+        buffer,
+        cursor,
+        home_dir().as_deref(),
+    )
+}
+
+#[cfg(test)]
 pub(crate) fn build_candidates_with_home(
     commands: &[SlashCommand],
     data: &CompletionData,
@@ -251,23 +382,57 @@ pub(crate) fn build_candidates_with_home(
     cursor: usize,
     home_dir: Option<&Path>,
 ) -> Vec<Candidate> {
-    if let Some(path_token) = filesystem_path_token(buffer, cursor) {
-        return build_filesystem_candidates_with_home(&path_token, home_dir);
-    }
+    build_candidates_with_home_and_rules(
+        commands,
+        data,
+        &CompletionRules::default(),
+        buffer,
+        cursor,
+        home_dir,
+    )
+}
 
-    if !buffer.starts_with('/') {
-        if let Some(agent_token) = agent_mention_token(buffer, cursor) {
-            return build_agent_mention_candidates(data, &agent_token);
+pub(crate) fn build_candidates_with_home_and_rules(
+    commands: &[SlashCommand],
+    data: &CompletionData,
+    rules: &CompletionRules,
+    buffer: &str,
+    cursor: usize,
+    home_dir: Option<&Path>,
+) -> Vec<Candidate> {
+    if first_non_whitespace_starts_action(buffer) {
+        let leading_len = buffer.len() - buffer.trim_start().len();
+        let view = &buffer[leading_len..];
+        if let Some(space_pos) = view.find(char::is_whitespace) {
+            let cmd = &view[..space_pos];
+            if cmd.is_empty() {
+                return Vec::new();
+            }
+            let rest = &view[space_pos + 1..];
+            let candidates = build_arg_candidates(data, cmd, rest);
+            return prepend_to_replacements(&buffer[..leading_len], candidates);
         }
-        return Vec::new();
+        let candidates = build_cmd_candidates(commands, &data.dynamic_commands(), view);
+        return replace_token_candidates(&buffer[..leading_len], "", candidates);
     }
 
-    if let Some(space_pos) = buffer.find(' ') {
-        let cmd = &buffer[..space_pos];
-        let rest = &buffer[space_pos + 1..];
-        build_arg_candidates(data, cmd, rest)
-    } else {
-        build_cmd_candidates(commands, &data.dynamic_commands(), buffer)
+    let Some(token) = word_token(buffer, cursor) else {
+        return Vec::new();
+    };
+    let Some(rule) = rules.matching_rule(token.prefix) else {
+        return Vec::new();
+    };
+
+    match &rule.kind {
+        CompletionRuleKind::Agents => build_agent_mention_candidates(data, &token, &rule.prefix),
+        CompletionRuleKind::Path => build_filesystem_candidates_with_home(&token, home_dir, false),
+        CompletionRuleKind::PathFuzzy => {
+            build_filesystem_candidates_with_home(&token, home_dir, true)
+        }
+        CompletionRuleKind::Actions => {
+            build_action_token_candidates(commands, &data.dynamic_commands(), &token, &rule.prefix)
+        }
+        CompletionRuleKind::Command(_) => Vec::new(),
     }
 }
 
@@ -289,14 +454,74 @@ fn build_cmd_candidates(
         })
         .collect()
 }
+fn prepend_to_replacements(prefix: &str, candidates: Vec<Candidate>) -> Vec<Candidate> {
+    candidates
+        .into_iter()
+        .map(|candidate| Candidate {
+            replacement: format!("{prefix}{}", candidate.replacement),
+            ..candidate
+        })
+        .collect()
+}
 
+fn replace_token_candidates(
+    before: &str,
+    after: &str,
+    candidates: Vec<Candidate>,
+) -> Vec<Candidate> {
+    candidates
+        .into_iter()
+        .map(|candidate| Candidate {
+            replacement: format!("{before}{}{after}", candidate.replacement),
+            ..candidate
+        })
+        .collect()
+}
+
+fn build_action_token_candidates(
+    static_commands: &[SlashCommand],
+    dynamic_commands: &[SlashCommand],
+    token: &PathToken<'_>,
+    trigger_prefix: &str,
+) -> Vec<Candidate> {
+    let partial = token
+        .prefix
+        .strip_prefix(trigger_prefix)
+        .unwrap_or(token.prefix);
+    let lookup_prefix = if trigger_prefix == "/" {
+        token.prefix.to_owned()
+    } else {
+        format!("/{partial}")
+    };
+    build_cmd_candidates(static_commands, dynamic_commands, &lookup_prefix)
+        .into_iter()
+        .map(|candidate| {
+            let replacement = if trigger_prefix == "/" {
+                candidate.replacement.clone()
+            } else {
+                format!(
+                    "{trigger_prefix}{}",
+                    candidate.replacement.trim_start_matches('/')
+                )
+            };
+            Candidate {
+                replacement: format!("{}{}{}", token.before, replacement, token.after),
+                ..candidate
+            }
+        })
+        .collect()
+}
 struct PathToken<'a> {
     prefix: &'a str,
     before: &'a str,
     after: &'a str,
 }
 
-fn filesystem_path_token(buffer: &str, cursor: usize) -> Option<PathToken<'_>> {
+fn first_non_whitespace_starts_action(buffer: &str) -> bool {
+    buffer.trim_start().starts_with('/')
+}
+
+fn word_token(buffer: &str, cursor: usize) -> Option<PathToken<'_>> {
     let before_cursor = buffer.get(..cursor)?;
     let after_cursor = buffer.get(cursor..)?;
     let token_start = before_cursor
@@ -308,56 +533,33 @@ fn filesystem_path_token(buffer: &str, cursor: usize) -> Option<PathToken<'_>> {
         .char_indices()
         .find_map(|(idx, ch)| ch.is_whitespace().then_some(cursor + idx))
         .unwrap_or(buffer.len());
-    let prefix = &buffer[token_start..cursor];
-    if is_filesystem_prefix(prefix) {
-        Some(PathToken {
-            prefix,
-            before: &buffer[..token_start],
-            after: &buffer[token_end..],
-        })
-    } else {
-        None
-    }
-}
-
-fn is_filesystem_prefix(buffer: &str) -> bool {
-    buffer.starts_with("./")
-        || buffer.starts_with("../")
-        || buffer == "~"
-        || buffer.starts_with("~/")
-}
-
-fn agent_mention_token(buffer: &str, cursor: usize) -> Option<PathToken<'_>> {
-    let before_cursor = buffer.get(..cursor)?;
-    let after_cursor = buffer.get(cursor..)?;
-    let token_start = before_cursor
-        .char_indices()
-        .rev()
-        .find_map(|(idx, ch)| ch.is_whitespace().then_some(idx + ch.len_utf8()))
-        .unwrap_or(0);
-    let token_end = after_cursor
-        .char_indices()
-        .find_map(|(idx, ch)| ch.is_whitespace().then_some(cursor + idx))
-        .unwrap_or(buffer.len());
-    let prefix = &buffer[token_start..cursor];
-    prefix.starts_with('@').then_some(PathToken {
-        prefix,
+    Some(PathToken {
+        prefix: &buffer[token_start..cursor],
         before: &buffer[..token_start],
         after: &buffer[token_end..],
     })
 }
-
-fn build_agent_mention_candidates(data: &CompletionData, token: &PathToken<'_>) -> Vec<Candidate> {
+fn build_agent_mention_candidates(
+    data: &CompletionData,
+    token: &PathToken<'_>,
+    trigger_prefix: &str,
+) -> Vec<Candidate> {
     let Some(completer) = data.get_agent_mention_completer() else {
         return Vec::new();
     };
-    let partial = token.prefix.strip_prefix('@').unwrap_or(token.prefix);
+    let partial = token
+        .prefix
+        .strip_prefix(trigger_prefix)
+        .unwrap_or(token.prefix);
     completer(&[partial])
         .into_iter()
         .map(|item| Candidate {
             label: item.value.clone(),
             description: item.description.clone(),
-            replacement: format!("{}@{}{}", token.before, item.value, token.after),
+            replacement: format!(
+                "{}{}{}{}",
+                token.before, trigger_prefix, item.value, token.after
+            ),
         })
         .collect()
 }
@@ -387,6 +589,7 @@ fn home_expanded_path(prefix: &str, home_dir: Option<&Path>) -> Option<PathBuf> 
 fn build_filesystem_candidates_with_home(
     path_token: &PathToken<'_>,
     home_dir: Option<&Path>,
+    fuzzy_git_files: bool,
 ) -> Vec<Candidate> {
     let prefix = path_token.prefix;
     let Some(lookup_path) = home_expanded_path(prefix, home_dir) else {
@@ -421,7 +624,7 @@ fn build_filesystem_candidates_with_home(
         (lookup_dir, display_dir, partial)
     };
 
-    if prefix.starts_with("./") && !partial.is_empty() {
+    if fuzzy_git_files && prefix.starts_with("./") && !partial.is_empty() {
         let cwd = cwd();
         if let Some((repo_root, files)) = git_files::git_repo_files(&cwd) {
             let matches = git_files::fuzzy_match_git_files(partial, &files);

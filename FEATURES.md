@@ -468,14 +468,21 @@ available like in-session history.
 
 ### Path autocompletion
 
-When the prompt buffer starts with `./`, Tab fuzzy-searches git-tracked and
-unignored files in the current repository using `nucleo-matcher`; outside a git
-repository, or when no fuzzy matches are found, it falls back to directory prefix
-completion. `../`, `~`, and `~/` use directory prefix completion. `@...` remains
-reserved for agent mention completion. Standard fzf-style fuzzy-search bindings
-are also available inside the completion menu. Slash-command arguments use the
-same menu but are populated dynamically by the harness (model list, effort
-levels, …).
+Prompt word completions are configured in `~/.config/tau/cli.yaml` under
+`completions`. Built-ins map `@` to `complete_agents`, `./`, `../`, `/`, `~`,
+and `~/` to plain `complete_path`; a `/` that is the first non-whitespace
+character always opens slash/action completion for now. Other available
+completers are `complete_path_fuzzy`, `complete_actions`, and
+`complete_with_command <argv...>`; command arguments are split on whitespace,
+run when the trigger token is typed exactly, and replace it with trimmed stdout.
+
+`complete_path_fuzzy` fuzzy-searches git-tracked and unignored files in the
+current repository using `nucleo-matcher`; outside a git repository, or when no
+fuzzy matches are found, it falls back to directory prefix completion. Plain path
+completion reads matching directory entries. `@...` remains reserved for agent
+mention completion. Standard fzf-style fuzzy-search bindings are also available
+inside the completion menu. Slash-command arguments use the same menu but are
+populated dynamically by the harness (model list, effort levels, …).
 
 ### Bang shell commands
 

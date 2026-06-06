@@ -5,6 +5,15 @@
 # prompt_symbol: "◯"
 # submitted_prompt_symbol: "⬤"
 
+# Optional prompt completion rules keyed by word prefix.
+# completions:
+#   "@": complete_agents
+#   "./": complete_path
+#   "/": complete_path
+#   "~": complete_path
+#   "~/": complete_path
+#   "#/": complete_with_command fzf some arguments
+
 # Optional keybinding overrides. Merge on top of built-in defaults.
 # bind:
 #   ctrl-g:

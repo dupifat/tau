@@ -12,4 +12,11 @@ show_tools: full
 show_messages: all-full
 show_status: all
 theme: auto
+completions:
+  "@": complete_agents
+  "./": complete_path
+  "../": complete_path
+  "/": complete_path
+  "~": complete_path
+  "~/": complete_path
 bind: {}

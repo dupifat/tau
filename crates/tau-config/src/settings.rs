@@ -81,6 +81,10 @@ pub struct CliSettings {
     pub show_status: ShowStatus,
     /// Which built-in color theme to use for the terminal UI.
     pub theme: CliTheme,
+    /// Prompt-text completion rules keyed by word prefix. Values name
+    /// the completer to run, optionally followed by completer arguments.
+    #[serde(default)]
+    pub completions: HashMap<String, String>,
     /// Key bindings for prompt-local actions. Defaults to an
     /// empty map at the serde layer; the loader merges
     /// `built-in.cli-bindings.yaml` underneath the user's bindings.
@@ -1199,11 +1203,15 @@ pub fn load_cli_settings() -> Result<CliSettings, SettingsError> {
 /// The embedded `built-in.cli.yaml` is layered underneath the user's
 /// own `cli.yaml` (and any `cli.d/*.yaml` drop-ins), so the user
 /// can write a partial file and unmentioned fields fall back to the
-/// shipped defaults. The `bind` map is merged per-key on top so a
-/// user customizing one chord doesn't lose the others.
+/// shipped defaults. The `completions` and `bind` maps are merged
+/// per-key on top so customizing one prefix or chord does not remove
+/// the built-ins.
 pub fn load_cli_settings_in(dirs: &TauDirs) -> Result<CliSettings, SettingsError> {
     let mut settings: CliSettings =
         load_yaml_layered_with_builtin(BUILT_IN_CLI_YAML, dirs.config_dir.as_deref(), "cli")?;
+    let mut completions = CliSettings::built_in().completions;
+    completions.extend(settings.completions);
+    settings.completions = completions;
     let mut bindings = default_cli_bindings();
     bindings.extend(settings.bind);
     settings.bind = bindings;

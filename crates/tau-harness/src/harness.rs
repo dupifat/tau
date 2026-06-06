@@ -5,9 +5,12 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
+use rand::SeedableRng as _;
+use rand::rngs::StdRng;
 use tau_core::{
     ActionRegistry, AgentStore, Connection, ConnectionMetadata, ConnectionOrigin,
     DefaultSubscriptionPolicy, EventBus, NodeId, PolicyStore, RouteError, SessionStore,
@@ -594,21 +597,26 @@ fn normalize_display_name(value: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn random_alphanumeric(len: usize) -> String {
+#[cfg(test)]
+fn deterministic_agent_id_rng() -> StdRng {
+    StdRng::seed_from_u64(0)
+}
+
+fn random_alphanumeric(len: usize, rng: &mut StdRng) -> String {
     use rand::Rng as _;
 
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    let mut rng = rand::thread_rng();
     (0..len)
         .map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char)
         .collect()
 }
 
-struct RandomAlphanumericHelper {
+struct RandomAlphanumericHelper<'a> {
     collision_extra_len: usize,
+    rng: Mutex<&'a mut StdRng>,
 }
 
-impl handlebars::HelperDef for RandomAlphanumericHelper {
+impl handlebars::HelperDef for RandomAlphanumericHelper<'_> {
     fn call_inner<'reg: 'rc, 'rc>(
         &self,
         h: &handlebars::Helper<'rc>,
@@ -621,8 +629,9 @@ impl handlebars::HelperDef for RandomAlphanumericHelper {
             .and_then(|param| param.value().as_u64())
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or(6);
+        let mut rng = self.rng.lock().expect("agent id rng lock poisoned");
         Ok(handlebars::ScopedJson::Derived(serde_json::Value::String(
-            random_alphanumeric(requested.saturating_add(self.collision_extra_len)),
+            random_alphanumeric(requested.saturating_add(self.collision_extra_len), &mut rng),
         )))
     }
 }
@@ -640,7 +649,10 @@ enum AgentIdMintWarning {
     CollisionsExceeded { attempts: usize },
 }
 
-fn handlebars_for_agent_template(collision_extra_len: usize) -> handlebars::Handlebars<'static> {
+fn handlebars_for_agent_template<'a>(
+    collision_extra_len: usize,
+    rng: &'a mut StdRng,
+) -> handlebars::Handlebars<'a> {
     let mut handlebars = handlebars::Handlebars::new();
     handlebars.set_strict_mode(true);
     handlebars.register_escape_fn(handlebars::no_escape);
@@ -648,6 +660,7 @@ fn handlebars_for_agent_template(collision_extra_len: usize) -> handlebars::Hand
         "random_alphanumeric",
         Box::new(RandomAlphanumericHelper {
             collision_extra_len,
+            rng: Mutex::new(rng),
         }),
     );
     handlebars
@@ -681,7 +694,8 @@ fn render_agent_template(
     task_name: Option<&str>,
     collision_extra_len: usize,
 ) -> Result<String, handlebars::RenderError> {
-    let handlebars = handlebars_for_agent_template(collision_extra_len);
+    let mut rng = deterministic_agent_id_rng();
+    let handlebars = handlebars_for_agent_template(collision_extra_len, &mut rng);
     let mut context = base_agent_template_context(role, role_group);
     context.insert(
         "agent_id".to_owned(),
@@ -715,8 +729,9 @@ fn render_agent_id_template(
     role: &str,
     role_group: &str,
     collision_extra_len: usize,
+    rng: &mut StdRng,
 ) -> Result<String, handlebars::RenderError> {
-    let handlebars = handlebars_for_agent_template(collision_extra_len);
+    let handlebars = handlebars_for_agent_template(collision_extra_len, rng);
     handlebars.render_template(
         template,
         &serde_json::Value::Object(base_agent_template_context(role, role_group)),
@@ -728,6 +743,7 @@ fn mint_available_agent_id_for_role_with(
     role_group: &str,
     template: &str,
     mut is_taken: impl FnMut(&str) -> bool,
+    rng: &mut StdRng,
     mut warn: impl FnMut(AgentIdTemplateKind, AgentIdMintWarning),
 ) -> String {
     let mut use_default = false;
@@ -750,7 +766,7 @@ fn mint_available_agent_id_for_role_with(
         let mut exhausted_attempts = true;
         for attempt in 0..max_attempts {
             let rendered =
-                match render_agent_id_template(active_template, role, role_group, attempt) {
+                match render_agent_id_template(active_template, role, role_group, attempt, rng) {
                     Ok(rendered) => rendered,
                     Err(error) => {
                         warn(
@@ -798,11 +814,13 @@ fn mint_available_agent_id_for_role_with(
 
 #[cfg(test)]
 fn mint_agent_id_for_role(role: &str) -> String {
+    let mut rng = deterministic_agent_id_rng();
     mint_available_agent_id_for_role_with(
         role,
         role,
         DEFAULT_AGENT_ID_TEMPLATE,
         |_| false,
+        &mut rng,
         |_, _| {},
     )
 }
@@ -1078,6 +1096,12 @@ pub struct Harness {
     /// Reason associated with the current session binding. Late UI subscribers
     /// receive a replayed `SessionStarted` snapshot with this reason.
     pub(crate) current_session_start_reason: tau_proto::SessionStartReason,
+    /// Random stream for agent-id template helpers. Production harnesses seed
+    /// it from OS entropy; tests seed it deterministically from the session id
+    /// so they can stabilize generated agent ids. Advanced on each agent
+    /// creation so one harness does not mint the same random candidate
+    /// repeatedly.
+    agent_id_rng: StdRng,
     /// `call_id` → owning agent for every tool call currently
     /// in flight. Read by `session_id_for_event` (via the
     /// conversation) to attribute incoming `ToolResult` / `ToolError`
@@ -1136,9 +1160,6 @@ pub struct Harness {
     /// the harness loop. Startup waits on this before treating an empty
     /// `extensions` map as ready.
     pending_extension_connects: usize,
-    /// Monotonic counter used to mint synthetic `sp-N`
-    /// `AgentPromptId`s when dispatching prompts to the agent.
-    pub(crate) next_agent_prompt_id: u64,
     /// Maps agent_prompt_id → owning agent for in-flight
     /// prompts. The conversation knows its `session_id`, so older
     /// `prompt_sessions[spid]` lookups become two hops:
@@ -1625,6 +1646,7 @@ impl Harness {
             agent_store,
             current_session_id: eager_session_id.into(),
             current_session_start_reason: eager_session_start_reason,
+            agent_id_rng: StdRng::from_entropy(),
             tool_agents: std::collections::HashMap::new(),
             pending_tools: std::collections::HashMap::new(),
             completed_tool_calls: std::collections::HashSet::new(),
@@ -1638,7 +1660,6 @@ impl Harness {
             extension_activation_staging: std::collections::HashMap::new(),
             extension_order: Vec::new(),
             pending_extension_connects: 0,
-            next_agent_prompt_id: 0,
             prompt_agents: std::collections::HashMap::new(),
             agents,
             agent_routes: HashMap::new(),
@@ -1866,6 +1887,7 @@ impl Harness {
             agent_store,
             current_session_id: eager_session_id.into(),
             current_session_start_reason: eager_session_start_reason,
+            agent_id_rng: StdRng::from_entropy(),
             tool_agents: std::collections::HashMap::new(),
             pending_tools: std::collections::HashMap::new(),
             completed_tool_calls: std::collections::HashSet::new(),
@@ -1879,7 +1901,6 @@ impl Harness {
             extension_activation_staging: std::collections::HashMap::new(),
             extension_order: Vec::new(),
             pending_extension_connects: 0,
-            next_agent_prompt_id: 0,
             prompt_agents: std::collections::HashMap::new(),
             agents,
             agent_routes: HashMap::new(),
@@ -7560,16 +7581,6 @@ impl Harness {
             .filter(|role| self.available_roles.contains_key(role))
     }
 
-    fn agent_id_is_taken(&self, agent_id: &str) -> bool {
-        self.agent_routes.contains_key(agent_id)
-            || self.stopped_agent_ids.contains(agent_id)
-            || self.agent_store.agent_exists(agent_id)
-            || self
-                .pending_start_agent_requests
-                .iter()
-                .any(|pending| pending.agent_id == agent_id)
-    }
-
     fn role_group_name_for_role(&self, role: &str) -> String {
         self.available_role_groups
             .iter()
@@ -7604,11 +7615,23 @@ impl Harness {
         let template = self.agent_id_template.clone();
         let mut warnings = Vec::new();
         let role_group = self.role_group_name_for_role(role);
+        let agent_routes = &self.agent_routes;
+        let stopped_agent_ids = &self.stopped_agent_ids;
+        let agent_store = &self.agent_store;
+        let pending_start_agent_requests = &self.pending_start_agent_requests;
         let agent_id = mint_available_agent_id_for_role_with(
             role,
             &role_group,
             &template,
-            |agent_id| self.agent_id_is_taken(agent_id),
+            |agent_id| {
+                agent_routes.contains_key(agent_id)
+                    || stopped_agent_ids.contains(agent_id)
+                    || agent_store.agent_exists(agent_id)
+                    || pending_start_agent_requests
+                        .iter()
+                        .any(|pending| pending.agent_id == agent_id)
+            },
+            &mut self.agent_id_rng,
             |kind, warning| warnings.push((kind, warning)),
         );
         for (kind, warning) in warnings {
@@ -7711,6 +7734,24 @@ impl Harness {
         }
         let _ = self.agent_store.record_agent_meta(agent_id, cwd);
         let agent_id_proto: tau_proto::AgentId = crate::parse_agent_id(agent_id);
+        let prompt_index_initialized = self
+            .agents
+            .get(cid)
+            .is_some_and(|agent| agent.prompt_index_initialized);
+        if !prompt_index_initialized {
+            let next_prompt_index = match self.agent_store.load_agent(agent_id) {
+                Ok(Some(tree)) => tree.materialized_prompt_count(),
+                Ok(None) => 0,
+                Err(error) => {
+                    self.emit_info(&format!("failed to load agent `{agent_id}`: {error}"));
+                    0
+                }
+            };
+            if let Some(agent) = self.agents.get_mut(cid) {
+                agent.next_prompt_index = next_prompt_index;
+                agent.prompt_index_initialized = true;
+            }
+        }
         let already_loaded = match self.store.load_session(self.current_session_id.as_str()) {
             Ok(Some(membership)) => membership.contains_agent(&agent_id_proto),
             Ok(None) => false,
@@ -7853,8 +7894,16 @@ impl Harness {
         let durable_agent_id = agent_id_for_tree.as_deref().map(crate::parse_agent_id);
         let system_prompt =
             self.build_system_prompt_for_role_and_agent(&role_name, durable_agent_id.as_ref());
-        let agent_prompt_id: AgentPromptId = format!("sp-{}", self.next_agent_prompt_id).into();
-        self.next_agent_prompt_id += 1;
+        let durable_agent_id = agent_id_for_tree.as_deref().unwrap_or(cid.as_ref());
+        let prompt_index = self
+            .agents
+            .get_mut(cid)
+            .expect("prepare_agent_prompt_for_dispatch: unknown agent id")
+            .next_prompt_index;
+        let agent_prompt_id: AgentPromptId = format!("ap-{durable_agent_id}-{prompt_index}").into();
+        if let Some(agent) = self.agents.get_mut(cid) {
+            agent.next_prompt_index += 1;
+        }
         self.prompt_agents
             .insert(agent_prompt_id.clone(), cid.clone());
         let ctx_id = self.agents.get_mut(cid).and_then(|c| c.next_ctx_id.take());

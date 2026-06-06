@@ -378,6 +378,15 @@ pub fn send_daemon_message_with_trace(
     session_id: &str,
     message: &str,
 ) -> Result<InteractionOutcome, HarnessError> {
+    fn parse_agent_prompt_index(agent_prompt_id: &str) -> Option<u64> {
+        agent_prompt_id
+            .strip_prefix("ap-")?
+            .rsplit_once('-')?
+            .1
+            .parse()
+            .ok()
+    }
+
     let mut peer = SocketPeer::connect(socket_path)?;
     peer.send(&Frame::Message(Message::Hello(Hello {
         protocol_version: PROTOCOL_VERSION,
@@ -442,12 +451,12 @@ pub fn send_daemon_message_with_trace(
                 Frame::Event(Event::AgentPromptCreated(prompt))
                     if prompt.ctx_id.as_deref() == Some(ctx_id.as_str()) =>
                 {
-                    our_spid_counter = parse_spid_counter(prompt.agent_prompt_id.as_ref());
+                    our_spid_counter = parse_agent_prompt_index(prompt.agent_prompt_id.as_ref());
                 }
                 Frame::Event(Event::ProviderResponseFinished(finished))
                     if tool_calls_from_output_items(&finished.output_items).is_empty()
                         && our_spid_counter.is_some_and(|ours| {
-                            parse_spid_counter(finished.agent_prompt_id.as_ref())
+                            parse_agent_prompt_index(finished.agent_prompt_id.as_ref())
                                 .is_some_and(|c| ours <= c)
                         }) =>
                 {
@@ -483,13 +492,6 @@ fn next_ctx_id() -> String {
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     )
-}
-
-/// Parses the `sp-N` counter the harness assigns when allocating a
-/// new `AgentPromptId`. Returns `None` if the format ever changes —
-/// callers treat that as "can't correlate" rather than panicking.
-fn parse_spid_counter(spid: &str) -> Option<u64> {
-    spid.strip_prefix("sp-").and_then(|s| s.parse().ok())
 }
 
 /// Sends one user message to a running daemon and returns the final

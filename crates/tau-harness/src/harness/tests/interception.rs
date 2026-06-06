@@ -1,6 +1,18 @@
 use super::*;
 use crate::harness::PendingTool;
 
+fn prompt_created_count(h: &Harness) -> u64 {
+    let mut cursor = tau_proto::EventLogSeq::new(0);
+    let mut count = 0;
+    while let Some(entry) = h.event_log.get_next_from(cursor) {
+        cursor = entry.seq.next();
+        if matches!(entry.event, Event::AgentPromptCreated(_)) {
+            count += 1;
+        }
+    }
+    count
+}
+
 #[test]
 fn interception_exact_selector_intercepts_before_log() {
     let tmp = TempDir::new().expect("tempdir");
@@ -592,7 +604,7 @@ fn interception_user_prompt_dispatch_waits_for_commit() {
 
     let cid = ensure_test_user_agent(&mut h);
     let head_before_dispatch = h.agents.get(&cid).and_then(|c| c.head);
-    let next_sp_before = h.next_agent_prompt_id;
+    let prompts_before = prompt_created_count(&h);
 
     // Drive the user-prompt path. The publish parks in interception.
     h.dispatch_prompt_for_agent(&cid, "real question".to_owned())
@@ -602,7 +614,8 @@ fn interception_user_prompt_dispatch_waits_for_commit() {
     // c.head hasn't moved, and the deferred-dispatch queue contains
     // our cid.
     assert_eq!(
-        h.next_agent_prompt_id, next_sp_before,
+        prompt_created_count(&h),
+        prompts_before,
         "agent dispatch must wait until the prompt commits"
     );
     assert_eq!(
@@ -625,8 +638,8 @@ fn interception_user_prompt_dispatch_waits_for_commit() {
 
     assert_eq!(h.pending_user_prompt_dispatches.len(), 0);
     assert_eq!(
-        h.next_agent_prompt_id,
-        next_sp_before + 1,
+        prompt_created_count(&h),
+        prompts_before + 1,
         "agent dispatch fires once the prompt commits"
     );
     let head_after = h

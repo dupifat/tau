@@ -724,7 +724,7 @@ fn provider_models_are_staged_until_ready_and_queued_prompt_waits() {
     assert!(event_log_contains_source_event(&h, conn_id, |event| {
         matches!(event, Event::ProviderModelsUpdated(update) if update.models.iter().any(|model| model.id == model_id))
     }));
-    let prompt = read_prompt_created(&h, &AgentPromptId::from("sp-0"));
+    let prompt = read_nth_prompt_created(&h, 0);
     assert_eq!(prompt.model, model_id);
     assert!(prompt_context_contains(&prompt, "wait for staged model"));
 
@@ -982,7 +982,7 @@ fn agents_context_ready_staged_until_ready_and_queue_waits() {
             Event::ExtAgentsMdAvailable(_) | Event::ExtensionContextReady(_)
         )
     }));
-    let prompt = read_prompt_created(&h, &AgentPromptId::from("sp-0"));
+    let prompt = read_nth_prompt_created(&h, 0);
     assert!(prompt_context_contains(
         &prompt,
         "queued after staged context"
@@ -1200,7 +1200,7 @@ fn prompt_created_waits_for_registered_agent_context_provider() {
     )
     .expect("context ready");
 
-    let prompt = read_prompt_created(&h, &AgentPromptId::from("sp-0"));
+    let prompt = read_nth_prompt_created(&h, 0);
     assert!(prompt_context_contains(&prompt, "first prompt"));
     assert!(
         prompt
@@ -1454,7 +1454,7 @@ fn unregister_queues_unavailable_notice_for_next_user_prompt_only() {
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("after unregister".to_owned()))
         .expect("dispatch user prompt");
 
-    let prompt = read_prompt_created(&h, &AgentPromptId::from("sp-0"));
+    let prompt = read_nth_prompt_created(&h, 0);
     let notice_pos = prompt
         .context
         .flatten()
@@ -1490,7 +1490,7 @@ fn reregister_before_notice_delivery_dequeues_unavailable_notice() {
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("after reconnect".to_owned()))
         .expect("dispatch user prompt");
 
-    let prompt = read_prompt_created(&h, &AgentPromptId::from("sp-0"));
+    let prompt = read_nth_prompt_created(&h, 0);
     assert_eq!(context_text_count(&prompt, &notice), 0);
     assert_eq!(agent_prompt_text_count(&h, &notice), 0);
     assert!(prompt_has_tool(&prompt, "shell"));
@@ -1516,14 +1516,14 @@ fn reregister_after_notice_delivery_queues_available_again_notice() {
     let cid = ensure_test_user_agent(&mut h);
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("after unregister".to_owned()))
         .expect("dispatch unavailable prompt");
-    let first_prompt = read_prompt_created(&h, &AgentPromptId::from("sp-0"));
+    let first_prompt = read_nth_prompt_created(&h, 0);
     assert_eq!(context_text_count(&first_prompt, &unavailable), 1);
 
     reregister_shell(&mut h, spec);
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("after reregister".to_owned()))
         .expect("dispatch available prompt");
 
-    let second_prompt = read_prompt_created(&h, &AgentPromptId::from("sp-1"));
+    let second_prompt = read_nth_prompt_created(&h, 1);
     let available_pos = second_prompt
         .context
         .flatten()
@@ -1566,7 +1566,7 @@ fn duplicate_provider_keeps_tool_available_without_notice() {
     )
     .expect("dispatch user prompt");
 
-    let prompt = read_prompt_created(&h, &AgentPromptId::from("sp-0"));
+    let prompt = read_nth_prompt_created(&h, 0);
     assert_eq!(context_text_count(&prompt, &notice), 0);
     assert_eq!(agent_prompt_text_count(&h, &notice), 0);
     assert!(prompt_has_tool(&prompt, "shell"));
@@ -1638,7 +1638,7 @@ fn unavailable_tool_is_reported_without_crashing() {
                 })
         )
     }));
-    let followup_prompt = read_prompt_created(&h, &AgentPromptId::from("sp-0"));
+    let followup_prompt = read_nth_prompt_created(&h, 0);
     assert!(
         followup_prompt
             .context

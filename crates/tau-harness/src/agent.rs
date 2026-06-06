@@ -86,6 +86,13 @@ pub(crate) struct Agent {
     /// The next prompt can reference its message prefix instead of
     /// repeating the full conversation history.
     pub(crate) last_prompt_id: Option<AgentPromptId>,
+    /// Next per-agent index used when minting an [`AgentPromptId`] for this
+    /// conversation. Initialized from durable agent events when the agent is
+    /// loaded, then incremented for each materialized provider prompt.
+    pub(crate) next_prompt_index: u64,
+    /// Whether [`Self::next_prompt_index`] has been initialized from the
+    /// loaded durable agent state for this harness run.
+    pub(crate) prompt_index_initialized: bool,
     /// Correlation tag carried in by a [`tau_proto::UiPromptSubmitted`]
     /// and copied onto the next [`tau_proto::AgentPromptCreated`] this
     /// conversation emits. Cleared once consumed. Currently only set
@@ -243,6 +250,8 @@ impl Agent {
             pending_prompts: VecDeque::new(),
             pending_cancel: None,
             last_prompt_id: None,
+            next_prompt_index: 0,
+            prompt_index_initialized: false,
             next_ctx_id: None,
             turn_state: AgentTurnState::Idle,
             parent_tool_call_id: None,

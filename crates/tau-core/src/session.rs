@@ -233,10 +233,13 @@ pub struct AgentTree {
     /// the last sequence (the previous behaviour was O(N) per append,
     /// quadratic over a long agent).
     pub(crate) next_event_seq: PersistedAgentEventSeq,
+    /// Number of materialized agent prompts already present in this
+    /// derived tree. Maintained while replaying/applying events so callers can
+    /// mint the next per-agent prompt id without rescanning the event log.
+    materialized_prompt_count: u64,
     pending_tool_rounds: HashMap<NodeId, PendingToolRound>,
     tool_call_rounds: HashMap<ToolCallId, NodeId>,
 }
-
 fn normalize_display_name(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -530,6 +533,7 @@ impl AgentTree {
             head: None,
             display_name: None,
             next_event_seq: PersistedAgentEventSeq::new(0),
+            materialized_prompt_count: 0,
             pending_tool_rounds: HashMap::new(),
             tool_call_rounds: HashMap::new(),
         };
@@ -547,6 +551,12 @@ impl AgentTree {
     #[must_use]
     pub fn next_event_seq(&self) -> PersistedAgentEventSeq {
         self.next_event_seq
+    }
+
+    /// Returns the number of materialized agent prompts folded into this tree.
+    #[must_use]
+    pub fn materialized_prompt_count(&self) -> u64 {
+        self.materialized_prompt_count
     }
 
     /// Bumps the cached next-event-seq after a successful append.
@@ -581,6 +591,9 @@ impl AgentTree {
     /// to it after a non-folding event would steal whichever other
     /// conversation's node the cursor last visited.
     pub fn apply_event_at(&mut self, parent: AgentEventParent, event: &Event) -> Option<NodeId> {
+        if matches!(event, Event::AgentPromptCreated(_)) {
+            self.materialized_prompt_count += 1;
+        }
         let parent = parent.resolve(self.head);
         match event {
             Event::AgentStarted(started) => {

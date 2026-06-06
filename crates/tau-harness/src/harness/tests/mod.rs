@@ -73,6 +73,26 @@ fn minted_agent_ids_use_default_random_alphanumeric_template() {
 }
 
 #[test]
+fn minted_agent_ids_use_deterministic_test_rng_sequence() {
+    // Harness tests install a fixed RNG seed. The sequence should be stable
+    // across harnesses while still advancing between agent creations.
+    let mint_pair = || {
+        let tmp = TempDir::new().expect("tempdir");
+        let mut h = echo_harness(tmp.path()).expect("harness");
+        let role = h.selected_role.clone();
+        let first = h.create_durable_user_agent("s1".into(), &role, test_cwd());
+        let second = h.create_durable_user_agent("s1".into(), &role, test_cwd());
+        (first.to_string(), second.to_string())
+    };
+
+    let first_run = mint_pair();
+    let second_run = mint_pair();
+
+    assert_eq!(first_run, second_run);
+    assert_ne!(first_run.0, first_run.1);
+}
+
+#[test]
 fn minting_agent_ids_renders_configured_template() {
     let mut warnings = Vec::new();
     let agent_id = super::mint_available_agent_id_for_role_with(
@@ -80,6 +100,7 @@ fn minting_agent_ids_renders_configured_template() {
         "engineer",
         "{{role}}-{{random_alphanumeric 6}}",
         |_| false,
+        &mut super::deterministic_agent_id_rng(),
         |kind, warning| warnings.push((kind, warning)),
     );
 
@@ -99,6 +120,7 @@ fn minting_agent_ids_renders_role_group_in_configured_template() {
         "engineer",
         "{{role_group}}-{{role}}-{{random_alphanumeric 4}}",
         |_| false,
+        &mut super::deterministic_agent_id_rng(),
         |kind, warning| warnings.push((kind, warning)),
     );
 
@@ -118,6 +140,7 @@ fn minting_agent_ids_reject_display_name_only_template_fields() {
         "engineer",
         "{{role}}-{{task_name}}",
         |_| false,
+        &mut super::deterministic_agent_id_rng(),
         |kind, warning| warnings.push((kind, warning)),
     );
 
@@ -176,6 +199,7 @@ fn minting_agent_ids_falls_back_immediately_on_invalid_rendered_id() {
         "engineer",
         "bad/id",
         |_| false,
+        &mut super::deterministic_agent_id_rng(),
         |kind, warning| warnings.push((kind, warning)),
     );
 
@@ -201,6 +225,7 @@ fn minting_agent_ids_falls_back_after_configured_template_collisions() {
         "engineer",
         "taken",
         |agent_id| agent_id == "taken",
+        &mut super::deterministic_agent_id_rng(),
         |kind, warning| warnings.push((kind, warning)),
     );
 
@@ -232,6 +257,7 @@ fn minting_agent_ids_skips_persisted_agent_dirs() {
         "engineer",
         "engineer_0",
         |agent_id| store.agent_exists(agent_id),
+        &mut super::deterministic_agent_id_rng(),
         |kind, warning| warnings.push((kind, warning)),
     );
 
@@ -465,7 +491,7 @@ fn echo_harness_with_dirs_and_start_reason(
         session_id,
         start_reason,
     )?;
-    // Most harness tests use the in-process shell only as a tool provider. Do
+    h.agent_id_rng = super::deterministic_agent_id_rng();
     // not let its startup context-provider registration defer unrelated prompt
     // dispatch assertions; readiness-specific tests register providers directly.
     h.agent_context_providers.clear();
@@ -527,14 +553,16 @@ fn quiet_provider_harness_with_start_reason(
         config_dir: Some(state_dir.join("config")),
         state_dir: Some(state_dir.join("runtime")),
     };
-    Harness::new_with_provider(
+    let mut h = Harness::new_with_provider(
         state_dir,
         dirs,
         quiet_provider_runner,
         Vec::new(),
         "s1",
         start_reason,
-    )
+    )?;
+    h.agent_id_rng = super::deterministic_agent_id_rng();
+    Ok(h)
 }
 
 struct TestSink {
@@ -818,6 +846,26 @@ fn read_raw_prompt_created(h: &Harness, spid: &AgentPromptId) -> AgentPromptCrea
                 return prompt;
             }
             _ => {}
+        }
+    }
+}
+
+fn read_nth_prompt_created(h: &Harness, index: usize) -> AgentPromptCreated {
+    let mut cursor = tau_proto::EventLogSeq::new(0);
+    let mut seen = 0;
+    loop {
+        let entry = h
+            .event_log
+            .get_next_from(cursor)
+            .expect("prompt event in log");
+        cursor = entry.seq.next();
+        if let Event::AgentPromptCreated(prompt) = entry.event {
+            if seen == index {
+                return h
+                    .read_agent_prompt_created(&prompt.session_id, &prompt.agent_prompt_id)
+                    .expect("materialized prompt event");
+            }
+            seen += 1;
         }
     }
 }

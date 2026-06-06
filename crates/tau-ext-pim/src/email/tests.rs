@@ -5,13 +5,16 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::thread;
 
-use tau_proto::ToolResponse;
+use tau_proto::{
+    HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter,
+    ToolResponse,
+};
 
 use super::*;
 
 struct FramePair {
-    reader: FrameReader<BufReader<UnixStream>>,
-    writer: FrameWriter<BufWriter<UnixStream>>,
+    reader: HarnessInputReader<BufReader<UnixStream>>,
+    writer: HarnessOutputWriter<BufWriter<UnixStream>>,
 }
 
 #[derive(Default)]
@@ -240,34 +243,42 @@ fn spawn_extension() -> FramePair {
         let _ = run(reader_stream, ext_stream);
     });
     FramePair {
-        reader: FrameReader::new(BufReader::new(
+        reader: HarnessInputReader::new(BufReader::new(
             harness_stream.try_clone().expect("harness clone"),
         )),
-        writer: FrameWriter::new(BufWriter::new(harness_stream)),
+        writer: HarnessOutputWriter::new(BufWriter::new(harness_stream)),
     }
 }
 
 fn drain_startup_register(
-    reader: &mut FrameReader<BufReader<UnixStream>>,
+    reader: &mut HarnessInputReader<BufReader<UnixStream>>,
 ) -> tau_proto::ToolRegister {
     loop {
-        match reader.read_frame().expect("read").expect("frame") {
-            Frame::Event(Event::ToolRegister(register)) => return register,
-            Frame::Message(Message::Ready(_)) => panic!("tool should be registered before ready"),
+        match reader.read_message().expect("read").expect("frame") {
+            HarnessInputMessage::Emit(emit) => {
+                if let Event::ToolRegister(register) = *emit.event {
+                    return register;
+                }
+            }
+            HarnessInputMessage::Ready(_) => panic!("tool should be registered before ready"),
             _ => {}
         }
     }
 }
 
-fn drain_startup(reader: &mut FrameReader<BufReader<UnixStream>>) -> ToolSpec {
+fn drain_startup(reader: &mut HarnessInputReader<BufReader<UnixStream>>) -> ToolSpec {
     drain_startup_register(reader).tool
 }
 
-fn drain_action_schema(reader: &mut FrameReader<BufReader<UnixStream>>) -> ActionSchema {
+fn drain_action_schema(reader: &mut HarnessInputReader<BufReader<UnixStream>>) -> ActionSchema {
     loop {
-        match reader.read_frame().expect("read").expect("frame") {
-            Frame::Event(Event::ActionSchemaPublished(published)) => return published.schema,
-            Frame::Message(Message::Ready(_)) => {
+        match reader.read_message().expect("read").expect("frame") {
+            HarnessInputMessage::Emit(emit) => {
+                if let Event::ActionSchemaPublished(published) = *emit.event {
+                    return published.schema;
+                }
+            }
+            HarnessInputMessage::Ready(_) => {
                 panic!("action schema should be published before ready")
             }
             _ => {}
@@ -496,18 +507,20 @@ fn registers_email_get_tool_prompt_fragment() {
     let mut saw_read_prompt = false;
     let mut saw_send_prompt = false;
     loop {
-        match pair.reader.read_frame().expect("read").expect("frame") {
-            Frame::Event(Event::ToolRegister(register)) => {
-                if register.tool.name.as_str() == "email_get" {
-                    let fragment = register.prompt_fragment.expect("read prompt fragment");
-                    assert_eq!(fragment.name, "email.instructions");
-                    assert!(fragment.template.contains("external data"));
-                    saw_read_prompt = true;
-                } else if register.tool.name.as_str() == "email_send" {
-                    saw_send_prompt = register.prompt_fragment.is_some();
+        match pair.reader.read_message().expect("read").expect("frame") {
+            HarnessInputMessage::Emit(emit) => {
+                if let Event::ToolRegister(register) = *emit.event {
+                    if register.tool.name.as_str() == "email_get" {
+                        let fragment = register.prompt_fragment.expect("read prompt fragment");
+                        assert_eq!(fragment.name, "email.instructions");
+                        assert!(fragment.template.contains("external data"));
+                        saw_read_prompt = true;
+                    } else if register.tool.name.as_str() == "email_send" {
+                        saw_send_prompt = register.prompt_fragment.is_some();
+                    }
                 }
             }
-            Frame::Message(Message::Ready(_)) => break,
+            HarnessInputMessage::Ready(_) => break,
             _ => {}
         }
     }
@@ -3522,16 +3535,16 @@ fn configure_requires_state_dir_and_rejected_config_is_reported() {
     let mut pair = spawn_extension();
     let _tool = drain_startup(&mut pair.reader);
     pair.writer
-        .write_frame(&Frame::Message(Message::Configure(tau_proto::Configure {
+        .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
             config: CborValue::Map(Vec::new()),
             state_dir: None,
             secrets: configure_secrets(),
-        })))
+        }))
         .expect("configure");
     pair.writer.flush().expect("flush");
     loop {
-        if let Frame::Message(Message::ConfigError(error)) =
-            pair.reader.read_frame().expect("read").expect("frame")
+        if let HarnessInputMessage::ConfigError(error) =
+            pair.reader.read_message().expect("read").expect("frame")
         {
             assert!(error.message.contains("state_dir"), "{}", error.message);
             break;

@@ -9,8 +9,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use tau_proto::{
-    ClientKind, Disconnect, Event, EventSelector, Frame, Hello, Message, PROTOCOL_VERSION,
-    Subscribe, UiCreateAgent,
+    ClientKind, Disconnect, Event, EventSelector, HarnessInputMessage, HarnessOutputMessage, Hello,
+    PROTOCOL_VERSION, Subscribe, UiCreateAgent,
 };
 use tau_socket::SocketPeer;
 
@@ -388,12 +388,12 @@ pub fn send_daemon_message_with_trace(
     }
 
     let mut peer = SocketPeer::connect(socket_path)?;
-    peer.send(&Frame::Message(Message::Hello(Hello {
+    peer.send(&HarnessInputMessage::Hello(Hello {
         protocol_version: PROTOCOL_VERSION,
         client_name: "tau-cli".into(),
         client_kind: ClientKind::Ui,
-    })))?;
-    peer.send(&Frame::Message(Message::Subscribe(Subscribe {
+    }))?;
+    peer.send(&HarnessInputMessage::Subscribe(Subscribe {
         selectors: vec![
             EventSelector::Prefix("agent.".to_owned()),
             EventSelector::Prefix("provider.".to_owned()),
@@ -403,17 +403,19 @@ pub fn send_daemon_message_with_trace(
             EventSelector::Prefix("extension.".to_owned()),
             EventSelector::Prefix("harness.".to_owned()),
         ],
-    })))?;
+    }))?;
     let ctx_id = next_ctx_id();
-    peer.send(&Frame::Event(Event::UiCreateAgent(UiCreateAgent {
-        session_id: session_id.into(),
-        role: "senior-engineer".to_owned(),
-        cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-        initial_prompt: Some(message.to_owned()),
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: Some(ctx_id.clone()),
-    })))?;
+    peer.send(&HarnessInputMessage::emit(Event::UiCreateAgent(
+        UiCreateAgent {
+            session_id: session_id.into(),
+            role: "senior-engineer".to_owned(),
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            initial_prompt: Some(message.to_owned()),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some(ctx_id.clone()),
+        },
+    )))?;
 
     let started_at = Instant::now();
     let mut lifecycle_messages = Vec::new();
@@ -427,50 +429,46 @@ pub fn send_daemon_message_with_trace(
         if SEND_DAEMON_MESSAGE_TIMEOUT <= started_at.elapsed() {
             return Err(HarnessError::ResponseTimeout);
         }
-        if let Some(frame) = peer.recv_timeout(SEND_DAEMON_MESSAGE_TIMEOUT)? {
-            // UI clients don't ack — they just consume the inner event.
-            let (_log_id, frame) = frame.peel_log();
-            match frame {
-                Frame::Event(Event::ToolProgress(p)) => {
-                    progress_messages.push(format_tool_progress(&p))
-                }
-                Frame::Event(Event::ShellCommandProgress(_)) => {
-                    progress_messages.push("shell: running shell command".to_owned())
-                }
-                Frame::Event(Event::HarnessInfo(ref info)) => {
-                    lifecycle_messages.push(info.message.clone());
-                }
-                Frame::Event(
-                    ref event @ (Event::ExtensionStarting(_)
+        if let Some(message) = peer.recv_timeout(SEND_DAEMON_MESSAGE_TIMEOUT)? {
+            match message {
+                HarnessOutputMessage::Deliver(delivery) => match delivery.into_event() {
+                    Event::ToolProgress(p) => progress_messages.push(format_tool_progress(&p)),
+                    Event::ShellCommandProgress(_) => {
+                        progress_messages.push("shell: running shell command".to_owned())
+                    }
+                    Event::HarnessInfo(info) => lifecycle_messages.push(info.message),
+                    event @ (Event::ExtensionStarting(_)
                     | Event::ExtensionReady(_)
                     | Event::ExtensionExited(_)
-                    | Event::ExtensionRestarting(_)),
-                ) => {
-                    lifecycle_messages.push(format_extension_event(event));
-                }
-                Frame::Event(Event::AgentPromptCreated(prompt))
-                    if prompt.ctx_id.as_deref() == Some(ctx_id.as_str()) =>
-                {
-                    our_spid_counter = parse_agent_prompt_index(prompt.agent_prompt_id.as_ref());
-                }
-                Frame::Event(Event::ProviderResponseFinished(finished))
-                    if tool_calls_from_output_items(&finished.output_items).is_empty()
-                        && our_spid_counter.is_some_and(|ours| {
-                            parse_agent_prompt_index(finished.agent_prompt_id.as_ref())
-                                .is_some_and(|c| ours <= c)
-                        }) =>
-                {
-                    peer.send(&Frame::Message(Message::Disconnect(Disconnect {
-                        reason: Some("done".to_owned()),
-                    })))?;
-                    return Ok(InteractionOutcome {
-                        lifecycle_messages,
-                        progress_messages,
-                        response: assistant_text_from_output_items(&finished.output_items)
-                            .unwrap_or_default(),
-                    });
-                }
-                Frame::Message(Message::Disconnect(d)) => {
+                    | Event::ExtensionRestarting(_)) => {
+                        lifecycle_messages.push(format_extension_event(&event));
+                    }
+                    Event::AgentPromptCreated(prompt)
+                        if prompt.ctx_id.as_deref() == Some(ctx_id.as_str()) =>
+                    {
+                        our_spid_counter =
+                            parse_agent_prompt_index(prompt.agent_prompt_id.as_ref());
+                    }
+                    Event::ProviderResponseFinished(finished)
+                        if tool_calls_from_output_items(&finished.output_items).is_empty()
+                            && our_spid_counter.is_some_and(|ours| {
+                                parse_agent_prompt_index(finished.agent_prompt_id.as_ref())
+                                    .is_some_and(|c| ours <= c)
+                            }) =>
+                    {
+                        peer.send(&HarnessInputMessage::Disconnect(Disconnect {
+                            reason: Some("done".to_owned()),
+                        }))?;
+                        return Ok(InteractionOutcome {
+                            lifecycle_messages,
+                            progress_messages,
+                            response: assistant_text_from_output_items(&finished.output_items)
+                                .unwrap_or_default(),
+                        });
+                    }
+                    _ => {}
+                },
+                HarnessOutputMessage::Disconnect(d) => {
                     return Err(HarnessError::Participant(
                         d.reason.unwrap_or_else(|| "daemon disconnected".to_owned()),
                     ));
@@ -512,30 +510,29 @@ pub fn get_daemon_rendered_system_prompt(
 ) -> Result<String, HarnessError> {
     let request_id = next_render_request_id("tau-rendered-system-prompt");
     let mut peer = connect_daemon_helper(socket_path, "tau-print-prompt")?;
-    peer.send(&Frame::Message(Message::GetRenderedSystemPrompt(
+    peer.send(&HarnessInputMessage::GetRenderedSystemPrompt(
         tau_proto::GetRenderedSystemPrompt {
             request_id: request_id.clone(),
             role: role.to_owned(),
         },
-    )))?;
+    ))?;
 
     let started_at = Instant::now();
     loop {
         if SEND_DAEMON_MESSAGE_TIMEOUT <= started_at.elapsed() {
-            let _ = peer.send(&Frame::Message(Message::Disconnect(Disconnect {
+            let _ = peer.send(&HarnessInputMessage::Disconnect(Disconnect {
                 reason: Some("done".to_owned()),
-            })));
+            }));
             return Err(HarnessError::ResponseTimeout);
         }
-        if let Some(frame) = peer.recv_timeout(SEND_DAEMON_MESSAGE_TIMEOUT)? {
-            let (_log_id, frame) = frame.peel_log();
-            match frame {
-                Frame::Message(Message::RenderedSystemPromptResult(result))
+        if let Some(message) = peer.recv_timeout(SEND_DAEMON_MESSAGE_TIMEOUT)? {
+            match message {
+                HarnessOutputMessage::RenderedSystemPromptResult(result)
                     if result.request_id == request_id =>
                 {
-                    let _ = peer.send(&Frame::Message(Message::Disconnect(Disconnect {
+                    let _ = peer.send(&HarnessInputMessage::Disconnect(Disconnect {
                         reason: Some("done".to_owned()),
-                    })));
+                    }));
                     if let Some(error) = result.error {
                         return Err(HarnessError::Participant(error));
                     }
@@ -545,7 +542,7 @@ pub fn get_daemon_rendered_system_prompt(
                         )
                     });
                 }
-                Frame::Message(Message::Disconnect(d)) => {
+                HarnessOutputMessage::Disconnect(d) => {
                     return Err(HarnessError::Participant(
                         d.reason.unwrap_or_else(|| "daemon disconnected".to_owned()),
                     ));
@@ -564,30 +561,29 @@ pub fn get_daemon_rendered_tool_definitions(
 ) -> Result<Vec<tau_proto::ToolDefinition>, HarnessError> {
     let request_id = next_render_request_id("tau-rendered-tools");
     let mut peer = connect_daemon_helper(socket_path, "tau-print-tools")?;
-    peer.send(&Frame::Message(Message::GetRenderedToolDefinitions(
+    peer.send(&HarnessInputMessage::GetRenderedToolDefinitions(
         tau_proto::GetRenderedToolDefinitions {
             request_id: request_id.clone(),
             role: role.to_owned(),
         },
-    )))?;
+    ))?;
 
     let started_at = Instant::now();
     loop {
         if SEND_DAEMON_MESSAGE_TIMEOUT <= started_at.elapsed() {
-            let _ = peer.send(&Frame::Message(Message::Disconnect(Disconnect {
+            let _ = peer.send(&HarnessInputMessage::Disconnect(Disconnect {
                 reason: Some("done".to_owned()),
-            })));
+            }));
             return Err(HarnessError::ResponseTimeout);
         }
-        if let Some(frame) = peer.recv_timeout(SEND_DAEMON_MESSAGE_TIMEOUT)? {
-            let (_log_id, frame) = frame.peel_log();
-            match frame {
-                Frame::Message(Message::RenderedToolDefinitionsResult(result))
+        if let Some(message) = peer.recv_timeout(SEND_DAEMON_MESSAGE_TIMEOUT)? {
+            match message {
+                HarnessOutputMessage::RenderedToolDefinitionsResult(result)
                     if result.request_id == request_id =>
                 {
-                    let _ = peer.send(&Frame::Message(Message::Disconnect(Disconnect {
+                    let _ = peer.send(&HarnessInputMessage::Disconnect(Disconnect {
                         reason: Some("done".to_owned()),
-                    })));
+                    }));
                     if let Some(error) = result.error {
                         return Err(HarnessError::Participant(error));
                     }
@@ -597,7 +593,7 @@ pub fn get_daemon_rendered_tool_definitions(
                         )
                     });
                 }
-                Frame::Message(Message::Disconnect(d)) => {
+                HarnessOutputMessage::Disconnect(d) => {
                     return Err(HarnessError::Participant(
                         d.reason.unwrap_or_else(|| "daemon disconnected".to_owned()),
                     ));
@@ -613,11 +609,11 @@ fn connect_daemon_helper(
     client_name: &str,
 ) -> Result<SocketPeer, HarnessError> {
     let mut peer = SocketPeer::connect(socket_path)?;
-    peer.send(&Frame::Message(Message::Hello(Hello {
+    peer.send(&HarnessInputMessage::Hello(Hello {
         protocol_version: PROTOCOL_VERSION,
         client_name: client_name.into(),
         client_kind: ClientKind::Ui,
-    })))?;
+    }))?;
     Ok(peer)
 }
 

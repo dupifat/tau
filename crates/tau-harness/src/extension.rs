@@ -10,7 +10,7 @@ use std::thread::{self, JoinHandle};
 
 use tau_config::settings::InvalidExtensionName;
 use tau_core::ConnectionOrigin;
-use tau_proto::{ClientKind, Frame};
+use tau_proto::{ClientKind, HarnessOutputMessage};
 
 use crate::error::HarnessError;
 use crate::event::{
@@ -75,7 +75,7 @@ pub(crate) struct ExtensionConnectCommand {
     /// Bus metadata origin to report for the connection.
     pub(crate) origin: ConnectionOrigin,
     /// Writer channel owned by the bus connection sink.
-    pub(crate) writer_tx: Sender<Frame>,
+    pub(crate) writer_tx: Sender<HarnessOutputMessage>,
     /// Ack that releases the reader after state installation completes.
     pub(crate) initialized_ack: ExtensionInitializedAck,
     /// Previous connection id to replace when this is a supervised respawn.
@@ -88,7 +88,7 @@ pub(crate) struct InProcessSpawn {
     /// Connection id assigned before the reader thread starts.
     pub(crate) connection_id: tau_proto::ConnectionId,
     /// Writer channel to install in the bus from the harness loop.
-    pub(crate) writer_tx: Sender<Frame>,
+    pub(crate) writer_tx: Sender<HarnessOutputMessage>,
     /// In-process extension thread handle to join during shutdown.
     pub(crate) thread: JoinHandle<Result<(), String>>,
     /// Ack that releases the reader after state installation completes.
@@ -100,7 +100,7 @@ pub(crate) struct SupervisedSpawn {
     /// Connection id assigned before the reader thread starts.
     pub(crate) connection_id: tau_proto::ConnectionId,
     /// Writer channel to install in the bus from the harness loop.
-    pub(crate) writer_tx: Sender<Frame>,
+    pub(crate) writer_tx: Sender<HarnessOutputMessage>,
     /// OS process id of the supervised child.
     pub(crate) child_pid: u32,
     /// Ack that releases the reader after state installation completes.

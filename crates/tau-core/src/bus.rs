@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use tau_proto::{ClientKind, ConnectionId, EventSelector, Frame, Message};
+use tau_proto::{ClientKind, ConnectionId, EventSelector, HarnessOutputMessage};
 
 use crate::connection::{
     Connection, ConnectionMetadata, ConnectionSink, DeliveryFailure, RouteError, RouteReport,
@@ -22,10 +22,10 @@ impl SubscriptionSet {
         self.selectors = selectors;
     }
 
-    pub(crate) fn matches(&self, frame: &Frame) -> bool {
+    pub(crate) fn matches(&self, message: &HarnessOutputMessage) -> bool {
         self.selectors
             .iter()
-            .any(|selector| selector_matches(selector, frame))
+            .any(|selector| selector_matches(selector, message))
     }
 
     pub(crate) fn selectors(&self) -> &[EventSelector] {
@@ -33,15 +33,13 @@ impl SubscriptionSet {
     }
 }
 
-pub(crate) fn selector_matches(selector: &EventSelector, frame: &Frame) -> bool {
-    // For event-log deliveries, match against the inner event's name —
-    // subscribers subscribe to "session.started", not the LogEvent envelope.
-    let target_name = match frame {
-        Frame::Message(Message::LogEvent(env)) => env.event.name(),
-        Frame::Event(event) => event.name(),
-        // Other messages are point-to-point control plane and aren't subscribable.
-        Frame::Message(_) => return false,
+pub(crate) fn selector_matches(selector: &EventSelector, message: &HarnessOutputMessage) -> bool {
+    // Subscriptions match only event deliveries. Other harness output messages
+    // are point-to-point control plane and are not subscribable.
+    let Some(event) = message.delivered_event() else {
+        return false;
     };
+    let target_name = event.name();
     match selector {
         EventSelector::Exact(name) => *name == target_name,
         EventSelector::Prefix(prefix) => target_name.matches_prefix(prefix),
@@ -175,25 +173,30 @@ impl EventBus {
             .map(|entry| entry.subscriptions.selectors())
     }
 
-    /// Broadcasts one frame to subscribed and visible clients.
-    pub fn publish(&mut self, frame: Frame) -> RouteReport {
-        self.publish_from(None, frame)
+    /// Broadcasts one harness output message to subscribed and visible clients.
+    pub fn publish(&mut self, message: HarnessOutputMessage) -> RouteReport {
+        self.publish_from(None, message)
     }
 
-    /// Broadcasts one frame from a specific source connection.
-    pub fn publish_from(&mut self, source_id: Option<&str>, frame: Frame) -> RouteReport {
-        self.publish_from_excluding_kinds(source_id, frame, &[])
+    /// Broadcasts one harness output message from a specific source connection.
+    pub fn publish_from(
+        &mut self,
+        source_id: Option<&str>,
+        message: HarnessOutputMessage,
+    ) -> RouteReport {
+        self.publish_from_excluding_kinds(source_id, message, &[])
     }
 
-    /// Broadcasts one frame from a specific source connection while skipping
-    /// subscribers whose connection kind is in `excluded_kinds`.
+    /// Broadcasts one harness output message from a specific source connection
+    /// while skipping subscribers whose connection kind is in
+    /// `excluded_kinds`.
     pub fn publish_from_excluding_kinds(
         &mut self,
         source_id: Option<&str>,
-        frame: Frame,
+        message: HarnessOutputMessage,
         excluded_kinds: &[ClientKind],
     ) -> RouteReport {
-        let routed = RoutedFrame::new(source_id.map(ConnectionId::from), frame);
+        let routed = RoutedFrame::new(source_id.map(ConnectionId::from), message);
         let mut report = RouteReport::default();
 
         for (connection_id, entry) in &mut self.connections {
@@ -222,14 +225,14 @@ impl EventBus {
         report
     }
 
-    /// Sends one directed frame to a specific connection.
+    /// Sends one directed harness output message to a specific connection.
     pub fn send_to(
         &mut self,
         target_id: &str,
         source_id: Option<&str>,
-        frame: Frame,
+        message: HarnessOutputMessage,
     ) -> Result<RouteReport, RouteError> {
-        let routed = RoutedFrame::new(source_id.map(ConnectionId::from), frame);
+        let routed = RoutedFrame::new(source_id.map(ConnectionId::from), message);
         let entry =
             self.connections
                 .get_mut(target_id)

@@ -16,9 +16,9 @@ use backon::BackoffBuilder;
 use dialoguer::Input;
 use serde::{Deserialize, Serialize};
 use tau_proto::{
-    Ack, ClientKind, ContextItem, Event, EventName, Frame, FrameReader, FrameWriter,
-    InProgressOutputItem, Message, ModelId, ModelName, ProviderBackend, ProviderBackendKind,
-    ProviderBackendTransport, ProviderCacheMissDiagnostic, ProviderModelInfo,
+    Ack, ClientKind, ContextItem, Event, EventName, HarnessInputMessage, HarnessOutputMessage,
+    InProgressOutputItem, ModelId, ModelName, PeerInputReader, PeerOutputWriter, ProviderBackend,
+    ProviderBackendKind, ProviderBackendTransport, ProviderCacheMissDiagnostic, ProviderModelInfo,
     ProviderModelsUpdated, ProviderName, ProviderPromptSubmitted, ProviderResponseFinished,
     ProviderResponseItem, ProviderResponseUpdated, ProviderStopReason,
 };
@@ -482,7 +482,7 @@ where
     W: Write,
     F: FnMut() -> BuiltinProviderProfiles,
 {
-    let mut handshake_writer = FrameWriter::new(BufWriter::new(writer));
+    let mut handshake_writer = PeerOutputWriter::new(BufWriter::new(writer));
 
     // No past events requested: provider work starts from fresh live state.
     // Models are announced from current auth below; replaying old prompt,
@@ -499,11 +499,11 @@ where
         .run(&mut handshake_writer)?;
     let mut writer = handshake_writer.into_inner();
 
-    let (frame_tx, frame_rx) = mpsc::channel::<Frame>();
+    let (frame_tx, frame_rx) = mpsc::channel::<HarnessOutputMessage>();
     thread::spawn(move || {
-        let mut reader = FrameReader::new(BufReader::new(reader));
+        let mut reader = PeerInputReader::new(BufReader::new(reader));
         loop {
-            match reader.read_frame() {
+            match reader.read_message() {
                 Ok(Some(frame)) => {
                     if frame_tx.send(frame).is_err() {
                         return;
@@ -519,7 +519,7 @@ where
     });
 
     let (worker_tx, worker_rx) = mpsc::channel::<WorkerMessage>();
-    let mut deferred: VecDeque<Frame> = VecDeque::new();
+    let mut deferred: VecDeque<HarnessOutputMessage> = VecDeque::new();
     let chatgpt_runtime = Arc::new(ChatGptRuntime::new());
     let cancellation = Arc::new(CancellationState::default());
     let mut prompt_queue: VecDeque<PromptJob> = VecDeque::new();
@@ -577,22 +577,32 @@ where
             continue;
         };
 
-        let (log_id, inner) = frame.peel_log();
+        let (log_id, event) = match frame {
+            HarnessOutputMessage::Deliver(delivery) => {
+                let (event, log_id, _) = delivery.into_parts();
+                (log_id, Some(event))
+            }
+            HarnessOutputMessage::Disconnect(_) => {
+                cancellation.shutdown();
+                return Ok(());
+            }
+            _ => (None, None),
+        };
         if let Some(id) = log_id {
             ack_tracker.register(id);
         }
         let mut complete_log_now = true;
-        match inner {
-            Frame::Event(Event::AgentPromptPrewarmRequested(prewarm)) => {
+        match event {
+            Some(Event::AgentPromptPrewarmRequested(prewarm)) => {
                 let mut profiles = load_prompt_profiles();
                 handle_prewarm(&prewarm, &mut profiles, &chatgpt_runtime);
             }
-            Frame::Event(Event::AgentPromptCreated(prompt)) => {
+            Some(Event::AgentPromptCreated(prompt)) => {
                 let agent_prompt_id = prompt.agent_prompt_id.clone();
                 let prompt = materialize_prompt(&prompt);
 
                 if cancellation.take_canceled(&agent_prompt_id) {
-                    let mut frame_writer = FrameWriter::new(&mut writer);
+                    let mut frame_writer = PeerOutputWriter::new(&mut writer);
                     finish_canceled(&agent_prompt_id, &prompt, &mut frame_writer)?;
                     if let Some(id) = log_id {
                         ack_tracker.complete(id);
@@ -620,7 +630,7 @@ where
                         complete_log_now = false;
                     }
                     None => {
-                        let mut frame_writer = FrameWriter::new(&mut writer);
+                        let mut frame_writer = PeerOutputWriter::new(&mut writer);
                         write_prompt_submitted(
                             &agent_prompt_id,
                             &prompt.originator,
@@ -630,7 +640,7 @@ where
                     }
                 }
             }
-            Frame::Event(Event::UiCancelPrompt(cancel)) => match cancel.agent_prompt_id {
+            Some(Event::UiCancelPrompt(cancel)) => match cancel.agent_prompt_id {
                 Some(apid) => {
                     cancellation.cancel(apid.clone());
                     finish_queued_canceled(
@@ -642,10 +652,6 @@ where
                 }
                 None => cancellation.cancel_retry_sleeps(),
             },
-            Frame::Message(Message::Disconnect(_)) => {
-                cancellation.shutdown();
-                return Ok(());
-            }
             _ => {}
         }
         if complete_log_now {
@@ -690,8 +696,8 @@ struct PromptWorkerContext<'a> {
 }
 
 impl PromptExecution {
-    fn frame_writer(&self) -> FrameWriter<BufWriter<ChannelWrite>> {
-        FrameWriter::new(BufWriter::new(ChannelWrite::new(self.output_tx.clone())))
+    fn frame_writer(&self) -> PeerOutputWriter<BufWriter<ChannelWrite>> {
+        PeerOutputWriter::new(BufWriter::new(ChannelWrite::new(self.output_tx.clone())))
     }
 }
 
@@ -907,7 +913,7 @@ fn start_queued_prompts<W: Write>(
             return Ok(());
         };
         if context.cancellation.take_canceled(&job.agent_prompt_id) {
-            let mut frame_writer = FrameWriter::new(&mut *writer);
+            let mut frame_writer = PeerOutputWriter::new(&mut *writer);
             finish_canceled(&job.agent_prompt_id, &job.prompt, &mut frame_writer)?;
             if let Some(id) = job.log_id {
                 ack_tracker.complete(id);
@@ -934,7 +940,7 @@ fn finish_queued_canceled<W: Write>(
     let Some(job) = prompt_queue.remove(index) else {
         return Ok(());
     };
-    let mut frame_writer = FrameWriter::new(writer);
+    let mut frame_writer = PeerOutputWriter::new(writer);
     finish_canceled(&job.agent_prompt_id, &job.prompt, &mut frame_writer)?;
     if let Some(id) = job.log_id {
         ack_tracker.complete(id);
@@ -971,9 +977,9 @@ fn write_ready_acks<W: Write>(
     ack_tracker: &mut AckTracker,
 ) -> Result<(), Box<dyn Error>> {
     while let Some(id) = ack_tracker.next_ack() {
-        tau_proto::encode_frame(
+        tau_proto::encode_message(
             writer.by_ref(),
-            &Frame::Message(Message::Ack(Ack { up_to: id })),
+            &HarnessInputMessage::Ack(Ack { up_to: id }),
         )?;
         writer.flush()?;
     }
@@ -1007,9 +1013,9 @@ fn trace_prompt_like<T: serde::Serialize>(label: &str, value: &T, agent_prompt_i
 fn write_prompt_submitted<W: Write>(
     agent_prompt_id: &str,
     originator: &tau_proto::PromptOriginator,
-    writer: &mut FrameWriter<W>,
+    writer: &mut PeerOutputWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
-    writer.write_frame(&Frame::Event(Event::ProviderPromptSubmitted(
+    writer.write_message(&HarnessInputMessage::emit(Event::ProviderPromptSubmitted(
         ProviderPromptSubmitted {
             agent_prompt_id: agent_prompt_id.into(),
             originator: originator.clone(),
@@ -1022,14 +1028,14 @@ fn write_prompt_submitted<W: Write>(
 fn finish_canceled<W: Write>(
     agent_prompt_id: &str,
     prompt: &tau_proto::AgentPromptCreated,
-    writer: &mut FrameWriter<W>,
+    writer: &mut PeerOutputWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
     tracing::info!(
         target: LOG_TARGET,
         agent_prompt_id,
         "skipping provider request — already canceled by harness",
     );
-    writer.write_frame(&Frame::Event(Event::ProviderResponseFinished(
+    writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
         simple_finished(
             agent_prompt_id.into(),
             prompt.agent_id.clone(),
@@ -1044,10 +1050,10 @@ fn finish_canceled<W: Write>(
 fn finish_missing_backend<W: Write>(
     prompt: &tau_proto::AgentPromptCreated,
     agent_prompt_id: &str,
-    writer: &mut FrameWriter<W>,
+    writer: &mut PeerOutputWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
     let msg = format!("cannot resolve provider backend for: {}", prompt.model);
-    writer.write_frame(&Frame::Event(Event::ProviderResponseFinished(
+    writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
         simple_finished(
             agent_prompt_id.into(),
             prompt.agent_id.clone(),
@@ -1282,12 +1288,12 @@ fn llm_retry_schedule(max_attempts: usize) -> backon::FibonacciBackoff {
 fn with_llm_retry<F, R, W: Write, T>(
     agent_prompt_id: &str,
     originator: &tau_proto::PromptOriginator,
-    writer: &mut FrameWriter<W>,
+    writer: &mut PeerOutputWriter<W>,
     retry_ctx: &mut R,
     mut call: F,
 ) -> Result<T, common::LlmError>
 where
-    F: FnMut(&mut FrameWriter<W>, &mut R) -> Result<T, common::LlmError>,
+    F: FnMut(&mut PeerOutputWriter<W>, &mut R) -> Result<T, common::LlmError>,
     R: RetrySleeper,
 {
     let max_attempts = max_retries_for(originator);
@@ -1337,7 +1343,7 @@ where
 fn emit_retry_banner<W: Write>(
     agent_prompt_id: &str,
     originator: &tau_proto::PromptOriginator,
-    writer: &mut FrameWriter<W>,
+    writer: &mut PeerOutputWriter<W>,
     error: &common::LlmError,
     delay: Duration,
     attempt: usize,
@@ -1350,7 +1356,7 @@ fn emit_retry_banner<W: Write>(
         max_attempts,
         error,
     );
-    let _ = writer.write_frame(&Frame::Event(Event::ProviderResponseUpdated(
+    let _ = writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
         ProviderResponseUpdated {
             agent_prompt_id: agent_prompt_id.into(),
             items: vec![ProviderResponseItem::InProgress(
@@ -1427,7 +1433,7 @@ fn handle_prompt_backend<R, W: Write>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     backend: &PromptBackend,
     prompt: &tau_proto::AgentPromptCreated,
-    writer: &mut FrameWriter<W>,
+    writer: &mut PeerOutputWriter<W>,
     retry_ctx: &mut R,
     chatgpt_runtime: &ChatGptRuntime,
 ) -> Result<(), Box<dyn Error>>
@@ -1447,7 +1453,9 @@ where
             write_prompt_submitted(agent_prompt_id, &prompt.originator, writer)?;
             let finished =
                 run_chat_completions_prompt(agent_prompt_id, prompt, provider, model, writer);
-            writer.write_frame(&Frame::Event(Event::ProviderResponseFinished(finished)))?;
+            writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
+                finished,
+            )))?;
             writer.flush()?;
             Ok(())
         }
@@ -1458,7 +1466,7 @@ fn handle_prompt<R, W: Write>(
     agent_prompt_id: &str,
     config: &responses::ResponsesConfig,
     prompt: &tau_proto::AgentPromptCreated,
-    writer: &mut FrameWriter<W>,
+    writer: &mut PeerOutputWriter<W>,
     retry_ctx: &mut R,
     chatgpt_runtime: &ChatGptRuntime,
 ) -> Result<(), Box<dyn Error>>
@@ -1490,15 +1498,15 @@ where
         retry_ctx,
         |writer, retry_ctx| {
             let mut on_update = |state: &common::StreamState| {
-                let _ = writer.write_frame(&Frame::Event(Event::ProviderResponseUpdated(
-                    ProviderResponseUpdated {
+                let _ = writer.write_message(&HarnessInputMessage::emit(
+                    Event::ProviderResponseUpdated(ProviderResponseUpdated {
                         agent_prompt_id: agent_prompt_id.into(),
                         items: state.response_items(),
                         compaction_original_input_tokens: None,
                         compaction_compacted_input_tokens: None,
                         originator: originator.clone(),
-                    },
-                )));
+                    }),
+                ));
                 let _ = writer.flush();
             };
             chatgpt_runtime.stream(
@@ -1627,7 +1635,7 @@ fn finish_stream<W: Write>(
     backend: &ProviderBackend,
     mut state: common::StreamState,
     ws_pool_delta: Option<tau_proto::WsPoolDelta>,
-    writer: &mut FrameWriter<W>,
+    writer: &mut PeerOutputWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
     let input_tokens = state.input_tokens;
     let cached_tokens = state.cached_tokens;
@@ -1660,11 +1668,13 @@ fn finish_stream<W: Write>(
     };
     maybe_debug_write_provider_response(session_id, &finished, provider_terminal_event.as_ref());
     let diagnostic = cache_miss_diagnostic(prompt, request, &finished);
-    writer.write_frame(&Frame::Event(Event::ProviderResponseFinished(finished)))?;
+    writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
+        finished,
+    )))?;
     if let Some(diagnostic) = diagnostic {
-        writer.write_frame(&Frame::Event(Event::ProviderCacheMissDiagnostic(
-            diagnostic,
-        )))?;
+        writer.write_message(&HarnessInputMessage::emit(
+            Event::ProviderCacheMissDiagnostic(diagnostic),
+        ))?;
     }
     writer.flush()?;
     Ok(())
@@ -1715,7 +1725,7 @@ fn finish_error<W: Write>(
     backend: &ProviderBackend,
     error: common::LlmError,
     ws_pool_delta: Option<tau_proto::WsPoolDelta>,
-    writer: &mut FrameWriter<W>,
+    writer: &mut PeerOutputWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
     let finished = ProviderResponseFinished {
         agent_prompt_id: agent_prompt_id.into(),
@@ -1732,7 +1742,9 @@ fn finish_error<W: Write>(
         ws_pool_delta,
     };
     maybe_debug_write_provider_response(session_id, &finished, None);
-    writer.write_frame(&Frame::Event(Event::ProviderResponseFinished(finished)))?;
+    writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
+        finished,
+    )))?;
     writer.flush()?;
     Ok(())
 }

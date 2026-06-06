@@ -11,7 +11,8 @@ use tau_core::{
 };
 use tau_proto::{
     AgentPromptCreated, ClientKind, ConnectionId, ContentPart, ContextItem, ContextRole, Event,
-    EventName, EventSelector, Frame, FrameReader, FrameWriter, MessageItem,
+    EventName, EventSelector, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage,
+    HarnessOutputWriter, MessageItem,
 };
 use tempfile::TempDir;
 
@@ -38,14 +39,14 @@ fn runtime_supports_embedded_and_daemon_scenarios() {
 }
 
 struct StreamSink {
-    writer: Rc<RefCell<FrameWriter<BufWriter<UnixStream>>>>,
+    writer: Rc<RefCell<HarnessOutputWriter<BufWriter<UnixStream>>>>,
 }
 
 impl ConnectionSink for StreamSink {
     fn send(&mut self, routed: RoutedFrame) -> Result<(), ConnectionSendError> {
         let mut writer = self.writer.borrow_mut();
         writer
-            .write_frame(&routed.frame)
+            .write_message(&routed.frame)
             .map_err(|error| ConnectionSendError::new(error.to_string()))?;
         writer
             .flush()
@@ -57,7 +58,7 @@ fn stream_connection(
     name: &str,
     kind: ClientKind,
     stream: UnixStream,
-) -> (Connection, FrameReader<BufReader<UnixStream>>) {
+) -> (Connection, HarnessInputReader<BufReader<UnixStream>>) {
     let writer_stream = stream
         .try_clone()
         .expect("stream clone for writer should succeed");
@@ -69,12 +70,12 @@ fn stream_connection(
             origin: ConnectionOrigin::InMemory,
         },
         Box::new(StreamSink {
-            writer: Rc::new(RefCell::new(FrameWriter::new(BufWriter::new(
+            writer: Rc::new(RefCell::new(HarnessOutputWriter::new(BufWriter::new(
                 writer_stream,
             )))),
         }),
     );
-    let reader = FrameReader::new(BufReader::new(stream));
+    let reader = HarnessInputReader::new(BufReader::new(stream));
     (connection, reader)
 }
 
@@ -130,46 +131,43 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
     )
     .expect("ui subscription should be stored");
 
-    // Read and process the provider's startup frames (hello, subscribe,
-    // optional model publication, ready). Subscribe is a `Message`, not an
-    // `Event`, so we install subscriptions directly via `set_subscriptions`.
+    // Read and process the provider's startup messages (hello, subscribe,
+    // optional model publication, ready). Subscribe is a protocol message, not
+    // an event, so we install subscriptions directly via `set_subscriptions`.
     let provider_hello = provider_reader
-        .read_frame()
+        .read_message()
         .expect("read")
         .expect("provider hello should arrive");
-    assert!(matches!(
-        provider_hello,
-        Frame::Message(tau_proto::Message::Hello(_))
-    ));
+    assert!(matches!(provider_hello, HarnessInputMessage::Hello(_)));
     loop {
-        let frame = provider_reader
-            .read_frame()
+        let message = provider_reader
+            .read_message()
             .expect("read")
-            .expect("provider startup frame should arrive");
-        match frame {
-            Frame::Message(tau_proto::Message::Subscribe(sub)) => {
+            .expect("provider startup message should arrive");
+        match message {
+            HarnessInputMessage::Subscribe(sub) => {
                 bus.set_subscriptions(&provider_id, sub.selectors)
                     .expect("provider subscriptions should be stored");
             }
-            Frame::Event(Event::ProviderModelsUpdated(_)) => {}
-            Frame::Message(tau_proto::Message::Ready(_)) => break,
-            _ => panic!("unexpected provider startup frame"),
+            HarnessInputMessage::Emit(emit) => match *emit.event {
+                Event::ProviderModelsUpdated(_) => {}
+                other => panic!("unexpected provider startup event: {other:?}"),
+            },
+            HarnessInputMessage::Ready(_) => break,
+            other => panic!("unexpected provider startup message: {other:?}"),
         }
     }
 
     let tool_hello = tool_reader
-        .read_frame()
+        .read_message()
         .expect("read")
         .expect("tool hello should arrive");
-    assert!(matches!(
-        tool_hello,
-        Frame::Message(tau_proto::Message::Hello(_))
-    ));
+    assert!(matches!(tool_hello, HarnessInputMessage::Hello(_)));
     let tool_subscribe = tool_reader
-        .read_frame()
+        .read_message()
         .expect("read")
         .expect("tool subscribe should arrive");
-    if let Frame::Message(tau_proto::Message::Subscribe(sub)) = tool_subscribe {
+    if let HarnessInputMessage::Subscribe(sub) = tool_subscribe {
         bus.set_subscriptions(&tool_id, sub.selectors)
             .expect("tool subscriptions should be stored");
     } else {
@@ -177,24 +175,27 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
     }
     let mut registered_tool_names = Vec::new();
     loop {
-        let startup_frame = tool_reader
-            .read_frame()
+        let startup_message = tool_reader
+            .read_message()
             .expect("read")
             .expect("tool startup event should arrive");
-        match startup_frame {
-            Frame::Event(Event::ToolRegister(tool_register)) => {
-                let register_report = registry.register(&tool_id, tool_register.tool.clone());
-                assert!(register_report.warnings.is_empty());
-                registered_tool_names.push(tool_register.tool.name);
-            }
-            Frame::Event(Event::ActionSchemaPublished(_))
-            | Frame::Event(Event::ExtensionStarting(_))
-            | Frame::Event(Event::ExtensionReady(_))
-            | Frame::Event(Event::ProviderModelsUpdated(_))
-            | Frame::Event(Event::ExtensionContextProviderRegister(_))
-            | Frame::Event(Event::ExtPromptFragmentPublish(_)) => {}
-            Frame::Message(tau_proto::Message::Ready(_)) => break,
-            _ => panic!("unexpected tool startup event: {startup_frame:?}"),
+        match startup_message {
+            HarnessInputMessage::Emit(emit) => match *emit.event {
+                Event::ToolRegister(tool_register) => {
+                    let register_report = registry.register(&tool_id, tool_register.tool.clone());
+                    assert!(register_report.warnings.is_empty());
+                    registered_tool_names.push(tool_register.tool.name);
+                }
+                Event::ActionSchemaPublished(_)
+                | Event::ExtensionStarting(_)
+                | Event::ExtensionReady(_)
+                | Event::ProviderModelsUpdated(_)
+                | Event::ExtensionContextProviderRegister(_)
+                | Event::ExtPromptFragmentPublish(_) => {}
+                other => panic!("unexpected tool startup event: {other:?}"),
+            },
+            HarnessInputMessage::Ready(_) => break,
+            other => panic!("unexpected tool startup message: {other:?}"),
         }
     }
     assert!(registered_tool_names.iter().any(|name| name == "echo"));
@@ -241,17 +242,19 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
     let _ = bus.send_to(
         &provider_id,
         None,
-        Frame::Event(Event::AgentPromptCreated(prompt)),
+        HarnessOutputMessage::deliver(Event::AgentPromptCreated(prompt)),
     );
 
     // Without a configured backend for the requested model, the provider should
     // close the turn without network I/O.
     let response = loop {
-        let frame = provider_reader
-            .read_frame()
+        let message = provider_reader
+            .read_message()
             .expect("read")
             .expect("provider event should arrive");
-        if let Frame::Event(Event::ProviderResponseFinished(r)) = frame {
+        if let HarnessInputMessage::Emit(emit) = message
+            && let Event::ProviderResponseFinished(r) = *emit.event
+        {
             break r;
         }
     };
@@ -271,17 +274,17 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
     bus.send_to(
         &provider_id,
         Some(&ui_id),
-        Frame::Message(tau_proto::Message::Disconnect(tau_proto::Disconnect {
+        HarnessOutputMessage::Disconnect(tau_proto::Disconnect {
             reason: Some("test complete".to_owned()),
-        })),
+        }),
     )
     .expect("provider disconnect should route");
     bus.send_to(
         &tool_id,
         Some(&ui_id),
-        Frame::Message(tau_proto::Message::Disconnect(tau_proto::Disconnect {
+        HarnessOutputMessage::Disconnect(tau_proto::Disconnect {
             reason: Some("test complete".to_owned()),
-        })),
+        }),
     )
     .expect("tool disconnect should route");
 

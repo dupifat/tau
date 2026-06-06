@@ -7,7 +7,7 @@ use std::error::Error;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
-use tau_proto::{ClientKind, ConnectionId, Frame};
+use tau_proto::{ClientKind, ConnectionId, HarnessOutputMessage};
 
 /// The origin class of one live connection.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -27,17 +27,17 @@ pub struct ConnectionMetadata {
     pub origin: ConnectionOrigin,
 }
 
-/// One protocol frame routed through the internal bus.
+/// One harness output message routed through the internal bus.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RoutedFrame {
     pub source_id: Option<ConnectionId>,
-    pub frame: Frame,
+    pub frame: HarnessOutputMessage,
 }
 
 impl RoutedFrame {
-    /// Creates a routed frame with an optional source connection.
+    /// Creates a routed output message with an optional source connection.
     #[must_use]
-    pub fn new(source_id: Option<ConnectionId>, frame: Frame) -> Self {
+    pub fn new(source_id: Option<ConnectionId>, frame: HarnessOutputMessage) -> Self {
         Self { source_id, frame }
     }
 }

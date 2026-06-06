@@ -12,8 +12,9 @@ use std::time::{Duration, Instant};
 use tau_config::settings::CliBindingAction;
 use tau_harness::SessionLaunchStatus;
 use tau_proto::{
-    CborValue, Disconnect, Event, Frame, FrameReader, FrameWriter, Message, UiFocusChanged,
-    UiPromptDraft, UiPromptSubmitted, UiSetAgentDisplayName, UnixMicros,
+    CborValue, Disconnect, Event, HarnessInputMessage, HarnessOutputMessage, PeerInputReader,
+    PeerOutputWriter, UiFocusChanged, UiPromptDraft, UiPromptSubmitted, UiSetAgentDisplayName,
+    UnixMicros,
 };
 
 use crate::action_commands::ActionCommandState;
@@ -32,19 +33,26 @@ struct UiIoMeter {
 }
 
 impl UiIoMeter {
-    fn record_uplink_frame(&self, frame: &Frame) {
-        self.record_frame(UiIoDirection::Uplink, frame);
+    fn record_uplink_frame(&self, message: &HarnessInputMessage) {
+        self.record_bytes(
+            UiIoDirection::Uplink,
+            ui_io_input_message_key(message),
+            ui_io_message_len(message),
+        );
     }
 
-    fn record_downlink_frame(&self, frame: &Frame) {
-        self.record_frame(UiIoDirection::Downlink, frame);
+    fn record_downlink_frame(&self, message: &HarnessOutputMessage) {
+        self.record_bytes(
+            UiIoDirection::Downlink,
+            ui_io_output_message_key(message),
+            ui_io_message_len(message),
+        );
     }
 
-    fn record_frame(&self, direction: UiIoDirection, frame: &Frame) {
-        let Some(bytes) = ui_io_frame_len(frame) else {
+    fn record_bytes(&self, direction: UiIoDirection, key: String, bytes: Option<u64>) {
+        let Some(bytes) = bytes else {
             return;
         };
-        let key = ui_io_frame_key(frame);
         let mut buckets = locked(&self.buckets);
         let entries = match direction {
             UiIoDirection::Uplink => &mut buckets.uplink,
@@ -182,22 +190,24 @@ impl UiIoTracker {
 }
 
 struct UiWriter {
-    writer: FrameWriter<BufWriter<UnixStream>>,
+    writer: PeerOutputWriter<BufWriter<UnixStream>>,
     meter: UiIoMeter,
 }
 
 impl UiWriter {
     fn new(stream: UnixStream, meter: UiIoMeter) -> Self {
         Self {
-            writer: FrameWriter::new(BufWriter::new(stream)),
+            writer: PeerOutputWriter::new(BufWriter::new(stream)),
             meter,
         }
     }
 
-    fn send_frame(&mut self, frame: &Frame) -> io::Result<()> {
-        self.writer.write_frame(frame).map_err(io::Error::other)?;
+    fn send_frame(&mut self, message: &HarnessInputMessage) -> io::Result<()> {
+        self.writer
+            .write_message(message)
+            .map_err(io::Error::other)?;
         self.writer.flush()?;
-        self.meter.record_uplink_frame(frame);
+        self.meter.record_uplink_frame(message);
         Ok(())
     }
 }
@@ -214,51 +224,59 @@ type WriterHandle = Arc<Mutex<UiWriter>>;
 /// Lock the writer, write one frame and flush. Returns the underlying
 /// `io::Error` on failure so callers can use `?` or discard with
 /// `let _ = …`.
-fn send_frame(writer: &WriterHandle, frame: &Frame) -> io::Result<()> {
-    locked(writer).send_frame(frame)
+fn send_frame(writer: &WriterHandle, message: &HarnessInputMessage) -> io::Result<()> {
+    locked(writer).send_frame(message)
 }
 
 /// Convenience wrapper around [`send_frame`] for [`Event`] payloads.
 fn send_event(writer: &WriterHandle, event: &Event) -> io::Result<()> {
-    send_frame(writer, &Frame::Event(event.clone()))
+    send_frame(writer, &HarnessInputMessage::emit(event.clone()))
 }
 
-fn ui_io_frame_len(frame: &Frame) -> Option<u64> {
-    tau_proto::encode_frame_to_vec(frame)
+fn ui_io_message_len<M: serde::Serialize>(message: &M) -> Option<u64> {
+    tau_proto::encode_message_to_vec(message)
         .ok()
         .map(|bytes| bytes.len() as u64)
 }
 
-fn ui_io_frame_key(frame: &Frame) -> String {
-    match frame {
-        Frame::Event(event) => event.name().to_string(),
-        Frame::Message(Message::LogEvent(log)) => log.event.name().to_string(),
-        Frame::Message(message) => format!("message.{}", ui_io_message_name(message)),
+fn ui_io_input_message_key(message: &HarnessInputMessage) -> String {
+    format!("message.{}", ui_io_harness_input_message_name(message))
+}
+
+fn ui_io_output_message_key(message: &HarnessOutputMessage) -> String {
+    match message {
+        HarnessOutputMessage::Deliver(delivery) => delivery.event().name().to_string(),
+        HarnessOutputMessage::Disconnect(_) => "message.disconnect".to_owned(),
+        HarnessOutputMessage::Configure(_) => "message.configure".to_owned(),
+        HarnessOutputMessage::InterceptRequest(_) => "message.intercept_request".to_owned(),
+        HarnessOutputMessage::AgentPromptCreatedResult(_) => {
+            "message.agent_prompt_created_result".to_owned()
+        }
+        HarnessOutputMessage::RenderedSystemPromptResult(_) => {
+            "message.rendered_system_prompt_result".to_owned()
+        }
+        HarnessOutputMessage::RenderedToolDefinitionsResult(_) => {
+            "message.rendered_tool_definitions_result".to_owned()
+        }
+        HarnessOutputMessage::ExtensionDataResult(_) => "message.extension_data_result".to_owned(),
     }
 }
 
-fn ui_io_message_name(message: &Message) -> &'static str {
+fn ui_io_harness_input_message_name(message: &HarnessInputMessage) -> &'static str {
     match message {
-        Message::Hello(_) => "hello",
-        Message::Subscribe(_) => "subscribe",
-        Message::Intercept(_) => "intercept",
-        Message::Ready(_) => "ready",
-        Message::Disconnect(_) => "disconnect",
-        Message::Configure(_) => "configure",
-        Message::ConfigError(_) => "config_error",
-        Message::Emit(_) => "emit",
-        Message::InterceptRequest(_) => "intercept_request",
-        Message::InterceptReply(_) => "intercept_reply",
-        Message::GetAgentPromptCreated(_) => "get_agent_prompt_created",
-        Message::AgentPromptCreatedResult(_) => "agent_prompt_created_result",
-        Message::GetRenderedSystemPrompt(_) => "get_rendered_system_prompt",
-        Message::RenderedSystemPromptResult(_) => "rendered_system_prompt_result",
-        Message::GetRenderedToolDefinitions(_) => "get_rendered_tool_definitions",
-        Message::ExtensionDataRequest(_) => "extension_data_request",
-        Message::RenderedToolDefinitionsResult(_) => "rendered_tool_definitions_result",
-        Message::ExtensionDataResult(_) => "extension_data_result",
-        Message::LogEvent(_) => "log_event",
-        Message::Ack(_) => "ack",
+        HarnessInputMessage::Hello(_) => "hello",
+        HarnessInputMessage::Subscribe(_) => "subscribe",
+        HarnessInputMessage::Intercept(_) => "intercept",
+        HarnessInputMessage::Ready(_) => "ready",
+        HarnessInputMessage::Disconnect(_) => "disconnect",
+        HarnessInputMessage::ConfigError(_) => "config_error",
+        HarnessInputMessage::Emit(_) => "emit",
+        HarnessInputMessage::InterceptReply(_) => "intercept_reply",
+        HarnessInputMessage::GetAgentPromptCreated(_) => "get_agent_prompt_created",
+        HarnessInputMessage::GetRenderedSystemPrompt(_) => "get_rendered_system_prompt",
+        HarnessInputMessage::GetRenderedToolDefinitions(_) => "get_rendered_tool_definitions",
+        HarnessInputMessage::ExtensionDataRequest(_) => "extension_data_request",
+        HarnessInputMessage::Ack(_) => "ack",
     }
 }
 
@@ -304,19 +322,14 @@ fn format_ui_io_scaled_bytes(bytes: u64, divisor: u64, suffix: &str) -> String {
 mod ui_io_tests {
     use super::*;
 
-    /// Downlink frames often arrive as `LogEvent` envelopes; attribution should
-    /// charge those bytes to the inner event name so the breakdown points at
-    /// the event family worth optimizing rather than the transport
-    /// envelope.
+    /// Downlink deliveries should attribute bytes to the inner event name so
+    /// the breakdown points at the event family worth optimizing rather
+    /// than the transport envelope.
     #[test]
-    fn ui_io_frame_key_uses_inner_log_event_name() {
-        let frame = Frame::Message(Message::LogEvent(tau_proto::LogEvent {
-            seq: tau_proto::EventLogSeq::new(1),
-            recorded_at: UnixMicros::new(1),
-            event: Box::new(Event::TermBell(tau_proto::TermBell {})),
-        }));
+    fn ui_io_output_message_key_uses_delivered_event_name() {
+        let message = HarnessOutputMessage::deliver(Event::TermBell(tau_proto::TermBell {}));
 
-        assert_eq!(ui_io_frame_key(&frame), "term.bell");
+        assert_eq!(ui_io_output_message_key(&message), "term.bell");
     }
 
     /// Breakdown logging should put the largest contributors first so a noisy
@@ -331,19 +344,6 @@ mod ui_io_tests {
             format_ui_io_breakdown(&breakdown),
             "large.event=12K, small.event=512B"
         );
-    }
-}
-
-fn peel_log_with_timestamp(
-    frame: Frame,
-) -> (Option<tau_proto::EventLogSeq>, Option<UnixMicros>, Frame) {
-    match frame {
-        Frame::Message(Message::LogEvent(env)) => (
-            Some(env.seq),
-            Some(env.recorded_at),
-            Frame::Event(*env.event),
-        ),
-        other => (None, None, other),
     }
 }
 
@@ -664,11 +664,11 @@ pub(crate) fn run_chat(
     let writer: WriterHandle = Arc::new(Mutex::new(UiWriter::new(stream, ui_io_meter.clone())));
 
     // Handshake.
-    send_frame(&writer, &crate::ui_client::hello_frame("tau-chat")).map_err(CliError::Io)?;
+    send_frame(&writer, &crate::ui_client::hello_message("tau-chat")).map_err(CliError::Io)?;
     tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "sent hello");
     send_frame(
         &writer,
-        &crate::ui_client::subscribe_frame(crate::ui_client::chat_subscription_selectors()),
+        &crate::ui_client::subscribe_message(crate::ui_client::chat_subscription_selectors()),
     )
     .map_err(CliError::Io)?;
     tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "sent subscribe");
@@ -687,21 +687,22 @@ pub(crate) fn run_chat(
     let socket_remote_disconnected = remote_disconnected.clone();
     let socket_ui_io_meter = ui_io_meter.clone();
     let socket_reader = std::thread::spawn(move || {
-        let mut reader = FrameReader::new(BufReader::new(read_stream));
+        let mut reader = PeerInputReader::new(BufReader::new(read_stream));
         loop {
-            match reader.read_frame() {
-                Ok(Some(frame)) => {
-                    socket_ui_io_meter.record_downlink_frame(&frame);
-                    // Peel the LogEvent wrapper so downstream renderers
-                    // see the inner payload directly. The UI is a
-                    // best-effort consumer and does not ack.
-                    let (_log_id, log_recorded_at, inner) = peel_log_with_timestamp(frame);
-                    let cmd = match inner {
-                        Frame::Event(event) => RendererCmd::Remote {
-                            event: Box::new(event),
-                            recorded_at: log_recorded_at.unwrap_or_else(UnixMicros::now),
-                        },
-                        Frame::Message(Message::Disconnect(d)) => {
+            match reader.read_message() {
+                Ok(Some(message)) => {
+                    socket_ui_io_meter.record_downlink_frame(&message);
+                    // The UI is a best-effort consumer and does not ack
+                    // sequenced event deliveries.
+                    let cmd = match message {
+                        HarnessOutputMessage::Deliver(delivery) => {
+                            let (event, _seq, recorded_at) = delivery.into_parts();
+                            RendererCmd::Remote {
+                                event: Box::new(event),
+                                recorded_at: recorded_at.unwrap_or_else(UnixMicros::now),
+                            }
+                        }
+                        HarnessOutputMessage::Disconnect(d) => {
                             socket_remote_disconnected.store(true, Ordering::Release);
                             if let Some(handle) = socket_input_shutdown
                                 .lock()
@@ -713,7 +714,7 @@ pub(crate) fn run_chat(
                             }
                             RendererCmd::RemoteDisconnect(d.reason)
                         }
-                        Frame::Message(_) => continue,
+                        _ => continue,
                     };
                     if socket_event_tx.send(cmd).is_err() {
                         return;
@@ -990,9 +991,9 @@ fn shutdown_ui_connection(
     let reason = exit.reason();
     let _ = send_frame(
         &writer,
-        &Frame::Message(Message::Disconnect(Disconnect {
+        &HarnessInputMessage::Disconnect(Disconnect {
             reason: Some(reason.to_owned()),
-        })),
+        }),
     );
 
     // Drop the writer, then explicitly shut down the extra stream clone kept

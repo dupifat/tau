@@ -11,8 +11,8 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use tau_proto::{
-    AgentId, CborValue, Event, Frame, ToolCallId, ToolCancelled, ToolError, ToolProgress,
-    ToolResult, ToolResultKind, ToolStarted, ToolType, ToolUseState, ToolUseStatus,
+    AgentId, CborValue, Event, HarnessInputMessage, ToolCallId, ToolCancelled, ToolError,
+    ToolProgress, ToolResult, ToolResultKind, ToolStarted, ToolType, ToolUseState, ToolUseStatus,
 };
 
 use crate::argument::{argument_text, optional_argument_text};
@@ -627,7 +627,7 @@ pub(crate) fn dispatch_dir_lock_tool(
     invoke: ToolStarted,
     manager: &DirLockManager,
     enabled: bool,
-    tx: &mpsc::Sender<Frame>,
+    tx: &mpsc::Sender<HarnessInputMessage>,
 ) {
     if !enabled {
         send_event(
@@ -1093,8 +1093,8 @@ fn cancelled_event(invoke: ToolStarted) -> Event {
     })
 }
 
-fn send_event(tx: &mpsc::Sender<Frame>, event: Event) {
-    let _ = tx.send(Frame::Event(event));
+fn send_event(tx: &mpsc::Sender<HarnessInputMessage>, event: Event) {
+    let _ = tx.send(HarnessInputMessage::emit(event));
 }
 
 #[cfg(test)]

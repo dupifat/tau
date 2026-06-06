@@ -1,43 +1,50 @@
 //! Shared protocol types and CBOR stream codec helpers.
 //!
-//! The wire format is a sequence of self-delimiting CBOR items. Each
-//! item is a [`Frame`] — an untagged enum that's either:
+//! The wire format is a sequence of self-delimiting CBOR items. Each item is a
+//! directionally typed protocol message:
 //!
-//! - a [`Message`]: control-plane point-to-point traffic, encoded as
-//!   `{"message": "<flat_name>", "payload": {...}}`, or
-//! - an [`Event`]: bus-broadcast facts, encoded as `{"event":
-//!   "<category>.<call>", "payload": {...}}`.
+//! - [`HarnessInputMessage`]: messages the harness receives from peers (UI
+//!   clients and extensions), including `Emit` requests that wrap peer-authored
+//!   events; or
+//! - [`HarnessOutputMessage`]: messages the harness sends to peers, including
+//!   `Deliver` payloads that wrap event delivery metadata.
 //!
-//! The codec helpers in this crate work with any [`std::io::Read`] or
-//! [`std::io::Write`], so the same protocol layer can be reused for
-//! stdio, Unix sockets, tests, or in-memory transports.
+//! Bare top-level [`Event`] values are not valid protocol items. Peers emit
+//! events with [`HarnessInputMessage::Emit`], and the harness delivers events
+//! with [`HarnessOutputMessage::Deliver`]. The typed codec aliases make the
+//! intended direction explicit for both harness-side and peer-side transports.
 
 mod context;
 mod diff;
 mod event_name;
 mod events;
-mod frame;
 mod interception;
 mod messages;
 mod prompt_fragment;
 mod token_usage;
 
 use std::io::{BufReader, Cursor, Read, Write};
+use std::marker::PhantomData;
 
 pub use ciborium::value::Value as CborValue;
 pub use context::*;
 pub use diff::{DiffHunk, DiffLine, DiffSegment, DiffSummary};
 pub use event_name::*;
 pub use events::*;
-pub use frame::Frame;
 pub use interception::*;
 pub use messages::*;
 pub use prompt_fragment::*;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 pub use tau_actions::*;
 pub use token_usage::*;
 
-/// First protocol version implemented by this crate.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// Current protocol version implemented by this crate.
+///
+/// Version 3 removes the old top-level event frame lane. Events sent by peers
+/// must be wrapped in [`HarnessInputMessage::Emit`], and events sent by the
+/// harness are wrapped in [`HarnessOutputMessage::Deliver`].
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// UI marker text for responses, thinking blocks, and tool calls that
 /// are still in progress.
@@ -794,42 +801,74 @@ impl From<u64> for ExtensionInstanceId {
     }
 }
 
-/// CBOR serialization error used by [`encode_frame`] and [`FrameWriter`].
+/// CBOR serialization error used by protocol encoders and writers.
 pub type EncodeError = ciborium::ser::Error<std::io::Error>;
 
-/// CBOR deserialization error used by [`decode_frame`] and [`FrameReader`].
+/// CBOR deserialization error used by protocol decoders and readers.
 pub type DecodeError = ciborium::de::Error<std::io::Error>;
 
 // ---------------------------------------------------------------------------
 // Codec
 // ---------------------------------------------------------------------------
 
-/// Encodes one frame as a self-delimiting CBOR item.
-pub fn encode_frame<W>(writer: W, frame: &Frame) -> Result<(), EncodeError>
+/// Encodes one directionally typed protocol message as a self-delimiting CBOR
+/// item.
+pub fn encode_message<W, M>(writer: W, message: &M) -> Result<(), EncodeError>
 where
     W: Write,
+    M: Serialize,
 {
-    ciborium::into_writer(frame, writer)
+    ciborium::into_writer(message, writer)
 }
 
-/// Decodes one frame from a self-delimiting CBOR item.
-pub fn decode_frame<R>(reader: R) -> Result<Frame, DecodeError>
+/// Decodes one directionally typed protocol message from a self-delimiting CBOR
+/// item.
+pub fn decode_message<R, M>(reader: R) -> Result<M, DecodeError>
 where
     R: Read,
+    M: DeserializeOwned,
 {
     ciborium::from_reader(reader)
 }
 
-/// Encodes one frame into an owned byte buffer.
-pub fn encode_frame_to_vec(frame: &Frame) -> Result<Vec<u8>, EncodeError> {
+/// Encodes one protocol message into an owned byte buffer.
+pub fn encode_message_to_vec<M>(message: &M) -> Result<Vec<u8>, EncodeError>
+where
+    M: Serialize,
+{
     let mut bytes = Vec::new();
-    encode_frame(&mut bytes, frame)?;
+    encode_message(&mut bytes, message)?;
     Ok(bytes)
 }
 
-/// Decodes one frame from a byte slice.
-pub fn decode_frame_from_slice(bytes: &[u8]) -> Result<Frame, DecodeError> {
-    decode_frame(Cursor::new(bytes))
+/// Decodes one protocol message from a byte slice.
+pub fn decode_message_from_slice<M>(bytes: &[u8]) -> Result<M, DecodeError>
+where
+    M: DeserializeOwned,
+{
+    decode_message(Cursor::new(bytes))
+}
+
+/// Encodes one harness input message into an owned byte buffer.
+pub fn encode_harness_input_to_vec(message: &HarnessInputMessage) -> Result<Vec<u8>, EncodeError> {
+    encode_message_to_vec(message)
+}
+
+/// Decodes one harness input message from a byte slice.
+pub fn decode_harness_input_from_slice(bytes: &[u8]) -> Result<HarnessInputMessage, DecodeError> {
+    decode_message_from_slice(bytes)
+}
+
+/// Encodes one harness output message into an owned byte buffer.
+pub fn encode_harness_output_to_vec(
+    message: &HarnessOutputMessage,
+) -> Result<Vec<u8>, EncodeError> {
+    encode_message_to_vec(message)
+}
+
+/// Decodes one harness output message from a byte slice.
+pub fn decode_harness_output_from_slice(bytes: &[u8]) -> Result<HarnessOutputMessage, DecodeError> {
+    decode_message_from_slice(bytes)
 }
 
 /// Looks up `key` in a [`CborValue::Map`] and returns the matching
@@ -923,17 +962,21 @@ pub fn json_to_cbor(v: &serde_json::Value) -> CborValue {
     }
 }
 
-/// Stateful writer for a stream of protocol frames.
+/// Stateful writer for a stream of directionally typed protocol messages.
 #[derive(Debug)]
-pub struct FrameWriter<W> {
+pub struct MessageWriter<W, M> {
     inner: W,
+    _message: PhantomData<fn() -> M>,
 }
 
-impl<W> FrameWriter<W> {
+impl<W, M> MessageWriter<W, M> {
     /// Wraps an arbitrary writer.
     #[must_use]
     pub fn new(inner: W) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            _message: PhantomData,
+        }
     }
 
     /// Returns the wrapped writer.
@@ -943,13 +986,14 @@ impl<W> FrameWriter<W> {
     }
 }
 
-impl<W> FrameWriter<W>
+impl<W, M> MessageWriter<W, M>
 where
     W: Write,
+    M: Serialize,
 {
-    /// Writes one protocol frame to the stream.
-    pub fn write_frame(&mut self, frame: &Frame) -> Result<(), EncodeError> {
-        encode_frame(&mut self.inner, frame)
+    /// Writes one protocol message to the stream.
+    pub fn write_message(&mut self, message: &M) -> Result<(), EncodeError> {
+        encode_message(&mut self.inner, message)
     }
 
     /// Flushes the wrapped writer.
@@ -958,43 +1002,46 @@ where
     }
 }
 
-/// Stateful reader for a stream of protocol frames.
+/// Stateful reader for a stream of directionally typed protocol messages.
 ///
-/// Wraps the inner reader in a [`BufReader`] internally so per-byte
-/// decoding (which `ciborium` issues during deserialization) doesn't
-/// translate to per-byte syscalls on stdio or socket transports.
+/// Wraps the inner reader in a [`BufReader`] internally so per-byte decoding
+/// (which `ciborium` issues during deserialization) doesn't translate to
+/// per-byte syscalls on stdio or socket transports.
 #[derive(Debug)]
-pub struct FrameReader<R> {
+pub struct MessageReader<R, M> {
     inner: BufReader<R>,
+    _message: PhantomData<fn() -> M>,
 }
 
-impl<R> FrameReader<R>
+impl<R, M> MessageReader<R, M>
 where
     R: Read,
+    M: DeserializeOwned,
 {
     /// Wraps an arbitrary reader.
     #[must_use]
     pub fn new(inner: R) -> Self {
         Self {
             inner: BufReader::new(inner),
+            _message: PhantomData,
         }
     }
 
-    /// Returns the wrapped reader. Any data already buffered but not
-    /// yet consumed by a frame decode is discarded.
+    /// Returns the wrapped reader. Any data already buffered but not yet
+    /// consumed by a message decode is discarded.
     #[must_use]
     pub fn into_inner(self) -> R {
         self.inner.into_inner()
     }
 
-    /// Reads one protocol frame from the stream.
+    /// Reads one protocol message from the stream.
     ///
-    /// Returns `Ok(None)` on clean end-of-stream (EOF at a message
-    /// boundary). Returns `Err` only for actual corruption or
+    /// Returns `Ok(None)` on clean end-of-stream (EOF at a message boundary).
+    /// Returns `Err` only for actual corruption, wrong-direction payloads, or
     /// truncated data.
-    pub fn read_frame(&mut self) -> Result<Option<Frame>, DecodeError> {
-        // Peek one byte to distinguish clean EOF from a real read; if
-        // none is available, the stream is at a message boundary.
+    pub fn read_message(&mut self) -> Result<Option<M>, DecodeError> {
+        // Peek one byte to distinguish clean EOF from a real read; if none is
+        // available, the stream is at a message boundary.
         match std::io::BufRead::fill_buf(&mut self.inner) {
             Ok([]) => return Ok(None),
             Ok(_) => {}
@@ -1004,6 +1051,30 @@ where
         ciborium::from_reader(&mut self.inner).map(Some)
     }
 }
+
+/// Harness-side reader: messages received by the harness from peers.
+pub type HarnessInputReader<R> = MessageReader<R, HarnessInputMessage>;
+
+/// Harness-side writer: messages sent by the harness to peers.
+pub type HarnessOutputWriter<W> = MessageWriter<W, HarnessOutputMessage>;
+
+/// Harness-side writer for tests or in-process peers that need to feed input.
+pub type HarnessInputWriter<W> = MessageWriter<W, HarnessInputMessage>;
+
+/// Harness-side reader for tests or in-process peers that inspect output.
+pub type HarnessOutputReader<R> = MessageReader<R, HarnessOutputMessage>;
+
+/// Peer-side reader: messages received from the harness.
+pub type PeerInputReader<R> = HarnessOutputReader<R>;
+
+/// Peer-side writer: messages sent to the harness.
+pub type PeerOutputWriter<W> = HarnessInputWriter<W>;
+
+/// Peer-side input message type.
+pub type PeerInputMessage = HarnessOutputMessage;
+
+/// Peer-side output message type.
+pub type PeerOutputMessage = HarnessInputMessage;
 
 // ---------------------------------------------------------------------------
 // Tests

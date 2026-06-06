@@ -28,8 +28,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use tau_proto::{
-    ConfigError, Event, Frame, FrameReader, FrameWriter, Message, Osc1337SetUserVar,
-    StartAgentRequest, TermBell,
+    ConfigError, Event, HarnessInputMessage, HarnessOutputMessage, Osc1337SetUserVar,
+    PeerInputReader, PeerOutputWriter, StartAgentRequest, TermBell,
 };
 
 /// `tracing` target for events emitted from this extension. Matches
@@ -290,11 +290,11 @@ where
     run_with_idle(reader, writer, Duration::from_secs(DEFAULT_IDLE_SECONDS))
 }
 
-/// Inbound message on the main thread's channel: either a decoded
-/// frame from the reader thread, or a terminal condition that ends
-/// the loop.
+/// Inbound message on the main thread's channel: either a decoded harness
+/// output message from the reader thread, or a terminal condition that ends the
+/// loop.
 enum InMsg {
-    Frame(Box<Frame>),
+    Message(Box<HarnessOutputMessage>),
     EndOfStream,
 }
 
@@ -334,7 +334,7 @@ where
     R: Read + Send + 'static,
     W: Write,
 {
-    let mut writer = FrameWriter::new(BufWriter::new(writer));
+    let mut writer = PeerOutputWriter::new(BufWriter::new(writer));
     // Live config. `idle_duration` is the default delay supplied by tests or
     // production startup; explicit per-hook `delay_seconds` values override it.
     let mut config = ExtConfig::default();
@@ -362,17 +362,17 @@ where
         .ready_message("std-notifications ready")
         .run(&mut writer)?;
 
-    // Spawn a reader thread so the main loop can wait on either an
-    // incoming frame or an idle deadline via `recv_timeout`. The
-    // reader exits naturally when stdin closes, then the channel
-    // disconnects and the main loop sees EndOfStream.
+    // Spawn a reader thread so the main loop can wait on either an incoming
+    // message or an idle deadline via `recv_timeout`. The reader exits
+    // naturally when stdin closes, then the channel disconnects and the main
+    // loop sees EndOfStream.
     let (tx, rx) = mpsc::channel::<InMsg>();
     let _reader_handle = thread::spawn(move || {
-        let mut reader = FrameReader::new(BufReader::new(reader));
+        let mut reader = PeerInputReader::new(BufReader::new(reader));
         loop {
-            match reader.read_frame() {
-                Ok(Some(frame)) => {
-                    if tx.send(InMsg::Frame(Box::new(frame))).is_err() {
+            match reader.read_message() {
+                Ok(Some(message)) => {
+                    if tx.send(InMsg::Message(Box::new(message))).is_err() {
                         break;
                     }
                 }
@@ -430,18 +430,17 @@ where
         };
 
         match recv_result {
-            Ok(InMsg::Frame(frame)) => {
-                let (_, inner) = frame.peel_log();
-                // Handle messages first.
-                match inner {
-                    Frame::Message(Message::Configure(msg)) => {
+            Ok(InMsg::Message(message)) => {
+                // Handle control messages first, then continue with delivered events.
+                let inner = match *message {
+                    HarnessOutputMessage::Configure(msg) => {
                         match tau_extension::parse_config::<ExtConfig>(&msg.config) {
                             Ok(cfg) => {
                                 if let Err(message) = cfg.validate() {
                                     tracing::warn!(target: LOG_TARGET, error = %message, "rejecting config");
-                                    writer.write_frame(&Frame::Message(Message::ConfigError(
+                                    writer.write_message(&HarnessInputMessage::ConfigError(
                                         ConfigError { message },
-                                    )))?;
+                                    ))?;
                                     writer.flush()?;
                                     continue;
                                 }
@@ -461,25 +460,22 @@ where
                                     error = %message,
                                     "rejecting config",
                                 );
-                                writer.write_frame(&Frame::Message(Message::ConfigError(
+                                writer.write_message(&HarnessInputMessage::ConfigError(
                                     ConfigError {
                                         message: message.clone(),
                                     },
-                                )))?;
+                                ))?;
                                 writer.flush()?;
                             }
                         }
                         continue;
                     }
-                    Frame::Message(Message::Disconnect(_)) => {
+                    HarnessOutputMessage::Disconnect(_) => {
                         tracing::info!(target: LOG_TARGET, "disconnect received, exiting");
                         break;
                     }
-                    Frame::Message(_) => continue,
-                    Frame::Event(_) => {}
-                }
-                let Frame::Event(inner) = inner else {
-                    continue;
+                    HarnessOutputMessage::Deliver(delivery) => delivery.into_event(),
+                    _ => continue,
                 };
                 tracing::trace!(target: LOG_TARGET, name = %inner.name(), "event received");
                 // Sub-agent (`PromptOriginator::Extension`) events
@@ -766,16 +762,16 @@ where
                                 query_id = %query_id,
                                 "idle deadline elapsed, requesting agent summary",
                             );
-                            writer.write_frame(&Frame::Event(Event::StartAgentRequest(
-                                StartAgentRequest {
+                            writer.write_message(&HarnessInputMessage::emit(
+                                Event::StartAgentRequest(StartAgentRequest {
                                     query_id: query_id.clone(),
                                     instruction: SUMMARY_INSTRUCTION.to_owned(),
                                     role: None,
                                     input_stats: tau_proto::ToolUseStats::default(),
                                     tool_call_id: None,
                                     task_name: None,
-                                },
-                            )))?;
+                                }),
+                            ))?;
                             writer.flush()?;
                             pending.state = IdleState::WaitingSummary {
                                 query_id,
@@ -837,7 +833,7 @@ where
 
 #[allow(clippy::too_many_arguments)]
 fn emit_agent_end<W: Write>(
-    writer: &mut FrameWriter<BufWriter<W>>,
+    writer: &mut PeerOutputWriter<BufWriter<W>>,
     waiting_for_final_response: &mut bool,
     turn_end_emitted: &mut bool,
     idle: &mut Vec<PendingIdleHook>,
@@ -872,7 +868,7 @@ fn emit_agent_end<W: Write>(
 
 #[allow(clippy::too_many_arguments)]
 fn maybe_emit_deferred_agent_end<W: Write>(
-    writer: &mut FrameWriter<BufWriter<W>>,
+    writer: &mut PeerOutputWriter<BufWriter<W>>,
     waiting_for_final_response: &mut bool,
     turn_end_emitted: &mut bool,
     final_response_pending_background_tools: &mut bool,
@@ -940,7 +936,7 @@ fn next_idle_deadline(idle: &[PendingIdleHook]) -> Option<Instant> {
 }
 
 fn emit_hooks<W: Write>(
-    writer: &mut FrameWriter<BufWriter<W>>,
+    writer: &mut PeerOutputWriter<BufWriter<W>>,
     hooks: &[HookConfig],
     ctx: &TemplateContext<'_>,
 ) -> Result<(), Box<dyn Error>> {
@@ -952,20 +948,19 @@ fn emit_hooks<W: Write>(
 }
 
 fn emit_hook<W: Write>(
-    writer: &mut FrameWriter<BufWriter<W>>,
+    writer: &mut PeerOutputWriter<BufWriter<W>>,
     hook: &HookConfig,
     ctx: &TemplateContext<'_>,
 ) -> Result<(), Box<dyn Error>> {
     if hook.bell {
-        writer.write_frame(&Frame::Event(Event::TermBell(TermBell {})))?;
+        writer.write_message(&HarnessInputMessage::emit(Event::TermBell(TermBell {})))?;
     }
     if let Some(osc) = &hook.osc1337 {
         let name = render_template(&osc.key, ctx)?;
         let value = render_template(&osc.value, ctx)?;
-        writer.write_frame(&Frame::Event(Event::Osc1337SetUserVar(Osc1337SetUserVar {
-            name,
-            value,
-        })))?;
+        writer.write_message(&HarnessInputMessage::emit(Event::Osc1337SetUserVar(
+            Osc1337SetUserVar { name, value },
+        )))?;
     }
     if let Some(command) = &hook.command {
         spawn_command(command, ctx);
@@ -1037,7 +1032,7 @@ fn is_sub_agent_event(event: &Event) -> bool {
 }
 
 fn emit_idle_hook<W: Write>(
-    writer: &mut FrameWriter<BufWriter<W>>,
+    writer: &mut PeerOutputWriter<BufWriter<W>>,
     hook: &IdleHookConfig,
     agent_id: &tau_proto::AgentId,
     agent_name: &str,

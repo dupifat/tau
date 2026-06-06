@@ -19,8 +19,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use tau_proto::{
-    AgentId, Event, EventName, EventSelector, ExtensionName, Frame, InterceptAction,
-    InterceptReply, InterceptRequest, InterceptionPriority, Message,
+    AgentId, Event, EventName, EventSelector, ExtensionName, HarnessOutputMessage, InterceptAction,
+    InterceptReply, InterceptRequest, InterceptionPriority,
 };
 
 use crate::harness::Harness;
@@ -365,10 +365,10 @@ impl Harness {
             let _ = self.bus.send_to(
                 &conn_id,
                 None,
-                Frame::Message(Message::InterceptRequest(InterceptRequest {
+                HarnessOutputMessage::InterceptRequest(InterceptRequest {
                     event: Box::new(event.clone()),
                     transient,
-                })),
+                }),
             );
             self.pending_intercept = Some(PendingIntercept {
                 conn_id: conn_id.clone(),

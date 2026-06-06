@@ -11,9 +11,9 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Duration;
 
 use tau_proto::{
-    Ack, CborValue, ConfigError, Event, EventLogSeq, Frame, FrameReader, FrameWriter, Message,
-    ToolError, ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState, ToolUseStats,
-    ToolUseStatus,
+    Ack, CborValue, ConfigError, Event, EventLogSeq, HarnessInputMessage, HarnessOutputMessage,
+    PeerInputReader, PeerOutputWriter, ToolError, ToolProgress, ToolResult, ToolSpec, ToolStarted,
+    ToolUseState, ToolUseStats, ToolUseStatus,
 };
 /// `tracing` target for events emitted from this extension.
 pub const LOG_TARGET: &str = "websearch";
@@ -98,7 +98,7 @@ pub trait ParallelClient: Send + Sync + 'static {
     fn set_endpoint(&self, _endpoint: String) {}
 }
 
-/// Extension-side config carried in `Message::Configure.config`.
+/// Extension-side config carried in `HarnessOutputMessage::Configure.config`.
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ExtConfig {
@@ -121,8 +121,8 @@ where
     R: Read,
     W: Write + Send + 'static,
 {
-    let mut reader = FrameReader::new(BufReader::new(reader));
-    let mut writer = FrameWriter::new(BufWriter::new(writer));
+    let mut reader = PeerInputReader::new(BufReader::new(reader));
+    let mut writer = PeerOutputWriter::new(BufWriter::new(writer));
 
     tau_extension::Handshake::tool("tau-ext-websearch")
         .subscribe([tau_proto::EventName::TOOL_STARTED])
@@ -132,13 +132,13 @@ where
         .ready_message("websearch ready")
         .run(&mut writer)?;
 
-    let (tx, rx) = mpsc::channel::<Frame>();
+    let (tx, rx) = mpsc::channel::<HarnessInputMessage>();
     let sem = Arc::new(Semaphore::new(MAX_IN_FLIGHT));
 
     let writer_handle = std::thread::spawn(move || -> Result<(), Box<dyn Error + Send>> {
-        for frame in rx {
+        for message in rx {
             writer
-                .write_frame(&frame)
+                .write_message(&message)
                 .map_err(|e| -> Box<dyn Error + Send> { Box::new(e) })?;
             writer
                 .flush()
@@ -147,10 +147,9 @@ where
         Ok(())
     });
 
-    while let Some(frame) = reader.read_frame()? {
-        let (log_id, inner) = frame.peel_log();
-        match inner {
-            Frame::Message(Message::Configure(msg)) => {
+    while let Some(message) = reader.read_message()? {
+        match message {
+            HarnessOutputMessage::Configure(msg) => {
                 match tau_extension::parse_config::<ExtConfig>(&msg.config) {
                     Ok(cfg) => {
                         if let Some(endpoint) = cfg.endpoint.or(cfg.exa_endpoint) {
@@ -164,31 +163,37 @@ where
                     }
                     Err(message) => {
                         tracing::warn!(target: LOG_TARGET, error = %message, "rejecting config");
-                        let _ = tx.send(Frame::Message(Message::ConfigError(ConfigError {
-                            message,
-                        })));
+                        let _ = tx.send(HarnessInputMessage::ConfigError(ConfigError { message }));
                     }
                 }
             }
-            Frame::Event(Event::ToolStarted(invoke)) => {
-                if !is_websearch_tool(invoke.tool_name.as_str()) {
-                    ack_if_logged(log_id, &tx)?;
-                    continue;
+            HarnessOutputMessage::Deliver(delivery) => {
+                let (event, log_id, _) = delivery.into_parts();
+                if let Event::ToolStarted(invoke) = event {
+                    if !is_websearch_tool(invoke.tool_name.as_str()) {
+                        ack_if_logged(log_id, &tx)?;
+                        continue;
+                    }
+                    if let Some(id) = log_id {
+                        ack_log_event(id, &tx);
+                    }
+                    let permit = sem.acquire();
+                    let tx = tx.clone();
+                    let searcher = Arc::clone(&searcher);
+                    let parallel_client = Arc::clone(&parallel_client);
+                    std::thread::spawn(move || {
+                        let _permit = permit;
+                        dispatch_tool_invoke(
+                            invoke,
+                            searcher.as_ref(),
+                            parallel_client.as_ref(),
+                            &tx,
+                        );
+                    });
                 }
-                let permit = sem.acquire();
-                let tx = tx.clone();
-                let searcher = Arc::clone(&searcher);
-                let parallel_client = Arc::clone(&parallel_client);
-                std::thread::spawn(move || {
-                    let _permit = permit;
-                    dispatch_tool_invoke(invoke, searcher.as_ref(), parallel_client.as_ref(), &tx);
-                });
             }
-            Frame::Message(Message::Disconnect(_)) => break,
+            HarnessOutputMessage::Disconnect(_) => break,
             _ => {}
-        }
-        if let Some(id) = log_id {
-            ack_log_event(id, &tx);
         }
     }
 
@@ -202,17 +207,17 @@ where
 
 fn ack_if_logged(
     id: Option<EventLogSeq>,
-    tx: &mpsc::Sender<Frame>,
-) -> Result<(), Box<mpsc::SendError<Frame>>> {
+    tx: &mpsc::Sender<HarnessInputMessage>,
+) -> Result<(), Box<mpsc::SendError<HarnessInputMessage>>> {
     if let Some(id) = id {
-        tx.send(Frame::Message(Message::Ack(Ack { up_to: id })))
+        tx.send(HarnessInputMessage::Ack(Ack { up_to: id }))
             .map_err(Box::new)?;
     }
     Ok(())
 }
 
-fn ack_log_event(id: EventLogSeq, tx: &mpsc::Sender<Frame>) {
-    let _ = tx.send(Frame::Message(Message::Ack(Ack { up_to: id })));
+fn ack_log_event(id: EventLogSeq, tx: &mpsc::Sender<HarnessInputMessage>) {
+    let _ = tx.send(HarnessInputMessage::Ack(Ack { up_to: id }));
 }
 
 fn is_websearch_tool(name: &str) -> bool {
@@ -313,16 +318,18 @@ fn dispatch_tool_invoke(
     invoke: ToolStarted,
     searcher: &dyn Searcher,
     parallel_client: &dyn ParallelClient,
-    tx: &mpsc::Sender<Frame>,
+    tx: &mpsc::Sender<HarnessInputMessage>,
 ) {
     if let Some(display) = initial_display(&invoke) {
-        let _ = tx.send(Frame::Event(Event::ToolProgress(ToolProgress {
-            call_id: invoke.call_id.clone(),
-            tool_name: invoke.tool_name.clone(),
-            message: None,
-            progress: None,
-            display: Some(display),
-        })));
+        let _ = tx.send(HarnessInputMessage::emit(Event::ToolProgress(
+            ToolProgress {
+                call_id: invoke.call_id.clone(),
+                tool_name: invoke.tool_name.clone(),
+                message: None,
+                progress: None,
+                display: Some(display),
+            },
+        )));
     }
     let event = match invoke.tool_name.as_str() {
         EXA_TOOL_NAME => dispatch_exa(invoke, searcher),
@@ -342,7 +349,7 @@ fn dispatch_tool_invoke(
             originator: tau_proto::PromptOriginator::User,
         }),
     };
-    let _ = tx.send(Frame::Event(event));
+    let _ = tx.send(HarnessInputMessage::emit(event));
 }
 
 fn initial_display(invoke: &ToolStarted) -> Option<ToolUseState> {

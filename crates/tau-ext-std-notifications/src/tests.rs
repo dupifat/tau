@@ -2,36 +2,29 @@ use std::io::Cursor;
 use std::sync::Once;
 
 use tau_proto::{
-    AgentPromptSubmitted, ContentPart, ContextItem, ContextRole, Event, FrameReader, FrameWriter,
-    MessageItem, ProviderResponseFinished, ProviderStopReason, ToolBackgroundResult, ToolCallItem,
-    ToolResult,
+    AgentPromptSubmitted, ContentPart, ContextItem, ContextRole, Event, HarnessInputMessage,
+    HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter, MessageItem,
+    ProviderResponseFinished, ProviderStopReason, ToolBackgroundResult, ToolCallItem, ToolResult,
 };
 use tracing_subscriber::EnvFilter;
 
 use super::*;
 
-fn message_variant(msg: &Message) -> &'static str {
+fn message_variant(msg: &HarnessInputMessage) -> &'static str {
     match msg {
-        Message::Hello(_) => "Hello",
-        Message::Subscribe(_) => "Subscribe",
-        Message::Intercept(_) => "Intercept",
-        Message::Ready(_) => "Ready",
-        Message::Disconnect(_) => "Disconnect",
-        Message::Configure(_) => "Configure",
-        Message::ConfigError(_) => "ConfigError",
-        Message::Emit(_) => "Emit",
-        Message::InterceptRequest(_) => "InterceptRequest",
-        Message::InterceptReply(_) => "InterceptReply",
-        Message::GetAgentPromptCreated(_) => "GetAgentPromptCreated",
-        Message::AgentPromptCreatedResult(_) => "AgentPromptCreatedResult",
-        Message::GetRenderedSystemPrompt(_) => "GetRenderedSystemPrompt",
-        Message::RenderedSystemPromptResult(_) => "RenderedSystemPromptResult",
-        Message::GetRenderedToolDefinitions(_) => "GetRenderedToolDefinitions",
-        Message::RenderedToolDefinitionsResult(_) => "RenderedToolDefinitionsResult",
-        Message::ExtensionDataRequest(_) => "ExtensionDataRequest",
-        Message::ExtensionDataResult(_) => "ExtensionDataResult",
-        Message::LogEvent(_) => "LogEvent",
-        Message::Ack(_) => "Ack",
+        HarnessInputMessage::Hello(_) => "Hello",
+        HarnessInputMessage::Subscribe(_) => "Subscribe",
+        HarnessInputMessage::Intercept(_) => "Intercept",
+        HarnessInputMessage::Ready(_) => "Ready",
+        HarnessInputMessage::Disconnect(_) => "Disconnect",
+        HarnessInputMessage::ConfigError(_) => "ConfigError",
+        HarnessInputMessage::Emit(_) => "Emit",
+        HarnessInputMessage::InterceptReply(_) => "InterceptReply",
+        HarnessInputMessage::GetAgentPromptCreated(_) => "GetAgentPromptCreated",
+        HarnessInputMessage::GetRenderedSystemPrompt(_) => "GetRenderedSystemPrompt",
+        HarnessInputMessage::GetRenderedToolDefinitions(_) => "GetRenderedToolDefinitions",
+        HarnessInputMessage::ExtensionDataRequest(_) => "ExtensionDataRequest",
+        HarnessInputMessage::Ack(_) => "Ack",
     }
 }
 
@@ -53,64 +46,65 @@ fn init_test_tracing() {
     });
 }
 
-/// Test-side wrapper around [`FrameReader`] that exposes an `Event`-flavoured
-/// API (peels `LogEvent`, drops other messages).
+/// Test-side wrapper around [`HarnessInputReader`] that exposes an
+/// `Event`-flavoured API (drops other messages).
 struct EventReader<R> {
-    inner: FrameReader<R>,
+    inner: HarnessInputReader<R>,
 }
 
 impl<R: std::io::Read> EventReader<R> {
     fn new(inner: R) -> Self {
         init_test_tracing();
         Self {
-            inner: FrameReader::new(inner),
+            inner: HarnessInputReader::new(inner),
         }
     }
 
     fn read_event(&mut self) -> Result<Option<Event>, tau_proto::DecodeError> {
         loop {
-            match self.inner.read_frame()? {
+            match self.inner.read_message()? {
                 None => {
                     tracing::trace!(target: "tau::test", "EventReader: end of stream");
                     return Ok(None);
                 }
-                Some(frame) => match frame.peel_log().1 {
-                    Frame::Event(event) => {
-                        tracing::trace!(target: "tau::test", name = %event.name(), "EventReader: event");
-                        return Ok(Some(event));
-                    }
-                    Frame::Message(msg) => {
-                        tracing::trace!(target: "tau::test", kind = message_variant(&msg), "EventReader: skipping message");
-                        continue;
-                    }
-                },
+                Some(HarnessInputMessage::Emit(emit)) => {
+                    let event = *emit.event;
+                    tracing::trace!(target: "tau::test", name = %event.name(), "EventReader: event");
+                    return Ok(Some(event));
+                }
+                Some(msg) => {
+                    tracing::trace!(target: "tau::test", kind = message_variant(&msg), "EventReader: skipping message");
+                    continue;
+                }
             }
         }
     }
 
-    fn read_frame(&mut self) -> Result<Option<Frame>, tau_proto::DecodeError> {
-        self.inner.read_frame()
+    fn read_frame(&mut self) -> Result<Option<HarnessInputMessage>, tau_proto::DecodeError> {
+        self.inner.read_message()
     }
 }
 
-/// Test-side wrapper around [`FrameWriter`] that accepts `Event` directly.
+/// Test-side wrapper around [`HarnessOutputWriter`] that accepts `Event`
+/// directly.
 struct EventWriter<W> {
-    inner: FrameWriter<W>,
+    inner: HarnessOutputWriter<W>,
 }
 
 impl<W: std::io::Write> EventWriter<W> {
     fn new(inner: W) -> Self {
         Self {
-            inner: FrameWriter::new(inner),
+            inner: HarnessOutputWriter::new(inner),
         }
     }
 
     fn write_event(&mut self, event: &Event) -> Result<(), tau_proto::EncodeError> {
-        self.inner.write_frame(&Frame::Event(event.clone()))
+        self.inner
+            .write_message(&HarnessOutputMessage::deliver(event.clone()))
     }
 
-    fn write_frame(&mut self, frame: &Frame) -> Result<(), tau_proto::EncodeError> {
-        self.inner.write_frame(frame)
+    fn write_frame(&mut self, frame: &HarnessOutputMessage) -> Result<(), tau_proto::EncodeError> {
+        self.inner.write_message(frame)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -118,20 +112,20 @@ impl<W: std::io::Write> EventWriter<W> {
     }
 }
 
-/// Build a `Frame::Message(Disconnect)` for tests that previously sent
+/// Build a disconnect output message for tests that previously sent
 /// `Event::LifecycleDisconnect`.
-fn disconnect_frame(reason: Option<String>) -> Frame {
-    Frame::Message(Message::Disconnect(tau_proto::Disconnect { reason }))
+fn disconnect_frame(reason: Option<String>) -> HarnessOutputMessage {
+    HarnessOutputMessage::Disconnect(tau_proto::Disconnect { reason })
 }
 
-/// Build a `Frame::Message(Configure)` for tests that previously sent
+/// Build a configure output message for tests that previously sent
 /// `Event::LifecycleConfigure`.
-fn configure_frame(config: tau_proto::CborValue) -> Frame {
-    Frame::Message(Message::Configure(tau_proto::Configure {
+fn configure_frame(config: tau_proto::CborValue) -> HarnessOutputMessage {
+    HarnessOutputMessage::Configure(tau_proto::Configure {
         config,
         state_dir: None,
         secrets: std::collections::BTreeMap::new(),
-    }))
+    })
 }
 
 fn default_idle_payload_template() -> String {
@@ -155,7 +149,7 @@ fn idle_osc_config(delay_seconds: u64, agent_summary: bool) -> serde_json::Value
     })
 }
 
-fn default_notifications_config_frame() -> Frame {
+fn default_notifications_config_frame() -> HarnessOutputMessage {
     configure_frame(tau_proto::json_to_cbor(&serde_json::json!({
         "agent-start": [{ "osc1337": { "key": SOUND_VAR_NAME, "value": VALUE_AGENT_START } }],
         "agent-end": [{ "osc1337": { "key": SOUND_VAR_NAME, "value": VALUE_AGENT_END } }],
@@ -168,14 +162,14 @@ fn default_notifications_config_frame() -> Frame {
     })))
 }
 
-fn immediate_idle_agent_summary_config_frame() -> Frame {
+fn immediate_idle_agent_summary_config_frame() -> HarnessOutputMessage {
     configure_frame(tau_proto::json_to_cbor(&serde_json::json!({
         "agent-end": [{ "osc1337": { "key": SOUND_VAR_NAME, "value": VALUE_AGENT_END } }],
         "agent-idle": [idle_osc_config(0, true)],
     })))
 }
 
-fn bell_mode_config_frame() -> Frame {
+fn bell_mode_config_frame() -> HarnessOutputMessage {
     configure_frame(tau_proto::json_to_cbor(&serde_json::json!({
         "agent-start": [],
         "agent-end": [{ "bell": true }],
@@ -275,10 +269,10 @@ fn tool_call_finished_response(
 }
 
 /// Test marker for "we're past the lifecycle handshake". The hello /
-/// subscribe / ready messages are point-to-point `Frame::Message`s
+/// subscribe / ready messages are directional protocol messages
 /// (filtered out by `EventReader`), so reading from `EventReader`
 /// after this returns will block until the extension emits an
-/// actual `Event`. Calling this is therefore a no-op — but if a
+/// actual `Event`.
 /// test ever blocks here suspiciously, set `TAU_LOG=trace` and run
 /// with `--nocapture` to see what `EventReader` is skipping vs.
 /// surfacing.
@@ -1203,11 +1197,11 @@ fn invalid_config_emits_lifecycle_config_error() {
             .read_frame()
             .expect("read")
             .expect("config error frame");
-        if matches!(frame, Frame::Message(Message::ConfigError(_))) {
+        if matches!(frame, HarnessInputMessage::ConfigError(_)) {
             break frame;
         }
     };
-    let Frame::Message(Message::ConfigError(e)) = err_frame else {
+    let HarnessInputMessage::ConfigError(e) = err_frame else {
         unreachable!()
     };
     assert!(!e.message.is_empty(), "config error must carry a message");
@@ -1238,11 +1232,11 @@ fn invalid_hook_template_emits_config_error() {
             .read_frame()
             .expect("read")
             .expect("config error frame");
-        if matches!(frame, Frame::Message(Message::ConfigError(_))) {
+        if matches!(frame, HarnessInputMessage::ConfigError(_)) {
             break frame;
         }
     };
-    let Frame::Message(Message::ConfigError(e)) = err_frame else {
+    let HarnessInputMessage::ConfigError(e) = err_frame else {
         unreachable!()
     };
     assert!(e.message.contains("missing"));

@@ -6,7 +6,7 @@ use std::io::{self, Read, Write};
 use tau_harness::SessionLaunchStatus;
 use tau_proto::{
     AgentPromptTerminated, ContentPart, ContextItem, ContextRole, Event, EventName, EventSelector,
-    Frame, Message, ProviderResponseFinished, ProviderResponseUpdated,
+    HarnessInputMessage, HarnessOutputMessage, ProviderResponseFinished, ProviderResponseUpdated,
 };
 
 use crate::CliError;
@@ -66,8 +66,8 @@ pub(crate) fn run_prompt_stdin(
     result
 }
 
-type OneShotReader = crate::ui_client::UiFrameReader;
-type OneShotWriter = crate::ui_client::UiFrameWriter;
+type OneShotReader = crate::ui_client::UiInputReader;
+type OneShotWriter = crate::ui_client::UiOutputWriter;
 
 fn print_prompt_stdin_headers(session_id: &str, startup_role: Option<&str>) {
     eprintln!("session_id: {session_id}");
@@ -103,9 +103,9 @@ fn submit_prompt(
     role: &str,
     prompt: String,
 ) -> io::Result<()> {
-    crate::ui_client::send_frame(
+    crate::ui_client::send_message(
         writer,
-        &Frame::Event(create_user_agent_prompt(session_id, role, prompt)),
+        &HarnessInputMessage::emit(create_user_agent_prompt(session_id, role, prompt)),
     )
 }
 fn read_one_shot_result(
@@ -113,29 +113,30 @@ fn read_one_shot_result(
     output: &mut OneShotOutput,
 ) -> Result<(), CliError> {
     loop {
-        let Some(frame) = reader.read_frame().map_err(io::Error::other)? else {
+        let Some(message) = reader.read_message().map_err(io::Error::other)? else {
             return Err(CliError::Participant("daemon disconnected".to_owned()));
         };
-        if handle_prompt_stdin_frame(frame, output)? {
+        if handle_prompt_stdin_message(message, output)? {
             return Ok(());
         }
     }
 }
 
-fn handle_prompt_stdin_frame(frame: Frame, output: &mut OneShotOutput) -> Result<bool, CliError> {
-    let (_log_id, frame) = frame.peel_log();
-    match frame {
-        Frame::Event(Event::ProviderResponseUpdated(update)) => {
-            output.capture_update(&update);
-            Ok(false)
-        }
-        Frame::Event(Event::ProviderResponseFinished(finished)) => {
-            Ok(output.capture_finished(&finished))
-        }
-        Frame::Event(Event::AgentPromptTerminated(terminated)) => {
-            handle_prompt_terminated(&terminated)
-        }
-        Frame::Message(Message::Disconnect(disconnect)) => Err(CliError::Participant(
+fn handle_prompt_stdin_message(
+    message: HarnessOutputMessage,
+    output: &mut OneShotOutput,
+) -> Result<bool, CliError> {
+    match message {
+        HarnessOutputMessage::Deliver(delivery) => match delivery.into_event() {
+            Event::ProviderResponseUpdated(update) => {
+                output.capture_update(&update);
+                Ok(false)
+            }
+            Event::ProviderResponseFinished(finished) => Ok(output.capture_finished(&finished)),
+            Event::AgentPromptTerminated(terminated) => handle_prompt_terminated(&terminated),
+            _ => Ok(false),
+        },
+        HarnessOutputMessage::Disconnect(disconnect) => Err(CliError::Participant(
             disconnect
                 .reason
                 .unwrap_or_else(|| "daemon disconnected".to_owned()),
@@ -155,11 +156,11 @@ fn handle_prompt_terminated(terminated: &AgentPromptTerminated) -> Result<bool, 
 }
 
 fn disconnect_prompt_stdin_client(writer: &mut OneShotWriter) {
-    let _ = crate::ui_client::send_frame(
+    let _ = crate::ui_client::send_message(
         writer,
-        &Frame::Message(Message::Disconnect(tau_proto::Disconnect {
+        &HarnessInputMessage::Disconnect(tau_proto::Disconnect {
             reason: Some("prompt-stdin done".to_owned()),
-        })),
+        }),
     );
 }
 

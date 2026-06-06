@@ -1,17 +1,14 @@
-//! Control-plane point-to-point messages.
+//! Directional harness protocol messages.
 //!
-//! `Message` is the sibling of [`crate::Event`]: where `Event` carries
-//! bus facts (broadcast to subscribers, dotted `category.call` names),
-//! `Message` carries directed control-plane traffic — handshake,
-//! subscription registration, configuration, the at-least-once
-//! `LogEvent`/`Ack` envelope, etc. Messages are not subscribable;
-//! they're sent point-to-point between the harness and one specific
-//! peer.
+//! [`HarnessInputMessage`] is the set of messages the harness accepts from
+//! peers. [`HarnessOutputMessage`] is the set of messages the harness sends to
+//! peers. Events are never top-level protocol items: peer-authored events are
+//! wrapped in [`HarnessInputMessage::Emit`], and harness deliveries are wrapped
+//! in [`HarnessOutputMessage::Deliver`].
 //!
 //! Wire form: `{"message": "hello", "payload": {...}}` — flat, lower
-//! snake_case names, distinct from `Event`'s `{"event": "tool.started",
-//! ...}` shape so the [`crate::Frame`] envelope can disambiguate by
-//! discriminator.
+//! snake_case names, distinct from [`crate::Event`]'s `{"event":
+//! "tool.started", "payload": {...}}` shape.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -135,8 +132,8 @@ pub struct ConfigError {
 /// Monotonic sequence assigned by the harness runtime event stream.
 ///
 /// This sequence is relative to the running harness as a whole. Every
-/// `LogEvent` envelope emitted by the running harness gets the next value in
-/// this single stream, regardless of whether the inner event is transient,
+/// Committed [`EventDelivery`] emitted by the running harness gets the next
+/// value in
 /// persisted in an agent log, persisted in a session log, or replayed from
 /// history. It is not comparable to persisted agent/session event sequences.
 /// Receivers acknowledge processing by returning the same sequence in
@@ -237,45 +234,131 @@ impl std::fmt::Display for UnixMicros {
     }
 }
 
-/// A bus event delivered with harness-owned sequencing metadata. Receivers
-/// must process the inner event and then send an [`Ack`] referencing
-/// `seq` (or any later sequence, since acks are cumulative).
+/// A bus event delivered by the harness to one peer.
 ///
-/// `event` is boxed because the inner value is the (potentially
-/// large) bus fact. It is never another `LogEvent` or `Ack` — only
-/// "real" payload events (e.g., `SessionStarted`, `ExtensionReady`).
+/// The protocol no longer has a bare top-level event lane. Every event the
+/// harness sends to a peer is wrapped in [`HarnessOutputMessage::Deliver`] with
+/// this payload so delivery metadata is explicitly harness-owned and
+/// direction-specific.
 ///
-/// `recorded_at` is stamped by the harness at the publish chokepoint.
-/// Subscribers receive the same value the persisted record carries, so offline
-/// timing analyses agree with what live consumers saw. Older peers send
-/// records without the field; they deserialize as `UnixMicros(0)`.
+/// `seq: Some(_)` marks an ackable event from the committed runtime stream; the
+/// receiver should process the inner event and send an [`Ack`] for that
+/// sequence (or any later sequence, because acks are cumulative). `seq: None`
+/// marks an unsequenced direct or replay delivery that must not be acked.
+///
+/// `recorded_at` is present for committed runtime deliveries and for durable
+/// replay entries when a historical timestamp is meaningful. It is absent for
+/// synthetic direct snapshots.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct LogEvent {
-    /// Sequence assigned by the harness runtime event log.
-    pub seq: EventLogSeq,
-    /// Runtime append timestamp shared with durable records when the event is
-    /// persisted.
-    #[serde(default)]
-    pub recorded_at: UnixMicros,
-    /// Inner bus fact carried by this event-log envelope.
+pub struct EventDelivery {
+    /// Inner bus fact delivered to the peer.
     pub event: Box<Event>,
+    /// Harness runtime event-log sequence when this delivery is ackable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<EventLogSeq>,
+    /// Runtime or historical append timestamp associated with the event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_at: Option<UnixMicros>,
 }
 
-/// Extension/client request to emit one event with harness-owned
-/// delivery metadata.
+impl EventDelivery {
+    /// Creates an unsequenced direct or replay delivery.
+    #[must_use]
+    pub fn unsequenced(event: Event) -> Self {
+        Self {
+            event: Box::new(event),
+            seq: None,
+            recorded_at: None,
+        }
+    }
+
+    /// Creates an ackable committed runtime delivery.
+    #[must_use]
+    pub fn sequenced(seq: EventLogSeq, recorded_at: UnixMicros, event: Event) -> Self {
+        Self {
+            event: Box::new(event),
+            seq: Some(seq),
+            recorded_at: Some(recorded_at),
+        }
+    }
+
+    /// Creates an unsequenced replay delivery carrying a persisted timestamp.
+    #[must_use]
+    pub fn replay(recorded_at: UnixMicros, event: Event) -> Self {
+        Self {
+            event: Box::new(event),
+            seq: None,
+            recorded_at: Some(recorded_at),
+        }
+    }
+
+    /// Returns the inner delivered event.
+    #[must_use]
+    pub fn event(&self) -> &Event {
+        &self.event
+    }
+
+    /// Returns the ack sequence for committed runtime deliveries.
+    #[must_use]
+    pub fn ack_sequence(&self) -> Option<EventLogSeq> {
+        self.seq
+    }
+
+    /// Consumes this delivery and returns the inner event.
+    #[must_use]
+    pub fn into_event(self) -> Event {
+        *self.event
+    }
+
+    /// Consumes this delivery and returns event, ack sequence, and timestamp.
+    #[must_use]
+    pub fn into_parts(self) -> (Event, Option<EventLogSeq>, Option<UnixMicros>) {
+        (*self.event, self.seq, self.recorded_at)
+    }
+}
+
+/// Extension/client request to emit one event with harness-owned delivery
+/// metadata.
 ///
-/// The inner `event` is the fact that subscribers see. `transient`
-/// controls whether the harness writes eligible semantic facts to durable
-/// session or agent event history; it is not part of the emitted fact itself.
+/// The inner `event` is the fact that subscribers see. `transient` controls
+/// whether the harness writes eligible semantic facts to durable session or
+/// agent event history; it is not part of the emitted fact itself.
 ///
-/// `Emit` is strictly for emitting fresh events. Interceptor replies
-/// — including the optionally-mutated event — go through
-/// [`InterceptReply`], not `Emit`.
+/// `Emit` is strictly for peer → harness event emission. Harness → peer event
+/// delivery uses [`HarnessOutputMessage::Deliver`] instead.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Emit {
+    /// Event the peer asks the harness to publish.
     pub event: Box<Event>,
+    /// True when the event should skip durable semantic logs.
     #[serde(default, skip_serializing_if = "core::ops::Not::not")]
     pub transient: bool,
+}
+
+impl Emit {
+    /// Creates a durable-by-default emit request.
+    #[must_use]
+    pub fn new(event: Event) -> Self {
+        Self {
+            event: Box::new(event),
+            transient: false,
+        }
+    }
+
+    /// Creates an emit request with explicit transient metadata.
+    #[must_use]
+    pub fn with_transient(event: Event, transient: bool) -> Self {
+        Self {
+            event: Box::new(event),
+            transient,
+        }
+    }
+
+    /// Consumes this request and returns the inner event plus transient flag.
+    #[must_use]
+    pub fn into_parts(self) -> (Event, bool) {
+        (*self.event, self.transient)
+    }
 }
 
 /// Directed harness → interceptor message carrying an event emission that has
@@ -284,19 +367,21 @@ pub struct Emit {
 /// further publishes that would themselves be subject to interception.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InterceptRequest {
+    /// Event being offered to the interceptor.
     pub event: Box<Event>,
+    /// Original transient metadata from the publish request.
     #[serde(default, skip_serializing_if = "core::ops::Not::not")]
     pub transient: bool,
 }
 
 /// What an interceptor wants the harness to do with the event it was given.
 ///
-/// `Pass(None)` republishes the original event unchanged (the common
-/// no-op case). `Pass(Some(event))` substitutes a possibly-mutated
-/// version that flows on through any remaining interceptors and then to
-/// subscribers. `Drop` discards the event entirely — but the harness
-/// may override `Drop` for events the publisher marked `must_pass`,
-/// `tracing::warn!`-ing and falling back to the original.
+/// `Pass(None)` republishes the original event unchanged (the common no-op
+/// case). `Pass(Some(event))` substitutes a possibly-mutated version that flows
+/// on through any remaining interceptors and then to subscribers. `Drop`
+/// discards the event entirely — but the harness may override `Drop` for events
+/// the publisher marked `must_pass`, `tracing::warn!`-ing and falling back to
+/// the original.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum InterceptAction {
@@ -304,10 +389,9 @@ pub enum InterceptAction {
     Drop,
 }
 
-/// Interceptor → harness response to an [`InterceptRequest`]. Exactly
-/// one reply per request; out-of-order or duplicate replies are a
-/// programming error and the harness logs + falls back to the original
-/// event.
+/// Interceptor → harness response to an [`InterceptRequest`]. Exactly one reply
+/// per request; out-of-order or duplicate replies are a programming error and
+/// the harness logs + falls back to the original event.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InterceptReply {
     pub action: InterceptAction,
@@ -468,124 +552,126 @@ pub struct ExtensionDataEntry {
     pub len: Option<u64>,
 }
 
-/// Receiver → sender acknowledgement that all log events with sequence
-/// `<= up_to` have been processed. Cumulative — newer acks supersede
-/// older ones.
+/// Receiver → sender acknowledgement that all ackable deliveries with sequence
+/// `<= up_to` have been processed. Cumulative — newer acks supersede older
+/// ones. Only [`EventDelivery`] values with `seq: Some(_)` should be acked.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Ack {
     pub up_to: EventLogSeq,
 }
 
 // ---------------------------------------------------------------------------
-// Top-level message envelope
+// Directional protocol envelopes
 // ---------------------------------------------------------------------------
 
-/// Directional subsets of the point-to-point control-plane protocol.
+/// Messages the harness accepts from connected peers (UI clients and
+/// extensions).
 ///
-/// The harness ↔ extension protocol is directional even though the shared wire
-/// envelope below remains bidirectional for compatibility and UI/client use.
-/// Control-plane messages sent by the harness to an extension.
-///
-/// These are point-to-point replies, lifecycle/configuration messages, or live
-/// delivery envelopes. They are not extension-authored requests and do not by
-/// themselves represent facts appended to the event log.
+/// Wire form is `{"message": "<flat_name>", "payload": {...}}`. Event
+/// emission is represented by [`HarnessInputMessage::Emit`]; a bare serialized
+/// [`Event`] is not a valid harness input message.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "message", content = "payload", rename_all = "snake_case")]
-pub enum HarnessMessage {
-    Configure(Configure),
-    Disconnect(Disconnect),
-    InterceptRequest(InterceptRequest),
-    AgentPromptCreatedResult(Box<AgentPromptCreatedResult>),
-    ExtensionDataResult(Box<ExtensionDataResult>),
-    LogEvent(LogEvent),
-}
-
-impl From<HarnessMessage> for Message {
-    fn from(message: HarnessMessage) -> Self {
-        match message {
-            HarnessMessage::Configure(value) => Self::Configure(value),
-            HarnessMessage::Disconnect(value) => Self::Disconnect(value),
-            HarnessMessage::InterceptRequest(value) => Self::InterceptRequest(value),
-            HarnessMessage::AgentPromptCreatedResult(value) => {
-                Self::AgentPromptCreatedResult(value)
-            }
-            HarnessMessage::ExtensionDataResult(value) => Self::ExtensionDataResult(value),
-            HarnessMessage::LogEvent(value) => Self::LogEvent(value),
-        }
-    }
-}
-
-/// Control-plane messages sent by an extension to the harness.
-///
-/// These are extension-authored lifecycle messages, subscriptions,
-/// event-publication requests, interceptor replies, RPC requests, and delivery
-/// acknowledgements. Some variants are also accepted from UI clients, but this
-/// direction names the extension side of the harness ↔ extension protocol.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "message", content = "payload", rename_all = "snake_case")]
-pub enum ExtensionMessage {
-    Hello(Hello),
-    Subscribe(Subscribe),
-    Intercept(Intercept),
-    Ready(Ready),
-    ConfigError(ConfigError),
-    Emit(Emit),
-    InterceptReply(InterceptReply),
-    GetAgentPromptCreated(GetAgentPromptCreated),
-    ExtensionDataRequest(ExtensionDataRequest),
-    Ack(Ack),
-}
-
-impl From<ExtensionMessage> for Message {
-    fn from(message: ExtensionMessage) -> Self {
-        match message {
-            ExtensionMessage::Hello(value) => Self::Hello(value),
-            ExtensionMessage::Subscribe(value) => Self::Subscribe(value),
-            ExtensionMessage::Intercept(value) => Self::Intercept(value),
-            ExtensionMessage::Ready(value) => Self::Ready(value),
-            ExtensionMessage::ConfigError(value) => Self::ConfigError(value),
-            ExtensionMessage::Emit(value) => Self::Emit(value),
-            ExtensionMessage::InterceptReply(value) => Self::InterceptReply(value),
-            ExtensionMessage::GetAgentPromptCreated(value) => Self::GetAgentPromptCreated(value),
-            ExtensionMessage::ExtensionDataRequest(value) => Self::ExtensionDataRequest(value),
-            ExtensionMessage::Ack(value) => Self::Ack(value),
-        }
-    }
-}
-
-/// Bidirectional point-to-point control-plane message envelope used on the
-/// wire.
-///
-/// Wire form is `{"message": "<flat_name>", "payload": {...}}`. Names
-/// are flat (no dot, snake_case) to make the discriminator trivially
-/// distinguishable from [`Event`]'s dotted `category.call` form — the
-/// outer [`crate::Frame`] envelope relies on this distinction.
-///
-/// Prefer [`HarnessMessage`] or [`ExtensionMessage`] in new extension-facing
-/// code when the communication direction is known. This bidirectional enum is
-/// retained as the shared wire envelope and for UI/client messages that are not
-/// exclusively part of the harness ↔ extension flow.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "message", content = "payload", rename_all = "snake_case")]
-pub enum Message {
+pub enum HarnessInputMessage {
     Hello(Hello),
     Subscribe(Subscribe),
     Intercept(Intercept),
     Ready(Ready),
     Disconnect(Disconnect),
-    Configure(Configure),
     ConfigError(ConfigError),
     Emit(Emit),
-    InterceptRequest(InterceptRequest),
     InterceptReply(InterceptReply),
     GetAgentPromptCreated(GetAgentPromptCreated),
-    AgentPromptCreatedResult(Box<AgentPromptCreatedResult>),
     GetRenderedSystemPrompt(GetRenderedSystemPrompt),
-    RenderedSystemPromptResult(Box<RenderedSystemPromptResult>),
     GetRenderedToolDefinitions(GetRenderedToolDefinitions),
     ExtensionDataRequest(ExtensionDataRequest),
+    Ack(Ack),
+}
+
+impl HarnessInputMessage {
+    /// Wraps an event emission request with durable-by-default metadata.
+    #[must_use]
+    pub fn emit(event: Event) -> Self {
+        Self::Emit(Emit::new(event))
+    }
+
+    /// Wraps an event emission request with explicit transient metadata.
+    #[must_use]
+    pub fn emit_with_transient(event: Event, transient: bool) -> Self {
+        Self::Emit(Emit::with_transient(event, transient))
+    }
+}
+
+/// Messages the harness sends to connected peers (UI clients and extensions).
+///
+/// Event delivery is represented by [`HarnessOutputMessage::Deliver`]. The
+/// output direction intentionally has no `Emit` variant: peers emit events to
+/// the harness, while the harness delivers events to peers.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "message", content = "payload", rename_all = "snake_case")]
+pub enum HarnessOutputMessage {
+    Configure(Configure),
+    Disconnect(Disconnect),
+    Deliver(EventDelivery),
+    InterceptRequest(InterceptRequest),
+    AgentPromptCreatedResult(Box<AgentPromptCreatedResult>),
+    RenderedSystemPromptResult(Box<RenderedSystemPromptResult>),
     RenderedToolDefinitionsResult(Box<RenderedToolDefinitionsResult>),
     ExtensionDataResult(Box<ExtensionDataResult>),
-    LogEvent(LogEvent),
-    Ack(Ack),
+}
+
+impl HarnessOutputMessage {
+    /// Wraps an event for unsequenced direct or replay delivery.
+    #[must_use]
+    pub fn deliver(event: Event) -> Self {
+        Self::Deliver(EventDelivery::unsequenced(event))
+    }
+
+    /// Wraps an event for ackable committed runtime delivery.
+    #[must_use]
+    pub fn deliver_sequenced(seq: EventLogSeq, recorded_at: UnixMicros, event: Event) -> Self {
+        Self::Deliver(EventDelivery::sequenced(seq, recorded_at, event))
+    }
+
+    /// Wraps a historical event for unsequenced replay delivery.
+    #[must_use]
+    pub fn deliver_replay(recorded_at: UnixMicros, event: Event) -> Self {
+        Self::Deliver(EventDelivery::replay(recorded_at, event))
+    }
+
+    /// Returns delivery metadata when this output message carries an event.
+    #[must_use]
+    pub fn as_delivery(&self) -> Option<&EventDelivery> {
+        match self {
+            Self::Deliver(delivery) => Some(delivery),
+            _ => None,
+        }
+    }
+
+    /// Returns the delivered event when this output message carries one.
+    #[must_use]
+    pub fn delivered_event(&self) -> Option<&Event> {
+        self.as_delivery().map(EventDelivery::event)
+    }
+
+    /// Returns the ack sequence for committed runtime deliveries.
+    #[must_use]
+    pub fn ack_sequence(&self) -> Option<EventLogSeq> {
+        self.as_delivery().and_then(EventDelivery::ack_sequence)
+    }
+
+    /// Consumes this output message and returns its delivery payload, if any.
+    #[must_use]
+    pub fn into_delivery(self) -> Option<EventDelivery> {
+        match self {
+            Self::Deliver(delivery) => Some(delivery),
+            _ => None,
+        }
+    }
+
+    /// Consumes this output message and returns its delivered event, if any.
+    #[must_use]
+    pub fn into_delivered_event(self) -> Option<Event> {
+        self.into_delivery().map(EventDelivery::into_event)
+    }
 }

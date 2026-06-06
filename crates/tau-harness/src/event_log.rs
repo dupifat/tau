@@ -1,4 +1,4 @@
-//! Thread-safe runtime event sequencer used by `LogEvent` delivery.
+//! Thread-safe runtime event sequencer used by ackable event delivery.
 //!
 //! The harness still assigns one globally monotonic [`EventLogSeq`] to every
 //! committed runtime event, but the sequencer does not retain event payloads.
@@ -53,7 +53,7 @@ impl EventLog {
     /// Reserves the next harness runtime event-log sequence.
     ///
     /// Durable-history replay uses this path: replayed transcript facts already
-    /// live in agent logs, but their `LogEvent` envelopes still need fresh
+    /// live in agent logs, but their runtime deliveries still need fresh
     /// globally monotonic [`EventLogSeq`] values rather than reusing persisted
     /// per-agent/per-session sequences.
     pub(crate) fn reserve_seq(&self) -> EventLogSeq {
@@ -66,7 +66,7 @@ impl EventLog {
     /// Assigns a sequence and wall-clock timestamp for one live committed
     /// event.
     ///
-    /// Stamping happens at the publish chokepoint so the wire `LogEvent`, any
+    /// Stamping happens at the publish chokepoint so the wire delivery, any
     /// durable semantic record, and the debug JSONL line all carry the same
     /// timestamp. The timestamp is returned to the caller and is not retained
     /// in production memory.

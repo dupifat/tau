@@ -1,14 +1,14 @@
 use std::io::Cursor;
 
 use tau_proto::{
-    CborValue, Configure, Event, Frame, FrameReader, FrameWriter, InterceptRequest, Message,
-    ToolStarted,
+    CborValue, Configure, Event, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage,
+    HarnessOutputWriter, InterceptReply, InterceptRequest, ToolStarted,
 };
 
 use super::*;
 
-fn invoke_restart() -> Frame {
-    Frame::Event(Event::ToolStarted(ToolStarted {
+fn invoke_restart() -> HarnessOutputMessage {
+    HarnessOutputMessage::deliver(Event::ToolStarted(ToolStarted {
         call_id: "call-1".into(),
         tool_name: tau_proto::ToolName::new(RESTART_TEST_DUMMY_TOOL_NAME),
         arguments: tau_proto::CborValue::Map(Vec::new()),
@@ -17,22 +17,25 @@ fn invoke_restart() -> Frame {
     }))
 }
 
-fn restart_config(mode: &str) -> Frame {
-    Frame::Message(Message::Configure(Configure {
+fn restart_config(mode: &str) -> HarnessOutputMessage {
+    HarnessOutputMessage::Configure(Configure {
         config: CborValue::Map(vec![(
             CborValue::Text("restart_mode".to_owned()),
             CborValue::Text(mode.to_owned()),
         )]),
         state_dir: None,
         secrets: std::collections::BTreeMap::new(),
-    }))
+    })
 }
 
-fn run_restart_frames(input_frames: &[Frame], seed: u64) -> Vec<Frame> {
+fn run_restart_frames(
+    input_frames: &[HarnessOutputMessage],
+    seed: u64,
+) -> Vec<HarnessInputMessage> {
     let mut input = Vec::new();
-    let mut writer = FrameWriter::new(&mut input);
+    let mut writer = HarnessOutputWriter::new(&mut input);
     for frame in input_frames {
-        writer.write_frame(frame).expect("write input frame");
+        writer.write_message(frame).expect("write input frame");
     }
     writer.flush().expect("flush input");
 
@@ -40,46 +43,29 @@ fn run_restart_frames(input_frames: &[Frame], seed: u64) -> Vec<Frame> {
     let mut rng = StdRng::seed_from_u64(seed);
     run_with_rng(Cursor::new(input), &mut output, &mut rng).expect("run");
 
-    let mut reader = FrameReader::new(Cursor::new(output));
+    let mut reader = HarnessInputReader::new(Cursor::new(output));
     let mut frames = Vec::new();
-    while let Some(frame) = reader.read_frame().expect("read") {
+    while let Some(frame) = reader.read_message().expect("read") {
         frames.push(frame);
     }
     frames
 }
 
+fn emitted_event(message: &HarnessInputMessage) -> Option<&Event> {
+    match message {
+        HarnessInputMessage::Emit(emit) => Some(emit.event.as_ref()),
+        _ => None,
+    }
+}
+
 #[test]
 fn restart_tool_can_return_error() {
-    let mut input = Vec::new();
-    let mut writer = FrameWriter::new(&mut input);
-    writer.write_frame(&invoke_restart()).expect("write invoke");
-    writer.flush().expect("flush");
+    let frames = run_restart_frames(&[invoke_restart()], 1);
 
-    let mut output = Vec::new();
-    let mut rng = StdRng::seed_from_u64(1);
-    run_with_rng(Cursor::new(input), &mut output, &mut rng).expect("run");
-
-    let mut reader = FrameReader::new(Cursor::new(output));
-    let hello = reader
-        .read_frame()
-        .expect("read")
-        .expect("hello should exist");
-    assert!(matches!(hello, Frame::Message(Message::Hello(_))));
-    let subscribe = reader
-        .read_frame()
-        .expect("read")
-        .expect("subscribe should exist");
-    assert!(matches!(subscribe, Frame::Message(Message::Subscribe(_))));
-    let intercept = reader
-        .read_frame()
-        .expect("read")
-        .expect("intercept should exist");
-    assert!(matches!(intercept, Frame::Message(Message::Intercept(_))));
-    let register = reader
-        .read_frame()
-        .expect("read")
-        .expect("register should exist");
-    let Frame::Event(Event::ToolRegister(register)) = register else {
+    assert!(matches!(frames[0], HarnessInputMessage::Hello(_)));
+    assert!(matches!(frames[1], HarnessInputMessage::Subscribe(_)));
+    assert!(matches!(frames[2], HarnessInputMessage::Intercept(_)));
+    let Some(Event::ToolRegister(register)) = emitted_event(&frames[3]) else {
         panic!("expected tool register");
     };
     assert_eq!(
@@ -89,43 +75,22 @@ fn restart_tool_can_return_error() {
             .map(|group| group.name.as_str()),
         Some("test")
     );
-    let ready = reader
-        .read_frame()
-        .expect("read")
-        .expect("ready should exist");
-    assert!(matches!(ready, Frame::Message(Message::Ready(_))));
-    let error = reader
-        .read_frame()
-        .expect("read")
-        .expect("error should exist");
-    let Frame::Event(Event::ToolError(error)) = error else {
+    assert!(matches!(frames[4], HarnessInputMessage::Ready(_)));
+    let Some(Event::ToolError(error)) = frames.get(5).and_then(emitted_event) else {
         panic!("expected tool error");
     };
     assert_eq!(error.message, "restarting failed");
-    assert!(reader.read_frame().expect("read eof").is_none());
+    assert_eq!(frames.len(), 6);
 }
 
 #[test]
 fn restart_tool_can_exit_without_reply() {
-    let mut input = Vec::new();
-    let mut writer = FrameWriter::new(&mut input);
-    writer.write_frame(&invoke_restart()).expect("write invoke");
-    writer.flush().expect("flush");
-
-    let mut output = Vec::new();
-    let mut rng = StdRng::seed_from_u64(2);
-    run_with_rng(Cursor::new(input), &mut output, &mut rng).expect("run");
-
-    let mut reader = FrameReader::new(Cursor::new(output));
-    let mut frames = Vec::new();
-    while let Some(frame) = reader.read_frame().expect("read") {
-        frames.push(frame);
-    }
+    let frames = run_restart_frames(&[invoke_restart()], 2);
     assert_eq!(frames.len(), 5);
-    assert!(matches!(frames[0], Frame::Message(Message::Hello(_))));
-    assert!(matches!(frames[1], Frame::Message(Message::Subscribe(_))));
-    assert!(matches!(frames[2], Frame::Message(Message::Intercept(_))));
-    let Frame::Event(Event::ToolRegister(register)) = &frames[3] else {
+    assert!(matches!(frames[0], HarnessInputMessage::Hello(_)));
+    assert!(matches!(frames[1], HarnessInputMessage::Subscribe(_)));
+    assert!(matches!(frames[2], HarnessInputMessage::Intercept(_)));
+    let Some(Event::ToolRegister(register)) = emitted_event(&frames[3]) else {
         panic!("expected tool register");
     };
     assert_eq!(
@@ -139,9 +104,9 @@ fn restart_tool_can_exit_without_reply() {
     // reply frame for the invoke — guard against a future bug that
     // re-introduces a stray ToolResult/ToolError before exit.
     assert!(
-        frames.iter().all(|f| !matches!(
-            f,
-            Frame::Event(Event::ToolError(_)) | Frame::Event(Event::ToolResult(_))
+        frames.iter().all(|frame| !matches!(
+            emitted_event(frame),
+            Some(Event::ToolError(_)) | Some(Event::ToolResult(_))
         )),
         "no tool reply frame should appear in the restart-success branch"
     );
@@ -155,8 +120,8 @@ fn restart_tool_config_success_returns_tool_result() {
 
     let result = frames
         .iter()
-        .find_map(|frame| match frame {
-            Frame::Event(Event::ToolResult(result)) => Some(result),
+        .find_map(|frame| match emitted_event(frame) {
+            Some(Event::ToolResult(result)) => Some(result),
             _ => None,
         })
         .expect("configured success should return a tool result");
@@ -169,7 +134,7 @@ fn restart_tool_config_success_returns_tool_result() {
     assert!(
         frames
             .iter()
-            .all(|frame| !matches!(frame, Frame::Event(Event::ToolError(_))))
+            .all(|frame| !matches!(emitted_event(frame), Some(Event::ToolError(_))))
     );
 }
 
@@ -181,8 +146,8 @@ fn restart_tool_config_error_overrides_random_exit() {
 
     let error = frames
         .iter()
-        .find_map(|frame| match frame {
-            Frame::Event(Event::ToolError(error)) => Some(error),
+        .find_map(|frame| match emitted_event(frame) {
+            Some(Event::ToolError(error)) => Some(error),
             _ => None,
         })
         .expect("configured error should return a tool error");
@@ -191,7 +156,7 @@ fn restart_tool_config_error_overrides_random_exit() {
     assert!(
         frames
             .iter()
-            .all(|frame| !matches!(frame, Frame::Event(Event::ToolResult(_))))
+            .all(|frame| !matches!(emitted_event(frame), Some(Event::ToolResult(_))))
     );
 }
 
@@ -203,13 +168,13 @@ fn restart_tool_config_exit_overrides_random_error() {
 
     assert_eq!(frames.len(), 5);
     assert!(frames.iter().all(|frame| !matches!(
-        frame,
-        Frame::Event(Event::ToolError(_)) | Frame::Event(Event::ToolResult(_))
+        emitted_event(frame),
+        Some(Event::ToolError(_)) | Some(Event::ToolResult(_))
     )));
 }
 
-fn intercepted_prompt(text: &str) -> Frame {
-    Frame::Message(Message::InterceptRequest(InterceptRequest {
+fn intercepted_prompt(text: &str) -> HarnessOutputMessage {
+    HarnessOutputMessage::InterceptRequest(InterceptRequest {
         event: Box::new(Event::AgentPromptSubmitted(
             tau_proto::AgentPromptSubmitted {
                 agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -221,14 +186,14 @@ fn intercepted_prompt(text: &str) -> Frame {
             },
         )),
         transient: false,
-    }))
+    })
 }
 
 fn run_intercept(prompt: &str) -> (Vec<tau_proto::Emit>, Vec<InterceptReply>) {
     let mut input = Vec::new();
-    let mut writer = FrameWriter::new(&mut input);
+    let mut writer = HarnessOutputWriter::new(&mut input);
     writer
-        .write_frame(&intercepted_prompt(prompt))
+        .write_message(&intercepted_prompt(prompt))
         .expect("write intercepted prompt");
     writer.flush().expect("flush");
 
@@ -236,19 +201,22 @@ fn run_intercept(prompt: &str) -> (Vec<tau_proto::Emit>, Vec<InterceptReply>) {
     let mut rng = StdRng::seed_from_u64(1);
     run_with_rng(Cursor::new(input), &mut output, &mut rng).expect("run");
 
-    let mut reader = FrameReader::new(Cursor::new(output));
-    let mut emits = Vec::new();
+    let mut reader = HarnessInputReader::new(Cursor::new(output));
+    let mut notification_emits = Vec::new();
     let mut replies = Vec::new();
-    while let Some(frame) = reader.read_frame().expect("read") {
+    while let Some(frame) = reader.read_message().expect("read") {
         match frame {
-            Frame::Message(Message::Emit(emit)) => emits.push(emit),
-            Frame::Message(Message::InterceptReply(reply)) => replies.push(reply),
+            HarnessInputMessage::Emit(emit)
+                if matches!(emit.event.as_ref(), Event::HarnessInfo(_)) =>
+            {
+                notification_emits.push(emit);
+            }
+            HarnessInputMessage::InterceptReply(reply) => replies.push(reply),
             _ => {}
         }
     }
-    (emits, replies)
+    (notification_emits, replies)
 }
-
 fn replaced_prompt_text(reply: &InterceptReply) -> Option<String> {
     match &reply.action {
         tau_proto::InterceptAction::Pass(Some(boxed)) => match boxed.as_ref() {

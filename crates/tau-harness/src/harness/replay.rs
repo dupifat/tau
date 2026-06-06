@@ -12,9 +12,8 @@
 //!   one that was here from the start without retaining old runtime events.
 
 use tau_proto::{
-    ActionSchemaPublished, AgentPromptQueued, Event, EventSelector, Frame,
-    HarnessContextUsageChanged, HarnessModelsAvailable, HarnessRoleSelected, HarnessRolesAvailable,
-    Message,
+    ActionSchemaPublished, AgentPromptQueued, Event, EventSelector, HarnessContextUsageChanged,
+    HarnessModelsAvailable, HarnessOutputMessage, HarnessRoleSelected, HarnessRolesAvailable,
 };
 
 use super::{agent_runtime_state_for_turn, session_dir_status_from_reason};
@@ -32,9 +31,11 @@ impl Harness {
             reason: self.current_session_start_reason,
         });
         if selector_matches_event(selectors, &session_started) {
-            let _ = self
-                .bus
-                .send_to(client_id, None, Frame::Event(session_started));
+            let _ = self.bus.send_to(
+                client_id,
+                None,
+                HarnessOutputMessage::deliver(session_started),
+            );
         }
 
         let loaded_agents: Vec<tau_proto::AgentId> = {
@@ -57,7 +58,9 @@ impl Harness {
                 agent_id: agent_id.clone(),
             });
             if selector_matches_event(selectors, &event) {
-                let _ = self.bus.send_to(client_id, None, Frame::Event(event));
+                let _ = self
+                    .bus
+                    .send_to(client_id, None, HarnessOutputMessage::deliver(event));
             }
         }
 
@@ -76,11 +79,8 @@ impl Harness {
                 if selector_matches_event(selectors, &entry.event)
                     && should_replay_agent_event_to_late_subscriber(&entry.event)
                 {
-                    let frame = Frame::Message(Message::LogEvent(tau_proto::LogEvent {
-                        seq: self.event_log.reserve_seq(),
-                        recorded_at: entry.recorded_at,
-                        event: Box::new(entry.event),
-                    }));
+                    let frame =
+                        HarnessOutputMessage::deliver_replay(entry.recorded_at, entry.event);
                     let _ = self.bus.send_to(client_id, entry.source.as_deref(), frame);
                 }
             }
@@ -92,7 +92,7 @@ impl Harness {
         let _ = self.bus.send_to(
             client_id,
             None,
-            Frame::Event(Event::HarnessInfo(tau_proto::HarnessInfo {
+            HarnessOutputMessage::deliver(Event::HarnessInfo(tau_proto::HarnessInfo {
                 message: message.to_owned(),
                 level: tau_proto::HarnessInfoLevel::Important,
             })),
@@ -120,7 +120,9 @@ impl Harness {
                     message_class: prompt.message_class,
                 });
                 if selector_matches_event(selectors, &event) {
-                    let _ = self.bus.send_to(client_id, None, Frame::Event(event));
+                    let _ = self
+                        .bus
+                        .send_to(client_id, None, HarnessOutputMessage::deliver(event));
                 }
             }
         }
@@ -144,9 +146,11 @@ impl Harness {
             status: session_dir_status_from_reason(self.current_session_start_reason),
         });
         if selector_matches_event(selectors, &session_dir_event) {
-            let _ = self
-                .bus
-                .send_to(client_id, None, Frame::Event(session_dir_event));
+            let _ = self.bus.send_to(
+                client_id,
+                None,
+                HarnessOutputMessage::deliver(session_dir_event),
+            );
         }
 
         let mut agent_state_events = self
@@ -169,18 +173,22 @@ impl Harness {
         });
         for event in agent_state_events {
             if selector_matches_event(selectors, &event) {
-                let _ = self
-                    .bus
-                    .send_to(client_id, Some("harness"), Frame::Event(event));
+                let _ = self.bus.send_to(
+                    client_id,
+                    Some("harness"),
+                    HarnessOutputMessage::deliver(event),
+                );
             }
         }
 
         for info in &self.replayable_harness_infos {
             let event = Event::HarnessInfo(info.clone());
             if selector_matches_event(selectors, &event) {
-                let _ = self
-                    .bus
-                    .send_to(client_id, Some("harness"), Frame::Event(event));
+                let _ = self.bus.send_to(
+                    client_id,
+                    Some("harness"),
+                    HarnessOutputMessage::deliver(event),
+                );
             }
         }
 
@@ -214,9 +222,11 @@ impl Harness {
             .collect();
         for event in extension_events {
             if selector_matches_event(selectors, &event) {
-                let _ = self
-                    .bus
-                    .send_to(client_id, Some("harness"), Frame::Event(event));
+                let _ = self.bus.send_to(
+                    client_id,
+                    Some("harness"),
+                    HarnessOutputMessage::deliver(event),
+                );
             }
         }
 
@@ -233,7 +243,7 @@ impl Harness {
                 let _ = self.bus.send_to(
                     client_id,
                     Some(source_id.as_str()),
-                    Frame::Event(provider_event),
+                    HarnessOutputMessage::deliver(provider_event),
                 );
             }
         }
@@ -248,7 +258,7 @@ impl Harness {
                 let _ = self.bus.send_to(
                     client_id,
                     Some(published.connection_id.as_str()),
-                    Frame::Event(action_event),
+                    HarnessOutputMessage::deliver(action_event),
                 );
             }
         }
@@ -260,7 +270,7 @@ impl Harness {
         if selector_matches_event(selectors, &models_event) {
             let _ = self
                 .bus
-                .send_to(client_id, None, Frame::Event(models_event));
+                .send_to(client_id, None, HarnessOutputMessage::deliver(models_event));
         }
         let roles_event = Event::HarnessRolesAvailable(HarnessRolesAvailable {
             roles: role_infos(
@@ -271,7 +281,9 @@ impl Harness {
             groups: self.current_role_groups(),
         });
         if selector_matches_event(selectors, &roles_event) {
-            let _ = self.bus.send_to(client_id, None, Frame::Event(roles_event));
+            let _ = self
+                .bus
+                .send_to(client_id, None, HarnessOutputMessage::deliver(roles_event));
         }
         let (harness_settings, _) = crate::settings::load_harness_settings_or_warn(&self.dirs);
         let selected_event = Event::HarnessRoleSelected(HarnessRoleSelected {
@@ -292,9 +304,11 @@ impl Harness {
             role: self.selected_role.clone(),
         });
         if selector_matches_event(selectors, &selected_event) {
-            let _ = self
-                .bus
-                .send_to(client_id, None, Frame::Event(selected_event));
+            let _ = self.bus.send_to(
+                client_id,
+                None,
+                HarnessOutputMessage::deliver(selected_event),
+            );
         }
         let context_event = Event::HarnessContextUsageChanged(HarnessContextUsageChanged {
             input_tokens: self.current_session_state.context_input_tokens,
@@ -302,9 +316,11 @@ impl Harness {
             percent_used: self.current_session_state.context_percent_used,
         });
         if selector_matches_event(selectors, &context_event) {
-            let _ = self
-                .bus
-                .send_to(client_id, None, Frame::Event(context_event));
+            let _ = self.bus.send_to(
+                client_id,
+                None,
+                HarnessOutputMessage::deliver(context_event),
+            );
         }
         let effort_levels = self
             .selected_model
@@ -316,9 +332,11 @@ impl Harness {
                 levels: effort_levels,
             });
         if selector_matches_event(selectors, &effort_levels_event) {
-            let _ = self
-                .bus
-                .send_to(client_id, None, Frame::Event(effort_levels_event));
+            let _ = self.bus.send_to(
+                client_id,
+                None,
+                HarnessOutputMessage::deliver(effort_levels_event),
+            );
         }
         let verbosity_levels = self
             .selected_model
@@ -330,9 +348,11 @@ impl Harness {
                 levels: verbosity_levels,
             });
         if selector_matches_event(selectors, &verbosity_levels_event) {
-            let _ = self
-                .bus
-                .send_to(client_id, None, Frame::Event(verbosity_levels_event));
+            let _ = self.bus.send_to(
+                client_id,
+                None,
+                HarnessOutputMessage::deliver(verbosity_levels_event),
+            );
         }
         let thinking_levels = self
             .selected_model
@@ -345,9 +365,11 @@ impl Harness {
             },
         );
         if selector_matches_event(selectors, &thinking_levels_event) {
-            let _ = self
-                .bus
-                .send_to(client_id, None, Frame::Event(thinking_levels_event));
+            let _ = self.bus.send_to(
+                client_id,
+                None,
+                HarnessOutputMessage::deliver(thinking_levels_event),
+            );
         }
     }
 }

@@ -22,7 +22,7 @@ fn interception_exact_selector_intercepts_before_log() {
 
     h.handle_extension_event(
         "interceptor",
-        Frame::Message(Message::Intercept(Intercept {
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
             priority: InterceptionPriority::new(0),
         })),
@@ -49,7 +49,7 @@ fn interception_drop_prevents_final_delivery() {
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
-        Frame::Message(Message::Intercept(Intercept {
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
             priority: InterceptionPriority::new(0),
         })),
@@ -62,7 +62,7 @@ fn interception_drop_prevents_final_delivery() {
     h.publish_event(None, draft_event("dropped"));
     h.handle_extension_event(
         "interceptor",
-        Frame::Message(Message::InterceptReply(InterceptReply {
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
             action: InterceptAction::Drop,
         })),
     )
@@ -78,7 +78,7 @@ fn interception_pass_through_reaches_log_after_last_interceptor() {
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
-        Frame::Message(Message::Intercept(Intercept {
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
             priority: InterceptionPriority::new(0),
         })),
@@ -89,7 +89,7 @@ fn interception_pass_through_reaches_log_after_last_interceptor() {
     h.publish_event(None, draft_event("released"));
     h.handle_extension_event(
         "interceptor",
-        Frame::Message(Message::InterceptReply(InterceptReply {
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
             action: InterceptAction::Pass(None),
         })),
     )
@@ -109,7 +109,7 @@ fn interception_reply_can_modify_event() {
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
-        Frame::Message(Message::Intercept(Intercept {
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
             priority: InterceptionPriority::new(0),
         })),
@@ -120,7 +120,7 @@ fn interception_reply_can_modify_event() {
     h.publish_event(None, draft_event("original"));
     h.handle_extension_event(
         "interceptor",
-        Frame::Message(Message::InterceptReply(InterceptReply {
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
             action: InterceptAction::Pass(Some(Box::new(draft_event("modified")))),
         })),
     )
@@ -143,7 +143,7 @@ fn interception_cannot_modify_important_harness_info() {
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
-        Frame::Message(Message::Intercept(Intercept {
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::HARNESS_INFO)],
             priority: InterceptionPriority::new(0),
         })),
@@ -154,7 +154,7 @@ fn interception_cannot_modify_important_harness_info() {
     h.emit_info_important("extension core-shell rejected its config");
     h.handle_extension_event(
         "interceptor",
-        Frame::Message(Message::InterceptReply(InterceptReply {
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
             action: InterceptAction::Pass(Some(Box::new(Event::HarnessInfo(
                 tau_proto::HarnessInfo {
                     message: String::new(),
@@ -186,7 +186,7 @@ fn interception_priority_orders_lower_values_first() {
     for (name, priority) in [("low", 10), ("high", 0)] {
         h.handle_extension_event(
             name,
-            Frame::Message(Message::Intercept(Intercept {
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
                 selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
                 priority: InterceptionPriority::new(priority),
             })),
@@ -200,13 +200,13 @@ fn interception_priority_orders_lower_values_first() {
         high.lock()
             .expect("high events")
             .iter()
-            .any(|event| matches!(event.frame, Frame::Message(Message::InterceptRequest(_))))
+            .any(|event| matches!(event.frame, HarnessOutputMessage::InterceptRequest(_)))
     );
     assert!(
         !low.lock()
             .expect("low events")
             .iter()
-            .any(|event| matches!(event.frame, Frame::Message(Message::InterceptRequest(_))))
+            .any(|event| matches!(event.frame, HarnessOutputMessage::InterceptRequest(_)))
     );
 }
 
@@ -219,7 +219,7 @@ fn interception_same_priority_orders_by_component_name_and_redelivery_continues(
     for name in ["beta", "alpha"] {
         h.handle_extension_event(
             name,
-            Frame::Message(Message::Intercept(Intercept {
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
                 selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
                 priority: InterceptionPriority::new(0),
             })),
@@ -233,19 +233,19 @@ fn interception_same_priority_orders_by_component_name_and_redelivery_continues(
             .lock()
             .expect("alpha events")
             .iter()
-            .any(|event| matches!(event.frame, Frame::Message(Message::InterceptRequest(_))))
+            .any(|event| matches!(event.frame, HarnessOutputMessage::InterceptRequest(_)))
     );
     assert!(
         !beta
             .lock()
             .expect("beta events")
             .iter()
-            .any(|event| matches!(event.frame, Frame::Message(Message::InterceptRequest(_))))
+            .any(|event| matches!(event.frame, HarnessOutputMessage::InterceptRequest(_)))
     );
 
     h.handle_extension_event(
         "alpha",
-        Frame::Message(Message::InterceptReply(InterceptReply {
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
             action: InterceptAction::Pass(None),
         })),
     )
@@ -254,7 +254,7 @@ fn interception_same_priority_orders_by_component_name_and_redelivery_continues(
         beta.lock()
             .expect("beta events")
             .iter()
-            .any(|event| matches!(event.frame, Frame::Message(Message::InterceptRequest(_))))
+            .any(|event| matches!(event.frame, HarnessOutputMessage::InterceptRequest(_)))
     );
 }
 
@@ -266,7 +266,7 @@ fn interception_exact_beats_prefix_even_with_lower_prefix_priority() {
     let prefix = connect_test_tool(&mut h, "prefix");
     h.handle_extension_event(
         "prefix",
-        Frame::Message(Message::Intercept(Intercept {
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
             selectors: vec![EventSelector::Prefix("ui".to_owned())],
             priority: InterceptionPriority::new(-100),
         })),
@@ -274,7 +274,7 @@ fn interception_exact_beats_prefix_even_with_lower_prefix_priority() {
     .expect("prefix registration");
     h.handle_extension_event(
         "exact",
-        Frame::Message(Message::Intercept(Intercept {
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
             priority: InterceptionPriority::new(100),
         })),
@@ -288,14 +288,14 @@ fn interception_exact_beats_prefix_even_with_lower_prefix_priority() {
             .lock()
             .expect("exact events")
             .iter()
-            .any(|event| matches!(event.frame, Frame::Message(Message::InterceptRequest(_))))
+            .any(|event| matches!(event.frame, HarnessOutputMessage::InterceptRequest(_)))
     );
     assert!(
         !prefix
             .lock()
             .expect("prefix events")
             .iter()
-            .any(|event| matches!(event.frame, Frame::Message(Message::InterceptRequest(_))))
+            .any(|event| matches!(event.frame, HarnessOutputMessage::InterceptRequest(_)))
     );
 }
 
@@ -311,7 +311,7 @@ fn interception_pass_advances_past_responding_interceptor() {
     let interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
-        Frame::Message(Message::Intercept(Intercept {
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
             priority: InterceptionPriority::new(0),
         })),
@@ -321,7 +321,7 @@ fn interception_pass_advances_past_responding_interceptor() {
     h.publish_event(None, draft_event("once"));
     h.handle_extension_event(
         "interceptor",
-        Frame::Message(Message::InterceptReply(InterceptReply {
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
             action: InterceptAction::Pass(None),
         })),
     )
@@ -331,7 +331,7 @@ fn interception_pass_advances_past_responding_interceptor() {
         .lock()
         .expect("events")
         .iter()
-        .filter(|event| matches!(event.frame, Frame::Message(Message::InterceptRequest(_))))
+        .filter(|event| matches!(event.frame, HarnessOutputMessage::InterceptRequest(_)))
         .count();
     assert_eq!(
         count, 1,
@@ -349,7 +349,7 @@ fn interception_defers_subsequent_publishes_until_reply() {
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
-        Frame::Message(Message::Intercept(Intercept {
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
             priority: InterceptionPriority::new(0),
         })),
@@ -375,7 +375,7 @@ fn interception_defers_subsequent_publishes_until_reply() {
     // Reply: pass-through. Both events should now commit, in order.
     h.handle_extension_event(
         "interceptor",
-        Frame::Message(Message::InterceptReply(InterceptReply {
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
             action: InterceptAction::Pass(None),
         })),
     )
@@ -452,7 +452,7 @@ fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
-        Frame::Message(Message::Intercept(Intercept {
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
             priority: InterceptionPriority::new(0),
         })),
@@ -466,7 +466,7 @@ fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
 
     h.handle_extension_event(
         "tool-provider",
-        Frame::Event(Event::ToolResult(ToolResult {
+        TestProtocolItem::Event(Event::ToolResult(ToolResult {
             call_id: call_id.clone(),
             tool_name: tool_name.clone(),
             tool_type: tau_proto::ToolType::Function,
@@ -485,7 +485,7 @@ fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
 
     h.handle_extension_event(
         "interceptor",
-        Frame::Message(Message::InterceptReply(InterceptReply {
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
             action: InterceptAction::Pass(None),
         })),
     )
@@ -516,7 +516,7 @@ fn interception_drop_of_must_pass_event_is_overridden() {
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
-        Frame::Message(Message::Intercept(Intercept {
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(
                 tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
             )],
@@ -537,7 +537,7 @@ fn interception_drop_of_must_pass_event_is_overridden() {
     h.publish_event(None, prompt.clone());
     h.handle_extension_event(
         "interceptor",
-        Frame::Message(Message::InterceptReply(InterceptReply {
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
             action: InterceptAction::Drop,
         })),
     )
@@ -557,7 +557,7 @@ fn interception_disconnect_mid_reply_publishes_original() {
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
-        Frame::Message(Message::Intercept(Intercept {
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
             priority: InterceptionPriority::new(0),
         })),
@@ -593,7 +593,7 @@ fn interception_user_prompt_dispatch_waits_for_commit() {
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
-        Frame::Message(Message::Intercept(Intercept {
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(
                 tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
             )],
@@ -630,7 +630,7 @@ fn interception_user_prompt_dispatch_waits_for_commit() {
     // updated tree.
     h.handle_extension_event(
         "interceptor",
-        Frame::Message(Message::InterceptReply(InterceptReply {
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
             action: InterceptAction::Pass(None),
         })),
     )
@@ -682,7 +682,7 @@ fn interception_mutating_prompt_reaches_agent() {
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
-        Frame::Message(Message::Intercept(Intercept {
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(
                 tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
             )],
@@ -712,7 +712,7 @@ fn interception_mutating_prompt_reaches_agent() {
     });
     h.handle_extension_event(
         "interceptor",
-        Frame::Message(Message::InterceptReply(InterceptReply {
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
             action: InterceptAction::Pass(Some(Box::new(mutated))),
         })),
     )
@@ -792,7 +792,7 @@ fn interception_disconnect_clears_registration() {
     let _interceptor = connect_test_tool(&mut h, "interceptor");
     h.handle_extension_event(
         "interceptor",
-        Frame::Message(Message::Intercept(Intercept {
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
             priority: InterceptionPriority::new(0),
         })),

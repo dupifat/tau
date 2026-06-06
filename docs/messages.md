@@ -1,92 +1,99 @@
 # Message reference
 
-Messages are control-plane traffic between a single component (extension,
-agent, UI client) and the harness's per-component handler. They are
-**point-to-point**: never broadcast on the bus, never written to the
-durable session event log, and not subscribable.
+Messages are point-to-point protocol traffic between one peer (extension,
+provider, or UI client) and the harness. They are **not** bus facts: messages
+are never broadcast as events, never written to the durable semantic event logs,
+and not matched directly by event subscriptions.
 
-Wire form: `{"message": "<flat_name>", "payload": {...}}` — flat
-snake_case names, distinct from events' dotted `category.call` form.
-The top-level [`Frame`](../crates/tau-proto/src/frame.rs) envelope tells
-the two apart by discriminator. Type definitions live in
-[`crates/tau-proto/src/messages.rs`](../crates/tau-proto/src/messages.rs).
+Wire form: `{"message": "<flat_name>", "payload": {...}}` — flat snake_case
+names, distinct from events' dotted `category.call` form. The protocol is
+directional:
 
-For bus events (the broadcast `Event` half of the protocol), see
-[events.md](events.md).
+- [`HarnessInputMessage`](../crates/tau-proto/src/messages.rs): messages the
+  harness accepts from peers.
+- [`HarnessOutputMessage`](../crates/tau-proto/src/messages.rs): messages the
+  harness sends to peers.
+
+Bare top-level `Event` values are not valid protocol items. Peers ask the
+harness to publish events with `emit`; the harness delivers events to peers with
+`deliver`.
+
+Type definitions live in
+[`crates/tau-proto/src/messages.rs`](../crates/tau-proto/src/messages.rs). For
+bus events themselves, see [events.md](events.md).
 
 ## Handshake
 
-Exchanged when a component first connects to the harness. The order on
-every connection is: client sends `hello`, then `subscribe` (and
-optionally `intercept`); harness sends `configure` for supervised
-extensions; client sends `ready` once setup is done.
+Exchanged when a peer first connects to the harness. The usual extension order
+is: peer sends `hello`, then optional `subscribe` and `intercept`; the harness
+sends `configure` for supervised extensions; the peer sends `ready` once setup
+is done.
 
-- **`hello`** — A participant announces itself just after connecting:
-  protocol version, client name, client kind (`agent` / `tool` / `ui`
-  / `core` / `external`). First message on every connection.
-- **`subscribe`** — A client declares which events the harness should
-  deliver to it, as a list of selectors (exact name or prefix).
-  Without a subscription, only directed traffic reaches the client.
-- **`intercept`** — A client asks to receive matching event emissions
-  *before* they hit the event log, with a priority. Lower priority
-  runs first; the interceptor can rewrite the emission, drop it, or
-  pass it through with a redelivery cursor so later interceptors at
-  the same priority don't loop.
-- **`ready`** — Sent by an extension after its own startup work is
-  done and it is ready to participate in tool dispatch. The harness
-  supervisor reacts by emitting the `extension.ready` *event* on the
-  bus so subscribers can observe online state without watching every
-  per-component pipe.
-- **`disconnect`** — A client (or the harness) signals an intentional
-  disconnect, with an optional human-readable reason. Distinct from a
-  socket dying unannounced. The writer thread also sends this as a
-  best-effort sentinel when shutting an extension's stdin.
+- **`hello`** *(peer → harness)* — A participant announces itself just after
+  connecting: protocol version, client name, and client kind (`provider` /
+  `tool` / `action` / `ui` / `core` / `external`). First message on every
+  connection.
+- **`subscribe`** *(peer → harness)* — A peer declares which delivered events it
+  wants to receive, as a list of selectors (exact name or prefix). Without a
+  subscription, only directed traffic reaches the peer.
+- **`intercept`** *(peer → harness)* — A peer asks to receive matching event
+  emissions before they hit the event log, with a priority. Lower priority runs
+  first; each interceptor replies with `intercept_reply` to pass, rewrite, or
+  drop the offered emission.
+- **`ready`** *(peer → harness)* — Sent by an extension after its own startup
+  work is done and it is ready to participate in tool dispatch. The harness
+  supervisor reacts by emitting the `extension.ready` *event* on the bus so
+  subscribers can observe online state without watching every per-component
+  pipe.
+- **`disconnect`** *(either direction)* — A peer or the harness signals an
+  intentional disconnect, with an optional human-readable reason. Distinct from
+  a socket dying unannounced. The writer thread also sends this as a best-effort
+  sentinel when shutting an extension's stdin.
 
 ## Configuration (harness → extension)
 
-- **`configure`** — Sent point-to-point by the harness to one
-  extension immediately after that extension's `hello`. Carries
-  whatever the `config: { … }` value was for that extension in
-  `harness.yaml`, or an empty map when no config was provided.
-  In-process extensions don't carry a supervised config and receive
-  the empty default.
-- **`config_error`** — An extension reports back that the `configure`
-  payload it received was malformed or unusable; the harness surfaces
-  the message just like a `harness.yaml` parse error so the user can
+- **`configure`** — Sent point-to-point by the harness to one extension
+  immediately after that extension's `hello`. Carries whatever the `config: { …
+  }` value was for that extension in `harness.yaml`, the extension state
+  directory when available, and authorized secrets. In-process extensions don't
+  carry a supervised config and receive the empty default.
+- **`config_error`** *(extension → harness)* — An extension reports back that the
+  `configure` payload it received was malformed or unusable; the harness
+  surfaces the message just like a `harness.yaml` parse error so the user can
   see why their per-extension config was rejected.
 
-## Emission pipeline (client ↔ harness)
+## Emission and interception (peer ↔ harness)
 
-These wrap a real bus `Event` for delivery. They are messages — not
-events — even though their payload is an event, because they're
-point-to-point envelopes the bus never sees as facts.
+These messages wrap a real bus `Event` while it is entering the harness. They
+are messages — not events — because the wrapper is point-to-point protocol
+metadata, not the fact subscribers ultimately observe.
 
-- **`emit`** — A client's *request* to publish an event with
-  harness-owned delivery metadata. Carries the inner event, a
-  `transient` flag (don't persist to durable history), and an optional
-  interception cursor (used when an interceptor is forwarding an
-  emission it received earlier so the harness knows where to resume).
-- **`intercepted`** — Directed harness → interceptor delivery of an
-  emission that has not reached the event log yet, so the interceptor
-  can act before subscribers see it. Carries the inner event, the
-  same `transient` flag, and the priority cursor identifying which
-  interceptor in the chain this is for.
+- **`emit`** *(peer → harness)* — A peer's request to publish an event. Carries
+  the inner event and a `transient` flag controlling whether eligible semantic
+  facts should skip durable history. The harness owns source attribution,
+  interception, sequencing, persistence, and eventual delivery.
+- **`intercept_request`** *(harness → interceptor)* — Directed delivery of an
+  emission that has not reached the event log yet. Carries the offered event and
+  the same transient metadata.
+- **`intercept_reply`** *(interceptor → harness)* — Exactly one response to an
+  `intercept_request`: `pass` unchanged, `pass` with a replacement event, or
+  `drop`.
 
-## Transport (sequenced delivery)
+## Transport (event delivery and acknowledgement)
 
-The harness's delivery layer wraps every published event in a
-`log_event` envelope so receivers can ack after processing. Receivers
-ack cumulatively — newer acks supersede older ones. The harness does
-not retain the runtime event stream in memory; late UI catch-up is
-reconstructed from session/agent stores and current harness snapshots,
-and extension subscriptions remain live-only unless a future explicit
-replay mode is added.
+The harness wraps every event it sends to a peer in `deliver`. Receivers ack
+only committed runtime deliveries; direct snapshots and replay deliveries are
+unsequenced and must not be acked. The harness does not retain the runtime event
+stream in memory; late UI catch-up is reconstructed from session/agent stores
+and current harness snapshots, and extension subscriptions remain live-only
+unless a future explicit replay mode is added.
 
-- **`log_event`** — The harness's log-delivery envelope around a real
-  bus event, carrying a monotonic `EventLogSeq`. Receivers peel the
-  inner event, process it, then send an `ack` referencing the sequence
-  (or any later sequence, since acks are cumulative).
-- **`ack`** — Cumulative acknowledgement that the receiver has
-  processed all log events with sequence `<= up_to`. Newer acks supersede
-  older ones; duplicate or out-of-order acks are ignored by the
+- **`deliver`** *(harness → peer)* — Harness-owned event delivery envelope:
+  `EventDelivery { event, seq, recorded_at }`. `seq: Some(_)` means an ackable
+  committed runtime delivery. `seq: None` means a direct, replay, or otherwise
+  unsequenced delivery. `recorded_at` is present when a runtime or historical
+  timestamp is meaningful.
+- **`ack`** *(peer → harness)* — Cumulative acknowledgement that the receiver has
+  processed all ackable deliveries with sequence `<= up_to`. Newer acks
+  supersede older ones; duplicate or out-of-order acks are ignored by the
   harness.

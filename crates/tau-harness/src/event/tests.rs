@@ -7,13 +7,13 @@ fn extension_reader_waits_for_initialized_ack() {
     let (initialized_tx, initialized_rx) = mpsc::channel();
     spawn_reader_thread_after_initialized("conn-test".into(), reader_stream, tx, initialized_rx);
 
-    let mut writer = FrameWriter::new(BufWriter::new(writer_stream));
+    let mut writer = tau_proto::HarnessInputWriter::new(BufWriter::new(writer_stream));
     writer
-        .write_frame(&Frame::Message(Message::Hello(tau_proto::Hello {
+        .write_message(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: "test-extension".into(),
             client_kind: tau_proto::ClientKind::Tool,
-        })))
+        }))
         .expect("write hello");
     writer.flush().expect("flush hello");
 
@@ -29,10 +29,13 @@ fn extension_reader_waits_for_initialized_ack() {
     match event {
         HarnessEvent::FromConnection {
             connection_id,
-            frame,
+            message,
         } => {
             assert_eq!(connection_id.as_str(), "conn-test");
-            assert!(matches!(frame.as_ref(), Frame::Message(Message::Hello(_))));
+            assert!(matches!(
+                message.as_ref(),
+                tau_proto::HarnessInputMessage::Hello(_)
+            ));
         }
         HarnessEvent::Disconnected { .. }
         | HarnessEvent::NewClient(_)

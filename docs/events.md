@@ -6,9 +6,10 @@ Every event has a dotted name `<category>.<call>` and a typed payload defined in
 `crates/tau-proto/src/events.rs`. This document groups the core events by the
 component (or class of component) that emits them.
 
-Events are distinct from **messages**: messages are point-to-point control-plane
-traffic (handshake, subscribe/intercept, the `LogEvent`/`Ack` envelope, etc.)
-and never appear on the bus or in durable semantic logs. See
+Events are distinct from **messages**: messages are point-to-point protocol
+traffic (handshake, subscribe/intercept, `emit`, `deliver`, `ack`, etc.) and
+never appear on the bus or in durable semantic logs. Events are not top-level
+wire items; peers send them inside `emit` and receive them inside `deliver`. See
 [messages.md](messages.md) for the message-side reference.
 
 A few categories don't map to a single emitter — those are grouped by the

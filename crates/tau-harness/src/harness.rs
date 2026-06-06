@@ -20,13 +20,14 @@ use tau_proto::{
     ActionError, ActionInvocationId, ActionInvoke, ActionResult, ActionSchemaPublished, AgentId,
     AgentPromptCreated, AgentPromptId, AgentPromptQueued, AgentPromptRecalled,
     AgentPromptTerminated, AgentPromptTerminationReason, BackgroundSupport, CborValue, ClientKind,
-    ContentPart, ContextItem, ContextRole, Disconnect, Event, EventSelector, ExtensionName, Frame,
-    HarnessAgentContextUsageChanged, HarnessContextUsageChanged, HarnessRoleSelected, Hello,
-    Message, MessageItem, ModelId, PROTOCOL_VERSION, PromptFragment, PromptOriginator,
-    ProviderModelInfo, ProviderResponseFinished, ProviderStopReason, ProviderTokenUsage, SessionId,
-    TokenUsageStats, ToolBackgroundError, ToolBackgroundResult, ToolCallId, ToolCallItem,
-    ToolCancelled, ToolDefinition, ToolError, ToolName, ToolRegister, ToolRejected, ToolRequest,
-    ToolResult, ToolResultKind, ToolType, UiCancelPrompt,
+    ContentPart, ContextItem, ContextRole, Disconnect, Event, EventSelector, ExtensionName,
+    HarnessAgentContextUsageChanged, HarnessContextUsageChanged, HarnessInputMessage,
+    HarnessOutputMessage, HarnessRoleSelected, Hello, MessageItem, ModelId, PROTOCOL_VERSION,
+    PromptFragment, PromptOriginator, ProviderModelInfo, ProviderResponseFinished,
+    ProviderStopReason, ProviderTokenUsage, SessionId, TokenUsageStats, ToolBackgroundError,
+    ToolBackgroundResult, ToolCallId, ToolCallItem, ToolCancelled, ToolDefinition, ToolError,
+    ToolName, ToolRegister, ToolRejected, ToolRequest, ToolResult, ToolResultKind, ToolType,
+    UiCancelPrompt,
 };
 
 use crate::agent::{Agent, AgentTurnState, PendingCancel, PendingPrompt};
@@ -1245,7 +1246,8 @@ pub struct Harness {
     pub(crate) event_log: std::sync::Arc<EventLog>,
     /// Writer channels for socket clients, keyed by connection ID.
     /// Used to start follower threads for log-based replay + delivery.
-    pub(crate) client_writers: std::collections::HashMap<tau_proto::ConnectionId, Sender<Frame>>,
+    pub(crate) client_writers:
+        std::collections::HashMap<tau_proto::ConnectionId, Sender<HarnessOutputMessage>>,
     /// Buffered human-readable lifecycle messages (extension init,
     /// model changes, etc.) surfaced to the UI as part of the next
     /// `InteractionOutcome`.
@@ -1452,10 +1454,10 @@ where
     use std::io::{BufReader, BufWriter};
 
     use tau_proto::{
-        Ack, ContentPart, ContextItem, ContextRole, Effort, EventName, FrameReader, FrameWriter,
-        Hello, MessageItem, PROTOCOL_VERSION, ProviderModelInfo, ProviderModelsUpdated,
-        ProviderPromptSubmitted, Ready, Subscribe, ThinkingSummary, ToolCallItem, ToolName,
-        Verbosity,
+        Ack, ContentPart, ContextItem, ContextRole, Effort, EventName, HarnessInputMessage,
+        HarnessOutputMessage, Hello, MessageItem, PROTOCOL_VERSION, PeerInputReader,
+        PeerOutputWriter, ProviderModelInfo, ProviderModelsUpdated, ProviderPromptSubmitted, Ready,
+        Subscribe, ThinkingSummary, ToolCallItem, ToolName, Verbosity,
     };
 
     fn materialize_prompt(prompt: &tau_proto::AgentPromptCreated) -> tau_proto::AgentPromptCreated {
@@ -1464,23 +1466,23 @@ where
         materialized
     }
 
-    let mut reader = FrameReader::new(BufReader::new(reader));
-    let mut writer = FrameWriter::new(BufWriter::new(writer));
+    let mut reader = PeerInputReader::new(BufReader::new(reader));
+    let mut writer = PeerOutputWriter::new(BufWriter::new(writer));
 
-    writer.write_frame(&Frame::Message(Message::Hello(Hello {
+    writer.write_message(&HarnessInputMessage::Hello(Hello {
         protocol_version: PROTOCOL_VERSION,
         client_name: "tau-echo-provider".into(),
         client_kind: ClientKind::Provider,
-    })))?;
+    }))?;
     // Live-only test provider: prompt and cancel events are work requests.
     // Replaying past ones would rerun or cancel completed turns.
-    writer.write_frame(&Frame::Message(Message::Subscribe(Subscribe {
+    writer.write_message(&HarnessInputMessage::Subscribe(Subscribe {
         selectors: vec![
             EventSelector::Exact(EventName::AGENT_PROMPT_CREATED),
             EventSelector::Exact(EventName::UI_CANCEL_PROMPT),
         ],
-    })))?;
-    writer.write_frame(&Frame::Event(Event::ProviderModelsUpdated(
+    }))?;
+    writer.write_message(&HarnessInputMessage::emit(Event::ProviderModelsUpdated(
         ProviderModelsUpdated {
             models: vec![ProviderModelInfo {
                 id: "echo/model".into(),
@@ -1494,137 +1496,140 @@ where
             }],
         },
     )))?;
-    writer.write_frame(&Frame::Message(Message::Ready(Ready {
+    writer.write_message(&HarnessInputMessage::Ready(Ready {
         message: Some("echo provider ready".to_owned()),
-    })))?;
+    }))?;
     writer.flush()?;
 
     let mut next_call = 1_u64;
 
     loop {
-        let Some(frame) = reader.read_frame()? else {
+        let Some(message) = reader.read_message()? else {
             return Ok(());
         };
-        let (log_id, inner) = frame.peel_log();
-        match inner {
-            Frame::Event(Event::AgentPromptCreated(prompt)) => {
-                let spid = prompt.agent_prompt_id.clone();
-                let prompt = materialize_prompt(&prompt);
-                let context_items = prompt.context.flatten();
-                writer.write_frame(&Frame::Event(Event::ProviderPromptSubmitted(
-                    ProviderPromptSubmitted {
-                        agent_prompt_id: spid.clone(),
-                        originator: prompt.originator.clone(),
-                    },
-                )))?;
-
-                let is_tool_result = context_items
-                    .last()
-                    .is_some_and(|item| matches!(item, ContextItem::ToolResult(_)));
-                if is_tool_result {
-                    let text = context_items
-                        .last()
-                        .and_then(|item| match item {
-                            ContextItem::ToolResult(result) => Some(result.output.render()),
-                            _ => None,
-                        })
-                        .unwrap_or_default();
-                    writer.write_frame(&Frame::Event(Event::ProviderResponseFinished(
-                        ProviderResponseFinished {
-                            agent_prompt_id: spid,
-                            agent_id: prompt.agent_id.clone(),
-                            output_items: vec![ContextItem::Message(MessageItem {
-                                role: ContextRole::Assistant,
-                                content: vec![ContentPart::Text { text }],
-                                phase: None,
-                            })],
-                            stop_reason: ProviderStopReason::EndTurn,
-                            error: None,
-                            originator: prompt.originator.clone(),
-                            usage: None,
-                            compaction_original_input_tokens: None,
-                            compaction_compacted_input_tokens: None,
-                            backend: None,
-                            provider_response_id: None,
-                            ws_pool_delta: None,
-                        },
-                    )))?;
-                } else {
-                    let user_text = context_items
-                        .iter()
-                        .rev()
-                        .find_map(|item| match item {
-                            ContextItem::Message(message) if message.role == ContextRole::User => {
-                                message.content.first().map(|part| match part {
-                                    ContentPart::Text { text } => text.clone(),
-                                })
-                            }
-                            _ => None,
-                        })
-                        .unwrap_or_default();
-
-                    let call_id = format!("call-{next_call}");
-                    next_call += 1;
-
-                    let tool_call = if let Some(path) = user_text.strip_prefix("read ") {
-                        ToolCallItem {
-                            call_id: call_id.into(),
-                            name: ToolName::new("read"),
-                            tool_type: tau_proto::ToolType::Function,
-                            arguments: CborValue::Map(vec![(
-                                CborValue::Text("path".to_owned()),
-                                CborValue::Text(path.trim().to_owned()),
-                            )]),
-                        }
-                    } else if let Some(cmd) = user_text.strip_prefix("shell ") {
-                        ToolCallItem {
-                            call_id: call_id.into(),
-                            name: ToolName::new("shell"),
-                            tool_type: tau_proto::ToolType::Function,
-                            arguments: CborValue::Map(vec![
-                                (
-                                    CborValue::Text("mode".to_owned()),
-                                    CborValue::Text("rw".to_owned()),
-                                ),
-                                (
-                                    CborValue::Text("command".to_owned()),
-                                    CborValue::Text(cmd.trim().to_owned()),
-                                ),
-                            ]),
-                        }
-                    } else {
-                        ToolCallItem {
-                            call_id: call_id.into(),
-                            name: ToolName::new("echo"),
-                            tool_type: tau_proto::ToolType::Function,
-                            arguments: CborValue::Text(user_text),
-                        }
-                    };
-
-                    writer.write_frame(&Frame::Event(Event::ProviderResponseFinished(
-                        ProviderResponseFinished {
-                            agent_prompt_id: spid,
-                            agent_id: prompt.agent_id.clone(),
-                            output_items: vec![ContextItem::ToolCall(tool_call)],
-                            stop_reason: ProviderStopReason::ToolCalls,
-                            error: None,
-                            originator: prompt.originator.clone(),
-                            usage: None,
-                            compaction_original_input_tokens: None,
-                            compaction_compacted_input_tokens: None,
-                            backend: None,
-                            provider_response_id: None,
-                            ws_pool_delta: None,
-                        },
-                    )))?;
-                }
-                writer.flush()?;
+        let (log_id, event) = match message {
+            HarnessOutputMessage::Deliver(delivery) => {
+                let (event, log_id, _) = delivery.into_parts();
+                (log_id, Some(event))
             }
-            Frame::Message(Message::Disconnect(_)) => return Ok(()),
-            _ => {}
+            HarnessOutputMessage::Disconnect(_) => return Ok(()),
+            _ => (None, None),
+        };
+        if let Some(Event::AgentPromptCreated(prompt)) = event {
+            let spid = prompt.agent_prompt_id.clone();
+            let prompt = materialize_prompt(&prompt);
+            let context_items = prompt.context.flatten();
+            writer.write_message(&HarnessInputMessage::emit(Event::ProviderPromptSubmitted(
+                ProviderPromptSubmitted {
+                    agent_prompt_id: spid.clone(),
+                    originator: prompt.originator.clone(),
+                },
+            )))?;
+
+            let is_tool_result = context_items
+                .last()
+                .is_some_and(|item| matches!(item, ContextItem::ToolResult(_)));
+            if is_tool_result {
+                let text = context_items
+                    .last()
+                    .and_then(|item| match item {
+                        ContextItem::ToolResult(result) => Some(result.output.render()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                writer.write_message(&HarnessInputMessage::emit(
+                    Event::ProviderResponseFinished(ProviderResponseFinished {
+                        agent_prompt_id: spid,
+                        agent_id: prompt.agent_id.clone(),
+                        output_items: vec![ContextItem::Message(MessageItem {
+                            role: ContextRole::Assistant,
+                            content: vec![ContentPart::Text { text }],
+                            phase: None,
+                        })],
+                        stop_reason: ProviderStopReason::EndTurn,
+                        error: None,
+                        originator: prompt.originator.clone(),
+                        usage: None,
+                        compaction_original_input_tokens: None,
+                        compaction_compacted_input_tokens: None,
+                        backend: None,
+                        provider_response_id: None,
+                        ws_pool_delta: None,
+                    }),
+                ))?;
+            } else {
+                let user_text = context_items
+                    .iter()
+                    .rev()
+                    .find_map(|item| match item {
+                        ContextItem::Message(message) if message.role == ContextRole::User => {
+                            message.content.first().map(|part| match part {
+                                ContentPart::Text { text } => text.clone(),
+                            })
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+
+                let call_id = format!("call-{next_call}");
+                next_call += 1;
+
+                let tool_call = if let Some(path) = user_text.strip_prefix("read ") {
+                    ToolCallItem {
+                        call_id: call_id.into(),
+                        name: ToolName::new("read"),
+                        tool_type: tau_proto::ToolType::Function,
+                        arguments: CborValue::Map(vec![(
+                            CborValue::Text("path".to_owned()),
+                            CborValue::Text(path.trim().to_owned()),
+                        )]),
+                    }
+                } else if let Some(cmd) = user_text.strip_prefix("shell ") {
+                    ToolCallItem {
+                        call_id: call_id.into(),
+                        name: ToolName::new("shell"),
+                        tool_type: tau_proto::ToolType::Function,
+                        arguments: CborValue::Map(vec![
+                            (
+                                CborValue::Text("mode".to_owned()),
+                                CborValue::Text("rw".to_owned()),
+                            ),
+                            (
+                                CborValue::Text("command".to_owned()),
+                                CborValue::Text(cmd.trim().to_owned()),
+                            ),
+                        ]),
+                    }
+                } else {
+                    ToolCallItem {
+                        call_id: call_id.into(),
+                        name: ToolName::new("echo"),
+                        tool_type: tau_proto::ToolType::Function,
+                        arguments: CborValue::Text(user_text),
+                    }
+                };
+
+                writer.write_message(&HarnessInputMessage::emit(
+                    Event::ProviderResponseFinished(ProviderResponseFinished {
+                        agent_prompt_id: spid,
+                        agent_id: prompt.agent_id.clone(),
+                        output_items: vec![ContextItem::ToolCall(tool_call)],
+                        stop_reason: ProviderStopReason::ToolCalls,
+                        error: None,
+                        originator: prompt.originator.clone(),
+                        usage: None,
+                        compaction_original_input_tokens: None,
+                        compaction_compacted_input_tokens: None,
+                        backend: None,
+                        provider_response_id: None,
+                        ws_pool_delta: None,
+                    }),
+                ))?;
+            }
+            writer.flush()?;
         }
         if let Some(id) = log_id {
-            writer.write_frame(&Frame::Message(Message::Ack(Ack { up_to: id })))?;
+            writer.write_message(&HarnessInputMessage::Ack(Ack { up_to: id }))?;
             writer.flush()?;
         }
     }
@@ -2527,8 +2532,8 @@ impl Harness {
                 .unwrap_or(tau_core::AgentEventParent::InheritHead)
         };
         // Stamp once and share with every downstream observer: the durable
-        // record on disk, the debug JSONL line, and the wire `LogEvent`
-        // envelope. Sampling the clock separately would let timing analyses
+        // record on disk, the debug JSONL line, and the wire delivery.
+        // Sampling the clock separately would let timing analyses
         // disagree with what live subscribers saw.
         let source_id = source.map(tau_proto::ConnectionId::from);
         let (seq, recorded_at) = self.event_log.append();
@@ -2613,19 +2618,14 @@ impl Harness {
                 _ => {}
             }
         }
-        // Wrap in a `LogEvent` message envelope so subscribers get the
-        // runtime event-log sequence and can ack after processing. Receivers
-        // that don't care (UIs) call `Frame::peel_log()` and discard it.
-        let log_frame = Frame::Message(Message::LogEvent(tau_proto::LogEvent {
-            seq,
-            recorded_at,
-            event: Box::new(event.clone()),
-        }));
+        // Wrap in a harness-owned delivery so subscribers get the runtime
+        // event-log sequence and can ack after processing.
+        let log_frame = HarnessOutputMessage::deliver_sequenced(seq, recorded_at, event.clone());
         if let Some(provider_connection_id) = self.provider_route_for_prompt_request(&event) {
             // Provider-owned prompt execution is point-to-point: observers still
             // see the durable prompt fact, but execution clients do not all race
-            // to consume it. The owning provider gets the exact same LogEvent
-            // envelope via a directed route so ACK and replay semantics match
+            // to consume it. The owning provider gets the exact same delivery
+            // payload via a directed route so ACK and replay semantics match
             // the subscribed-provider path.
             let execution_kinds = [ClientKind::Provider];
             let _ =
@@ -3053,9 +3053,9 @@ impl Harness {
             match harness_evt {
                 HarnessEvent::FromConnection {
                     connection_id,
-                    frame,
+                    message,
                 } => {
-                    self.handle_extension_event(&connection_id, *frame)?;
+                    self.handle_extension_message(&connection_id, *message)?;
                 }
                 HarnessEvent::Disconnected { connection_id } => {
                     let was_provider = self.is_provider_extension(&connection_id);
@@ -3092,9 +3092,9 @@ impl Harness {
             match harness_evt {
                 HarnessEvent::FromConnection {
                     connection_id,
-                    frame,
+                    message,
                 } => {
-                    self.handle_extension_event(&connection_id, *frame)?;
+                    self.handle_extension_message(&connection_id, *message)?;
                 }
                 HarnessEvent::Disconnected { connection_id } => {
                     let name = self
@@ -3158,7 +3158,7 @@ impl Harness {
             match harness_evt {
                 HarnessEvent::FromConnection {
                     connection_id,
-                    frame,
+                    message,
                 } => {
                     let origin = self
                         .bus
@@ -3166,20 +3166,23 @@ impl Harness {
                         .map(|m| m.origin.clone());
                     match origin {
                         Some(ConnectionOrigin::Socket) => {
-                            // `/detach` → stay alive even after this
-                            // UI leaves; a later `tau --attach`
-                            // can pick up right here.
-                            if matches!(frame.as_ref(), Frame::Event(Event::UiDetachRequest(_))) {
+                            // `/detach` → stay alive even after this UI leaves;
+                            // a later `tau --attach` can pick up right here.
+                            if matches!(
+                                message.as_ref(),
+                                HarnessInputMessage::Emit(emit)
+                                    if matches!(emit.event.as_ref(), Event::UiDetachRequest(_))
+                            ) {
                                 exit_on_disconnect = false;
                             }
-                            let keep = self.handle_client_event(&connection_id, *frame)?;
+                            let keep = self.handle_client_message(&connection_id, *message)?;
                             if !keep {
                                 let _ = self.bus.disconnect(&connection_id);
                                 served_clients += 1;
                             }
                         }
-                        Some(_) => self.handle_extension_event(&connection_id, *frame)?,
-                        None => {} // already disconnected
+                        Some(_) => self.handle_extension_message(&connection_id, *message)?,
+                        None => {}
                     }
                 }
                 HarnessEvent::Disconnected { connection_id } => {
@@ -3233,17 +3236,6 @@ impl Harness {
     // Event handlers
     // -----------------------------------------------------------------------
 
-    fn handle_extension_event(
-        &mut self,
-        source_id: &str,
-        frame: Frame,
-    ) -> Result<(), HarnessError> {
-        match frame {
-            Frame::Message(msg) => self.handle_extension_message(source_id, msg),
-            Frame::Event(event) => self.handle_extension_event_inner(source_id, event),
-        }
-    }
-
     fn send_agent_prompt_created_result(
         &mut self,
         connection_id: &str,
@@ -3252,12 +3244,12 @@ impl Harness {
         let _ = self.bus.send_to(
             connection_id,
             None,
-            Frame::Message(Message::AgentPromptCreatedResult(Box::new(
+            HarnessOutputMessage::AgentPromptCreatedResult(Box::new(
                 tau_proto::AgentPromptCreatedResult {
                     request_id: request.request_id,
                     prompt: None,
                 },
-            ))),
+            )),
         );
     }
 
@@ -3274,13 +3266,13 @@ impl Harness {
         let _ = self.bus.send_to(
             connection_id,
             None,
-            Frame::Message(Message::RenderedSystemPromptResult(Box::new(
+            HarnessOutputMessage::RenderedSystemPromptResult(Box::new(
                 tau_proto::RenderedSystemPromptResult {
                     request_id: request.request_id,
                     prompt,
                     error,
                 },
-            ))),
+            )),
         );
     }
 
@@ -3300,15 +3292,16 @@ impl Harness {
         let _ = self.bus.send_to(
             connection_id,
             None,
-            Frame::Message(Message::RenderedToolDefinitionsResult(Box::new(
+            HarnessOutputMessage::RenderedToolDefinitionsResult(Box::new(
                 tau_proto::RenderedToolDefinitionsResult {
                     request_id: request.request_id,
                     tools,
                     error,
                 },
-            ))),
+            )),
         );
     }
+
     fn send_extension_data_result(
         &mut self,
         connection_id: &str,
@@ -3318,9 +3311,10 @@ impl Harness {
         let _ = self.bus.send_to(
             connection_id,
             None,
-            Frame::Message(Message::ExtensionDataResult(Box::new(
-                tau_proto::ExtensionDataResult { request_id, result },
-            ))),
+            HarnessOutputMessage::ExtensionDataResult(Box::new(tau_proto::ExtensionDataResult {
+                request_id,
+                result,
+            })),
         );
     }
 
@@ -3771,10 +3765,11 @@ impl Harness {
     fn handle_extension_message(
         &mut self,
         source_id: &str,
-        message: Message,
+        message: impl Into<HarnessInputMessage>,
     ) -> Result<(), HarnessError> {
+        let message = message.into();
         match message {
-            Message::Ack(ack) => {
+            HarnessInputMessage::Ack(ack) => {
                 // Cumulative ack: advance the cursor if it moves
                 // forward, ignore otherwise (duplicates, late acks).
                 if let Some(entry) = self.extensions.get_mut(source_id)
@@ -3783,12 +3778,12 @@ impl Harness {
                     entry.last_acked = ack.up_to;
                 }
             }
-            Message::Hello(hello) => {
+            HarnessInputMessage::Hello(hello) => {
                 validate_protocol_version(&hello)?;
                 self.set_extension_state(source_id, ExtensionState::Handshaking);
                 self.send_lifecycle_configure(source_id);
             }
-            Message::ConfigError(err) => {
+            HarnessInputMessage::ConfigError(err) => {
                 let name = self
                     .extensions
                     .get(source_id)
@@ -3805,7 +3800,7 @@ impl Harness {
                     err.message,
                 ));
             }
-            Message::Subscribe(subscribe) => {
+            HarnessInputMessage::Subscribe(subscribe) => {
                 // Extension subscriptions are live-only today: set routing for
                 // future events, without replaying past log entries. Do not
                 // treat first-party extensions that want live-only delivery as
@@ -3813,14 +3808,14 @@ impl Harness {
                 // explicit opt-in separate from selectors.
                 self.bus.set_subscriptions(source_id, subscribe.selectors)?;
             }
-            Message::Intercept(intercept) => {
+            HarnessInputMessage::Intercept(intercept) => {
                 if self.should_stage_extension_capabilities(source_id) {
                     self.stage_extension_intercept(source_id, intercept);
                 } else {
                     self.register_extension_interceptor(source_id, intercept);
                 }
             }
-            Message::Ready(_ready) => {
+            HarnessInputMessage::Ready(_ready) => {
                 let (context_ready_events, agent_queries) =
                     self.activate_staged_extension_capabilities(source_id);
                 self.set_extension_state(source_id, ExtensionState::Ready);
@@ -3834,62 +3829,46 @@ impl Harness {
                 self.drain_pending_tool_invocations()?;
                 self.try_advance_queue();
             }
-            Message::Emit(emit) => {
-                let event = *emit.event;
-                if matches!(
+            HarnessInputMessage::Emit(emit) => {
+                let (event, transient) = emit.into_parts();
+                self.handle_extension_event_inner_with_transient(
+                    source_id,
                     event,
-                    Event::ActionSchemaPublished(_)
-                        | Event::ActionInvoke(_)
-                        | Event::ActionResult(_)
-                        | Event::ActionError(_)
-                ) {
-                    self.handle_extension_event_inner(source_id, event)?;
-                    return Ok(());
-                }
-                if event.name().category == tau_proto::EventCategory::Provider
-                    || Self::requires_tool_event_intake(&event)
-                    || matches!(
-                        event,
-                        Event::AgentMessageSent(_) | Event::AgentMessageReceived(_)
-                    )
-                {
-                    return Ok(());
-                }
-                if self.should_stage_extension_capabilities(source_id) {
-                    self.stage_extension_publish(source_id, event, emit.transient);
-                } else {
-                    self.enqueue_publish(Some(source_id), event, emit.transient, false, None);
-                }
+                    Some(transient),
+                )?;
             }
-            Message::InterceptReply(reply) => {
+            HarnessInputMessage::InterceptReply(reply) => {
                 self.handle_intercept_reply(source_id, reply);
             }
-            Message::GetAgentPromptCreated(request) => {
+            HarnessInputMessage::GetAgentPromptCreated(request) => {
                 self.send_agent_prompt_created_result(source_id, request);
             }
-            Message::ExtensionDataRequest(request) => {
+            HarnessInputMessage::ExtensionDataRequest(request) => {
                 self.handle_extension_data_request(source_id, request);
             }
-            // Messages sent by clients or the harness only — extensions shouldn't
-            // round-trip these. Ignore silently.
-            Message::Configure(_)
-            | Message::Disconnect(_)
-            | Message::GetRenderedSystemPrompt(_)
-            | Message::GetRenderedToolDefinitions(_)
-            | Message::InterceptRequest(_)
-            | Message::AgentPromptCreatedResult(_)
-            | Message::RenderedSystemPromptResult(_)
-            | Message::RenderedToolDefinitionsResult(_)
-            | Message::ExtensionDataResult(_)
-            | Message::LogEvent(_) => {}
+            // Messages sent by clients only — extensions shouldn't round-trip
+            // these. Ignore silently.
+            HarnessInputMessage::Disconnect(_)
+            | HarnessInputMessage::GetRenderedSystemPrompt(_)
+            | HarnessInputMessage::GetRenderedToolDefinitions(_) => {}
         }
         Ok(())
     }
 
+    #[cfg(test)]
     fn handle_extension_event_inner(
         &mut self,
         source_id: &str,
         event: Event,
+    ) -> Result<(), HarnessError> {
+        self.handle_extension_event_inner_with_transient(source_id, event, None)
+    }
+
+    fn handle_extension_event_inner_with_transient(
+        &mut self,
+        source_id: &str,
+        event: Event,
+        transient_override: Option<bool>,
     ) -> Result<(), HarnessError> {
         let event_name = event.name();
         if event_name.category == tau_proto::EventCategory::Provider
@@ -4238,44 +4217,37 @@ impl Harness {
                 }
             }
             other => {
+                let transient = transient_override.unwrap_or_else(|| other.defaults_to_transient());
                 if self.should_stage_extension_capabilities(source_id) {
-                    let transient = other.defaults_to_transient();
                     self.stage_extension_publish(source_id, other, transient);
                 } else {
-                    self.publish_event(Some(source_id), other);
+                    self.enqueue_publish(Some(source_id), other, transient, false, None);
                 }
             }
         }
         Ok(())
     }
 
-    fn handle_client_event(&mut self, client_id: &str, frame: Frame) -> Result<bool, HarnessError> {
-        match frame {
-            Frame::Message(msg) => self.handle_client_message(client_id, msg),
-            Frame::Event(event) => self.handle_client_event_inner(client_id, event),
-        }
-    }
-
     fn handle_client_message(
         &mut self,
         client_id: &str,
-        message: Message,
+        message: HarnessInputMessage,
     ) -> Result<bool, HarnessError> {
         match message {
-            Message::Hello(hello) => {
+            HarnessInputMessage::Hello(hello) => {
                 if let Err(error) = validate_protocol_version(&hello) {
                     let _ = self.bus.send_to(
                         client_id,
                         None,
-                        Frame::Message(Message::Disconnect(Disconnect {
+                        HarnessOutputMessage::Disconnect(Disconnect {
                             reason: Some(error.to_string()),
-                        })),
+                        }),
                     );
                     return Ok(false);
                 }
                 Ok(true)
             }
-            Message::Subscribe(subscribe) => {
+            HarnessInputMessage::Subscribe(subscribe) => {
                 // Socket/UI clients replay selected past state after subscribing.
                 // Extensions use `handle_extension_message`, which is live-only.
                 match self
@@ -4292,56 +4264,61 @@ impl Harness {
                         let _ = self.bus.send_to(
                             client_id,
                             None,
-                            Frame::Message(Message::Disconnect(Disconnect {
+                            HarnessOutputMessage::Disconnect(Disconnect {
                                 reason: Some(format!("subscription denied: {reason}")),
-                            })),
+                            }),
                         );
                         Ok(false)
                     }
                     Err(other) => Err(HarnessError::Route(other)),
                 }
             }
-            Message::Disconnect(_) => Ok(false),
-            Message::GetAgentPromptCreated(request) => {
+            HarnessInputMessage::Disconnect(_) => Ok(false),
+            HarnessInputMessage::GetAgentPromptCreated(request) => {
                 self.send_agent_prompt_created_result(client_id, request);
                 Ok(true)
             }
-            Message::GetRenderedSystemPrompt(request) => {
+            HarnessInputMessage::GetRenderedSystemPrompt(request) => {
                 self.send_rendered_system_prompt_result(client_id, request);
                 Ok(true)
             }
-            Message::GetRenderedToolDefinitions(request) => {
+            HarnessInputMessage::GetRenderedToolDefinitions(request) => {
                 self.send_rendered_tool_definitions_result(client_id, request);
                 Ok(true)
             }
-            // Other messages from clients are ignored (Configure, Ack,
-            // LogEvent, InterceptRequest, InterceptReply, Emit,
-            // ConfigError, Intercept).
-            Message::Ack(_)
-            | Message::Configure(_)
-            | Message::ConfigError(_)
-            | Message::Intercept(_)
-            | Message::InterceptRequest(_)
-            | Message::InterceptReply(_)
-            | Message::Ready(_)
-            | Message::AgentPromptCreatedResult(_)
-            | Message::RenderedSystemPromptResult(_)
-            | Message::RenderedToolDefinitionsResult(_)
-            | Message::ExtensionDataRequest(_)
-            | Message::ExtensionDataResult(_)
-            | Message::LogEvent(_)
-            | Message::Emit(_) => Ok(true),
+            HarnessInputMessage::Emit(emit) => {
+                let (event, transient) = emit.into_parts();
+                self.handle_client_event_inner_with_transient(client_id, event, Some(transient))?;
+                Ok(true)
+            }
+            // Other input messages from clients are ignored.
+            HarnessInputMessage::Ack(_)
+            | HarnessInputMessage::ConfigError(_)
+            | HarnessInputMessage::Intercept(_)
+            | HarnessInputMessage::InterceptReply(_)
+            | HarnessInputMessage::Ready(_)
+            | HarnessInputMessage::ExtensionDataRequest(_) => Ok(true),
         }
     }
 
+    #[cfg(test)]
     fn handle_client_event_inner(
         &mut self,
         client_id: &str,
         event: Event,
     ) -> Result<bool, HarnessError> {
+        self.handle_client_event_inner_with_transient(client_id, event, None)
+    }
+
+    fn handle_client_event_inner_with_transient(
+        &mut self,
+        client_id: &str,
+        event: Event,
+        transient_override: Option<bool>,
+    ) -> Result<bool, HarnessError> {
         let event_name = event.name();
         if event_name.category == tau_proto::EventCategory::Provider {
-            self.handle_extension_event_inner(client_id, event)?;
+            self.handle_extension_event_inner_with_transient(client_id, event, transient_override)?;
             return Ok(true);
         }
 
@@ -4376,7 +4353,8 @@ impl Harness {
                 {
                     return Ok(true);
                 }
-                self.publish_event(Some(client_id), other);
+                let transient = transient_override.unwrap_or_else(|| other.defaults_to_transient());
+                self.enqueue_publish(Some(client_id), other, transient, false, None);
                 Ok(true)
             }
         }
@@ -4909,7 +4887,7 @@ impl Harness {
             let _ = self.bus.send_to(
                 source_id.as_str(),
                 None,
-                Frame::Event(Event::StartAgentResult(result)),
+                HarnessOutputMessage::deliver(Event::StartAgentResult(result)),
             );
         }
         Ok(())
@@ -5207,7 +5185,7 @@ impl Harness {
         let _ = self.bus.send_to(
             client_id,
             Some(HARNESS_CONNECTION_ID),
-            Frame::Event(Event::ActionError(ActionError {
+            HarnessOutputMessage::deliver(Event::ActionError(ActionError {
                 invocation_id,
                 action_id,
                 message,
@@ -5275,7 +5253,7 @@ impl Harness {
         match self.bus.send_to(
             provider_connection_id.as_str(),
             Some(client_id),
-            Frame::Event(Event::ActionInvoke(invoke.clone())),
+            HarnessOutputMessage::deliver(Event::ActionInvoke(invoke.clone())),
         ) {
             Ok(report) if !report.delivered_to.is_empty() => {
                 self.pending_action_invocations.insert(
@@ -5346,7 +5324,7 @@ impl Harness {
         let _ = self.bus.send_to(
             pending.requester_client_id.as_str(),
             Some(source_id),
-            Frame::Event(Event::ActionResult(result)),
+            HarnessOutputMessage::deliver(Event::ActionResult(result)),
         );
     }
 
@@ -5376,7 +5354,7 @@ impl Harness {
         let _ = self.bus.send_to(
             pending.requester_client_id.as_str(),
             Some(source_id),
-            Frame::Event(Event::ActionError(error)),
+            HarnessOutputMessage::deliver(Event::ActionError(error)),
         );
     }
 
@@ -5692,9 +5670,9 @@ impl Harness {
                     let _ = self.bus.send_to(
                         source_id,
                         None,
-                        Frame::Message(Message::ConfigError(tau_proto::ConfigError {
-                            message: error.to_string(),
-                        })),
+                        HarnessOutputMessage::Disconnect(Disconnect {
+                            reason: Some(error.to_string()),
+                        }),
                     );
                     return;
                 }
@@ -5710,11 +5688,11 @@ impl Harness {
         let _ = self.bus.send_to(
             source_id,
             None,
-            Frame::Message(Message::Configure(tau_proto::Configure {
+            HarnessOutputMessage::Configure(tau_proto::Configure {
                 config: tau_proto::json_to_cbor(&config_json),
                 state_dir: Some(state_dir),
                 secrets,
-            })),
+            }),
         );
     }
 
@@ -5954,7 +5932,7 @@ impl Harness {
             let _ = self.bus.send_to(
                 source_id,
                 None,
-                Frame::Event(Event::StartAgentResult(result)),
+                HarnessOutputMessage::deliver(Event::StartAgentResult(result)),
             );
         }
     }
@@ -5985,7 +5963,7 @@ impl Harness {
         let _ = self.bus.send_to(
             source_id,
             None,
-            Frame::Event(Event::StartAgentAccepted(accepted)),
+            HarnessOutputMessage::deliver(Event::StartAgentAccepted(accepted)),
         );
         self.pending_start_agent_requests.push_back(pending);
         self.drain_pending_start_agent_requests()
@@ -6008,7 +5986,7 @@ impl Harness {
         let _ = self.bus.send_to(
             source_id,
             None,
-            Frame::Event(Event::StartAgentAccepted(accepted)),
+            HarnessOutputMessage::deliver(Event::StartAgentAccepted(accepted)),
         );
     }
 
@@ -6032,7 +6010,7 @@ impl Harness {
         let _ = self.bus.send_to(
             HARNESS_CONNECTION_ID,
             None,
-            Frame::Event(Event::StartAgentAccepted(accepted)),
+            HarnessOutputMessage::deliver(Event::StartAgentAccepted(accepted)),
         );
         self.pending_start_agent_requests.push_back(pending);
         Ok(agent_id)
@@ -8840,7 +8818,7 @@ impl Harness {
                     let _ = self.bus.send_to(
                         source.as_str(),
                         None,
-                        Frame::Event(Event::StartAgentResult(result)),
+                        HarnessOutputMessage::deliver(Event::StartAgentResult(result)),
                     );
                 }
             } else {
@@ -9804,24 +9782,28 @@ impl Harness {
             match harness_evt {
                 HarnessEvent::FromConnection {
                     connection_id,
-                    frame,
+                    message,
                 } => {
-                    if let Frame::Event(Event::ToolProgress(progress)) = frame.as_ref() {
+                    let event = match message.as_ref() {
+                        HarnessInputMessage::Emit(emit) => Some(emit.event.as_ref()),
+                        _ => None,
+                    };
+                    if let Some(Event::ToolProgress(progress)) = event {
                         progress_messages.push(format_tool_progress(progress));
                     }
                     let is_final = matches!(
-                        frame.as_ref(),
-                        Frame::Event(Event::ProviderResponseFinished(r))
+                        event,
+                        Some(Event::ProviderResponseFinished(r))
                             if tool_calls_from_output_items(&r.output_items).is_empty()
                                 && r.originator.is_user()
                     );
-                    let final_text =
-                        if let Frame::Event(Event::ProviderResponseFinished(r)) = frame.as_ref() {
+                    let final_text = match event {
+                        Some(Event::ProviderResponseFinished(r)) => {
                             assistant_text_from_output_items(&r.output_items)
-                        } else {
-                            None
-                        };
-                    self.handle_extension_event(&connection_id, *frame)?;
+                        }
+                        _ => None,
+                    };
+                    self.handle_extension_message(&connection_id, *message)?;
                     if is_final {
                         return Ok(InteractionOutcome {
                             lifecycle_messages: Vec::new(),

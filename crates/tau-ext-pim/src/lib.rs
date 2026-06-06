@@ -8,8 +8,8 @@ use std::io::{BufReader, BufWriter, Read, Write};
 
 use serde::Deserialize;
 use tau_proto::{
-    Ack, ActionSchema, CborValue, ConfigError, Event, EventLogSeq, Frame, FrameReader, FrameWriter,
-    Message,
+    Ack, ActionSchema, CborValue, ConfigError, Event, EventLogSeq, HarnessInputMessage,
+    HarnessOutputMessage, PeerInputReader, PeerOutputWriter,
 };
 
 pub mod calendar;
@@ -30,8 +30,8 @@ where
     R: Read,
     W: Write,
 {
-    let mut reader = FrameReader::new(BufReader::new(reader));
-    let mut writer = FrameWriter::new(BufWriter::new(writer));
+    let mut reader = PeerInputReader::new(BufReader::new(reader));
+    let mut writer = PeerOutputWriter::new(BufWriter::new(writer));
     let mut runtime = RuntimeState::default();
 
     let handshake = tau_extension::Handshake::tool("tau-ext-pim").subscribe([
@@ -58,13 +58,9 @@ where
         .ready_message("pim extension ready")
         .run(&mut writer)?;
 
-    while let Some(frame) = reader.read_frame()? {
-        let (log_id, inner) = frame.peel_log();
-        if !handle_frame(&mut runtime, inner, &mut writer)? {
+    while let Some(message) = reader.read_message()? {
+        if !handle_message(&mut runtime, message, &mut writer)? {
             break;
-        }
-        if let Some(id) = log_id {
-            ack_log_event(id, &mut writer)?;
         }
     }
     Ok(())
@@ -208,27 +204,34 @@ fn action_schema() -> ActionSchema {
     schema
 }
 
-fn handle_frame<W: Write>(
+fn handle_message<W: Write>(
     runtime: &mut RuntimeState,
-    frame: Frame,
-    writer: &mut FrameWriter<W>,
+    message: HarnessOutputMessage,
+    writer: &mut PeerOutputWriter<W>,
 ) -> Result<bool, Box<dyn Error>> {
-    match frame {
-        Frame::Message(Message::Configure(configure)) => {
+    match message {
+        HarnessOutputMessage::Configure(configure) => {
             if let Err(message) = runtime.configure(configure) {
-                writer.write_frame(&Frame::Message(Message::ConfigError(ConfigError {
-                    message,
-                })))?;
+                writer.write_message(&HarnessInputMessage::ConfigError(ConfigError { message }))?;
                 writer.flush()?;
             }
         }
-        Frame::Event(Event::ToolStarted(invoke)) => handle_tool_started(runtime, invoke, writer)?,
-        Frame::Event(Event::ActionInvoke(invoke)) => {
-            let event = runtime.dispatch_action(invoke);
-            writer.write_frame(&Frame::Event(event))?;
-            writer.flush()?;
+        HarnessOutputMessage::Deliver(delivery) => {
+            let (event, log_id, _) = delivery.into_parts();
+            match event {
+                Event::ToolStarted(invoke) => handle_tool_started(runtime, invoke, writer)?,
+                Event::ActionInvoke(invoke) => {
+                    let event = runtime.dispatch_action(invoke);
+                    writer.write_message(&HarnessInputMessage::emit(event))?;
+                    writer.flush()?;
+                }
+                _ => {}
+            }
+            if let Some(id) = log_id {
+                ack_log_event(id, writer)?;
+            }
         }
-        Frame::Message(Message::Disconnect(_)) => return Ok(false),
+        HarnessOutputMessage::Disconnect(_) => return Ok(false),
         _ => {}
     }
     Ok(true)
@@ -237,14 +240,14 @@ fn handle_frame<W: Write>(
 fn handle_tool_started<W: Write>(
     runtime: &mut RuntimeState,
     invoke: tau_proto::ToolStarted,
-    writer: &mut FrameWriter<W>,
+    writer: &mut PeerOutputWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
     if let Some(progress) = runtime.initial_tool_progress(&invoke) {
-        writer.write_frame(&Frame::Event(progress))?;
+        writer.write_message(&HarnessInputMessage::emit(progress))?;
         writer.flush()?;
     }
     if let Some(event) = runtime.dispatch_tool(invoke) {
-        writer.write_frame(&Frame::Event(event))?;
+        writer.write_message(&HarnessInputMessage::emit(event))?;
         writer.flush()?;
     }
     Ok(())
@@ -252,9 +255,9 @@ fn handle_tool_started<W: Write>(
 
 fn ack_log_event<W: Write>(
     id: EventLogSeq,
-    writer: &mut FrameWriter<W>,
+    writer: &mut PeerOutputWriter<W>,
 ) -> Result<(), tau_proto::EncodeError> {
-    writer.write_frame(&Frame::Message(Message::Ack(Ack { up_to: id })))?;
+    writer.write_message(&HarnessInputMessage::Ack(Ack { up_to: id }))?;
     writer.flush().map_err(tau_proto::EncodeError::Io)
 }
 

@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use tau_proto::{
-    CborValue, EventName, Frame, FrameReader, FrameWriter, Message, ToolCancelRequest, ToolStarted,
-    ToolUsePayload, ToolUseStatus,
+    CborValue, EventName, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage,
+    HarnessOutputWriter, ToolCancelRequest, ToolStarted, ToolUsePayload, ToolUseStatus,
 };
 use tempfile::TempDir;
 
@@ -31,76 +31,71 @@ use crate::truncate::{
     MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, mark_line, truncate_head, truncate_tail,
 };
 
-/// Test-side wrapper around [`FrameReader`] that exposes an `Event`-flavoured
-/// API so the existing tests (which don't care about the message/event split)
-/// can stay mechanical. Messages other than `LogEvent` are skipped.
+/// Test-side wrapper around [`HarnessInputReader`] that exposes an
+/// `Event`-flavoured API so the existing tests can stay mechanical. Non-event
+/// messages are skipped by `read_event`.
 struct EventReader<R> {
-    inner: FrameReader<R>,
+    inner: HarnessInputReader<R>,
 }
 
 impl<R: std::io::Read> EventReader<R> {
     fn new(inner: R) -> Self {
         Self {
-            inner: FrameReader::new(inner),
+            inner: HarnessInputReader::new(inner),
         }
     }
 
     fn read_event(&mut self) -> Result<Option<Event>, tau_proto::DecodeError> {
         loop {
-            match self.inner.read_frame()? {
+            match self.inner.read_message()? {
                 None => return Ok(None),
-                Some(frame) => {
-                    let (_log_id, peeled) = frame.peel_log();
-                    match peeled {
-                        Frame::Event(Event::ToolProgress(progress))
-                            if progress.message.is_none()
-                                && progress.display.is_some()
-                                && progress.tool_name != SHELL_TOOL_NAME
-                                && progress.tool_name != GPT_SHELL_TOOL_NAME =>
-                        {
-                            continue;
-                        }
-                        Frame::Event(event) => return Ok(Some(event)),
-                        Frame::Message(_) => continue,
+                Some(HarnessInputMessage::Emit(emit)) => match *emit.event {
+                    Event::ToolProgress(progress)
+                        if progress.message.is_none()
+                            && progress.display.is_some()
+                            && progress.tool_name != SHELL_TOOL_NAME
+                            && progress.tool_name != GPT_SHELL_TOOL_NAME =>
+                    {
+                        continue;
                     }
-                }
+                    event => return Ok(Some(event)),
+                },
+                Some(_) => continue,
             }
         }
     }
-    fn read_message(&mut self) -> Result<Option<Message>, tau_proto::DecodeError> {
+
+    fn read_message(&mut self) -> Result<Option<HarnessInputMessage>, tau_proto::DecodeError> {
         loop {
-            match self.inner.read_frame()? {
+            match self.inner.read_message()? {
                 None => return Ok(None),
-                Some(frame) => {
-                    let (_log_id, peeled) = frame.peel_log();
-                    match peeled {
-                        Frame::Event(_) => continue,
-                        Frame::Message(message) => return Ok(Some(message)),
-                    }
-                }
+                Some(HarnessInputMessage::Emit(_)) => continue,
+                Some(message) => return Ok(Some(message)),
             }
         }
     }
 }
 
-/// Test-side wrapper around [`FrameWriter`] that accepts `Event` directly.
+/// Test-side wrapper around [`HarnessOutputWriter`] that accepts `Event`
+/// directly.
 struct EventWriter<W> {
-    inner: FrameWriter<W>,
+    inner: HarnessOutputWriter<W>,
 }
 
 impl<W: std::io::Write> EventWriter<W> {
     fn new(inner: W) -> Self {
         Self {
-            inner: FrameWriter::new(inner),
+            inner: HarnessOutputWriter::new(inner),
         }
     }
 
     fn write_event(&mut self, event: &Event) -> Result<(), tau_proto::EncodeError> {
-        self.inner.write_frame(&Frame::Event(event.clone()))
+        self.inner
+            .write_message(&HarnessOutputMessage::deliver(event.clone()))
     }
 
-    fn write_frame(&mut self, frame: &Frame) -> Result<(), tau_proto::EncodeError> {
-        self.inner.write_frame(frame)
+    fn write_frame(&mut self, frame: &HarnessOutputMessage) -> Result<(), tau_proto::EncodeError> {
+        self.inner.write_message(frame)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -108,11 +103,10 @@ impl<W: std::io::Write> EventWriter<W> {
     }
 }
 
-/// Build a `Frame::Message(Disconnect)` for tests that previously sent
-/// `Event::LifecycleDisconnect`. Wrapped in this helper to keep the
-/// disruption from the protocol split contained.
-fn disconnect_frame(reason: Option<String>) -> Frame {
-    Frame::Message(Message::Disconnect(tau_proto::Disconnect { reason }))
+/// Build a disconnect output message for tests that previously sent
+/// `Event::LifecycleDisconnect`.
+fn disconnect_frame(reason: Option<String>) -> HarnessOutputMessage {
+    HarnessOutputMessage::Disconnect(tau_proto::Disconnect { reason })
 }
 
 fn cbor_int_field(value: &CborValue, key: &str) -> Option<i128> {
@@ -216,14 +210,14 @@ fn read_range(start_line: i64, end_line: i64) -> CborValue {
 }
 fn send_dir_lock_config(writer: &mut EventWriter<BufWriter<UnixStream>>, enable: bool) {
     writer
-        .write_frame(&Frame::Message(Message::Configure(tau_proto::Configure {
+        .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             config: cbor_map(vec![(
                 "dir_lock",
                 cbor_map(vec![("enable", CborValue::Bool(enable))]),
             )]),
             state_dir: None,
             secrets: Default::default(),
-        })))
+        }))
         .expect("configure dir_lock");
     writer.flush().expect("flush config");
 }
@@ -1367,8 +1361,10 @@ fn session_agent_loaded_publishes_current_directory_context_for_agent() {
         &tx,
     );
 
-    let Frame::Event(Event::ExtAgentContextPublish(publish)) = rx.recv().expect("cwd publish")
-    else {
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("cwd publish") else {
+        panic!("expected cwd agent context publish");
+    };
+    let Event::ExtAgentContextPublish(publish) = *emit.event else {
         panic!("expected cwd agent context publish");
     };
     assert_eq!(publish.agent_id.as_ref(), "agent-1");
@@ -3371,7 +3367,7 @@ fn shell_tool_applies_configured_prefix_and_command() {
     drain_startup(&mut reader);
 
     writer
-        .write_frame(&Frame::Message(Message::Configure(tau_proto::Configure {
+        .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             config: CborValue::Map(vec![(
                 CborValue::Text("shell".to_owned()),
                 CborValue::Map(vec![
@@ -3390,7 +3386,7 @@ fn shell_tool_applies_configured_prefix_and_command() {
             )]),
             state_dir: None,
             secrets: std::collections::BTreeMap::new(),
-        })))
+        }))
         .expect("configure");
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
@@ -3495,7 +3491,7 @@ fn shell_extension_rejects_invalid_config() {
     drain_startup(&mut reader);
 
     writer
-        .write_frame(&Frame::Message(Message::Configure(tau_proto::Configure {
+        .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             config: CborValue::Map(vec![(
                 CborValue::Text("shell".to_owned()),
                 CborValue::Map(vec![(
@@ -3505,13 +3501,13 @@ fn shell_extension_rejects_invalid_config() {
             )]),
             state_dir: None,
             secrets: std::collections::BTreeMap::new(),
-        })))
+        }))
         .expect("configure");
     writer.flush().expect("flush");
 
     let error = loop {
         let message = reader.read_message().expect("read").expect("message");
-        if let Message::ConfigError(error) = message {
+        if let HarnessInputMessage::ConfigError(error) = message {
             break error;
         }
     };
@@ -3569,20 +3565,20 @@ fn shell_extension_reports_invalid_working_directory_config() {
     let missing_dir = td.path().join("missing");
 
     writer
-        .write_frame(&Frame::Message(Message::Configure(tau_proto::Configure {
+        .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
             config: cbor_text_map(vec![(
                 "working_directory",
                 missing_dir.to_str().expect("utf8 temp path"),
             )]),
             state_dir: None,
             secrets: std::collections::BTreeMap::new(),
-        })))
+        }))
         .expect("configure");
     writer.flush().expect("flush");
 
     let error = loop {
         let message = reader.read_message().expect("read").expect("message");
-        if let Message::ConfigError(error) = message {
+        if let HarnessInputMessage::ConfigError(error) = message {
             break error;
         }
     };

@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 use tau_proto::{
     Ack, ActionError, ActionInvoke, ActionOutput, ActionResult, AgentContextKey, AgentContextValue,
     CborValue, ConfigError, Event, EventLogSeq, ExtAgentContextPublish, ExtPromptFragmentPublish,
-    ExtensionContextReady, Frame, FrameReader, FrameWriter, Message, PromptContent, PromptFragment,
-    PromptPriority, SessionAgentLoaded, SessionStarted, ToolCancelled, ToolResult, ToolResultKind,
-    ToolSpec,
+    ExtensionContextReady, HarnessInputMessage, HarnessOutputMessage, PeerInputReader,
+    PeerOutputWriter, PromptContent, PromptFragment, PromptPriority, SessionAgentLoaded,
+    SessionStarted, ToolCancelled, ToolResult, ToolResultKind, ToolSpec,
 };
 use tracing::{debug, trace};
 
@@ -73,8 +73,8 @@ where
     R: Read,
     W: Write + Send + 'static,
 {
-    let mut reader = FrameReader::new(BufReader::new(reader));
-    let mut writer = FrameWriter::new(BufWriter::new(writer));
+    let mut reader = PeerInputReader::new(BufReader::new(reader));
+    let mut writer = PeerOutputWriter::new(BufWriter::new(writer));
 
     #[cfg(any(test, feature = "echo-agent"))]
     let echo_tool = Some(ToolSpec {
@@ -496,9 +496,9 @@ where
         .ready_message("filesystem and shell tools ready")
         .run(&mut writer)?;
 
-    // Response channel: worker threads send frames here, writer thread
-    // drains them onto the wire.
-    let (tx, rx) = mpsc::channel::<Frame>();
+    // Response channel: worker threads send protocol messages here; writer
+    // thread drains them onto the wire.
+    let (tx, rx) = mpsc::channel::<HarnessInputMessage>();
     let sem = Arc::new(Semaphore::new(16));
     let running_shells = Arc::new(Mutex::new(
         HashMap::<tau_proto::ToolCallId, mpsc::Sender<()>>::new(),
@@ -506,11 +506,11 @@ where
     let lock_manager = DirLockManager::default();
     let mut start_agent_owners = HashMap::<String, tau_proto::AgentId>::new();
 
-    // Writer thread: drains response frames and writes them to the wire.
+    // Writer thread: drains response messages and writes them to the wire.
     let writer_handle = std::thread::spawn(move || -> Result<(), Box<dyn Error + Send>> {
-        for frame in rx {
+        for message in rx {
             writer
-                .write_frame(&frame)
+                .write_message(&message)
                 .map_err(|e| -> Box<dyn Error + Send> { Box::new(e) })?;
             writer
                 .flush()
@@ -520,156 +520,167 @@ where
     });
 
     // Reader loop: dispatch each owned tool invocation to a worker thread.
-    // ToolStarted is a subscribed event-log delivery, so it arrives as a
-    // LogEvent and must be acked after processing like other subscribed events.
-    while let Some(frame) = reader.read_frame()? {
-        let (log_id, inner) = frame.peel_log();
-        match inner {
-            Frame::Message(Message::Configure(msg)) => {
+    // ToolStarted is a subscribed committed delivery, so it carries an ack
+    // sequence that must be acknowledged after processing like other subscribed
+    // events.
+    while let Some(message) = reader.read_message()? {
+        match message {
+            HarnessOutputMessage::Configure(msg) => {
                 match tau_extension::parse_config::<ExtConfig>(&msg.config) {
                     Ok(mut cfg) => {
                         if cfg.working_directory.is_none() {
                             cfg.working_directory = config.working_directory.clone();
                         }
                         if let Err(message) = apply_working_directory(&config, &cfg) {
-                            tx.send(Frame::Message(Message::ConfigError(ConfigError {
-                                message,
-                            })))?;
+                            tx.send(HarnessInputMessage::ConfigError(ConfigError { message }))?;
                             continue;
                         }
                         let dir_lock_changed = config.dir_lock.enable != cfg.dir_lock.enable;
                         config = cfg;
                         if dir_lock_changed {
-                            tx.send(Frame::Event(Event::ToolRegister(tau_proto::ToolRegister {
-                                tool: dir_lock_tool_spec(config.dir_lock.enable),
-                                tool_group: Some(tau_proto::ToolGroup {
-                                    name: tau_proto::ToolGroupName::new("shell"),
+                            tx.send(HarnessInputMessage::emit(Event::ToolRegister(
+                                tau_proto::ToolRegister {
+                                    tool: dir_lock_tool_spec(config.dir_lock.enable),
+                                    tool_group: Some(tau_proto::ToolGroup {
+                                        name: tau_proto::ToolGroupName::new("shell"),
+                                        prompt_fragment: None,
+                                    }),
                                     prompt_fragment: None,
-                                }),
-                                prompt_fragment: None,
-                            })))?;
+                                },
+                            )))?;
                         }
                     }
                     Err(message) => {
-                        tx.send(Frame::Message(Message::ConfigError(ConfigError {
-                            message,
-                        })))?;
+                        tx.send(HarnessInputMessage::ConfigError(ConfigError { message }))?;
                     }
                 }
             }
-            Frame::Event(Event::ToolStarted(invoke)) => {
-                if !is_shell_tool(invoke.tool_name.as_str()) {
-                    ack_if_logged(log_id, &tx)?;
-                    continue;
-                }
-                let tx = tx.clone();
-                let shell_config = config.shell.clone();
-                let enforce_ro_mode = config.enforce_ro_mode;
-                let running_shells = Arc::clone(&running_shells);
-                if invoke.tool_name == DIR_LOCK_TOOL_NAME {
-                    let lock_manager = lock_manager.clone();
-                    let enabled = config.dir_lock.enable;
-                    std::thread::spawn(move || {
-                        crate::dir_lock::dispatch_dir_lock_tool(
-                            invoke,
-                            &lock_manager,
-                            enabled,
-                            &tx,
-                        );
-                    });
-                } else if config.dir_lock.enable
-                    && is_dir_lock_update_tool(invoke.tool_name.as_str())
-                {
-                    let lock_manager = lock_manager.clone();
-                    let sem = Arc::clone(&sem);
-                    std::thread::spawn(move || {
-                        dispatch_locked_tool_invoke(
-                            invoke,
-                            shell_config,
-                            &tx,
-                            &running_shells,
-                            &lock_manager,
-                            &sem,
-                            enforce_ro_mode,
-                        );
-                    });
-                } else {
-                    // Block here until a permit is free. This bounds the
-                    // total number of in-flight worker threads — without
-                    // it, a burst of ToolStarted events would spawn unbounded
-                    // native threads that then serialize on the semaphore.
-                    let permit = sem.acquire();
-                    std::thread::spawn(move || {
-                        let _permit = permit;
-                        dispatch_tool_invoke(
-                            invoke,
-                            shell_config,
-                            &tx,
-                            &running_shells,
-                            None,
-                            enforce_ro_mode,
-                        );
-                    });
-                }
-            }
-            Frame::Event(Event::SessionStarted(started)) => {
-                dispatch_session_started(started, &tx);
-            }
-            Frame::Event(Event::SessionAgentLoaded(loaded)) => {
-                dispatch_session_agent_loaded(loaded, &tx);
-            }
-            Frame::Event(Event::SessionAgentUnloaded(unloaded)) => {
-                lock_manager.release_agent(&unloaded.agent_id);
-                start_agent_owners.retain(|_, agent_id| agent_id != &unloaded.agent_id);
-            }
-            Frame::Event(Event::SessionShutdown(_)) => {
-                lock_manager.release_all_manual();
-                start_agent_owners.clear();
-            }
-            Frame::Event(Event::StartAgentAccepted(accepted)) => {
-                start_agent_owners.insert(accepted.query_id, accepted.agent_id);
-            }
-            Frame::Event(Event::StartAgentResult(result)) => {
-                if let Some(agent_id) = start_agent_owners.remove(&result.query_id) {
-                    lock_manager.release_agent(&agent_id);
-                }
-            }
-            Frame::Event(Event::ActionInvoke(invoke)) => {
-                tx.send(Frame::Event(dispatch_action_invoke(invoke, &lock_manager)))?;
-            }
-            Frame::Event(Event::ToolCancelRequest(request)) => {
-                let cancel_tx = running_shells
-                    .lock()
-                    .expect("running shell registry lock poisoned")
-                    .get(&request.target_call_id)
-                    .cloned();
-                if let Some(cancel_tx) = cancel_tx {
-                    debug!(call_id = %request.target_call_id, "shell cancellation requested for running call");
-                    if cancel_tx.send(()).is_err() {
-                        debug!(call_id = %request.target_call_id, "shell cancellation receiver already gone");
+            HarnessOutputMessage::Deliver(delivery) => {
+                let (event, log_id, _) = delivery.into_parts();
+                match event {
+                    Event::ToolStarted(invoke) => {
+                        if !is_shell_tool(invoke.tool_name.as_str()) {
+                            ack_if_logged(log_id, &tx)?;
+                            continue;
+                        }
+                        let tx = tx.clone();
+                        let shell_config = config.shell.clone();
+                        let enforce_ro_mode = config.enforce_ro_mode;
+                        let running_shells = Arc::clone(&running_shells);
+                        if invoke.tool_name == DIR_LOCK_TOOL_NAME {
+                            let lock_manager = lock_manager.clone();
+                            let enabled = config.dir_lock.enable;
+                            std::thread::spawn(move || {
+                                crate::dir_lock::dispatch_dir_lock_tool(
+                                    invoke,
+                                    &lock_manager,
+                                    enabled,
+                                    &tx,
+                                );
+                            });
+                        } else if config.dir_lock.enable
+                            && is_dir_lock_update_tool(invoke.tool_name.as_str())
+                        {
+                            let lock_manager = lock_manager.clone();
+                            let sem = Arc::clone(&sem);
+                            std::thread::spawn(move || {
+                                dispatch_locked_tool_invoke(
+                                    invoke,
+                                    shell_config,
+                                    &tx,
+                                    &running_shells,
+                                    &lock_manager,
+                                    &sem,
+                                    enforce_ro_mode,
+                                );
+                            });
+                        } else {
+                            // Block here until a permit is free. This bounds the
+                            // total number of in-flight worker threads — without
+                            // it, a burst of ToolStarted events would spawn unbounded
+                            // native threads that then serialize on the semaphore.
+                            let permit = sem.acquire();
+                            std::thread::spawn(move || {
+                                let _permit = permit;
+                                dispatch_tool_invoke(
+                                    invoke,
+                                    shell_config,
+                                    &tx,
+                                    &running_shells,
+                                    None,
+                                    enforce_ro_mode,
+                                );
+                            });
+                        }
                     }
-                } else if lock_manager.cancel_waiting_call(&request.target_call_id) {
-                    debug!(call_id = %request.target_call_id, "cancellation requested for waiting dir-lock call");
-                } else {
-                    debug!(call_id = %request.target_call_id, "shell cancellation requested for unknown call");
+                    Event::SessionStarted(started) => {
+                        dispatch_session_started(started, &tx);
+                    }
+                    Event::SessionAgentLoaded(loaded) => {
+                        dispatch_session_agent_loaded(loaded, &tx);
+                    }
+                    Event::SessionAgentUnloaded(unloaded) => {
+                        lock_manager.release_agent(&unloaded.agent_id);
+                        start_agent_owners.retain(|_, agent_id| agent_id != &unloaded.agent_id);
+                    }
+                    Event::SessionShutdown(_) => {
+                        lock_manager.release_all_manual();
+                        start_agent_owners.clear();
+                    }
+                    Event::StartAgentAccepted(accepted) => {
+                        start_agent_owners.insert(accepted.query_id, accepted.agent_id);
+                    }
+                    Event::StartAgentResult(result) => {
+                        if let Some(agent_id) = start_agent_owners.remove(&result.query_id) {
+                            lock_manager.release_agent(&agent_id);
+                        }
+                    }
+                    Event::ActionInvoke(invoke) => {
+                        tx.send(HarnessInputMessage::emit(dispatch_action_invoke(
+                            invoke,
+                            &lock_manager,
+                        )))?;
+                    }
+                    Event::ToolCancelRequest(request) => {
+                        let cancel_tx = running_shells
+                            .lock()
+                            .expect("running shell registry lock poisoned")
+                            .get(&request.target_call_id)
+                            .cloned();
+                        if let Some(cancel_tx) = cancel_tx {
+                            debug!(call_id = %request.target_call_id, "shell cancellation requested for running call");
+                            if cancel_tx.send(()).is_err() {
+                                debug!(call_id = %request.target_call_id, "shell cancellation receiver already gone");
+                            }
+                        } else if lock_manager.cancel_waiting_call(&request.target_call_id) {
+                            debug!(call_id = %request.target_call_id, "cancellation requested for waiting dir-lock call");
+                        } else {
+                            debug!(call_id = %request.target_call_id, "shell cancellation requested for unknown call");
+                        }
+                    }
+                    Event::UiShellCommand(cmd) => {
+                        // User-initiated `!`/`!!` — run on a worker thread and
+                        // stream chunks out via the same tx writer.
+                        let permit = sem.acquire();
+                        let tx = tx.clone();
+                        let shell_config = config.shell.clone();
+                        std::thread::spawn(move || {
+                            let _permit = permit;
+                            crate::tools::shell::dispatch_user_shell_command(
+                                cmd,
+                                shell_config,
+                                &tx,
+                            );
+                        });
+                    }
+                    _ => {}
+                }
+                if let Some(id) = log_id {
+                    ack_log_event(id, &tx);
                 }
             }
-            Frame::Event(Event::UiShellCommand(cmd)) => {
-                // User-initiated `!`/`!!` — run on a worker thread
-                // and stream chunks out via the same tx writer.
-                let permit = sem.acquire();
-                let tx = tx.clone();
-                let shell_config = config.shell.clone();
-                std::thread::spawn(move || {
-                    let _permit = permit;
-                    crate::tools::shell::dispatch_user_shell_command(cmd, shell_config, &tx);
-                });
-            }
-            Frame::Message(Message::Disconnect(_)) => break,
+            HarnessOutputMessage::Disconnect(_) => break,
             _ => {}
-        }
-        if let Some(id) = log_id {
-            ack_log_event(id, &tx);
         }
     }
 
@@ -808,7 +819,7 @@ fn action_error(invoke: ActionInvoke, message: String) -> Event {
 fn dispatch_locked_tool_invoke(
     invoke: tau_proto::ToolStarted,
     shell_config: ShellConfig,
-    tx: &mpsc::Sender<Frame>,
+    tx: &mpsc::Sender<HarnessInputMessage>,
     running_shells: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
     lock_manager: &DirLockManager,
     sem: &Arc<Semaphore>,
@@ -846,19 +857,20 @@ fn dispatch_locked_tool_invoke(
         invoke.agent_id.clone(),
         dirs,
         move || {
-            let _ = wait_tx.send(Frame::Event(crate::dir_lock::waiting_progress_event(
-                &wait_invoke,
-                &wait_dirs,
-            )));
+            let _ = wait_tx.send(HarnessInputMessage::emit(
+                crate::dir_lock::waiting_progress_event(&wait_invoke, &wait_dirs),
+            ));
         },
     ) {
         Ok(guard) => guard,
         Err(crate::dir_lock::LockAcquireError::Cancelled) => {
-            let _ = tx.send(Frame::Event(Event::ToolCancelled(ToolCancelled {
-                call_id: invoke.call_id,
-                tool_name: invoke.tool_name,
-                tool_type: tau_proto::ToolType::Function,
-            })));
+            let _ = tx.send(HarnessInputMessage::emit(Event::ToolCancelled(
+                ToolCancelled {
+                    call_id: invoke.call_id,
+                    tool_name: invoke.tool_name,
+                    tool_type: tau_proto::ToolType::Function,
+                },
+            )));
             return;
         }
         Err(crate::dir_lock::LockAcquireError::Abandoned(lock)) => {
@@ -884,22 +896,24 @@ fn dispatch_locked_tool_invoke(
 fn send_tool_failure(
     invoke: tau_proto::ToolStarted,
     failure: crate::display::ToolFailure,
-    tx: &mpsc::Sender<Frame>,
+    tx: &mpsc::Sender<HarnessInputMessage>,
 ) {
     let crate::display::ToolFailure {
         message,
         details,
         display,
     } = failure;
-    let _ = tx.send(Frame::Event(Event::ToolError(tau_proto::ToolError {
-        call_id: invoke.call_id,
-        tool_name: invoke.tool_name,
-        tool_type: tau_proto::ToolType::Function,
-        message,
-        details: details.map(|details| *details),
-        display: Some(*display),
-        originator: invoke.originator,
-    })));
+    let _ = tx.send(HarnessInputMessage::emit(Event::ToolError(
+        tau_proto::ToolError {
+            call_id: invoke.call_id,
+            tool_name: invoke.tool_name,
+            tool_type: tau_proto::ToolType::Function,
+            message,
+            details: details.map(|details| *details),
+            display: Some(*display),
+            originator: invoke.originator,
+        },
+    )));
 }
 
 fn reported_lock_wait_duration_seconds(elapsed: Duration) -> Option<u64> {
@@ -973,7 +987,7 @@ fn lock_wait_duration_entry(seconds: u64) -> (CborValue, CborValue) {
 fn dispatch_tool_invoke(
     invoke: tau_proto::ToolStarted,
     shell_config: ShellConfig,
-    tx: &mpsc::Sender<Frame>,
+    tx: &mpsc::Sender<HarnessInputMessage>,
     running_shells: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
     lock_wait_duration_seconds: Option<u64>,
     enforce_ro_mode: bool,
@@ -991,26 +1005,28 @@ fn dispatch_tool_invoke(
     }
 
     if let Some(display) = crate::tools::initial_display(&invoke) {
-        let _ = tx.send(Frame::Event(Event::ToolProgress(tau_proto::ToolProgress {
-            call_id: invoke.call_id.clone(),
-            tool_name: invoke.tool_name.clone(),
-            message: None,
-            progress: None,
-            display: Some(display),
-        })));
+        let _ = tx.send(HarnessInputMessage::emit(Event::ToolProgress(
+            tau_proto::ToolProgress {
+                call_id: invoke.call_id.clone(),
+                tool_name: invoke.tool_name.clone(),
+                message: None,
+                progress: None,
+                display: Some(display),
+            },
+        )));
     }
 
     let events = execute_tool(invoke, &shell_config);
     for event in events {
         let event = with_lock_wait_duration(event, lock_wait_duration_seconds);
-        let _ = tx.send(Frame::Event(event));
+        let _ = tx.send(HarnessInputMessage::emit(event));
     }
 }
 
 fn dispatch_cancellable_shell_tool(
     invoke: tau_proto::ToolStarted,
     shell_config: ShellConfig,
-    tx: &mpsc::Sender<Frame>,
+    tx: &mpsc::Sender<HarnessInputMessage>,
     running_shells: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
     lock_wait_duration_seconds: Option<u64>,
     enforce_ro_mode: bool,
@@ -1026,13 +1042,15 @@ fn dispatch_cancellable_shell_tool(
         .expect("running shell registry lock poisoned")
         .insert(invoke.call_id.clone(), cancel_tx);
 
-    let _ = tx.send(Frame::Event(Event::ToolProgress(tau_proto::ToolProgress {
-        call_id: invoke.call_id.clone(),
-        tool_name: invoke.tool_name.clone(),
-        message: None,
-        progress: None,
-        display: Some(crate::tools::shell::initial_display(&invoke.arguments)),
-    })));
+    let _ = tx.send(HarnessInputMessage::emit(Event::ToolProgress(
+        tau_proto::ToolProgress {
+            call_id: invoke.call_id.clone(),
+            tool_name: invoke.tool_name.clone(),
+            message: None,
+            progress: None,
+            display: Some(crate::tools::shell::initial_display(&invoke.arguments)),
+        },
+    )));
     let event = match crate::tools::shell::run_command_cancellable(
         &invoke.arguments,
         &shell_config,
@@ -1088,20 +1106,23 @@ fn dispatch_cancellable_shell_tool(
         .remove(&invoke.call_id);
     trace!(call_id = %invoke.call_id, "removed shell call from cancellation registry");
     let event = with_lock_wait_duration(event, lock_wait_duration_seconds);
-    if tx.send(Frame::Event(event)).is_err() {
+    if tx.send(HarnessInputMessage::emit(event)).is_err() {
         debug!(call_id = %invoke.call_id, "failed to send terminal shell event to harness");
     }
 }
 
-fn dispatch_session_started(started: SessionStarted, tx: &mpsc::Sender<Frame>) {
+fn dispatch_session_started(started: SessionStarted, tx: &mpsc::Sender<HarnessInputMessage>) {
     for event in build_session_started_events(started) {
-        let _ = tx.send(Frame::Event(event));
+        let _ = tx.send(HarnessInputMessage::emit(event));
     }
 }
 
-fn dispatch_session_agent_loaded(loaded: SessionAgentLoaded, tx: &mpsc::Sender<Frame>) {
+fn dispatch_session_agent_loaded(
+    loaded: SessionAgentLoaded,
+    tx: &mpsc::Sender<HarnessInputMessage>,
+) {
     if let Ok(cwd) = std::env::current_dir() {
-        let _ = tx.send(Frame::Event(Event::ExtAgentContextPublish(
+        let _ = tx.send(HarnessInputMessage::emit(Event::ExtAgentContextPublish(
             ExtAgentContextPublish {
                 agent_id: loaded.agent_id.clone(),
                 key: AgentContextKey::new("cwd"),
@@ -1109,7 +1130,7 @@ fn dispatch_session_agent_loaded(loaded: SessionAgentLoaded, tx: &mpsc::Sender<F
             },
         )));
     }
-    let _ = tx.send(Frame::Event(Event::ExtensionContextReady(
+    let _ = tx.send(HarnessInputMessage::emit(Event::ExtensionContextReady(
         ExtensionContextReady {
             session_id: loaded.session_id,
             agent_id: loaded.agent_id,
@@ -1119,17 +1140,17 @@ fn dispatch_session_agent_loaded(loaded: SessionAgentLoaded, tx: &mpsc::Sender<F
 
 fn ack_if_logged(
     id: Option<EventLogSeq>,
-    tx: &mpsc::Sender<Frame>,
-) -> Result<(), Box<mpsc::SendError<Frame>>> {
+    tx: &mpsc::Sender<HarnessInputMessage>,
+) -> Result<(), Box<mpsc::SendError<HarnessInputMessage>>> {
     if let Some(id) = id {
-        tx.send(Frame::Message(Message::Ack(Ack { up_to: id })))
+        tx.send(HarnessInputMessage::Ack(Ack { up_to: id }))
             .map_err(Box::new)?;
     }
     Ok(())
 }
 
-fn ack_log_event(id: EventLogSeq, tx: &mpsc::Sender<Frame>) {
-    let _ = tx.send(Frame::Message(Message::Ack(Ack { up_to: id })));
+fn ack_log_event(id: EventLogSeq, tx: &mpsc::Sender<HarnessInputMessage>) {
+    let _ = tx.send(HarnessInputMessage::Ack(Ack { up_to: id }));
 }
 
 fn is_shell_tool(name: &str) -> bool {

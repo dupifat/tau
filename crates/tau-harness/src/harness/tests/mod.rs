@@ -4,7 +4,7 @@
 //! The shared helpers and imports live here so each submodule can
 //! pull them in with `use super::*;`.
 
-use std::io::{BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -17,11 +17,12 @@ use tau_core::{
 };
 use tau_proto::{
     AgentPromptCreated, AgentPromptId, AgentPromptQueued, AgentPromptRecalled, AgentPromptSteered,
-    CborValue, ContentPart, ContextItem, ContextRole, Disconnect, Event, EventSelector, Frame,
-    FrameReader, FrameWriter, Intercept, InterceptAction, InterceptReply, InterceptionPriority,
-    Message, MessageItem, NodeId, ProviderResponseFinished, ProviderResponseUpdated,
-    StartAgentRequest, Subscribe, ToolCallId, ToolCallItem, ToolName, ToolResult, ToolResultItem,
-    ToolResultStatus, ToolSpec, UiPromptDraft, UiPromptSubmitted,
+    CborValue, ContentPart, ContextItem, ContextRole, Disconnect, Event, EventDelivery,
+    EventSelector, HarnessInputMessage, HarnessInputWriter, HarnessOutputMessage,
+    HarnessOutputReader, Intercept, InterceptAction, InterceptReply, InterceptionPriority,
+    MessageItem, NodeId, ProviderResponseFinished, ProviderResponseUpdated, StartAgentRequest,
+    Subscribe, ToolCallId, ToolCallItem, ToolName, ToolResult, ToolResultItem, ToolResultStatus,
+    ToolSpec, UiPromptDraft, UiPromptSubmitted,
 };
 use tau_session_inspect::{
     default_session_id, format_session_entry, open_session_store, policy_lines, session_lines,
@@ -45,6 +46,193 @@ use crate::model::{
     selected_params_for_role, thinking_summaries_for_model, verbosities_for_model,
 };
 use crate::turn::{PromptSubmission, TurnState};
+
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug)]
+enum TestProtocolItem {
+    Event(Event),
+    Message(TestMessage),
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+enum TestMessage {
+    Hello(tau_proto::Hello),
+    Subscribe(Subscribe),
+    Intercept(Intercept),
+    Ready(tau_proto::Ready),
+    Disconnect(Disconnect),
+    ConfigError(tau_proto::ConfigError),
+    Emit(tau_proto::Emit),
+    InterceptReply(InterceptReply),
+    Ack(tau_proto::Ack),
+    Configure(tau_proto::Configure),
+    InterceptRequest(tau_proto::InterceptRequest),
+    SequencedDelivery(EventDelivery),
+    AgentPromptCreatedResult(Box<tau_proto::AgentPromptCreatedResult>),
+    RenderedSystemPromptResult(Box<tau_proto::RenderedSystemPromptResult>),
+    RenderedToolDefinitionsResult(Box<tau_proto::RenderedToolDefinitionsResult>),
+    ExtensionDataResult(Box<tau_proto::ExtensionDataResult>),
+}
+
+impl TestProtocolItem {
+    fn into_input_message(self) -> HarnessInputMessage {
+        match self {
+            Self::Event(event) => HarnessInputMessage::emit(event),
+            Self::Message(message) => message.into_input_message(),
+        }
+    }
+
+    fn from_output_message(message: HarnessOutputMessage) -> Self {
+        match message {
+            HarnessOutputMessage::Configure(message) => {
+                Self::Message(TestMessage::Configure(message))
+            }
+            HarnessOutputMessage::Disconnect(message) => {
+                Self::Message(TestMessage::Disconnect(message))
+            }
+            HarnessOutputMessage::Deliver(delivery) => {
+                if delivery.seq.is_some() {
+                    Self::Message(TestMessage::SequencedDelivery(delivery))
+                } else {
+                    Self::Event(delivery.into_event())
+                }
+            }
+            HarnessOutputMessage::InterceptRequest(message) => {
+                Self::Message(TestMessage::InterceptRequest(message))
+            }
+            HarnessOutputMessage::AgentPromptCreatedResult(message) => {
+                Self::Message(TestMessage::AgentPromptCreatedResult(message))
+            }
+            HarnessOutputMessage::RenderedSystemPromptResult(message) => {
+                Self::Message(TestMessage::RenderedSystemPromptResult(message))
+            }
+            HarnessOutputMessage::RenderedToolDefinitionsResult(message) => {
+                Self::Message(TestMessage::RenderedToolDefinitionsResult(message))
+            }
+            HarnessOutputMessage::ExtensionDataResult(message) => {
+                Self::Message(TestMessage::ExtensionDataResult(message))
+            }
+        }
+    }
+
+    fn into_event_frame(self) -> (Option<tau_proto::EventLogSeq>, Self) {
+        match self {
+            Self::Message(TestMessage::SequencedDelivery(delivery)) => {
+                (delivery.seq, Self::Event(delivery.into_event()))
+            }
+            other => (None, other),
+        }
+    }
+}
+
+impl From<TestMessage> for HarnessInputMessage {
+    fn from(message: TestMessage) -> Self {
+        message.into_input_message()
+    }
+}
+
+impl TestMessage {
+    fn into_input_message(self) -> HarnessInputMessage {
+        match self {
+            Self::Hello(message) => HarnessInputMessage::Hello(message),
+            Self::Subscribe(message) => HarnessInputMessage::Subscribe(message),
+            Self::Intercept(message) => HarnessInputMessage::Intercept(message),
+            Self::Ready(message) => HarnessInputMessage::Ready(message),
+            Self::Disconnect(message) => HarnessInputMessage::Disconnect(message),
+            Self::ConfigError(message) => HarnessInputMessage::ConfigError(message),
+            Self::Emit(message) => HarnessInputMessage::Emit(message),
+            Self::InterceptReply(message) => HarnessInputMessage::InterceptReply(message),
+            Self::Ack(message) => HarnessInputMessage::Ack(message),
+            Self::Configure(_)
+            | Self::InterceptRequest(_)
+            | Self::SequencedDelivery(_)
+            | Self::AgentPromptCreatedResult(_)
+            | Self::RenderedSystemPromptResult(_)
+            | Self::RenderedToolDefinitionsResult(_)
+            | Self::ExtensionDataResult(_) => {
+                panic!("test frame shim cannot send harness-output message as input")
+            }
+        }
+    }
+}
+
+struct TestOutputReader<R> {
+    inner: HarnessOutputReader<R>,
+}
+
+impl<R> TestOutputReader<R>
+where
+    R: Read,
+{
+    fn new(inner: R) -> Self {
+        Self {
+            inner: HarnessOutputReader::new(inner),
+        }
+    }
+
+    fn read_frame(&mut self) -> Result<Option<TestProtocolItem>, tau_proto::DecodeError> {
+        self.inner
+            .read_message()
+            .map(|message| message.map(TestProtocolItem::from_output_message))
+    }
+}
+
+struct TestInputWriter<W> {
+    inner: HarnessInputWriter<W>,
+}
+
+impl<W> TestInputWriter<W>
+where
+    W: Write,
+{
+    fn new(inner: W) -> Self {
+        Self {
+            inner: HarnessInputWriter::new(inner),
+        }
+    }
+
+    fn write_frame(&mut self, frame: &TestProtocolItem) -> Result<(), tau_proto::EncodeError> {
+        self.inner
+            .write_message(&frame.clone().into_input_message())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+trait HarnessTestProtocolExt {
+    fn handle_extension_event(
+        &mut self,
+        source_id: &str,
+        frame: TestProtocolItem,
+    ) -> Result<(), HarnessError>;
+
+    fn handle_client_event(
+        &mut self,
+        client_id: &str,
+        frame: TestProtocolItem,
+    ) -> Result<bool, HarnessError>;
+}
+
+impl HarnessTestProtocolExt for Harness {
+    fn handle_extension_event(
+        &mut self,
+        source_id: &str,
+        frame: TestProtocolItem,
+    ) -> Result<(), HarnessError> {
+        self.handle_extension_message(source_id, frame.into_input_message())
+    }
+
+    fn handle_client_event(
+        &mut self,
+        client_id: &str,
+        frame: TestProtocolItem,
+    ) -> Result<bool, HarnessError> {
+        self.handle_client_message(client_id, frame.into_input_message())
+    }
+}
 
 fn echo_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
     crate::harness::run_echo_provider(r, w).map_err(|e| e.to_string())
@@ -574,15 +762,17 @@ fn quiet_provider_harness_with_start_reason(
 ) -> Result<Harness, HarnessError> {
     fn quiet_provider_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
         fn inner(r: UnixStream, w: UnixStream) -> Result<(), Box<dyn std::error::Error>> {
-            let mut reader = FrameReader::new(BufReader::new(r));
-            let mut writer = FrameWriter::new(BufWriter::new(w));
+            let mut reader = TestOutputReader::new(BufReader::new(r));
+            let mut writer = TestInputWriter::new(BufWriter::new(w));
 
-            writer.write_frame(&Frame::Message(Message::Hello(tau_proto::Hello {
-                protocol_version: tau_proto::PROTOCOL_VERSION,
-                client_name: "tau-quiet-provider".into(),
-                client_kind: tau_proto::ClientKind::Provider,
-            })))?;
-            writer.write_frame(&Frame::Event(Event::ProviderModelsUpdated(
+            writer.write_frame(&TestProtocolItem::Message(TestMessage::Hello(
+                tau_proto::Hello {
+                    protocol_version: tau_proto::PROTOCOL_VERSION,
+                    client_name: "tau-quiet-provider".into(),
+                    client_kind: tau_proto::ClientKind::Provider,
+                },
+            )))?;
+            writer.write_frame(&TestProtocolItem::Event(Event::ProviderModelsUpdated(
                 tau_proto::ProviderModelsUpdated {
                     models: vec![tau_proto::ProviderModelInfo {
                         id: "test/model".into(),
@@ -596,14 +786,16 @@ fn quiet_provider_harness_with_start_reason(
                     }],
                 },
             )))?;
-            writer.write_frame(&Frame::Message(Message::Ready(tau_proto::Ready {
-                message: Some("quiet provider ready".to_owned()),
-            })))?;
+            writer.write_frame(&TestProtocolItem::Message(TestMessage::Ready(
+                tau_proto::Ready {
+                    message: Some("quiet provider ready".to_owned()),
+                },
+            )))?;
             writer.flush()?;
 
             while let Some(frame) = reader.read_frame()? {
-                let (_, frame) = frame.peel_log();
-                if matches!(frame, Frame::Message(Message::Disconnect(_))) {
+                let (_, frame) = frame.into_event_frame();
+                if matches!(frame, TestProtocolItem::Message(TestMessage::Disconnect(_))) {
                     return Ok(());
                 }
             }
@@ -756,14 +948,17 @@ fn drive_harness_until_call_completes(h: &mut Harness, target_call_id: &str) {
         match event {
             HarnessEvent::FromConnection {
                 connection_id,
-                frame,
+                message,
             } => {
-                let is_target = match frame.as_ref() {
-                    Frame::Event(Event::ToolResult(r)) => r.call_id.as_str() == target_call_id,
-                    Frame::Event(Event::ToolError(e)) => e.call_id.as_str() == target_call_id,
+                let is_target = match message.as_ref() {
+                    HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
+                        Event::ToolResult(r) => r.call_id.as_str() == target_call_id,
+                        Event::ToolError(e) => e.call_id.as_str() == target_call_id,
+                        _ => false,
+                    },
                     _ => false,
                 };
-                h.handle_extension_event(&connection_id, *frame)
+                h.handle_extension_message(&connection_id, *message)
                     .expect("handle");
                 if is_target {
                     return;
@@ -793,9 +988,9 @@ fn drive_harness_until_tool_turn_empty(h: &mut Harness) {
         match event {
             HarnessEvent::FromConnection {
                 connection_id,
-                frame,
+                message,
             } => h
-                .handle_extension_event(&connection_id, *frame)
+                .handle_extension_message(&connection_id, *message)
                 .expect("handle"),
             HarnessEvent::Disconnected { connection_id } => {
                 h.handle_disconnect(&connection_id);
@@ -856,15 +1051,10 @@ fn collect_event_sink(h: &mut Harness) -> Arc<Mutex<Vec<RoutedFrame>>> {
     events
 }
 
-/// Peel a routed frame to its bus-event payload, unwrapping the
-/// `Message::LogEvent` envelope when present. Returns `None` for
-/// non-event messages (Hello, Ack, …).
-fn peel_inner_event(frame: &Frame) -> Option<&Event> {
-    match frame {
-        Frame::Event(event) => Some(event),
-        Frame::Message(Message::LogEvent(env)) => Some(&env.event),
-        Frame::Message(_) => None,
-    }
+/// Peel a routed message to its bus-event payload. Returns `None` for
+/// non-event output messages (configure, intercept request, …).
+fn peel_inner_event(message: &HarnessOutputMessage) -> Option<&Event> {
+    message.delivered_event()
 }
 
 fn pop_delegate_progress(
@@ -879,12 +1069,8 @@ fn pop_delegate_progress(
         )
     })?;
     let removed = events.remove(pos);
-    match removed.frame {
-        Frame::Event(Event::ToolDelegateProgress(p)) => Some(p),
-        Frame::Message(Message::LogEvent(env)) => match *env.event {
-            Event::ToolDelegateProgress(p) => Some(p),
-            _ => unreachable!(),
-        },
+    match removed.frame.into_delivered_event() {
+        Some(Event::ToolDelegateProgress(p)) => Some(p),
         _ => unreachable!(),
     }
 }
@@ -953,7 +1139,7 @@ fn intercepted_payload(events: &Arc<Mutex<Vec<RoutedFrame>>>) -> (Event, bool) {
     let intercepted = events
         .iter()
         .find_map(|routed| match &routed.frame {
-            Frame::Message(Message::InterceptRequest(req)) => Some(req),
+            HarnessOutputMessage::InterceptRequest(req) => Some(req),
             _ => None,
         })
         .expect("intercept request delivered");

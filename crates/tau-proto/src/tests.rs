@@ -319,38 +319,40 @@ fn representative_events() -> Vec<Event> {
     ]
 }
 
-fn representative_messages() -> Vec<Message> {
+fn sample_session_started() -> Event {
+    Event::SessionStarted(SessionStarted {
+        session_id: "s1".into(),
+        reason: SessionStartReason::Initial,
+    })
+}
+
+fn representative_input_messages() -> Vec<HarnessInputMessage> {
     vec![
-        Message::Hello(Hello {
+        HarnessInputMessage::Hello(Hello {
             protocol_version: PROTOCOL_VERSION,
             client_name: "provider".into(),
             client_kind: ClientKind::Provider,
         }),
-        Message::Subscribe(Subscribe {
+        HarnessInputMessage::Subscribe(Subscribe {
             selectors: vec![
                 EventSelector::Exact(EventName::UI_PROMPT_SUBMITTED),
                 EventSelector::Prefix("tool.".to_owned()),
             ],
         }),
-        Message::Intercept(Intercept {
+        HarnessInputMessage::Intercept(Intercept {
             selectors: vec![EventSelector::Prefix("tool.".to_owned())],
             priority: InterceptionPriority::new(0),
         }),
-        Message::Ready(Ready {
+        HarnessInputMessage::Ready(Ready {
             message: Some("ready".to_owned()),
         }),
-        Message::Disconnect(Disconnect {
+        HarnessInputMessage::Disconnect(Disconnect {
             reason: Some("shutdown".to_owned()),
         }),
-        Message::Configure(Configure {
-            config: CborValue::Null,
-            state_dir: Some(std::path::PathBuf::from("/tmp/tau/state/ext/demo")),
-            secrets: std::collections::BTreeMap::new(),
-        }),
-        Message::ConfigError(ConfigError {
+        HarnessInputMessage::ConfigError(ConfigError {
             message: "bad config".to_owned(),
         }),
-        Message::Emit(Emit {
+        HarnessInputMessage::Emit(Emit {
             event: Box::new(Event::ExtensionEvent(CustomEvent {
                 name: "demo.transient_progress".parse().expect("event name"),
                 session_id: Some("s1".into()),
@@ -358,49 +360,85 @@ fn representative_messages() -> Vec<Message> {
             })),
             transient: true,
         }),
-        Message::InterceptRequest(InterceptRequest {
-            event: Box::new(Event::SessionStarted(SessionStarted {
-                session_id: "s1".into(),
-                reason: SessionStartReason::Initial,
-            })),
-            transient: false,
-        }),
-        Message::InterceptReply(InterceptReply {
+        HarnessInputMessage::InterceptReply(InterceptReply {
             action: InterceptAction::Pass(None),
         }),
-        Message::GetRenderedSystemPrompt(GetRenderedSystemPrompt {
+        HarnessInputMessage::GetAgentPromptCreated(GetAgentPromptCreated {
+            request_id: "prompt-1".to_owned(),
+            session_id: "s1".into(),
+            agent_prompt_id: "sp-1".into(),
+        }),
+        HarnessInputMessage::GetRenderedSystemPrompt(GetRenderedSystemPrompt {
             request_id: "render-prompt-1".to_owned(),
             role: "engineer".to_owned(),
         }),
-        Message::RenderedSystemPromptResult(Box::new(RenderedSystemPromptResult {
-            request_id: "render-prompt-1".to_owned(),
-            prompt: Some("You are helpful.".to_owned()),
-            error: None,
-        })),
-        Message::GetRenderedToolDefinitions(GetRenderedToolDefinitions {
+        HarnessInputMessage::GetRenderedToolDefinitions(GetRenderedToolDefinitions {
             request_id: "render-tools-1".to_owned(),
             role: "engineer".to_owned(),
         }),
-        Message::RenderedToolDefinitionsResult(Box::new(RenderedToolDefinitionsResult {
-            request_id: "render-tools-1".to_owned(),
-            tools: Some(vec![ToolDefinition {
-                name: ToolName::new("read"),
-                model_visible_name: None,
-                description: Some("Read a file".to_owned()),
-                tool_type: ToolType::Function,
-                parameters: Some(serde_json::json!({"type": "object"})),
-                format: None,
-            }]),
-            error: None,
-        })),
-        Message::ExtensionDataRequest(ExtensionDataRequest {
+        HarnessInputMessage::ExtensionDataRequest(ExtensionDataRequest {
             request_id: "ext-data-1".to_owned(),
             scope: ExtensionDataScope::Session,
             op: ExtensionDataRequestOp::ReadFile {
                 path: "notes/state.cbor".to_owned(),
             },
         }),
-        Message::ExtensionDataResult(Box::new(ExtensionDataResult {
+        HarnessInputMessage::Ack(Ack {
+            up_to: EventLogSeq::new(42),
+        }),
+    ]
+}
+
+fn representative_output_messages() -> Vec<HarnessOutputMessage> {
+    vec![
+        HarnessOutputMessage::Configure(Configure {
+            config: CborValue::Null,
+            state_dir: Some(std::path::PathBuf::from("/tmp/tau/state/ext/demo")),
+            secrets: std::collections::BTreeMap::new(),
+        }),
+        HarnessOutputMessage::Disconnect(Disconnect {
+            reason: Some("shutdown".to_owned()),
+        }),
+        HarnessOutputMessage::Deliver(EventDelivery::sequenced(
+            EventLogSeq::new(42),
+            UnixMicros::new(1_700_000_000_000_000),
+            sample_session_started(),
+        )),
+        HarnessOutputMessage::Deliver(EventDelivery::unsequenced(Event::ExtensionEvent(
+            CustomEvent {
+                name: "demo.snapshot".parse().expect("event name"),
+                session_id: Some("s1".into()),
+                payload: CborValue::Text("snapshot".to_owned()),
+            },
+        ))),
+        HarnessOutputMessage::InterceptRequest(InterceptRequest {
+            event: Box::new(sample_session_started()),
+            transient: false,
+        }),
+        HarnessOutputMessage::AgentPromptCreatedResult(Box::new(AgentPromptCreatedResult {
+            request_id: "prompt-1".to_owned(),
+            prompt: None,
+        })),
+        HarnessOutputMessage::RenderedSystemPromptResult(Box::new(RenderedSystemPromptResult {
+            request_id: "render-prompt-1".to_owned(),
+            prompt: Some("You are helpful.".to_owned()),
+            error: None,
+        })),
+        HarnessOutputMessage::RenderedToolDefinitionsResult(Box::new(
+            RenderedToolDefinitionsResult {
+                request_id: "render-tools-1".to_owned(),
+                tools: Some(vec![ToolDefinition {
+                    name: ToolName::new("read"),
+                    model_visible_name: None,
+                    description: Some("Read a file".to_owned()),
+                    tool_type: ToolType::Function,
+                    parameters: Some(serde_json::json!({"type": "object"})),
+                    format: None,
+                }]),
+                error: None,
+            },
+        )),
+        HarnessOutputMessage::ExtensionDataResult(Box::new(ExtensionDataResult {
             request_id: "ext-data-1".to_owned(),
             result: ExtensionDataResultPayload::Ok {
                 value: ExtensionDataValue::ListFiles {
@@ -412,27 +450,7 @@ fn representative_messages() -> Vec<Message> {
                 },
             },
         })),
-        Message::LogEvent(LogEvent {
-            seq: EventLogSeq::new(42),
-            recorded_at: UnixMicros::new(1_700_000_000_000_000),
-            event: Box::new(Event::SessionStarted(SessionStarted {
-                session_id: "s1".into(),
-                reason: SessionStartReason::Initial,
-            })),
-        }),
-        Message::Ack(Ack {
-            up_to: EventLogSeq::new(42),
-        }),
     ]
-}
-
-fn representative_frames() -> Vec<Frame> {
-    let mut out: Vec<Frame> = representative_events()
-        .into_iter()
-        .map(Frame::Event)
-        .collect();
-    out.extend(representative_messages().into_iter().map(Frame::Message));
-    out
 }
 
 #[test]
@@ -466,52 +484,81 @@ fn agent_message_events_have_names_and_persistence_defaults() {
     assert_eq!(received.name().to_string(), "agent.message_received");
     assert!(!received.defaults_to_transient());
 }
-#[test]
-fn directional_messages_convert_to_shared_wire_message() {
-    let extension: Message = ExtensionMessage::Ready(Ready {
-        message: Some("ready".to_owned()),
-    })
-    .into();
-    assert!(matches!(extension, Message::Ready(_)));
-
-    let harness: Message = HarnessMessage::Disconnect(Disconnect {
-        reason: Some("shutdown".to_owned()),
-    })
-    .into();
-    assert!(matches!(harness, Message::Disconnect(_)));
-}
 
 #[test]
-fn representative_frames_round_trip_through_cbor() {
-    for frame in representative_frames() {
-        let encoded = encode_frame_to_vec(&frame).expect("frame should encode");
-        let decoded = decode_frame_from_slice(&encoded).expect("frame should decode");
-        assert_eq!(decoded, frame);
+fn representative_directional_messages_round_trip_through_cbor() {
+    for message in representative_input_messages() {
+        let encoded = encode_harness_input_to_vec(&message).expect("input should encode");
+        let decoded = decode_harness_input_from_slice(&encoded).expect("input should decode");
+        assert_eq!(decoded, message);
+    }
+
+    for message in representative_output_messages() {
+        let encoded = encode_harness_output_to_vec(&message).expect("output should encode");
+        let decoded = decode_harness_output_from_slice(&encoded).expect("output should decode");
+        assert_eq!(decoded, message);
     }
 }
 
 #[test]
-fn multiple_frames_can_share_one_stream() {
-    let frames = representative_frames();
-    let mut writer = FrameWriter::new(Vec::new());
-    for frame in &frames {
-        writer.write_frame(frame).expect("frame should encode");
+fn multiple_directional_messages_can_share_one_stream() {
+    let messages = representative_output_messages();
+    let mut writer = HarnessOutputWriter::new(Vec::new());
+    for message in &messages {
+        writer
+            .write_message(message)
+            .expect("output message should encode");
     }
     writer.flush().expect("stream should flush");
 
     let bytes = writer.into_inner();
-    let mut reader = FrameReader::new(std::io::Cursor::new(bytes));
+    let mut reader = HarnessOutputReader::new(std::io::Cursor::new(bytes));
     let mut decoded = Vec::new();
-    for _ in 0..frames.len() {
+    for _ in 0..messages.len() {
         decoded.push(
             reader
-                .read_frame()
+                .read_message()
                 .expect("read should succeed")
-                .expect("frame should arrive"),
+                .expect("message should arrive"),
         );
     }
 
-    assert_eq!(decoded, frames);
+    assert_eq!(decoded, messages);
+}
+
+#[test]
+fn input_emit_and_output_deliver_are_distinct_wire_messages() {
+    let event = sample_session_started();
+    let input = HarnessInputMessage::emit_with_transient(event.clone(), true);
+    let output = HarnessOutputMessage::deliver_sequenced(
+        EventLogSeq::new(7),
+        UnixMicros::new(1_700_000_000_000_000),
+        event.clone(),
+    );
+
+    let input_json = serde_json::to_value(&input).expect("serialize input");
+    assert_eq!(input_json["message"], "emit");
+    assert_eq!(input_json["payload"]["event"]["event"], "session.started");
+    assert_eq!(input_json["payload"]["transient"], true);
+
+    let output_json = serde_json::to_value(&output).expect("serialize output");
+    assert_eq!(output_json["message"], "deliver");
+    assert_eq!(output_json["payload"]["event"]["event"], "session.started");
+    assert_eq!(output_json["payload"]["seq"], serde_json::json!(7));
+    assert!(output_json["payload"].get("transient").is_none());
+
+    let input_bytes = encode_harness_input_to_vec(&input).expect("encode input");
+    assert!(decode_harness_output_from_slice(&input_bytes).is_err());
+
+    let output_bytes = encode_harness_output_to_vec(&output).expect("encode output");
+    assert!(decode_harness_input_from_slice(&output_bytes).is_err());
+}
+
+#[test]
+fn bare_event_is_not_a_protocol_item_in_either_direction() {
+    let bytes = encode_message_to_vec(&sample_session_started()).expect("encode bare event");
+    assert!(decode_harness_input_from_slice(&bytes).is_err());
+    assert!(decode_harness_output_from_slice(&bytes).is_err());
 }
 
 #[test]
@@ -579,15 +626,22 @@ fn configure_secrets_round_trip_and_debug_redacts_values() {
 }
 
 #[test]
-fn message_wire_form_uses_flat_message_tag() {
-    let msg = Message::Hello(Hello {
+fn directional_message_wire_form_uses_flat_message_tag() {
+    let input = HarnessInputMessage::Hello(Hello {
         protocol_version: PROTOCOL_VERSION,
         client_name: "provider".into(),
         client_kind: ClientKind::Provider,
     });
-    let json = serde_json::to_value(&msg).expect("serialize");
-    assert_eq!(json["message"], "hello");
-    assert!(json.get("payload").is_some());
+    let input_json = serde_json::to_value(&input).expect("serialize input");
+    assert_eq!(input_json["message"], "hello");
+    assert!(input_json.get("payload").is_some());
+
+    let output = HarnessOutputMessage::Disconnect(Disconnect {
+        reason: Some("shutdown".to_owned()),
+    });
+    let output_json = serde_json::to_value(&output).expect("serialize output");
+    assert_eq!(output_json["message"], "disconnect");
+    assert!(output_json.get("payload").is_some());
 }
 
 #[test]
@@ -798,43 +852,27 @@ fn tool_name_rejects_overlong_input() {
 }
 
 #[test]
-fn frame_peel_log_extracts_event_log_seq_and_inner_event() {
-    let inner = Event::SessionStarted(SessionStarted {
-        session_id: "s1".into(),
-        reason: SessionStartReason::Initial,
-    });
-    let frame = Frame::Message(Message::LogEvent(LogEvent {
-        seq: EventLogSeq::new(7),
-        recorded_at: UnixMicros::new(1_700_000_000_000_000),
-        event: Box::new(inner.clone()),
-    }));
+fn event_delivery_helpers_expose_ack_metadata_and_inner_event() {
+    let inner = sample_session_started();
+    let message = HarnessOutputMessage::deliver_sequenced(
+        EventLogSeq::new(7),
+        UnixMicros::new(1_700_000_000_000_000),
+        inner.clone(),
+    );
 
-    let (peeled_id, rest) = frame.peel_log();
-    assert_eq!(peeled_id, Some(EventLogSeq::new(7)));
-    assert_eq!(rest, Frame::Event(inner));
-}
+    let delivery = message.as_delivery().expect("delivery payload");
+    assert_eq!(delivery.ack_sequence(), Some(EventLogSeq::new(7)));
+    assert_eq!(delivery.event(), &inner);
+    assert_eq!(message.ack_sequence(), Some(EventLogSeq::new(7)));
+    assert_eq!(message.clone().into_delivered_event(), Some(inner));
 
-#[test]
-fn frame_peel_log_passes_non_log_frames_through_unchanged() {
-    // A bare event must not be mistaken for a log envelope, and the
-    // returned frame must be byte-for-byte the same value the caller
-    // handed in.
-    let event = Event::SessionStarted(SessionStarted {
-        session_id: "s1".into(),
-        reason: SessionStartReason::Initial,
-    });
-    let original = Frame::Event(event);
-    let (peeled_id, rest) = original.clone().peel_log();
-    assert_eq!(peeled_id, None);
-    assert_eq!(rest, original);
+    let direct = HarnessOutputMessage::deliver(sample_session_started());
+    assert_eq!(direct.ack_sequence(), None);
 
-    // Likewise for a non-LogEvent message.
-    let msg = Frame::Message(Message::Ready(Ready {
-        message: Some("ready".to_owned()),
-    }));
-    let (peeled_id, rest) = msg.clone().peel_log();
-    assert_eq!(peeled_id, None);
-    assert_eq!(rest, msg);
+    let non_delivery = HarnessOutputMessage::Disconnect(Disconnect { reason: None });
+    assert_eq!(non_delivery.as_delivery(), None);
+    assert_eq!(non_delivery.ack_sequence(), None);
+    assert_eq!(non_delivery.into_delivered_event(), None);
 }
 
 #[test]

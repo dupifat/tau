@@ -39,7 +39,7 @@ fn run_tool_result(
     );
     h.handle_extension_event(
         "shell",
-        Frame::Event(Event::ToolResult(ToolResult {
+        TestProtocolItem::Event(Event::ToolResult(ToolResult {
             call_id: call_id_typed.clone(),
             tool_name: name,
             tool_type: tau_proto::ToolType::Function,
@@ -96,7 +96,7 @@ fn run_tool_error(
     );
     h.handle_extension_event(
         "shell",
-        Frame::Event(Event::ToolError(tau_proto::ToolError {
+        TestProtocolItem::Event(Event::ToolError(tau_proto::ToolError {
             call_id: call_id_typed.clone(),
             tool_name: name,
             tool_type: tau_proto::ToolType::Function,

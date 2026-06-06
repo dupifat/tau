@@ -70,7 +70,7 @@ fn clear_startup_echo_models(h: &mut Harness) {
         .to_owned();
     h.handle_extension_event(
         &provider_id,
-        Frame::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
             models: Vec::new(),
         })),
     )
@@ -123,7 +123,7 @@ fn provider_models_snapshot_updates_available_models() {
     assert!(!h.available_models.contains(&model_id));
     h.handle_extension_event(
         "provider-ext",
-        Frame::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
             models: vec![provider_model(model_id.clone(), 128_000)],
         })),
     )
@@ -179,7 +179,7 @@ fn provider_models_snapshot_from_non_provider_is_ignored() {
     let model_id: ModelId = "evil/model".parse().expect("model id");
     h.handle_extension_event(
         "tool-ext",
-        Frame::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
             models: vec![provider_model(model_id.clone(), 1)],
         })),
     )
@@ -277,7 +277,7 @@ fn provider_models_snapshot_selects_first_model_and_drains_queue() {
     let model_id: ModelId = "openai/gpt-4.1".parse().expect("model id");
     h.handle_extension_event(
         "provider-ext",
-        Frame::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
             models: vec![provider_model(model_id.clone(), 128_000)],
         })),
     )
@@ -327,7 +327,7 @@ fn unavailable_explicit_role_model_does_not_stall_queued_prompt() {
     let available_model: ModelId = "openai/available".parse().expect("model id");
     h.handle_extension_event(
         "provider-ext",
-        Frame::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
             models: vec![provider_model(available_model, 128_000)],
         })),
     )
@@ -354,7 +354,7 @@ fn provider_model_metadata_drives_selection_state() {
     let model_id: ModelId = "openai/gpt-4.1".parse().expect("model id");
     h.handle_extension_event(
         "provider-ext",
-        Frame::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
             models: vec![provider_model(model_id.clone(), 123_456)],
         })),
     )
@@ -384,7 +384,7 @@ fn provider_model_metadata_drives_selection_state() {
 
     h.handle_extension_event(
         "provider-ext",
-        Frame::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
             models: vec![ProviderModelInfo {
                 id: model_id.clone(),
                 display_name: None,

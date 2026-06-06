@@ -364,15 +364,15 @@ fn daemon_disconnect_reason_is_reported() {
     let server = thread::spawn(move || {
         let (stream, _) = listener.accept().expect("accept");
         let read_stream = stream.try_clone().expect("clone");
-        let mut reader = FrameReader::new(BufReader::new(read_stream));
-        let mut writer = FrameWriter::new(BufWriter::new(stream));
-        let _ = reader.read_frame(); // hello
-        let _ = reader.read_frame(); // subscribe
-        let _ = reader.read_frame(); // message
+        let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(read_stream));
+        let mut writer = tau_proto::HarnessOutputWriter::new(BufWriter::new(stream));
+        let _ = reader.read_message(); // hello
+        let _ = reader.read_message(); // subscribe
+        let _ = reader.read_message(); // message
         writer
-            .write_frame(&Frame::Message(Message::Disconnect(Disconnect {
+            .write_message(&HarnessOutputMessage::Disconnect(Disconnect {
                 reason: Some("test disconnect".to_owned()),
-            })))
+            }))
             .expect("write");
         writer.flush().expect("flush");
     });

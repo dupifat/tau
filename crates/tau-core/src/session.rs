@@ -1007,10 +1007,9 @@ pub struct PersistedAgentEvent {
     /// tree.
     pub parent: AgentEventParent,
     /// Wall-clock micros since UNIX epoch when the event was
-    /// appended, matching the value carried on the wire `LogEvent`
-    /// envelope and stamped in
-    /// [`crate::AgentStore::append_agent_event_at`]. `UnixMicros(0)` on
-    /// records written before this field existed (deserialized via
+    /// appended, matching the value carried by the harness event delivery and
+    /// stamped in [`crate::AgentStore::append_agent_event_at`]. `UnixMicros(0)`
+    /// on records written before this field existed (deserialized via
     /// `#[serde(default)]`). Used for offline inspection — inter-turn
     /// timing, RPM bursts, cache-miss correlation — never for replay
     /// semantics.

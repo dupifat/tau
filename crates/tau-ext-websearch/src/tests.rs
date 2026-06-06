@@ -4,55 +4,60 @@ use std::os::unix::net::UnixStream;
 use std::sync::Mutex;
 use std::thread;
 
-use tau_proto::ToolStarted;
+use tau_proto::{
+    Event, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter,
+    ToolStarted,
+};
 
 use super::*;
 
-/// Test-side wrapper around [`FrameReader`] that exposes an `Event`-flavoured
-/// API (peels `LogEvent`, drops other messages).
+/// Test-side wrapper around [`HarnessInputReader`] that exposes an
+/// `Event`-flavoured API (drops non-event messages).
 struct EventReader<R> {
-    inner: FrameReader<R>,
+    inner: HarnessInputReader<R>,
 }
 
 impl<R: std::io::Read> EventReader<R> {
     fn new(inner: R) -> Self {
         Self {
-            inner: FrameReader::new(inner),
+            inner: HarnessInputReader::new(inner),
         }
     }
 
     fn read_event(&mut self) -> Result<Option<Event>, tau_proto::DecodeError> {
         loop {
-            match self.inner.read_frame()? {
+            match self.inner.read_message()? {
                 None => return Ok(None),
-                Some(frame) => match frame.peel_log().1 {
-                    Frame::Event(Event::ToolProgress(progress))
+                Some(HarnessInputMessage::Emit(emit)) => match *emit.event {
+                    Event::ToolProgress(progress)
                         if progress.message.is_none() && progress.display.is_some() =>
                     {
                         continue;
                     }
-                    Frame::Event(event) => return Ok(Some(event)),
-                    Frame::Message(_) => continue,
+                    event => return Ok(Some(event)),
                 },
+                Some(_) => continue,
             }
         }
     }
 }
 
-/// Test-side wrapper around [`FrameWriter`] that accepts `Event` directly.
+/// Test-side wrapper around [`HarnessOutputWriter`] that accepts `Event`
+/// directly.
 struct EventWriter<W> {
-    inner: FrameWriter<W>,
+    inner: HarnessOutputWriter<W>,
 }
 
 impl<W: std::io::Write> EventWriter<W> {
     fn new(inner: W) -> Self {
         Self {
-            inner: FrameWriter::new(inner),
+            inner: HarnessOutputWriter::new(inner),
         }
     }
 
     fn write_event(&mut self, event: &Event) -> Result<(), tau_proto::EncodeError> {
-        self.inner.write_frame(&Frame::Event(event.clone()))
+        self.inner
+            .write_message(&HarnessOutputMessage::deliver(event.clone()))
     }
 
     fn flush(&mut self) -> std::io::Result<()> {

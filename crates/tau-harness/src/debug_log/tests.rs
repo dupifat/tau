@@ -1,5 +1,5 @@
 use tau_proto::{
-    AgentPromptId, Frame, InProgressOutputItem, ModelId, PromptOriginator,
+    AgentPromptId, HarnessInputMessage, InProgressOutputItem, ModelId, PromptOriginator,
     ProviderResponseFinished, ProviderResponseItem, ProviderResponseUpdated, ProviderTokenUsage,
     ReasoningTextKind,
 };
@@ -119,7 +119,7 @@ fn transient_from_connection_events_are_not_logged_twice() {
 
     log.log_harness_event(&HarnessEvent::FromConnection {
         connection_id: ConnectionId::from("conn-1"),
-        frame: Box::new(Frame::Event(event)),
+        message: Box::new(HarnessInputMessage::emit(event)),
     });
 
     let lines = read_lines(log.path());

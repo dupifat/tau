@@ -2,7 +2,9 @@
 
 use std::sync::mpsc;
 
-use tau_proto::{CborValue, Event, Frame, ToolUsePayload, ToolUseState, ToolUseStatus};
+use tau_proto::{
+    CborValue, Event, HarnessInputMessage, ToolUsePayload, ToolUseState, ToolUseStatus,
+};
 use tracing::{debug, trace};
 
 use crate::argument::{argument_text, optional_argument_int_strict, optional_argument_text};
@@ -228,14 +230,14 @@ fn parse_timeout_secs(arguments: &CborValue) -> Result<u64, String> {
 pub(crate) fn dispatch_user_shell_command(
     cmd: tau_proto::UiShellCommand,
     shell_config: ShellConfig,
-    tx: &mpsc::Sender<Frame>,
+    tx: &mpsc::Sender<HarnessInputMessage>,
 ) {
     use std::io::Read;
 
     let mut child = match shell_config.spawn_isolated(&cmd.command, None, false, false) {
         Ok(child) => child,
         Err(err) => {
-            let _ = tx.send(Frame::Event(Event::ShellCommandFinished(
+            let _ = tx.send(HarnessInputMessage::emit(Event::ShellCommandFinished(
                 tau_proto::ShellCommandFinished {
                     command_id: cmd.command_id,
                     session_id: cmd.session_id,
@@ -262,7 +264,7 @@ pub(crate) fn dispatch_user_shell_command(
         stream: tau_proto::ShellStream,
         command_id: tau_proto::ShellCommandId,
         target_agent_id: Option<tau_proto::AgentId>,
-        tx: mpsc::Sender<Frame>,
+        tx: mpsc::Sender<HarnessInputMessage>,
     ) -> std::thread::JoinHandle<String> {
         std::thread::spawn(move || {
             let mut captured = String::new();
@@ -273,7 +275,7 @@ pub(crate) fn dispatch_user_shell_command(
                     Ok(n) => {
                         let chunk = String::from_utf8_lossy(&buf[..n]).into_owned();
                         captured.push_str(&chunk);
-                        let _ = tx.send(Frame::Event(Event::ShellCommandProgress(
+                        let _ = tx.send(HarnessInputMessage::emit(Event::ShellCommandProgress(
                             tau_proto::ShellCommandProgress {
                                 command_id: command_id.clone(),
                                 stream,
@@ -383,7 +385,7 @@ pub(crate) fn dispatch_user_shell_command(
     }
     let truncated = crate::truncate::truncate_tail(&merged);
 
-    let _ = tx.send(Frame::Event(Event::ShellCommandFinished(
+    let _ = tx.send(HarnessInputMessage::emit(Event::ShellCommandFinished(
         tau_proto::ShellCommandFinished {
             command_id: cmd.command_id,
             session_id: cmd.session_id,

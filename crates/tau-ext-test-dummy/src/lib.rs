@@ -5,9 +5,10 @@ use rand::Rng;
 #[cfg(test)]
 use rand::{SeedableRng, rngs::StdRng};
 use tau_proto::{
-    AgentPromptSubmitted, ConfigError, Emit, Event, EventSelector, Frame, FrameReader, FrameWriter,
-    HarnessInfo, HarnessInfoLevel, InterceptAction, InterceptReply, InterceptionPriority, Message,
-    ToolError, ToolResult, ToolResultKind, ToolSpec,
+    AgentPromptSubmitted, ConfigError, Emit, Event, EventSelector, HarnessInfo, HarnessInfoLevel,
+    HarnessInputMessage, HarnessOutputMessage, InterceptAction, InterceptReply,
+    InterceptionPriority, PeerInputReader, PeerOutputWriter, ToolError, ToolResult, ToolResultKind,
+    ToolSpec,
 };
 
 pub const RESTART_TEST_DUMMY_TOOL_NAME: &str = "restart_test_dummy";
@@ -101,8 +102,8 @@ where
     W: Write,
     T: Rng + ?Sized,
 {
-    let mut reader = FrameReader::new(BufReader::new(reader));
-    let mut writer = FrameWriter::new(BufWriter::new(writer));
+    let mut reader = PeerInputReader::new(BufReader::new(reader));
+    let mut writer = PeerOutputWriter::new(BufWriter::new(writer));
 
     // Subscribe only to fresh live invoke-start events. Extension
     // subscriptions are live-only, so old invokes are not replayed.
@@ -141,10 +142,9 @@ where
 
     let mut restart_mode = RestartMode::Random;
 
-    while let Some(frame) = reader.read_frame()? {
-        let (log_id, inner) = frame.peel_log();
-        match inner {
-            Frame::Message(Message::InterceptRequest(req)) => {
+    while let Some(message) = reader.read_message()? {
+        match message {
+            HarnessOutputMessage::InterceptRequest(req) => {
                 let mutated = match req.event.as_ref() {
                     Event::AgentPromptSubmitted(prompt) => {
                         correct_tao_to_tau(&prompt.text).map(|fixed| {
@@ -158,61 +158,65 @@ where
                     _ => None,
                 };
                 if mutated.is_some() {
-                    writer.write_frame(&Frame::Message(Message::Emit(Emit {
+                    writer.write_message(&HarnessInputMessage::Emit(Emit {
                         event: Box::new(Event::HarnessInfo(HarnessInfo {
                             message: "did you mean \"Tau\"? — corrected for you".to_owned(),
                             level: HarnessInfoLevel::Normal,
                         })),
                         transient: true,
-                    })))?;
+                    }))?;
                 }
                 let action = match mutated {
                     Some(event) => InterceptAction::Pass(Some(Box::new(event))),
                     None => InterceptAction::Pass(None),
                 };
-                writer.write_frame(&Frame::Message(Message::InterceptReply(InterceptReply {
+                writer.write_message(&HarnessInputMessage::InterceptReply(InterceptReply {
                     action,
-                })))?;
+                }))?;
                 writer.flush()?;
             }
-            Frame::Message(Message::Configure(msg)) => {
+            HarnessOutputMessage::Configure(msg) => {
                 match tau_extension::parse_config::<ExtConfig>(&msg.config) {
                     Ok(config) => restart_mode = config.restart_mode.unwrap_or_default(),
                     Err(message) => {
-                        writer.write_frame(&Frame::Message(Message::ConfigError(ConfigError {
+                        writer.write_message(&HarnessInputMessage::ConfigError(ConfigError {
                             message,
-                        })))?;
+                        }))?;
                         writer.flush()?;
                     }
                 }
             }
-            Frame::Event(Event::ToolStarted(invoke))
-                if invoke.tool_name == RESTART_TEST_DUMMY_TOOL_NAME =>
-            {
-                if let Some(id) = log_id {
-                    writer
-                        .write_frame(&Frame::Message(Message::Ack(tau_proto::Ack { up_to: id })))?;
-                }
-                match restart_mode {
-                    RestartMode::Random if rng.gen_bool(0.5) => {
-                        writer.flush()?;
-                        return Ok(());
+            HarnessOutputMessage::Deliver(delivery) => {
+                let (event, log_id, _) = delivery.into_parts();
+                if let Event::ToolStarted(invoke) = event
+                    && invoke.tool_name == RESTART_TEST_DUMMY_TOOL_NAME
+                {
+                    if let Some(id) = log_id {
+                        writer.write_message(&HarnessInputMessage::Ack(tau_proto::Ack {
+                            up_to: id,
+                        }))?;
                     }
-                    RestartMode::Random | RestartMode::Error => {
-                        writer.write_frame(&restart_error(invoke))?;
-                        writer.flush()?;
-                    }
-                    RestartMode::Success => {
-                        writer.write_frame(&restart_success(invoke))?;
-                        writer.flush()?;
-                    }
-                    RestartMode::Exit => {
-                        writer.flush()?;
-                        return Ok(());
+                    match restart_mode {
+                        RestartMode::Random if rng.gen_bool(0.5) => {
+                            writer.flush()?;
+                            return Ok(());
+                        }
+                        RestartMode::Random | RestartMode::Error => {
+                            writer.write_message(&restart_error(invoke))?;
+                            writer.flush()?;
+                        }
+                        RestartMode::Success => {
+                            writer.write_message(&restart_success(invoke))?;
+                            writer.flush()?;
+                        }
+                        RestartMode::Exit => {
+                            writer.flush()?;
+                            return Ok(());
+                        }
                     }
                 }
             }
-            Frame::Message(Message::Disconnect(_)) => break,
+            HarnessOutputMessage::Disconnect(_) => break,
             _ => {}
         }
     }
@@ -220,8 +224,8 @@ where
     Ok(())
 }
 
-fn restart_success(invoke: tau_proto::ToolStarted) -> Frame {
-    Frame::Event(Event::ToolResult(ToolResult {
+fn restart_success(invoke: tau_proto::ToolStarted) -> HarnessInputMessage {
+    HarnessInputMessage::emit(Event::ToolResult(ToolResult {
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,
@@ -232,8 +236,8 @@ fn restart_success(invoke: tau_proto::ToolStarted) -> Frame {
     }))
 }
 
-fn restart_error(invoke: tau_proto::ToolStarted) -> Frame {
-    Frame::Event(Event::ToolError(ToolError {
+fn restart_error(invoke: tau_proto::ToolStarted) -> HarnessInputMessage {
+    HarnessInputMessage::emit(Event::ToolError(ToolError {
         call_id: invoke.call_id,
         tool_name: invoke.tool_name,
         tool_type: tau_proto::ToolType::Function,

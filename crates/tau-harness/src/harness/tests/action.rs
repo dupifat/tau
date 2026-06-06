@@ -22,7 +22,7 @@ fn action_schema(action_id: &str) -> tau_actions::ActionSchema {
 fn publish_action_schema(h: &mut Harness, source_id: &str, action_id: &str) {
     h.handle_extension_event(
         source_id,
-        Frame::Event(Event::ActionSchemaPublished(
+        TestProtocolItem::Event(Event::ActionSchemaPublished(
             tau_proto::ActionSchemaPublished {
                 extension_name: "spoofed".into(),
                 instance_id: 99.into(),
@@ -162,14 +162,14 @@ fn action_invoke_routes_to_owner_and_result_returns_only_to_requester() {
 
     h.handle_extension_event(
         "spoof-ext",
-        Frame::Event(Event::ActionResult(action_result("action-1", "spoofed"))),
+        TestProtocolItem::Event(Event::ActionResult(action_result("action-1", "spoofed"))),
     )
     .expect("spoofed result should be handled and discarded");
     assert!(ui.lock().expect("ui sink").is_empty());
 
     h.handle_extension_event(
         "email-ext",
-        Frame::Event(Event::ActionResult(action_result("action-1", "ok"))),
+        TestProtocolItem::Event(Event::ActionResult(action_result("action-1", "ok"))),
     )
     .expect("result should be handled");
 
@@ -231,7 +231,7 @@ fn duplicate_action_invocation_id_cannot_steal_result_routing() {
 
     h.handle_extension_event(
         "email-ext",
-        Frame::Event(Event::ActionResult(action_result("shared-action", "ok"))),
+        TestProtocolItem::Event(Event::ActionResult(action_result("shared-action", "ok"))),
     )
     .expect("original result should be handled");
 

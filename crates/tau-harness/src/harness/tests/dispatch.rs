@@ -29,7 +29,7 @@ fn publish_pending_agent_context_ready(h: &mut Harness, agent_id: &str) {
     };
     h.handle_extension_event(
         source_id.as_str(),
-        Frame::Event(Event::ExtensionContextReady(
+        TestProtocolItem::Event(Event::ExtensionContextReady(
             tau_proto::ExtensionContextReady {
                 session_id: h.current_session_id.clone(),
                 agent_id,
@@ -151,17 +151,17 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
         .to_string();
     h.handle_client_event(
         &ui_conn,
-        Frame::Message(Message::Subscribe(Subscribe {
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
             selectors: vec![EventSelector::Prefix("agent.".to_owned())],
         })),
     )
     .expect("subscribe");
 
-    let mut reader = FrameReader::new(BufReader::new(client_end));
+    let mut reader = TestOutputReader::new(BufReader::new(client_end));
     let mut queued = Vec::new();
     while let Ok(Some(frame)) = reader.read_frame() {
-        let (_log_id, inner) = frame.peel_log();
-        if let Frame::Event(Event::AgentPromptQueued(event)) = inner {
+        let (_log_id, inner) = frame.into_event_frame();
+        if let TestProtocolItem::Event(Event::AgentPromptQueued(event)) = inner {
             queued.push(event);
         }
     }
@@ -1981,7 +1981,7 @@ fn provider_owner_validation_rejects_tool_event_message_emit() {
 
     h.handle_extension_event(
         "conn-wrong",
-        Frame::Message(Message::Emit(tau_proto::Emit {
+        TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
             event: Box::new(Event::ToolCancelled(tau_proto::ToolCancelled {
                 call_id: "emit-cancelled-call".into(),
                 tool_name: ToolName::new("owned_tool"),
@@ -2009,7 +2009,7 @@ fn provider_owner_validation_rejects_provider_event_message_emit() {
 
     h.handle_extension_event(
         "conn-wrong",
-        Frame::Message(Message::Emit(tau_proto::Emit {
+        TestProtocolItem::Message(TestMessage::Emit(tau_proto::Emit {
             event: Box::new(Event::ProviderResponseFinished(ProviderResponseFinished {
                 agent_prompt_id: "spoofed-prompt".into(),
                 agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -2307,7 +2307,7 @@ fn cross_session_submission_is_rejected() {
 fn provider_model_prompt_routes_directly_to_provider_owner() {
     // Provider-published models should not wake every provider subscriber.
     // The committed prompt remains visible to observers, while the owner gets a
-    // direct LogEvent even without subscribing to agent.prompt_created.
+    // direct delivery even without subscribing to agent.prompt_created.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -2329,13 +2329,13 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
 
     h.handle_extension_message(
         "provider-owner",
-        Message::Ready(tau_proto::Ready { message: None }),
+        TestMessage::Ready(tau_proto::Ready { message: None }),
     )
     .expect("provider ready");
     let model_id: tau_proto::ModelId = "openai/gpt-5.5".parse().expect("model id");
     h.handle_extension_event(
         "provider-owner",
-        Frame::Event(Event::ProviderModelsUpdated(
+        TestProtocolItem::Event(Event::ProviderModelsUpdated(
             tau_proto::ProviderModelsUpdated {
                 models: vec![tau_proto::ProviderModelInfo {
                     id: model_id.clone(),
@@ -2376,10 +2376,9 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
     let spid = h.send_prompt_to_agent("s1");
 
     let frame_is_prompt = |routed: &RoutedFrame, spid: &AgentPromptId| {
-        let (_, inner) = routed.frame.clone().peel_log();
         matches!(
-            inner,
-            Frame::Event(Event::AgentPromptCreated(prompt))
+            peel_inner_event(&routed.frame),
+            Some(Event::AgentPromptCreated(prompt))
                 if prompt.agent_prompt_id.as_str() == spid.as_str()
         )
     };
@@ -2430,13 +2429,13 @@ fn provider_execution_events_must_come_from_prompt_owner() {
 
     h.handle_extension_message(
         "provider-owner",
-        Message::Ready(tau_proto::Ready { message: None }),
+        TestMessage::Ready(tau_proto::Ready { message: None }),
     )
     .expect("provider ready");
     let model_id: tau_proto::ModelId = "openai/gpt-5.5".parse().expect("model id");
     h.handle_extension_event(
         "provider-owner",
-        Frame::Event(Event::ProviderModelsUpdated(
+        TestProtocolItem::Event(Event::ProviderModelsUpdated(
             tau_proto::ProviderModelsUpdated {
                 models: vec![tau_proto::ProviderModelInfo {
                     id: model_id.clone(),
@@ -2483,7 +2482,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
 
     h.handle_extension_event(
         "provider-other",
-        Frame::Event(Event::ProviderResponseUpdated(ProviderResponseUpdated {
+        TestProtocolItem::Event(Event::ProviderResponseUpdated(ProviderResponseUpdated {
             agent_prompt_id: spid.clone(),
             items: Vec::new(),
             compaction_original_input_tokens: None,
@@ -2494,7 +2493,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
     .expect("forged stream from provider");
     h.handle_extension_event(
         "tool-impersonator",
-        Frame::Event(Event::ProviderResponseUpdated(ProviderResponseUpdated {
+        TestProtocolItem::Event(Event::ProviderResponseUpdated(ProviderResponseUpdated {
             agent_prompt_id: spid.clone(),
             items: Vec::new(),
             compaction_original_input_tokens: None,
@@ -2505,7 +2504,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
     .expect("forged stream from tool");
     h.handle_extension_event(
         "provider-other",
-        Frame::Event(Event::ProviderResponseFinished(provider_text_response(
+        TestProtocolItem::Event(Event::ProviderResponseFinished(provider_text_response(
             &spid,
             durable_agent_id_for_conversation(&h, &test_user_agent(&h)),
             "spoofed final",
@@ -2537,7 +2536,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
 
     h.handle_extension_event(
         "provider-owner",
-        Frame::Event(Event::ProviderResponseUpdated(ProviderResponseUpdated {
+        TestProtocolItem::Event(Event::ProviderResponseUpdated(ProviderResponseUpdated {
             agent_prompt_id: spid.clone(),
             items: Vec::new(),
             compaction_original_input_tokens: None,
@@ -2548,7 +2547,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
     .expect("owner stream");
     h.handle_extension_event(
         "provider-owner",
-        Frame::Event(Event::ProviderResponseFinished(provider_text_response(
+        TestProtocolItem::Event(Event::ProviderResponseFinished(provider_text_response(
             &spid,
             durable_agent_id_for_conversation(&h, &test_user_agent(&h)),
             "real final",
@@ -4380,7 +4379,7 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
     // actually dispatches (rather than queuing).
     h.handle_extension_event(
         &shell_conn,
-        Frame::Event(Event::ExtensionContextReady(
+        TestProtocolItem::Event(Event::ExtensionContextReady(
             tau_proto::ExtensionContextReady {
                 session_id: "s2".into(),
                 agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
@@ -5069,10 +5068,8 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
     let events = delegate_events.lock().expect("delegate events");
     let result = events
         .iter()
-        .find_map(|routed| match &routed.frame {
-            Frame::Event(Event::StartAgentResult(result)) if result.query_id == "q1" => {
-                Some(result)
-            }
+        .find_map(|routed| match peel_inner_event(&routed.frame) {
+            Some(Event::StartAgentResult(result)) if result.query_id == "q1" => Some(result),
             _ => None,
         })
         .expect("query result routed");
@@ -5273,7 +5270,12 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
             .lock()
             .expect("delegate events")
             .iter()
-            .all(|routed| !matches!(routed.frame, Frame::Event(Event::StartAgentResult(_)))),
+            .all(|routed| {
+                !matches!(
+                    peel_inner_event(&routed.frame),
+                    Some(Event::StartAgentResult(_))
+                )
+            }),
         "start result must wait until the message turn completes"
     );
     let message_spid = h
@@ -5319,10 +5321,8 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
     let events = delegate_events.lock().expect("delegate events");
     let result = events
         .iter()
-        .find_map(|routed| match &routed.frame {
-            Frame::Event(Event::StartAgentResult(result)) if result.query_id == "q-message" => {
-                Some(result)
-            }
+        .find_map(|routed| match peel_inner_event(&routed.frame) {
+            Some(Event::StartAgentResult(result)) if result.query_id == "q-message" => Some(result),
             _ => None,
         })
         .expect("query result routed");
@@ -7619,7 +7619,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
     // fresh progress event should show 0 in flight, 1 total.
     h.handle_extension_event(
         "conn-websearch",
-        Frame::Event(Event::ToolResult(ToolResult {
+        TestProtocolItem::Event(Event::ToolResult(ToolResult {
             call_id: "websearch-call".into(),
             tool_name: tau_proto::ToolName::new("websearch"),
             tool_type: tau_proto::ToolType::Function,
@@ -8056,8 +8056,8 @@ fn start_agent_request_error(
         .lock()
         .expect("frames")
         .iter()
-        .find_map(|routed| match &routed.frame {
-            Frame::Event(Event::StartAgentResult(result)) if result.query_id == query_id => {
+        .find_map(|routed| match peel_inner_event(&routed.frame) {
+            Some(Event::StartAgentResult(result)) if result.query_id == query_id => {
                 result.error.clone()
             }
             _ => None,
@@ -8381,7 +8381,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
     // back as a ToolResult — simulate that here.
     h.handle_extension_event(
         "conn-delegate",
-        Frame::Event(Event::ToolResult(ToolResult {
+        TestProtocolItem::Event(Event::ToolResult(ToolResult {
             call_id: "nested-call".into(),
             tool_name: tau_proto::ToolName::new("delegate"),
             tool_type: tau_proto::ToolType::Function,
@@ -8735,7 +8735,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
 
     h.handle_extension_event(
         "conn-delegate",
-        Frame::Event(Event::ToolResult(ToolResult {
+        TestProtocolItem::Event(Event::ToolResult(ToolResult {
             call_id: "outer-call".into(),
             tool_name: tau_proto::ToolName::new("delegate"),
             tool_type: tau_proto::ToolType::Function,
@@ -9306,7 +9306,7 @@ fn inbound_agent_message_events_are_ignored() {
         .expect("extension event");
     h.handle_extension_message(
         "extension",
-        Message::Emit(tau_proto::Emit {
+        TestMessage::Emit(tau_proto::Emit {
             event: Box::new(forged),
             transient: false,
         }),

@@ -9,12 +9,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tau_proto::{
-    AgentPromptId, ContentPart, ContextItem, ContextRole, Event, Frame, FrameWriter,
-    InProgressOutputItem, ModelId, ModelName, OpaqueProviderItem, ProviderBackend,
-    ProviderBackendKind, ProviderBackendTransport, ProviderModelInfo, ProviderName,
-    ProviderResponseFinished, ProviderResponseItem, ProviderResponseUpdated, ProviderStopReason,
-    ProviderTokenUsage, ReasoningTextItem, ReasoningTextKind, ThinkingSummary, ToolCallItem,
-    ToolChoice, ToolDefinition, ToolResponseHeader, ToolResultStatus, ToolType,
+    AgentPromptId, ContentPart, ContextItem, ContextRole, Event, HarnessInputMessage,
+    InProgressOutputItem, ModelId, ModelName, OpaqueProviderItem, PeerOutputWriter,
+    ProviderBackend, ProviderBackendKind, ProviderBackendTransport, ProviderModelInfo,
+    ProviderName, ProviderResponseFinished, ProviderResponseItem, ProviderResponseUpdated,
+    ProviderStopReason, ProviderTokenUsage, ReasoningTextItem, ReasoningTextKind, ThinkingSummary,
+    ToolCallItem, ToolChoice, ToolDefinition, ToolResponseHeader, ToolResultStatus, ToolType,
 };
 
 const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
@@ -147,7 +147,7 @@ fn run_prompt<W: Write>(
     prompt: &tau_proto::AgentPromptCreated,
     mut provider: ResolvedProvider,
     model: ChatCompletionsModel,
-    writer: &mut FrameWriter<W>,
+    writer: &mut PeerOutputWriter<W>,
 ) -> ProviderResponseFinished {
     if let Some(model_compat) = model.compat {
         provider.compat = model_compat;
@@ -156,15 +156,15 @@ fn run_prompt<W: Write>(
     loop {
         let result = {
             let mut on_update = |state: &StreamState| {
-                let _ = writer.write_frame(&Frame::Event(Event::ProviderResponseUpdated(
-                    ProviderResponseUpdated {
+                let _ = writer.write_message(&HarnessInputMessage::emit(
+                    Event::ProviderResponseUpdated(ProviderResponseUpdated {
                         agent_prompt_id: agent_prompt_id.clone(),
                         items: state.response_items(),
                         compaction_original_input_tokens: None,
                         compaction_compacted_input_tokens: None,
                         originator: prompt.originator.clone(),
-                    },
-                )));
+                    }),
+                ));
                 let _ = writer.flush();
             };
             chat_completions_stream(&provider, &model, prompt, &mut on_update)
@@ -189,12 +189,12 @@ fn emit_empty_response_retry_update<W: Write>(
     agent_prompt_id: &AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
     retry: usize,
-    writer: &mut FrameWriter<W>,
+    writer: &mut PeerOutputWriter<W>,
 ) {
     let text = format!(
         "provider returned an empty response; retrying ({retry}/{EMPTY_RESPONSE_MAX_RETRIES})"
     );
-    let _ = writer.write_frame(&Frame::Event(Event::ProviderResponseUpdated(
+    let _ = writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
         ProviderResponseUpdated {
             agent_prompt_id: agent_prompt_id.clone(),
             items: vec![ProviderResponseItem::InProgress(
@@ -215,7 +215,7 @@ pub fn run_prompt_for_provider<W: Write>(
     prompt: &tau_proto::AgentPromptCreated,
     provider: &ChatCompletionsProvider,
     model: &ChatCompletionsModel,
-    writer: &mut FrameWriter<W>,
+    writer: &mut PeerOutputWriter<W>,
 ) -> ProviderResponseFinished {
     run_prompt(
         agent_prompt_id,

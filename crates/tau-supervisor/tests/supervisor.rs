@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use tau_core::ToolRegistry;
 use tau_proto::{
-    CborValue, ClientKind, Disconnect, Event, Frame, Hello, Message, PROTOCOL_VERSION, Ready,
-    Subscribe, ToolRegister, ToolStarted,
+    CborValue, ClientKind, Disconnect, Event, HarnessInputMessage, HarnessOutputMessage, Hello,
+    PROTOCOL_VERSION, Ready, Subscribe, ToolRegister, ToolStarted,
 };
 use tau_supervisor::{ExtensionCommand, SupervisedChild};
 
@@ -12,6 +12,65 @@ fn test_child_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_tau-supervisor-test-child"))
 }
 
+fn expect_child_startup(child: &mut SupervisedChild) -> ToolRegister {
+    let hello = child
+        .recv_timeout(Duration::from_secs(1))
+        .expect("hello should decode")
+        .expect("hello should arrive");
+    assert_eq!(
+        hello,
+        HarnessInputMessage::Hello(Hello {
+            protocol_version: PROTOCOL_VERSION,
+            client_name: "test-child".into(),
+            client_kind: ClientKind::Tool,
+        })
+    );
+
+    let subscribe = child
+        .recv_timeout(Duration::from_secs(1))
+        .expect("subscribe should decode")
+        .expect("subscribe should arrive");
+    assert_eq!(
+        subscribe,
+        HarnessInputMessage::Subscribe(Subscribe {
+            selectors: vec![tau_proto::EventSelector::Exact(
+                tau_proto::EventName::TOOL_STARTED,
+            )],
+        })
+    );
+
+    let register = child
+        .recv_timeout(Duration::from_secs(1))
+        .expect("register should decode")
+        .expect("register should arrive");
+    let HarnessInputMessage::Emit(emit) = register else {
+        panic!("expected tool register emit");
+    };
+    let Event::ToolRegister(register) = *emit.event else {
+        panic!("expected tool register event");
+    };
+
+    let ready = child
+        .recv_timeout(Duration::from_secs(1))
+        .expect("ready should decode")
+        .expect("ready should arrive");
+    assert_eq!(
+        ready,
+        HarnessInputMessage::Ready(Ready {
+            message: Some("ready".to_owned()),
+        })
+    );
+
+    register
+}
+
+fn disconnect_child(child: &mut SupervisedChild, reason: &str) {
+    child
+        .send(&HarnessOutputMessage::Disconnect(Disconnect {
+            reason: Some(reason.to_owned()),
+        }))
+        .expect("disconnect should be sent");
+}
 #[test]
 fn supervised_child_exchanges_protocol_events_over_stdio() {
     let command = ExtensionCommand {
@@ -31,66 +90,10 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
         })
     );
 
-    let hello = child
-        .recv_timeout(Duration::from_secs(1))
-        .expect("hello should decode")
-        .expect("hello should arrive");
-    assert_eq!(
-        hello,
-        Frame::Message(Message::Hello(Hello {
-            protocol_version: PROTOCOL_VERSION,
-            client_name: "test-child".into(),
-            client_kind: ClientKind::Tool,
-        }))
-    );
-
-    child
-        .send(&Frame::Message(Message::Hello(Hello {
-            protocol_version: PROTOCOL_VERSION,
-            client_name: "parent".into(),
-            client_kind: ClientKind::Core,
-        })))
-        .expect("hello should be sent");
-
-    let subscribe = child
-        .recv_timeout(Duration::from_secs(1))
-        .expect("subscribe should decode")
-        .expect("subscribe should arrive");
-    assert_eq!(
-        subscribe,
-        Frame::Message(Message::Subscribe(Subscribe {
-            selectors: vec![tau_proto::EventSelector::Exact(
-                tau_proto::EventName::TOOL_STARTED,
-            )],
-        }))
-    );
-
-    let ready = child
-        .recv_timeout(Duration::from_secs(1))
-        .expect("ready should decode")
-        .expect("ready should arrive");
-    assert_eq!(
-        ready,
-        Frame::Message(Message::Ready(Ready {
-            message: Some("ready".to_owned()),
-        }))
-    );
-    assert_eq!(
-        child.ready_event(42.into(), Some(child.pid())),
-        Event::ExtensionReady(tau_proto::ExtensionReady {
-            instance_id: 42.into(),
-            extension_name: "test-child".into(),
-            pid: Some(child.pid()),
-        })
-    );
-
-    let register = child
-        .recv_timeout(Duration::from_secs(1))
-        .expect("register should decode")
-        .expect("register should arrive");
+    let register = expect_child_startup(&mut child);
     assert_eq!(
         register,
-        Frame::Event(Event::ToolRegister(ToolRegister {
+        ToolRegister {
             tool: tau_proto::ToolSpec {
                 name: tau_proto::ToolName::new("echo"),
                 model_visible_name: None,
@@ -103,17 +106,27 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
             },
             tool_group: None,
             prompt_fragment: None,
-        }))
+        }
+    );
+    assert_eq!(
+        child.ready_event(42.into(), Some(child.pid())),
+        Event::ExtensionReady(tau_proto::ExtensionReady {
+            instance_id: 42.into(),
+            extension_name: "test-child".into(),
+            pid: Some(child.pid()),
+        })
     );
 
     child
-        .send(&Frame::Event(Event::ToolStarted(ToolStarted {
-            call_id: "call-1".into(),
-            tool_name: tau_proto::ToolName::new("echo"),
-            arguments: CborValue::Text("hello".to_owned()),
-            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
-            originator: tau_proto::PromptOriginator::User,
-        })))
+        .send(&HarnessOutputMessage::deliver(Event::ToolStarted(
+            ToolStarted {
+                call_id: "call-1".into(),
+                tool_name: tau_proto::ToolName::new("echo"),
+                arguments: CborValue::Text("hello".to_owned()),
+                agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+                originator: tau_proto::PromptOriginator::User,
+            },
+        )))
         .expect("tool should be sent");
     let result = child
         .recv_timeout(Duration::from_secs(1))
@@ -121,7 +134,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
         .expect("tool result should arrive");
     assert_eq!(
         result,
-        Frame::Event(Event::ToolResult(tau_proto::ToolResult {
+        HarnessInputMessage::emit(Event::ToolResult(tau_proto::ToolResult {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new("echo"),
             tool_type: tau_proto::ToolType::Function,
@@ -132,11 +145,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
         }))
     );
 
-    child
-        .send(&Frame::Message(Message::Disconnect(Disconnect {
-            reason: Some("done".to_owned()),
-        })))
-        .expect("disconnect should be sent");
+    disconnect_child(&mut child, "done");
     let exit = child
         .wait_for_exit(Duration::from_secs(2))
         .expect("child should exit");
@@ -164,40 +173,10 @@ fn disconnect_cleanup_removes_registered_tools_after_child_exit() {
     let connection_id = "conn-child";
     let mut registry = ToolRegistry::new();
 
-    let _hello = child
-        .recv_timeout(Duration::from_secs(1))
-        .expect("hello should decode")
-        .expect("hello should arrive");
-    child
-        .send(&Frame::Message(Message::Hello(Hello {
-            protocol_version: PROTOCOL_VERSION,
-            client_name: "parent".into(),
-            client_kind: ClientKind::Core,
-        })))
-        .expect("hello should be sent");
-    let _subscribe = child
-        .recv_timeout(Duration::from_secs(1))
-        .expect("subscribe should decode")
-        .expect("subscribe should arrive");
-    let _ready = child
-        .recv_timeout(Duration::from_secs(1))
-        .expect("ready should decode")
-        .expect("ready should arrive");
-    let register = child
-        .recv_timeout(Duration::from_secs(1))
-        .expect("register should decode")
-        .expect("register should arrive");
-
-    let Frame::Event(Event::ToolRegister(register)) = register else {
-        panic!("expected tool register event");
-    };
+    let register = expect_child_startup(&mut child);
     registry.register(connection_id, register.tool);
 
-    child
-        .send(&Frame::Message(Message::Disconnect(Disconnect {
-            reason: Some("shutdown".to_owned()),
-        })))
-        .expect("disconnect should be sent");
+    disconnect_child(&mut child, "shutdown");
     let exit = child
         .wait_for_exit(Duration::from_secs(2))
         .expect("child should exit");
@@ -231,40 +210,11 @@ fn restarted_child_can_reregister_after_disconnect_cleanup() {
 
     for connection_id in ["conn-child-1", "conn-child-2"] {
         let mut child = SupervisedChild::spawn(command.clone()).expect("child should spawn");
-        let _hello = child
-            .recv_timeout(Duration::from_secs(1))
-            .expect("hello should decode")
-            .expect("hello should arrive");
-        child
-            .send(&Frame::Message(Message::Hello(Hello {
-                protocol_version: PROTOCOL_VERSION,
-                client_name: "parent".into(),
-                client_kind: ClientKind::Core,
-            })))
-            .expect("hello should be sent");
-        let _subscribe = child
-            .recv_timeout(Duration::from_secs(1))
-            .expect("subscribe should decode")
-            .expect("subscribe should arrive");
-        let _ready = child
-            .recv_timeout(Duration::from_secs(1))
-            .expect("ready should decode")
-            .expect("ready should arrive");
-        let register = child
-            .recv_timeout(Duration::from_secs(1))
-            .expect("register should decode")
-            .expect("register should arrive");
-        let Frame::Event(Event::ToolRegister(register)) = register else {
-            panic!("expected tool register event");
-        };
+        let register = expect_child_startup(&mut child);
         registry.register(connection_id, register.tool);
         assert_eq!(registry.providers_for("echo").len(), 1);
 
-        child
-            .send(&Frame::Message(Message::Disconnect(Disconnect {
-                reason: Some("restart".to_owned()),
-            })))
-            .expect("disconnect should be sent");
+        disconnect_child(&mut child, "restart");
         let exit = child
             .wait_for_exit(Duration::from_secs(2))
             .expect("child should exit");

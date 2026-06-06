@@ -3,7 +3,7 @@
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
-use tau_proto::Event;
+use tau_proto::{Event, HarnessInputMessage};
 
 use crate::CliError;
 use crate::ui_prompt::{DEFAULT_AGENT_ROLE, create_user_agent_prompt};
@@ -23,7 +23,7 @@ pub(crate) fn run_send(session_id: &str, line: &str) -> Result<(), CliError> {
     )?;
 
     if let Some(event) = event_for_line(session_id, text) {
-        crate::ui_client::send_frame(&mut writer, &tau_proto::Frame::Event(event))?;
+        crate::ui_client::send_message(&mut writer, &HarnessInputMessage::emit(event))?;
     }
 
     Ok(())

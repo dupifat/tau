@@ -1,29 +1,38 @@
 # Event interceptors
 
-Event interceptors let a component handle an event emission before the event is appended to the harness event log and before normal subscribers see it.
+Event interceptors let a peer handle an event emission before the event is
+appended to the harness event log and before normal subscribers see it.
 
-This is a pre-log emission pipeline. While an event is intercepted, it is considered not emitted yet.
+This is a pre-log emission pipeline. While an event is intercepted, it is
+considered not emitted yet.
 
 ## Events vs messages
 
 There are two protocol layers:
 
-- **Events** are bus facts. They have dotted `category.call` names, are appended to the event log, and are broadcast to subscribers.
-- **Messages** are point-to-point control-plane traffic. They have flat single-component `snake_case` names and are sent between the harness and one peer.
+- **Events** are bus facts. They have dotted `category.call` names, are appended
+  to the event log when committed, and are delivered to subscribers inside
+  `deliver` messages.
+- **Messages** are point-to-point protocol traffic. They have flat
+  single-component `snake_case` names and are sent between the harness and one
+  peer.
 
 Interception is controlled with messages, but it acts on event emissions.
 
 The relevant messages are:
 
-- `intercept` — component → harness registration request
-- `emit` — component → harness request to emit or redeliver an event
-- `intercepted` — harness → component delivery of an intercepted, not-yet-emitted event
+- `intercept` — peer → harness registration request
+- `emit` — peer → harness request to publish an event
+- `intercept_request` — harness → interceptor delivery of an intercepted,
+  not-yet-emitted event
+- `intercept_reply` — interceptor → harness decision for that request
 
-The event inside `emit` or `intercepted` is the fact being processed. The message itself is not the emitted fact.
+The event inside `emit` or `intercept_request` is the fact being processed. The
+message itself is not the emitted fact.
 
 ## Registering an interceptor
 
-A component registers interception interest with the `intercept` message.
+A peer registers interception interest with the `intercept` message.
 
 The message contains:
 
@@ -34,13 +43,18 @@ The message contains:
 
 Lower numeric priority values run first.
 
-Registrations are owned by the connection that sent them. When that connection disconnects or crashes, the harness removes its interceptor registrations. If the component reconnects, it must register again during handshake.
+Registrations are owned by the connection that sent them. When that connection
+disconnects or crashes, the harness removes its interceptor registrations. If
+the peer reconnects, it must register again during handshake.
 
 ## Matching
 
-When the harness is about to emit an event, it checks the interceptor registry.
+When the harness is about to commit an event, it checks the interceptor
+registry.
 
-Exact selectors are preferred over prefix selectors. This preference is stronger than priority. For example, an exact interceptor at priority `100` runs before a prefix interceptor at priority `-100` for the same event.
+Exact selectors are preferred over prefix selectors. This preference is stronger
+than priority. For example, an exact interceptor at priority `100` runs before a
+prefix interceptor at priority `-100` for the same event.
 
 Within the selected exact or prefix group, handlers are ordered by:
 
@@ -50,74 +64,57 @@ Within the selected exact or prefix group, handlers are ordered by:
 
 Component names are expected to be unique. Runtime enforcement is still TODO.
 
-## Intercepted delivery
+## Intercept request delivery
 
-If a matching interceptor exists, the harness does not append the event to the event log and does not broadcast it to subscribers.
+If a matching interceptor exists, the harness does not append the event to the
+event log and does not deliver it to subscribers yet.
 
-Instead, the harness sends the selected interceptor a directed `intercepted` message:
+Instead, the harness sends the selected interceptor a directed
+`intercept_request` message:
 
 ```text
-intercepted {
+intercept_request {
   event,
-  transient,
-  interception
+  transient
 }
 ```
 
 Fields:
 
 - `event`: the not-yet-emitted event
-- `transient`: the event-log persistence flag that would have applied to the event
-- `interception`: the current interception priority
+- `transient`: the persistence flag that will apply when the event commits
 
-This delivery bypasses normal subscriptions. A component receives intercepted events because it registered as an interceptor, not because it subscribed to `intercepted`. Messages are point-to-point and are not subscribable.
+This delivery bypasses normal subscriptions. A peer receives intercept requests
+because it registered as an interceptor, not because it subscribed to
+`intercept_request`. Messages are point-to-point and are not subscribable.
 
 ## Interceptor outcomes
 
-An interceptor has three normal choices.
+An interceptor must reply exactly once with `intercept_reply`.
 
 ### Drop
 
-The interceptor can do nothing.
+The interceptor can reply with `drop`.
 
-The event is consumed and never reaches later interceptors, the event log, or normal subscribers.
-
-This is expected behavior, not an error.
+The event is consumed and never reaches later interceptors, the event log, or
+normal subscribers. The harness may override `drop` for must-pass events (for
+example important harness notices) and publish the original event instead.
 
 ### Pass unchanged
 
-The interceptor can send `emit` back to the harness with the same event and same metadata.
+The interceptor can reply with `pass` and no replacement event.
 
-That resumes the interception chain after the current interceptor.
+The harness resumes the interception chain after the current interceptor, still
+using the original event and transient metadata.
 
 ### Pass modified
 
-The interceptor can send `emit` back with a modified event and/or modified metadata.
+The interceptor can reply with `pass` and a replacement event.
 
-Later interceptors and final subscribers see the modified event.
-
-## Redelivery cursor
-
-`emit` includes an optional `interception` field.
-
-```text
-emit {
-  event,
-  transient,
-  interception
-}
-```
-
-The field controls where interception scanning starts.
-
-- `interception: null` starts scanning from the beginning.
-- `interception: P` resumes after the sender at priority `P`.
-
-The component id is not included in the payload. The harness knows which connection sent the redelivery message and uses that as the component part of the cursor.
-
-This prevents a component from pretending to be a different interceptor in the same priority level. It can still intentionally restart scanning by setting `interception` to `null`, or jump to another priority by setting a different priority.
-
-There is no loop guard. A component can create an interception loop by repeatedly redelivering from the beginning. This is intentional for now; redelivery is asynchronous and can happen arbitrarily later, so robust loop tracking would require extra event identity and lifecycle machinery.
+Later interceptors and final subscribers see the modified event. The replacement
+must have the same event type as the original; if it does not, the harness logs a
+warning and falls back to the original event. The original transient metadata is
+preserved.
 
 ## Same-priority chaining
 
@@ -129,21 +126,37 @@ Suppose the ordered interceptors for an event are:
 (priority 20, component gamma)
 ```
 
-Initial emission starts with no cursor, so `alpha` receives the event.
+Initial emission starts at the beginning, so `alpha` receives the first
+`intercept_request`.
 
-If `alpha` redelivers with `interception: 10`, the harness resumes after `(10, alpha)`, so `beta` receives the event.
+If `alpha` replies `pass`, the harness resumes strictly after `(10, alpha)`, so
+`beta` receives the next `intercept_request`.
 
-If `beta` redelivers with `interception: 10`, the harness resumes after `(10, beta)`, so `gamma` receives the event.
+If `beta` replies `pass`, the harness resumes after `(10, beta)`, so `gamma`
+receives the next `intercept_request`.
 
-If `alpha` redelivers with `interception: null`, scanning restarts from the beginning and `alpha` receives the event again.
+A peer cannot spoof the cursor in its reply. The harness records the pending
+interceptor and advances the chain from that connection when the reply arrives.
+Unexpected or duplicate replies are ignored.
+
+## Failure and backpressure
+
+Only one intercepted emission is in flight at a time. Publishes that arrive while
+an interceptor is pending are queued and drained after the pending interceptor
+replies (or disconnects).
+
+If the selected interceptor disconnects before replying, the harness treats that
+as `pass` unchanged so an extension cannot wedge the event pipeline by going
+away mid-reply.
 
 ## Final emission
 
-If scanning finds no remaining matching interceptor, the harness finally emits the event normally:
+If scanning finds no remaining matching interceptor, the harness finally commits
+the event normally:
 
 1. apply session persistence rules, unless `transient` is set
-2. append to the harness event log
-3. publish the event-log wrapped event to normal subscribers
+2. append to the harness runtime event log
+3. deliver the event to subscribers inside `deliver`
 
 Only this final step makes the event visible as an emitted fact.
 
@@ -151,19 +164,25 @@ Only this final step makes the event visible as an emitted fact.
 
 The `transient` flag is carried through interception.
 
-An interceptor should preserve it when passing the event along unless it intentionally wants to change whether the final event is durable.
+An interceptor can inspect it in `intercept_request`, but replies cannot change
+it. The final event commits with the original transient metadata supplied by the
+initial publish.
 
-Events that default to transient still get that default when initially emitted through the normal harness path. While intercepted, that transient value is included in `intercepted` and should be sent back in `emit` on redelivery.
+Events that default to transient still get that default when initially emitted
+through the normal harness path. While intercepted, that value is included in
+`intercept_request`.
 
 ## Debugging
 
-The harness logs interception decisions with tracing under the `tau_harness::interception` target.
+The harness logs interception decisions with tracing under the
+`tau_harness::interception` target.
 
-These logs are diagnostic only. They are not event-log entries and are not visible to normal event subscribers.
+These logs are diagnostic only. They are not event-log entries and are not
+visible to normal event subscribers.
 
 ## Example flow
 
-A component registers:
+A peer registers:
 
 ```text
 intercept {
@@ -172,34 +191,31 @@ intercept {
 }
 ```
 
-Another component requests emission:
+Another peer requests emission:
 
 ```text
 emit {
   event: ui.prompt_draft { ... },
-  transient: true,
-  interception: null
+  transient: true
 }
 ```
 
 The harness finds the interceptor and sends it:
 
 ```text
-intercepted {
+intercept_request {
   event: ui.prompt_draft { ... },
-  transient: true,
-  interception: 0
+  transient: true
 }
 ```
 
 The interceptor modifies the event and passes it on:
 
 ```text
-emit {
-  event: ui.prompt_draft { modified ... },
-  transient: true,
-  interception: 0
+intercept_reply {
+  action: pass(ui.prompt_draft { modified ... })
 }
 ```
 
-If no later interceptor matches, the modified `ui.prompt_draft` event is emitted normally.
+If no later interceptor matches, the modified `ui.prompt_draft` event is
+committed and delivered normally.

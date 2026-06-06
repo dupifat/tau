@@ -14,8 +14,8 @@ use std::{fmt, thread};
 
 use tau_core::{ToolRegistry, ToolRouteError};
 use tau_proto::{
-    DecodeError, Event, ExtensionExited, ExtensionName, ExtensionReady, ExtensionStarting, Frame,
-    FrameReader, FrameWriter, ToolName,
+    DecodeError, Event, ExtensionExited, ExtensionName, ExtensionReady, ExtensionStarting,
+    HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter, ToolName,
 };
 
 /// One configured supervised extension command.
@@ -129,10 +129,9 @@ impl std::error::Error for SupervisionError {
 pub struct SupervisedChild {
     command: ExtensionCommand,
     child: Child,
-    stdin: FrameWriter<BufWriter<ChildStdin>>,
-    stdout_frames: Receiver<Result<Frame, DecodeError>>,
+    stdin: HarnessOutputWriter<BufWriter<ChildStdin>>,
+    stdout_frames: Receiver<Result<HarnessInputMessage, DecodeError>>,
 }
-
 impl SupervisedChild {
     /// Spawns one supervised child process with piped stdin/stdout.
     pub fn spawn(command: ExtensionCommand) -> Result<Self, SupervisionError> {
@@ -151,7 +150,7 @@ impl SupervisedChild {
         Ok(Self {
             command,
             child,
-            stdin: FrameWriter::new(BufWriter::new(stdin)),
+            stdin: HarnessOutputWriter::new(BufWriter::new(stdin)),
             stdout_frames,
         })
     }
@@ -182,17 +181,20 @@ impl SupervisedChild {
         })
     }
 
-    /// Sends one protocol frame to the child over stdin.
-    pub fn send(&mut self, frame: &Frame) -> Result<(), SupervisionError> {
+    /// Sends one harness → extension protocol message to the child over stdin.
+    pub fn send(&mut self, message: &HarnessOutputMessage) -> Result<(), SupervisionError> {
         self.stdin
-            .write_frame(frame)
+            .write_message(message)
             .map_err(SupervisionError::Encode)?;
         self.stdin.flush().map_err(SupervisionError::Flush)
     }
 
-    /// Reads one protocol frame from the child, or returns `Ok(None)` on
-    /// timeout.
-    pub fn recv_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, SupervisionError> {
+    /// Reads one extension → harness protocol message from the child, or
+    /// returns `Ok(None)` on timeout.
+    pub fn recv_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<HarnessInputMessage>, SupervisionError> {
         match self.stdout_frames.recv_timeout(timeout) {
             Ok(Ok(frame)) => Ok(Some(frame)),
             Ok(Err(error)) if is_unexpected_eof(&error) => Ok(None),
@@ -270,12 +272,14 @@ impl Drop for SupervisedChild {
     }
 }
 
-fn spawn_stdout_reader(stdout: std::process::ChildStdout) -> Receiver<Result<Frame, DecodeError>> {
+fn spawn_stdout_reader(
+    stdout: std::process::ChildStdout,
+) -> Receiver<Result<HarnessInputMessage, DecodeError>> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
-        let mut reader = FrameReader::new(BufReader::new(stdout));
+        let mut reader = HarnessInputReader::new(BufReader::new(stdout));
         loop {
-            match reader.read_frame() {
+            match reader.read_message() {
                 Ok(Some(frame)) => {
                     if sender.send(Ok(frame)).is_err() {
                         return;

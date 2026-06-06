@@ -88,7 +88,7 @@ fn unregister_shell(h: &mut Harness) {
         .to_owned();
     h.handle_extension_event(
         &conn_id,
-        Frame::Event(Event::ToolUnregister(tau_proto::ToolUnregister {
+        TestProtocolItem::Event(Event::ToolUnregister(tau_proto::ToolUnregister {
             tool_name: ToolName::new("shell"),
         })),
     )
@@ -102,7 +102,7 @@ fn reregister_shell(h: &mut Harness, spec: ToolSpec) {
         .to_owned();
     h.handle_extension_event(
         &conn_id,
-        Frame::Event(Event::ToolRegister(tau_proto::ToolRegister {
+        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
             tool: spec,
             tool_group: None,
             prompt_fragment: None,
@@ -144,7 +144,7 @@ fn clear_quiet_provider_models(h: &mut Harness) {
         .to_owned();
     h.handle_extension_event(
         &provider_id,
-        Frame::Event(Event::ProviderModelsUpdated(
+        TestProtocolItem::Event(Event::ProviderModelsUpdated(
             tau_proto::ProviderModelsUpdated { models: Vec::new() },
         )),
     )
@@ -216,7 +216,7 @@ fn configure_includes_extension_state_dir_and_creates_it() {
 
     h.handle_extension_event(
         "std-email",
-        Frame::Message(Message::Hello(tau_proto::Hello {
+        TestProtocolItem::Message(TestMessage::Hello(tau_proto::Hello {
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: "tau-ext-pim".into(),
             client_kind: tau_proto::ClientKind::Tool,
@@ -228,7 +228,7 @@ fn configure_includes_extension_state_dir_and_creates_it() {
     let configure = frames
         .iter()
         .find_map(|routed| match &routed.frame {
-            Frame::Message(Message::Configure(configure)) => Some(configure),
+            HarnessOutputMessage::Configure(configure) => Some(configure),
             _ => None,
         })
         .expect("configure sent");
@@ -257,7 +257,7 @@ fn configure_includes_only_resolved_extension_secrets() {
 
     h.handle_extension_event(
         "std-email",
-        Frame::Message(Message::Hello(tau_proto::Hello {
+        TestProtocolItem::Message(TestMessage::Hello(tau_proto::Hello {
             protocol_version: tau_proto::PROTOCOL_VERSION,
             client_name: "tau-ext-pim".into(),
             client_kind: tau_proto::ClientKind::Tool,
@@ -269,7 +269,7 @@ fn configure_includes_only_resolved_extension_secrets() {
     let configure = frames
         .iter()
         .find_map(|routed| match &routed.frame {
-            Frame::Message(Message::Configure(configure)) => Some(configure),
+            HarnessOutputMessage::Configure(configure) => Some(configure),
             _ => None,
         })
         .expect("configure sent");
@@ -291,7 +291,7 @@ fn extension_config_error_is_important_and_replayed_to_late_ui() {
 
     h.handle_extension_message(
         conn_id,
-        Message::ConfigError(tau_proto::ConfigError {
+        TestMessage::ConfigError(tau_proto::ConfigError {
             message: "unknown field `enforce_ro_mode`".to_owned(),
         }),
     )
@@ -313,7 +313,7 @@ fn extension_config_error_is_important_and_replayed_to_late_ui() {
     let ui_sink = connect_test_client(&mut h, ui_conn.as_str(), tau_proto::ClientKind::Ui);
     h.handle_client_event(
         &ui_conn,
-        Frame::Message(Message::Subscribe(Subscribe {
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
             selectors: vec![EventSelector::Prefix("harness.".to_owned())],
         })),
     )
@@ -321,8 +321,8 @@ fn extension_config_error_is_important_and_replayed_to_late_ui() {
 
     let frames = ui_sink.lock().expect("ui sink");
     assert!(frames.iter().any(|routed| matches!(
-        &routed.frame,
-        Frame::Event(Event::HarnessInfo(info))
+        peel_inner_event(&routed.frame),
+        Some(Event::HarnessInfo(info))
             if info.level == tau_proto::HarnessInfoLevel::Important
                 && info.message.contains("extension config-bad-ext rejected its config")
                 && info.message.contains("unknown field `enforce_ro_mode`")
@@ -344,7 +344,7 @@ fn handshaking_tool_register_is_not_active_before_ready() {
 
     h.handle_extension_event(
         conn_id,
-        Frame::Event(Event::ToolRegister(tau_proto::ToolRegister {
+        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
             tool: staged_tool_spec("staged_tool"),
             tool_group: None,
             prompt_fragment: Some(tau_proto::PromptFragment::new(
@@ -357,7 +357,7 @@ fn handshaking_tool_register_is_not_active_before_ready() {
     .expect("stage tool");
     h.handle_extension_event(
         conn_id,
-        Frame::Event(Event::ExtPromptFragmentPublish(
+        TestProtocolItem::Event(Event::ExtPromptFragmentPublish(
             tau_proto::ExtPromptFragmentPublish {
                 fragment: tau_proto::PromptFragment::new(
                     "staged.extension.instructions",
@@ -402,7 +402,7 @@ fn staged_tool_register_activates_on_ready_and_prompts_include_it() {
 
     h.handle_extension_event(
         conn_id,
-        Frame::Event(Event::ToolRegister(tau_proto::ToolRegister {
+        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
             tool: staged_tool_spec("staged_tool"),
             tool_group: None,
             prompt_fragment: Some(tau_proto::PromptFragment::new(
@@ -415,7 +415,7 @@ fn staged_tool_register_activates_on_ready_and_prompts_include_it() {
     .expect("stage tool");
     h.handle_extension_event(
         conn_id,
-        Frame::Event(Event::ExtPromptFragmentPublish(
+        TestProtocolItem::Event(Event::ExtPromptFragmentPublish(
             tau_proto::ExtPromptFragmentPublish {
                 fragment: tau_proto::PromptFragment::new(
                     "staged.extension.instructions",
@@ -429,7 +429,7 @@ fn staged_tool_register_activates_on_ready_and_prompts_include_it() {
 
     h.handle_extension_message(
         conn_id,
-        Message::Ready(tau_proto::Ready {
+        TestMessage::Ready(tau_proto::Ready {
             message: Some("ready".to_owned()),
         }),
     )
@@ -466,7 +466,7 @@ fn tool_prompt_fragment_heading_uses_model_visible_tool_name() {
 
     h.handle_extension_event(
         conn_id,
-        Frame::Event(Event::ToolRegister(tau_proto::ToolRegister {
+        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
             tool: spec,
             tool_group: None,
             prompt_fragment: Some(tau_proto::PromptFragment::new(
@@ -479,7 +479,7 @@ fn tool_prompt_fragment_heading_uses_model_visible_tool_name() {
     .expect("stage tool");
     h.handle_extension_event(
         conn_id,
-        Frame::Event(Event::ToolRegister(tau_proto::ToolRegister {
+        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
             tool: staged_tool_spec("empty_fragment_tool"),
             tool_group: None,
             prompt_fragment: Some(tau_proto::PromptFragment::new(
@@ -492,7 +492,7 @@ fn tool_prompt_fragment_heading_uses_model_visible_tool_name() {
     .expect("stage empty prompt tool");
     h.handle_extension_message(
         conn_id,
-        Message::Ready(tau_proto::Ready {
+        TestMessage::Ready(tau_proto::Ready {
             message: Some("ready".to_owned()),
         }),
     )
@@ -539,7 +539,7 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
     let staged_sink = connect_handshaking_tool(&mut h, "conn-staged-tool");
     h.handle_extension_event(
         "conn-staged-tool",
-        Frame::Event(Event::ToolRegister(tau_proto::ToolRegister {
+        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
             tool: staged_tool_spec("staged_tool"),
             tool_group: None,
             prompt_fragment: None,
@@ -598,7 +598,7 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
 
     h.handle_extension_event(
         "conn-blocking-tool",
-        Frame::Event(test_tool_result("call-blocking", "blocking_tool")),
+        TestProtocolItem::Event(test_tool_result("call-blocking", "blocking_tool")),
     )
     .expect("blocking result");
 
@@ -608,7 +608,7 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
 
     h.handle_extension_message(
         "conn-staged-tool",
-        Message::Ready(tau_proto::Ready {
+        TestMessage::Ready(tau_proto::Ready {
             message: Some("ready".to_owned()),
         }),
     )
@@ -624,7 +624,7 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
 
     h.handle_extension_event(
         "conn-staged-tool",
-        Frame::Event(test_tool_result("call-staged", "staged_tool")),
+        TestProtocolItem::Event(test_tool_result("call-staged", "staged_tool")),
     )
     .expect("staged result");
     assert!(!h.pending_tool_providers.contains_key("call-staged"));
@@ -646,7 +646,7 @@ fn extension_that_never_sends_ready_never_exposes_staged_tool() {
 
     h.handle_extension_event(
         conn_id,
-        Frame::Event(Event::ToolRegister(tau_proto::ToolRegister {
+        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
             tool: staged_tool_spec("never_ready_tool"),
             tool_group: None,
             prompt_fragment: None,
@@ -685,7 +685,7 @@ fn provider_models_are_staged_until_ready_and_queued_prompt_waits() {
     let model_id: tau_proto::ModelId = model_name.into();
     h.handle_extension_event(
         conn_id,
-        Frame::Event(Event::ProviderModelsUpdated(
+        TestProtocolItem::Event(Event::ProviderModelsUpdated(
             tau_proto::ProviderModelsUpdated {
                 models: vec![staged_provider_model(model_name)],
             },
@@ -710,7 +710,7 @@ fn provider_models_are_staged_until_ready_and_queued_prompt_waits() {
 
     h.handle_extension_message(
         conn_id,
-        Message::Ready(tau_proto::Ready {
+        TestMessage::Ready(tau_proto::Ready {
             message: Some("ready".to_owned()),
         }),
     )
@@ -745,7 +745,7 @@ fn skill_agent_context_and_fragment_are_staged_until_ready() {
 
     h.handle_extension_event(
         conn_id,
-        Frame::Event(Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
+        TestProtocolItem::Event(Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
             name: "staged-skill".into(),
             description: "STAGED SKILL DESCRIPTION".to_owned(),
             file_path: "/tmp/staged-skill/SKILL.md".into(),
@@ -761,7 +761,7 @@ fn skill_agent_context_and_fragment_are_staged_until_ready() {
         .to_owned();
     h.handle_extension_event(
         conn_id,
-        Frame::Event(Event::ExtAgentContextPublish(
+        TestProtocolItem::Event(Event::ExtAgentContextPublish(
             tau_proto::ExtAgentContextPublish {
                 agent_id: crate::parse_agent_id(&agent_id),
                 key: "demo".into(),
@@ -774,7 +774,7 @@ fn skill_agent_context_and_fragment_are_staged_until_ready() {
     .expect("stage agent context");
     h.handle_extension_event(
         conn_id,
-        Frame::Event(Event::ExtPromptFragmentPublish(
+        TestProtocolItem::Event(Event::ExtPromptFragmentPublish(
             tau_proto::ExtPromptFragmentPublish {
                 fragment: tau_proto::PromptFragment::new(
                     "staged.context.fragment",
@@ -795,7 +795,7 @@ fn skill_agent_context_and_fragment_are_staged_until_ready() {
 
     h.handle_extension_message(
         conn_id,
-        Message::Ready(tau_proto::Ready {
+        TestMessage::Ready(tau_proto::Ready {
             message: Some("ready".to_owned()),
         }),
     )
@@ -927,7 +927,7 @@ fn agents_context_ready_staged_until_ready_and_queue_waits() {
 
     h.handle_extension_event(
         conn_id,
-        Frame::Event(Event::ExtAgentsMdAvailable(
+        TestProtocolItem::Event(Event::ExtAgentsMdAvailable(
             tau_proto::ExtAgentsMdAvailable {
                 file_path: "/repo/AGENTS.md".into(),
                 content: "# Rules\nSTAGED AGENTS CONTEXT".to_owned(),
@@ -937,7 +937,7 @@ fn agents_context_ready_staged_until_ready_and_queue_waits() {
     .expect("stage agents");
     h.handle_extension_event(
         conn_id,
-        Frame::Event(Event::ExtensionContextReady(
+        TestProtocolItem::Event(Event::ExtensionContextReady(
             tau_proto::ExtensionContextReady {
                 session_id: "s1".into(),
                 agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
@@ -969,7 +969,7 @@ fn agents_context_ready_staged_until_ready_and_queue_waits() {
 
     h.handle_extension_message(
         conn_id,
-        Message::Ready(tau_proto::Ready {
+        TestMessage::Ready(tau_proto::Ready {
             message: Some("ready".to_owned()),
         }),
     )
@@ -1004,7 +1004,7 @@ fn interceptor_registration_is_staged_until_ready() {
 
     h.handle_extension_message(
         conn_id,
-        Message::Intercept(Intercept {
+        TestMessage::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
             priority: InterceptionPriority::new(0),
         }),
@@ -1012,14 +1012,15 @@ fn interceptor_registration_is_staged_until_ready() {
     .expect("stage intercept");
     h.publish_event(None, draft_event("before ready"));
     assert!(
-        sink.lock().expect("sink").iter().all(|routed| {
-            !matches!(routed.frame, Frame::Message(Message::InterceptRequest(_)))
-        })
+        sink.lock()
+            .expect("sink")
+            .iter()
+            .all(|routed| { !matches!(routed.frame, HarnessOutputMessage::InterceptRequest(_)) })
     );
 
     h.handle_extension_message(
         conn_id,
-        Message::Ready(tau_proto::Ready {
+        TestMessage::Ready(tau_proto::Ready {
             message: Some("ready".to_owned()),
         }),
     )
@@ -1027,7 +1028,7 @@ fn interceptor_registration_is_staged_until_ready() {
     h.publish_event(None, draft_event("after ready"));
 
     assert!(sink.lock().expect("sink").iter().any(|routed| {
-        matches!(&routed.frame, Frame::Message(Message::InterceptRequest(req))
+        matches!(&routed.frame, HarnessOutputMessage::InterceptRequest(req)
             if matches!(req.event.as_ref(), Event::UiPromptDraft(draft) if draft.text == "after ready"))
     }));
 
@@ -1048,7 +1049,7 @@ fn extension_emit_and_start_agent_request_are_staged_until_ready() {
 
     h.handle_extension_message(
         conn_id,
-        Message::Emit(tau_proto::Emit {
+        TestMessage::Emit(tau_proto::Emit {
             event: Box::new(Event::ExtensionEvent(tau_proto::CustomEvent {
                 name: custom_name.clone(),
                 session_id: Some("s1".into()),
@@ -1060,7 +1061,7 @@ fn extension_emit_and_start_agent_request_are_staged_until_ready() {
     .expect("stage emit");
     h.handle_extension_event(
         conn_id,
-        Frame::Event(Event::StartAgentRequest(StartAgentRequest {
+        TestProtocolItem::Event(Event::StartAgentRequest(StartAgentRequest {
             query_id: "q-staged".to_owned(),
             instruction: "STAGED START AGENT REQUEST".to_owned(),
             role: None,
@@ -1083,7 +1084,7 @@ fn extension_emit_and_start_agent_request_are_staged_until_ready() {
 
     h.handle_extension_message(
         conn_id,
-        Message::Ready(tau_proto::Ready {
+        TestMessage::Ready(tau_proto::Ready {
             message: Some("ready".to_owned()),
         }),
     )
@@ -1124,7 +1125,7 @@ fn prompt_created_waits_for_registered_agent_context_provider() {
 
     h.handle_extension_message(
         conn_id,
-        Message::Subscribe(Subscribe {
+        TestMessage::Subscribe(Subscribe {
             selectors: vec![EventSelector::Exact(
                 tau_proto::EventName::SESSION_AGENT_LOADED,
             )],
@@ -1133,21 +1134,21 @@ fn prompt_created_waits_for_registered_agent_context_provider() {
     .expect("subscribe");
     h.handle_extension_event(
         conn_id,
-        Frame::Event(Event::ExtensionContextProviderRegister(
+        TestProtocolItem::Event(Event::ExtensionContextProviderRegister(
             tau_proto::ExtensionContextProviderRegister {},
         )),
     )
     .expect("register context provider");
     h.handle_extension_message(
         conn_id,
-        Message::Ready(tau_proto::Ready {
+        TestMessage::Ready(tau_proto::Ready {
             message: Some("ready".to_owned()),
         }),
     )
     .expect("ready");
     h.handle_extension_event(
         conn_id,
-        Frame::Event(Event::ExtPromptFragmentPublish(
+        TestProtocolItem::Event(Event::ExtPromptFragmentPublish(
             tau_proto::ExtPromptFragmentPublish {
                 fragment: tau_proto::PromptFragment::new(
                     "test.cwd",
@@ -1180,7 +1181,7 @@ fn prompt_created_waits_for_registered_agent_context_provider() {
         .to_owned();
     h.handle_extension_event(
         conn_id,
-        Frame::Event(Event::ExtAgentContextPublish(
+        TestProtocolItem::Event(Event::ExtAgentContextPublish(
             tau_proto::ExtAgentContextPublish {
                 agent_id: crate::parse_agent_id(&agent_id),
                 key: "cwd".into(),
@@ -1191,7 +1192,7 @@ fn prompt_created_waits_for_registered_agent_context_provider() {
     .expect("publish cwd");
     h.handle_extension_event(
         conn_id,
-        Frame::Event(Event::ExtensionContextReady(
+        TestProtocolItem::Event(Event::ExtensionContextReady(
             tau_proto::ExtensionContextReady {
                 session_id: "s1".into(),
                 agent_id: crate::parse_agent_id(&agent_id),
@@ -1227,7 +1228,7 @@ fn disconnect_before_ready_drops_all_staged_state() {
 
     h.handle_extension_event(
         conn_id,
-        Frame::Event(Event::ToolRegister(tau_proto::ToolRegister {
+        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
             tool: staged_tool_spec("dropped_tool"),
             tool_group: None,
             prompt_fragment: Some(tau_proto::PromptFragment::new(
@@ -1240,7 +1241,7 @@ fn disconnect_before_ready_drops_all_staged_state() {
     .expect("stage tool");
     h.handle_extension_event(
         conn_id,
-        Frame::Event(Event::ProviderModelsUpdated(
+        TestProtocolItem::Event(Event::ProviderModelsUpdated(
             tau_proto::ProviderModelsUpdated {
                 models: vec![staged_provider_model(model_name)],
             },
@@ -1249,7 +1250,7 @@ fn disconnect_before_ready_drops_all_staged_state() {
     .expect("stage models");
     h.handle_extension_event(
         conn_id,
-        Frame::Event(Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
+        TestProtocolItem::Event(Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
             name: "dropped-skill".into(),
             description: "DROPPED SKILL".to_owned(),
             file_path: "/tmp/dropped/SKILL.md".into(),
@@ -1259,7 +1260,7 @@ fn disconnect_before_ready_drops_all_staged_state() {
     .expect("stage skill");
     h.handle_extension_event(
         conn_id,
-        Frame::Event(Event::ExtAgentsMdAvailable(
+        TestProtocolItem::Event(Event::ExtAgentsMdAvailable(
             tau_proto::ExtAgentsMdAvailable {
                 file_path: "/repo/DROPPED.md".into(),
                 content: "DROPPED AGENTS".to_owned(),
@@ -1275,7 +1276,7 @@ fn disconnect_before_ready_drops_all_staged_state() {
         .to_owned();
     h.handle_extension_event(
         conn_id,
-        Frame::Event(Event::ExtAgentContextPublish(
+        TestProtocolItem::Event(Event::ExtAgentContextPublish(
             tau_proto::ExtAgentContextPublish {
                 agent_id: crate::parse_agent_id(&agent_id),
                 key: "dropped".into(),
@@ -1286,7 +1287,7 @@ fn disconnect_before_ready_drops_all_staged_state() {
     .expect("stage agent context");
     h.handle_extension_event(
         conn_id,
-        Frame::Event(Event::ExtPromptFragmentPublish(
+        TestProtocolItem::Event(Event::ExtPromptFragmentPublish(
             tau_proto::ExtPromptFragmentPublish {
                 fragment: tau_proto::PromptFragment::new(
                     "dropped.extension.fragment",
@@ -1299,7 +1300,7 @@ fn disconnect_before_ready_drops_all_staged_state() {
     .expect("stage fragment");
     h.handle_extension_message(
         conn_id,
-        Message::Intercept(Intercept {
+        TestMessage::Intercept(Intercept {
             selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
             priority: InterceptionPriority::new(0),
         }),
@@ -1307,7 +1308,7 @@ fn disconnect_before_ready_drops_all_staged_state() {
     .expect("stage intercept");
     h.handle_extension_message(
         conn_id,
-        Message::Emit(tau_proto::Emit {
+        TestMessage::Emit(tau_proto::Emit {
             event: Box::new(Event::ExtensionEvent(tau_proto::CustomEvent {
                 name: "demo.dropped".parse().expect("event name"),
                 session_id: Some("s1".into()),
@@ -1341,9 +1342,10 @@ fn disconnect_before_ready_drops_all_staged_state() {
         event.name().to_string().contains("dropped")
     }));
     assert!(
-        sink.lock().expect("sink").iter().all(|routed| {
-            !matches!(routed.frame, Frame::Message(Message::InterceptRequest(_)))
-        })
+        sink.lock()
+            .expect("sink")
+            .iter()
+            .all(|routed| { !matches!(routed.frame, HarnessOutputMessage::InterceptRequest(_)) })
     );
 
     h.shutdown().expect("shutdown");
@@ -1761,9 +1763,9 @@ fn disconnected_tool_is_removed_cleanly() {
     let _ = h.bus.send_to(
         &conn_id,
         None,
-        Frame::Message(Message::Disconnect(Disconnect {
+        HarnessOutputMessage::Disconnect(Disconnect {
             reason: Some("test".to_owned()),
-        })),
+        }),
     );
 
     // Drive event loop until the disconnect arrives.
@@ -1781,9 +1783,9 @@ fn disconnected_tool_is_removed_cleanly() {
             }
             HarnessEvent::FromConnection {
                 connection_id,
-                frame,
+                message,
             } => {
-                let _ = h.handle_extension_event(&connection_id, *frame);
+                let _ = h.handle_extension_message(&connection_id, *message);
             }
             _ => {}
         }
@@ -1857,26 +1859,28 @@ fn extension_connect_command_installs_state_before_reader_ack() {
     // the bus connection and the lifecycle entry, then emitted the starting
     // barrier.
     fn eager_hello_extension(r: UnixStream, w: UnixStream) -> Result<(), String> {
-        let mut writer = FrameWriter::new(BufWriter::new(w));
+        let mut writer = TestInputWriter::new(BufWriter::new(w));
         writer
-            .write_frame(&Frame::Message(Message::Hello(tau_proto::Hello {
-                protocol_version: tau_proto::PROTOCOL_VERSION,
-                client_name: "late-tool".into(),
-                client_kind: tau_proto::ClientKind::Tool,
-            })))
+            .write_frame(&TestProtocolItem::Message(TestMessage::Hello(
+                tau_proto::Hello {
+                    protocol_version: tau_proto::PROTOCOL_VERSION,
+                    client_name: "late-tool".into(),
+                    client_kind: tau_proto::ClientKind::Tool,
+                },
+            )))
             .map_err(|e| e.to_string())?;
         writer.flush().map_err(|e| e.to_string())?;
         writer
-            .write_frame(&Frame::Message(Message::Ready(tau_proto::Ready {
-                message: None,
-            })))
+            .write_frame(&TestProtocolItem::Message(TestMessage::Ready(
+                tau_proto::Ready { message: None },
+            )))
             .map_err(|e| e.to_string())?;
         writer.flush().map_err(|e| e.to_string())?;
 
-        let mut reader = FrameReader::new(BufReader::new(r));
+        let mut reader = TestOutputReader::new(BufReader::new(r));
         while let Some(frame) = reader.read_frame().map_err(|e| e.to_string())? {
-            let (_, frame) = frame.peel_log();
-            if matches!(frame, Frame::Message(Message::Disconnect(_))) {
+            let (_, frame) = frame.into_event_frame();
+            if matches!(frame, TestProtocolItem::Message(TestMessage::Disconnect(_))) {
                 break;
             }
         }
@@ -1943,10 +1947,10 @@ fn extension_connect_command_installs_state_before_reader_ack() {
     match event {
         HarnessEvent::FromConnection {
             connection_id,
-            frame,
+            message,
         } => {
             assert_eq!(connection_id, conn_id);
-            assert!(matches!(frame.as_ref(), Frame::Message(Message::Hello(_))));
+            assert!(matches!(message.as_ref(), HarnessInputMessage::Hello(_)));
         }
         HarnessEvent::Command(_)
         | HarnessEvent::Disconnected { .. }
@@ -2157,7 +2161,7 @@ fn resumed_session_init_does_not_reinject_agents_context() {
     };
     h.handle_extension_event(
         &tools_connection_id,
-        Frame::Event(Event::ExtensionContextReady(
+        TestProtocolItem::Event(Event::ExtensionContextReady(
             tau_proto::ExtensionContextReady {
                 session_id: "s1".into(),
                 agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
@@ -2389,7 +2393,7 @@ fn cancel_after_agent_thinking_terminalizes_tool_calls_before_dispatch() {
     let target_agent_id = durable_agent_id_for_conversation(&h, &cid);
     h.handle_client_event(
         "ui",
-        Frame::Event(Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
+        TestProtocolItem::Event(Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
             session_id: "s1".into(),
             target_agent_id: Some(target_agent_id.clone()),
             agent_prompt_id: None,
@@ -2495,7 +2499,7 @@ fn cancel_during_tools_terminalizes_inflight_calls() {
 
     h.handle_client_event(
         "ui",
-        Frame::Event(Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
+        TestProtocolItem::Event(Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
             session_id: "s1".into(),
             target_agent_id: Some(target_agent_id),
             agent_prompt_id: None,
@@ -2537,7 +2541,7 @@ fn extension_ack_advances_cursor() {
 
     h.handle_extension_event(
         &tools_id,
-        Frame::Message(Message::Ack(tau_proto::Ack {
+        TestProtocolItem::Message(TestMessage::Ack(tau_proto::Ack {
             up_to: tau_proto::EventLogSeq::new(7),
         })),
     )
@@ -2567,7 +2571,7 @@ fn duplicate_ack_is_ignored() {
     // must not bump it forward either.
     h.handle_extension_event(
         &tools_id,
-        Frame::Message(Message::Ack(tau_proto::Ack {
+        TestProtocolItem::Message(TestMessage::Ack(tau_proto::Ack {
             up_to: tau_proto::EventLogSeq::new(0),
         })),
     )
@@ -2622,7 +2626,7 @@ fn duplicate_tool_result_is_discarded() {
     // Fabricate a tool result for a call_id that is not in pending_tool_sessions.
     let result = h.handle_extension_event(
         "fake-ext",
-        Frame::Event(Event::ToolResult(ToolResult {
+        TestProtocolItem::Event(Event::ToolResult(ToolResult {
             call_id: "orphan-call".into(),
             tool_name: ToolName::new("read"),
             tool_type: tau_proto::ToolType::Function,
@@ -2664,7 +2668,7 @@ fn client_hello_protocol_mismatch_disconnects_only_client() {
     let keep = h
         .handle_client_event(
             "stale-ui",
-            Frame::Message(Message::Hello(tau_proto::Hello {
+            TestProtocolItem::Message(TestMessage::Hello(tau_proto::Hello {
                 protocol_version: tau_proto::PROTOCOL_VERSION + 1,
                 client_name: "stale-ui".into(),
                 client_kind: tau_proto::ClientKind::Ui,
@@ -2677,7 +2681,7 @@ fn client_hello_protocol_mismatch_disconnects_only_client() {
     assert!(
         events.iter().any(|event| matches!(
             &event.frame,
-            Frame::Message(Message::Disconnect(disconnect))
+            HarnessOutputMessage::Disconnect(disconnect)
                 if disconnect
                     .reason
                     .as_deref()

@@ -353,7 +353,7 @@ fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
 
     h.handle_client_event(
         &ui_conn,
-        Frame::Message(Message::Subscribe(Subscribe {
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
             selectors: vec![EventSelector::Exact(
                 tau_proto::EventName::AGENT_MESSAGE_SENT,
             )],
@@ -361,17 +361,17 @@ fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
     )
     .expect("subscribe");
 
-    let mut reader = FrameReader::new(BufReader::new(client_end));
+    let mut reader = TestOutputReader::new(BufReader::new(client_end));
     let mut got_message = false;
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline && !got_message {
         let Ok(Some(frame)) = reader.read_frame() else {
             break;
         };
-        let (_log_id, inner) = frame.peel_log();
+        let (_log_id, inner) = frame.into_event_frame();
         got_message = matches!(
             inner,
-            Frame::Event(Event::AgentMessageSent(message))
+            TestProtocolItem::Event(Event::AgentMessageSent(message))
                 if message.sender_id.as_str() == "agent-1"
                     && message.recipient == tau_proto::AgentMessageRecipient::User
                     && message.message == "persisted hello"
@@ -426,7 +426,7 @@ fn late_joining_ui_client_receives_replayed_session_events() {
 
     h.handle_client_event(
         &ui_conn,
-        Frame::Message(Message::Subscribe(Subscribe {
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
             selectors: vec![
                 EventSelector::Prefix("session.".to_owned()),
                 EventSelector::Prefix("agent.".to_owned()),
@@ -436,7 +436,7 @@ fn late_joining_ui_client_receives_replayed_session_events() {
     )
     .expect("subscribe");
 
-    let mut reader = FrameReader::new(BufReader::new(client_end));
+    let mut reader = TestOutputReader::new(BufReader::new(client_end));
     let mut got_session_started = false;
     let mut got_agent_started = false;
     let mut got_prompt = false;
@@ -448,18 +448,22 @@ fn late_joining_ui_client_receives_replayed_session_events() {
         let Ok(Some(frame)) = reader.read_frame() else {
             break;
         };
-        let (_log_id, inner) = frame.peel_log();
+        let (_log_id, inner) = frame.into_event_frame();
         match inner {
-            Frame::Event(Event::SessionStarted(started)) if started.session_id.as_str() == "s1" => {
+            TestProtocolItem::Event(Event::SessionStarted(started))
+                if started.session_id.as_str() == "s1" =>
+            {
                 got_session_started = true;
             }
-            Frame::Event(Event::AgentStarted(_)) => {
+            TestProtocolItem::Event(Event::AgentStarted(_)) => {
                 got_agent_started = true;
             }
-            Frame::Event(Event::AgentPromptSubmitted(prompt)) if prompt.text == "hello replay" => {
+            TestProtocolItem::Event(Event::AgentPromptSubmitted(prompt))
+                if prompt.text == "hello replay" =>
+            {
                 got_prompt = true;
             }
-            Frame::Event(Event::ProviderResponseFinished(finished))
+            TestProtocolItem::Event(Event::ProviderResponseFinished(finished))
                 if finished.output_items.iter().any(|item| {
                     matches!(
                         item,
@@ -514,7 +518,7 @@ fn extension_subscribe_receives_no_replayed_past_events() {
     let extension_events = connect_test_tool(&mut h, "live-only-extension");
     h.handle_extension_message(
         "live-only-extension",
-        Message::Subscribe(Subscribe {
+        TestMessage::Subscribe(Subscribe {
             selectors: vec![EventSelector::Exact(
                 tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
             )],
@@ -694,7 +698,7 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
 
     h.handle_client_event(
         &ui_conn,
-        Frame::Message(Message::Subscribe(Subscribe {
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
             selectors: vec![
                 EventSelector::Prefix("agent.".to_owned()),
                 EventSelector::Prefix("provider.".to_owned()),
@@ -703,11 +707,11 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
     )
     .expect("subscribe");
 
-    let mut reader = FrameReader::new(BufReader::new(client_end));
+    let mut reader = TestOutputReader::new(BufReader::new(client_end));
     let mut replayed = Vec::new();
     while let Ok(Some(frame)) = reader.read_frame() {
-        let (_log_id, inner) = frame.peel_log();
-        if let Frame::Event(event) = inner {
+        let (_log_id, inner) = frame.into_event_frame();
+        if let TestProtocolItem::Event(event) = inner {
             replayed.push(event.name());
         }
     }
@@ -755,17 +759,17 @@ fn late_joining_ui_client_replays_only_current_active_queue() {
 
     h.handle_client_event(
         &ui_conn,
-        Frame::Message(Message::Subscribe(Subscribe {
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
             selectors: vec![EventSelector::Prefix("agent.".to_owned())],
         })),
     )
     .expect("subscribe");
 
-    let mut reader = FrameReader::new(BufReader::new(client_end));
+    let mut reader = TestOutputReader::new(BufReader::new(client_end));
     let mut queued = Vec::new();
     while let Ok(Some(frame)) = reader.read_frame() {
-        let (_log_id, inner) = frame.peel_log();
-        if let Frame::Event(Event::AgentPromptQueued(event)) = inner {
+        let (_log_id, inner) = frame.into_event_frame();
+        if let TestProtocolItem::Event(Event::AgentPromptQueued(event)) = inner {
             queued.push(event);
         }
     }
@@ -932,13 +936,13 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
 
     h.handle_client_event(
         &ui_conn,
-        Frame::Message(Message::Subscribe(Subscribe {
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
             selectors: vec![EventSelector::Prefix("tool.".to_owned())],
         })),
     )
     .expect("subscribe");
 
-    let mut reader = FrameReader::new(BufReader::new(client_end));
+    let mut reader = TestOutputReader::new(BufReader::new(client_end));
     let mut got_background_result = false;
     let mut got_background_error = false;
     let mut got_cancelled = false;
@@ -949,8 +953,10 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
         let Ok(Some(frame)) = reader.read_frame() else {
             break;
         };
-        let (_log_id, inner) = frame.peel_log();
-        let Frame::Event(event) = inner else { continue };
+        let (_log_id, inner) = frame.into_event_frame();
+        let TestProtocolItem::Event(event) = inner else {
+            continue;
+        };
         match event {
             Event::ToolBackgroundResult(result)
                 if result.call_id.as_str() == "background-result-call" =>
@@ -1034,7 +1040,7 @@ fn late_joining_ui_client_does_not_replay_runtime_extension_setup() {
     // Trigger subscribe + replay via the normal client-event path.
     h.handle_client_event(
         &ui_conn,
-        Frame::Message(Message::Subscribe(Subscribe {
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
             selectors: vec![EventSelector::Prefix("extension.".to_owned())],
         })),
     )
@@ -1052,7 +1058,7 @@ fn late_joining_ui_client_does_not_replay_runtime_extension_setup() {
         "runtime extension setup must not be persisted in the session membership log"
     );
 
-    let mut reader = FrameReader::new(BufReader::new(client_end));
+    let mut reader = TestOutputReader::new(BufReader::new(client_end));
     let mut agents_md_count = 0;
     let mut context_ready_count = 0;
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -1060,8 +1066,10 @@ fn late_joining_ui_client_does_not_replay_runtime_extension_setup() {
         let Ok(Some(frame)) = reader.read_frame() else {
             break;
         };
-        let (_log_id, inner) = frame.peel_log();
-        let Frame::Event(inner) = inner else { continue };
+        let (_log_id, inner) = frame.into_event_frame();
+        let TestProtocolItem::Event(inner) = inner else {
+            continue;
+        };
         match inner {
             Event::ExtAgentsMdAvailable(a)
                 if a.file_path == std::path::Path::new("/test/AGENTS.md") =>

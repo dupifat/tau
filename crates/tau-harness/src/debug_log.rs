@@ -41,18 +41,18 @@ impl DebugEventLog {
         let entry = match harness_event {
             HarnessEvent::FromConnection {
                 connection_id,
-                frame,
+                message,
             } => {
-                let name = match frame.as_ref() {
-                    tau_proto::Frame::Event(event) => {
-                        if event.defaults_to_transient() {
+                let name = match message.as_ref() {
+                    tau_proto::HarnessInputMessage::Emit(emit) => {
+                        if emit.event.defaults_to_transient() {
                             return;
                         }
-                        event.name().to_string()
+                        emit.event.name().to_string()
                     }
-                    tau_proto::Frame::Message(_) => "<message>".to_owned(),
+                    _ => "<message>".to_owned(),
                 };
-                let mut frame_json = serde_json::to_value(frame).unwrap_or_default();
+                let mut frame_json = serde_json::to_value(message).unwrap_or_default();
                 compact_debug_json_strings(&mut frame_json);
                 serde_json::json!({
                     "type": "from_connection",

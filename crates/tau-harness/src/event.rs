@@ -9,7 +9,9 @@ use std::thread;
 use std::time::Duration;
 
 use tau_core::{ConnectionSendError, ConnectionSink};
-use tau_proto::{Disconnect, Frame, FrameReader, FrameWriter, Message};
+use tau_proto::{
+    Disconnect, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter,
+};
 
 use crate::extension::ExtensionConnectCommand;
 
@@ -23,10 +25,10 @@ pub(crate) enum HarnessCommand {
 
 /// Internal event type — all reader threads feed this into one channel.
 pub(crate) enum HarnessEvent {
-    /// Decoded frame from any connection (extension or client).
+    /// Decoded harness input message from any connection (extension or client).
     FromConnection {
         connection_id: tau_proto::ConnectionId,
-        frame: Box<Frame>,
+        message: Box<HarnessInputMessage>,
     },
     /// A connection's reader hit EOF or decode error.
     Disconnected {
@@ -40,7 +42,7 @@ pub(crate) enum HarnessEvent {
 
 /// Connection sink — sends to the per-connection writer channel.
 pub(crate) struct ChannelSink {
-    pub(crate) tx: Sender<Frame>,
+    pub(crate) tx: Sender<HarnessOutputMessage>,
 }
 
 impl ConnectionSink for ChannelSink {
@@ -60,7 +62,7 @@ pub(crate) fn spawn_reader_thread(
     spawn_reader_thread_inner(connection_id, stream, tx, None);
 }
 
-/// Reader thread for extensions whose frames must not enter the harness loop
+/// Reader thread for extensions whose messages must not enter the harness loop
 /// until the harness has created all matching connection and lifecycle state.
 pub(crate) fn spawn_reader_thread_after_initialized(
     connection_id: tau_proto::ConnectionId,
@@ -84,14 +86,14 @@ fn spawn_reader_thread_inner(
             return;
         }
 
-        let mut reader = FrameReader::new(BufReader::new(stream));
+        let mut reader = HarnessInputReader::new(BufReader::new(stream));
         loop {
-            match reader.read_frame() {
-                Ok(Some(frame)) => {
+            match reader.read_message() {
+                Ok(Some(message)) => {
                     if tx
                         .send(HarnessEvent::FromConnection {
                             connection_id: connection_id.clone(),
-                            frame: Box::new(frame),
+                            message: Box::new(message),
                         })
                         .is_err()
                     {
@@ -121,14 +123,13 @@ pub(crate) enum WriterShutdown {
 pub(crate) fn spawn_writer_thread(
     writer: impl Write + Send + 'static,
     shutdown: WriterShutdown,
-) -> Sender<Frame> {
-    let (tx, rx) = mpsc::channel::<Frame>();
+) -> Sender<HarnessOutputMessage> {
+    let (tx, rx) = mpsc::channel::<HarnessOutputMessage>();
     thread::spawn(move || {
-        let mut w = FrameWriter::new(BufWriter::new(writer));
-
-        // Drain frames until the channel closes.
-        while let Ok(frame) = rx.recv() {
-            if w.write_frame(&frame).is_err() {
+        let mut w = HarnessOutputWriter::new(BufWriter::new(writer));
+        // Drain output messages until the channel closes.
+        while let Ok(message) = rx.recv() {
+            if w.write_message(&message).is_err() {
                 return;
             }
             if w.flush().is_err() {
@@ -143,9 +144,9 @@ pub(crate) fn spawn_writer_thread(
             }
             WriterShutdown::KillChild(child) => {
                 // Best-effort disconnect message.
-                let _ = w.write_frame(&Frame::Message(Message::Disconnect(Disconnect {
+                let _ = w.write_message(&HarnessOutputMessage::Disconnect(Disconnect {
                     reason: Some("shutdown".to_owned()),
-                })));
+                }));
                 let _ = w.flush();
                 // Drop the writer → closes stdin → extension sees EOF.
                 drop(w);

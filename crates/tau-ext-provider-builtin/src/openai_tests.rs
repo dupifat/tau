@@ -2,7 +2,10 @@ use std::io::{BufReader, Cursor};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use tau_proto::{Effort, Verbosity};
+use tau_proto::{
+    Effort, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter,
+    Verbosity,
+};
 
 use super::*;
 
@@ -19,25 +22,40 @@ fn model_ids(models: &[ProviderModelInfo]) -> Vec<String> {
     models.iter().map(|model| model.id.to_string()).collect()
 }
 
-fn decode_frames(bytes: &[u8]) -> Vec<Frame> {
-    let mut reader = tau_proto::FrameReader::new(BufReader::new(bytes));
+fn decode_frames(bytes: &[u8]) -> Vec<HarnessInputMessage> {
+    let mut reader = HarnessInputReader::new(BufReader::new(bytes));
     let mut frames = Vec::new();
-    while let Some(frame) = reader.read_frame().expect("decode frame") {
+    while let Some(frame) = reader.read_message().expect("decode frame") {
         frames.push(frame);
     }
     frames
 }
 
-fn encode_frames(frames: &[Frame]) -> Vec<u8> {
+fn encode_frames(frames: &[HarnessOutputMessage]) -> Vec<u8> {
     let mut bytes = Vec::new();
     {
-        let mut writer = FrameWriter::new(&mut bytes);
+        let mut writer = HarnessOutputWriter::new(&mut bytes);
         for frame in frames {
-            writer.write_frame(frame).expect("encode frame");
+            writer.write_message(frame).expect("encode frame");
         }
         writer.flush().expect("flush frames");
     }
     bytes
+}
+
+fn sequenced_event(seq: u64, recorded_at: u64, event: Event) -> HarnessOutputMessage {
+    HarnessOutputMessage::deliver_sequenced(
+        tau_proto::EventLogSeq::new(seq),
+        tau_proto::UnixMicros::new(recorded_at),
+        event,
+    )
+}
+
+fn input_event(message: &HarnessInputMessage) -> Option<&Event> {
+    match message {
+        HarnessInputMessage::Emit(emit) => Some(emit.event.as_ref()),
+        _ => None,
+    }
 }
 
 fn model_id(provider: &str, model: &str) -> ModelId {
@@ -208,16 +226,8 @@ fn prompt_workers_start_concurrently() {
     let mut second = prompt();
     second.agent_prompt_id = "sp-par-2".into();
     let input = encode_frames(&[
-        Frame::Message(Message::LogEvent(tau_proto::LogEvent {
-            seq: tau_proto::EventLogSeq::new(7),
-            recorded_at: tau_proto::UnixMicros::new(11),
-            event: Box::new(Event::AgentPromptCreated(first)),
-        })),
-        Frame::Message(Message::LogEvent(tau_proto::LogEvent {
-            seq: tau_proto::EventLogSeq::new(8),
-            recorded_at: tau_proto::UnixMicros::new(12),
-            event: Box::new(Event::AgentPromptCreated(second)),
-        })),
+        sequenced_event(7, 11, Event::AgentPromptCreated(first)),
+        sequenced_event(8, 12, Event::AgentPromptCreated(second)),
     ]);
     let started = std::sync::Arc::new((Mutex::new((0_usize, 0_usize)), Condvar::new()));
     let executor_started = started.clone();
@@ -246,7 +256,7 @@ fn prompt_workers_start_concurrently() {
         let mut writer = execution.frame_writer();
         write_prompt_submitted(&agent_prompt_id, &originator, &mut writer).expect("submitted");
         writer
-            .write_frame(&Frame::Event(Event::ProviderResponseFinished(
+            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
                 simple_finished(
                     agent_prompt_id.clone(),
                     tau_proto::AgentId::parse("agent-1").expect("valid test agent id"),
@@ -280,12 +290,14 @@ fn prompt_workers_start_concurrently() {
     let frames = decode_frames(&output);
     let finished_count = frames
         .iter()
-        .filter(|frame| matches!(frame, Frame::Event(Event::ProviderResponseFinished(_))))
+        .filter(|frame| matches!(input_event(frame), Some(Event::ProviderResponseFinished(_))))
         .count();
     assert_eq!(finished_count, 2);
-    assert!(frames.iter().any(|frame| {
-        matches!(frame, Frame::Message(Message::Ack(ack)) if ack.up_to.get() == 8)
-    }));
+    assert!(
+        frames.iter().any(|frame| {
+            matches!(frame, HarnessInputMessage::Ack(ack) if ack.up_to.get() == 8)
+        })
+    );
 }
 
 #[test]
@@ -300,7 +312,7 @@ fn run_announces_provider_models_before_ready() {
     assert!(
         matches!(
             &frames[0],
-            Frame::Message(Message::Hello(hello))
+            HarnessInputMessage::Hello(hello)
                 if hello.client_kind == ClientKind::Provider
                     && hello.client_name.as_str() == EXTENSION_NAME
         ),
@@ -309,21 +321,18 @@ fn run_announces_provider_models_before_ready() {
     assert!(
         frames
             .iter()
-            .any(|frame| matches!(frame, Frame::Message(Message::Subscribe(_)))),
+            .any(|frame| matches!(frame, HarnessInputMessage::Subscribe(_))),
         "provider should subscribe for prewarm/cancel events: {frames:?}"
     );
     assert!(
         frames.iter().any(|frame| matches!(
-            frame,
-            Frame::Event(Event::ProviderModelsUpdated(updated))
+            input_event(frame),
+            Some(Event::ProviderModelsUpdated(updated))
                 if model_ids(&updated.models).starts_with(&["chatgpt/gpt-5.5".to_owned()])
         )),
         "startup frames should announce provider models: {frames:?}"
     );
-    assert!(
-        matches!(frames.last(), Some(Frame::Message(Message::Ready(_)))),
-        "last frame should be ready: {frames:?}"
-    );
+    assert!(matches!(frames.last(), Some(HarnessInputMessage::Ready(_))),);
 }
 
 #[test]
@@ -331,14 +340,10 @@ fn direct_prompt_request_with_missing_backend_is_acknowledged_and_closed() {
     // Direct provider routing must never leave the harness waiting forever,
     // even if a prompt reaches this extension without usable credentials.
     let input = encode_frames(&[
-        Frame::Message(Message::LogEvent(tau_proto::LogEvent {
-            seq: tau_proto::EventLogSeq::new(7),
-            recorded_at: tau_proto::UnixMicros::new(11),
-            event: Box::new(Event::AgentPromptCreated(prompt())),
-        })),
-        Frame::Message(Message::Disconnect(tau_proto::Disconnect {
+        sequenced_event(7, 11, Event::AgentPromptCreated(prompt())),
+        HarnessOutputMessage::Disconnect(tau_proto::Disconnect {
             reason: Some("done".to_owned()),
-        })),
+        }),
     ]);
     let mut output = Vec::new();
     run_with_auth(Cursor::new(input), &mut output, OpenAiAuth::default())
@@ -347,15 +352,15 @@ fn direct_prompt_request_with_missing_backend_is_acknowledged_and_closed() {
     let frames = decode_frames(&output);
     let submitted = frames.iter().position(|frame| {
         matches!(
-            frame,
-            Frame::Event(Event::ProviderPromptSubmitted(submitted))
+            input_event(frame),
+            Some(Event::ProviderPromptSubmitted(submitted))
                 if submitted.agent_prompt_id.as_str() == "sp-1"
         )
     });
     let finished = frames.iter().position(|frame| {
         matches!(
-            frame,
-            Frame::Event(Event::ProviderResponseFinished(finished))
+            input_event(frame),
+            Some(Event::ProviderResponseFinished(finished))
                 if finished.agent_prompt_id.as_str() == "sp-1"
                     && finished.stop_reason == ProviderStopReason::Error
                     && finished.output_items.is_empty()
@@ -366,13 +371,13 @@ fn direct_prompt_request_with_missing_backend_is_acknowledged_and_closed() {
     let ack = frames.iter().position(|frame| {
         matches!(
             frame,
-            Frame::Message(Message::Ack(ack)) if ack.up_to.get() == 7
+            HarnessInputMessage::Ack(ack) if ack.up_to.get() == 7
         )
     });
 
     let submitted = submitted.expect("prompt submitted event");
     let finished = finished.expect("missing-backend response finished event");
-    let ack = ack.expect("ack for prompt LogEvent");
+    let ack = ack.expect("ack for prompt delivery");
     assert!(submitted < finished, "submission should precede finish");
     assert!(finished < ack, "ack should follow prompt handling");
 }

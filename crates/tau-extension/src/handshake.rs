@@ -1,13 +1,13 @@
 //! Reusable extension bootstrap helper.
 //!
 //! Every extension process opens its session with the same prelude:
-//! `Hello` → optional `Subscribe` → optional `Intercept` → zero or
-//! more startup `Event`s → `Ready`, then flushes. The exact mix varies
-//! (some extensions register tools, some intercept, some subscribe to
-//! several events, some announce model state) but the order and the
-//! surrounding frame-shaping is fixed. Copy-pasting that sequence into
-//! every crate is mechanical and drifts out of sync; this helper writes
-//! it once and lets each extension declare only what differs.
+//! `Hello` → optional `Subscribe` → optional `Intercept` → zero or more startup
+//! `Emit` event requests → `Ready`, then flushes. The exact mix varies (some
+//! extensions register tools, some intercept, some subscribe to several events,
+//! some announce model state) but the order and the surrounding message-shaping
+//! is fixed. Copy-pasting that sequence into every crate is mechanical and
+//! drifts out of sync; this helper writes it once and lets each extension
+//! declare only what differs.
 //!
 //! For extensions, `Subscribe` is live-only today: it records selectors
 //! for future delivery and does not replay already logged events. Some
@@ -32,11 +32,11 @@ use std::io::Write;
 
 use tau_proto::{
     ActionSchema, ActionSchemaPublished, ClientKind, EncodeError, Event, EventName, EventSelector,
-    ExtensionName, Frame, FrameWriter, Hello, Intercept, InterceptionPriority, Message,
-    PROTOCOL_VERSION, PromptFragment, Ready, Subscribe, ToolGroup, ToolRegister, ToolSpec,
+    ExtensionName, HarnessInputMessage, Hello, Intercept, InterceptionPriority, PROTOCOL_VERSION,
+    PeerOutputWriter, PromptFragment, Ready, Subscribe, ToolGroup, ToolRegister, ToolSpec,
 };
 
-/// Builder for the opening frame sequence an extension sends to the
+/// Builder for the opening message sequence an extension sends to the
 /// harness. See the module-level documentation for a worked example.
 #[must_use = "Handshake does nothing until `.run()` is called"]
 pub struct Handshake {
@@ -84,7 +84,7 @@ impl Handshake {
         self
     }
 
-    /// Append a pre-built `EventSelector` (e.g. `Prefix`, `Pattern`).
+    /// Append a pre-built `EventSelector` (e.g. `Prefix`).
     pub fn subscribe_selector(mut self, selector: EventSelector) -> Self {
         self.selectors.push(selector);
         self
@@ -153,7 +153,7 @@ impl Handshake {
         }))
     }
 
-    /// Announce one startup event before the terminal `Ready` frame.
+    /// Announce one startup event before the terminal `Ready` message.
     ///
     /// Use this for extension-owned state that the harness should activate when
     /// the handshake reaches `Ready`, such as `provider.models_updated`. Tool
@@ -164,48 +164,47 @@ impl Handshake {
         self
     }
 
-    /// Announce multiple startup events before the terminal `Ready` frame.
+    /// Announce multiple startup events before the terminal `Ready` message.
     pub fn announce_events(mut self, events: impl IntoIterator<Item = Event>) -> Self {
         self.events.extend(events);
         self
     }
 
-    /// Attach a human-readable message to the terminal `Ready` frame.
+    /// Attach a human-readable message to the terminal `Ready` message.
     pub fn ready_message(mut self, message: impl Into<String>) -> Self {
         self.ready_message = Some(message.into());
         self
     }
 
-    /// Write the full sequence (`Hello`, optional `Subscribe`,
-    /// `Intercept`s, startup `Event`s, `Ready`) and flush. Subscribe
-    /// is omitted when no selectors have been added — sending an
-    /// empty subscription would still be valid but adds noise on the
-    /// wire.
+    /// Write the full sequence (`Hello`, optional `Subscribe`, `Intercept`s,
+    /// startup event `Emit`s, `Ready`) and flush. Subscribe is omitted when no
+    /// selectors have been added — sending an empty subscription would still be
+    /// valid but adds noise on the wire.
     ///
     /// For extensions, `Subscribe` only starts live delivery.
-    pub fn run<W: Write>(self, writer: &mut FrameWriter<W>) -> Result<(), EncodeError> {
-        writer.write_frame(&Frame::Message(Message::Hello(Hello {
+    pub fn run<W: Write>(self, writer: &mut PeerOutputWriter<W>) -> Result<(), EncodeError> {
+        writer.write_message(&HarnessInputMessage::Hello(Hello {
             protocol_version: PROTOCOL_VERSION,
             client_name: self.client_name,
             client_kind: self.client_kind,
-        })))?;
+        }))?;
         if !self.selectors.is_empty() {
-            writer.write_frame(&Frame::Message(Message::Subscribe(Subscribe {
+            writer.write_message(&HarnessInputMessage::Subscribe(Subscribe {
                 selectors: self.selectors,
-            })))?;
+            }))?;
         }
         for intercept in self.intercepts {
-            writer.write_frame(&Frame::Message(Message::Intercept(intercept)))?;
+            writer.write_message(&HarnessInputMessage::Intercept(intercept))?;
         }
         for tool in self.tools {
-            writer.write_frame(&Frame::Event(Event::ToolRegister(tool)))?;
+            writer.write_message(&HarnessInputMessage::emit(Event::ToolRegister(tool)))?;
         }
         for event in self.events {
-            writer.write_frame(&Frame::Event(event))?;
+            writer.write_message(&HarnessInputMessage::emit(event))?;
         }
-        writer.write_frame(&Frame::Message(Message::Ready(Ready {
+        writer.write_message(&HarnessInputMessage::Ready(Ready {
             message: self.ready_message,
-        })))?;
+        }))?;
         writer.flush().map_err(EncodeError::Io)?;
         Ok(())
     }

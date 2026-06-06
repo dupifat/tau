@@ -10,7 +10,9 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::Duration;
 use std::{fmt, fs, thread};
 
-use tau_proto::{DecodeError, Frame, FrameReader, FrameWriter};
+use tau_proto::{
+    DecodeError, HarnessInputMessage, HarnessOutputMessage, PeerInputReader, PeerOutputWriter,
+};
 
 /// Errors returned by the Unix socket transport.
 #[derive(Debug)]
@@ -130,10 +132,9 @@ impl Drop for SocketListener {
 
 /// One connected Unix socket peer speaking the protocol.
 pub struct SocketPeer {
-    writer: FrameWriter<BufWriter<UnixStream>>,
-    reader_frames: Receiver<Result<Frame, DecodeError>>,
+    writer: PeerOutputWriter<BufWriter<UnixStream>>,
+    reader_frames: Receiver<Result<HarnessOutputMessage, DecodeError>>,
 }
-
 impl SocketPeer {
     /// Connects to an existing Unix socket listener.
     pub fn connect(path: impl Into<PathBuf>) -> Result<Self, SocketTransportError> {
@@ -147,24 +148,25 @@ impl SocketPeer {
         let writer_stream = stream.try_clone().map_err(SocketTransportError::Clone)?;
         let reader_frames = spawn_reader(stream);
         Ok(Self {
-            writer: FrameWriter::new(BufWriter::new(writer_stream)),
+            writer: PeerOutputWriter::new(BufWriter::new(writer_stream)),
             reader_frames,
         })
     }
 
-    /// Sends one protocol frame over the Unix socket.
-    pub fn send(&mut self, frame: &Frame) -> Result<(), SocketTransportError> {
+    /// Sends one peer → harness protocol message over the Unix socket.
+    pub fn send(&mut self, message: &HarnessInputMessage) -> Result<(), SocketTransportError> {
         self.writer
-            .write_frame(frame)
+            .write_message(message)
             .map_err(SocketTransportError::Encode)?;
         self.writer.flush().map_err(SocketTransportError::Flush)
     }
 
-    /// Reads one protocol frame, or returns `Ok(None)` on timeout or clean EOF.
+    /// Reads one harness → peer protocol message, or returns `Ok(None)` on
+    /// timeout or clean EOF.
     pub fn recv_timeout(
         &mut self,
         timeout: Duration,
-    ) -> Result<Option<Frame>, SocketTransportError> {
+    ) -> Result<Option<HarnessOutputMessage>, SocketTransportError> {
         match self.reader_frames.recv_timeout(timeout) {
             Ok(Ok(frame)) => Ok(Some(frame)),
             Ok(Err(error)) if is_unexpected_eof(&error) => Ok(None),
@@ -175,12 +177,12 @@ impl SocketPeer {
     }
 }
 
-fn spawn_reader(stream: UnixStream) -> Receiver<Result<Frame, DecodeError>> {
+fn spawn_reader(stream: UnixStream) -> Receiver<Result<HarnessOutputMessage, DecodeError>> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
-        let mut reader = FrameReader::new(BufReader::new(stream));
+        let mut reader = PeerInputReader::new(BufReader::new(stream));
         loop {
-            match reader.read_frame() {
+            match reader.read_message() {
                 Ok(Some(frame)) => {
                     if sender.send(Ok(frame)).is_err() {
                         return;

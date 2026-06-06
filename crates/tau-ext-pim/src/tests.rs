@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
-use tau_proto::{EventName, EventSelector};
+use tau_proto::{
+    EventName, EventSelector, HarnessInputMessage, HarnessInputReader, PeerOutputWriter,
+};
 
 use super::*;
 
@@ -93,24 +95,29 @@ fn handshake_registers_email_and_calendar_tools() {
     handshake
         .publish_actions(action_schema())
         .ready_message("pim extension ready")
-        .run(&mut FrameWriter::new(&mut bytes))
+        .run(&mut PeerOutputWriter::new(&mut bytes))
         .expect("handshake writes");
 
-    let mut reader = FrameReader::new(bytes.as_slice());
+    let mut reader = HarnessInputReader::new(bytes.as_slice());
     let mut tools = Vec::new();
     let mut prompt_tools = Vec::new();
     let mut per_tool_prompt_tools = Vec::new();
     let mut saw_subscription = false;
-    while let Some(frame) = reader.read_frame().expect("frame decodes") {
+    while let Some(frame) = reader.read_message().expect("frame decodes") {
         match frame {
-            Frame::Message(Message::Subscribe(subscribe)) => {
+            HarnessInputMessage::Subscribe(subscribe) => {
                 saw_subscription = subscribe.selectors
                     == vec![
                         EventSelector::Exact(EventName::TOOL_STARTED),
                         EventSelector::Exact(EventName::ACTION_INVOKE),
                     ];
             }
-            Frame::Event(Event::ToolRegister(register)) => {
+            HarnessInputMessage::Emit(emit)
+                if matches!(emit.event.as_ref(), Event::ToolRegister(_)) =>
+            {
+                let Event::ToolRegister(register) = *emit.event else {
+                    unreachable!();
+                };
                 if register.prompt_fragment.is_some() {
                     per_tool_prompt_tools.push(register.tool.name.clone());
                 }

@@ -205,6 +205,8 @@ pub(crate) struct EventRenderer {
     show_tools: tau_config::settings::ShowTools,
     /// Agent/user message visibility mode.
     show_messages: tau_config::settings::ShowMessages,
+    /// Routine lifecycle/status message visibility mode.
+    show_status: tau_config::settings::ShowStatus,
     /// Tool summary blocks keyed by their block id. Hidden when
     /// `show_tools` is `Full` or `Compact`, rendered in summarize modes.
     tool_summaries: HashMap<tau_cli_term::BlockId, ToolSummaryDisplay>,
@@ -217,11 +219,11 @@ pub(crate) struct EventRenderer {
     /// across tool follow-up turns, then moves to history when the assistant
     /// finishes without requesting more tools.
     prompt_tool_summary_active: bool,
-    /// Snapshot of persisted CLI settings, kept in sync with the four
-    /// `show_*` fields above by [`Self::save_cli_state`]. The input
-    /// loop captures this handle in the `/set` name-completion
-    /// closure so the menu can show each setting's current value
-    /// without snooping on renderer-thread fields directly.
+    /// Snapshot of persisted CLI settings, kept in sync with visible UI
+    /// toggles by [`Self::save_cli_state`]. The input loop captures this
+    /// handle in the `/set` name-completion closure so the menu can show each
+    /// setting's current value without snooping on renderer-thread fields
+    /// directly.
     cli_state_mirror: std::sync::Arc<std::sync::Mutex<tau_config::settings::CliState>>,
     /// Cumulative end-to-end time spent waiting for agent responses.
     cumulative_agent_latency: Duration,
@@ -1038,6 +1040,7 @@ impl EventRenderer {
             show_turn_stats: state.show_turn_stats,
             show_tools: state.show_tools,
             show_messages: state.show_messages,
+            show_status: state.show_status,
             show_ui_io: state.show_ui_io,
             ui_io_stats: UiIoStats::default(),
             tool_summaries: HashMap::new(),
@@ -1343,6 +1346,7 @@ impl EventRenderer {
             show_ui_io: self.show_ui_io,
             show_tools: self.show_tools,
             show_messages: self.show_messages,
+            show_status: self.show_status,
         };
         if let Ok(mut mirror) = self.cli_state_mirror.lock() {
             *mirror = state.clone();
@@ -1424,6 +1428,11 @@ impl EventRenderer {
             "show-messages" => {
                 if let Some(show_messages) = tau_config::settings::ShowMessages::parse(value) {
                     self.set_show_messages(show_messages);
+                }
+            }
+            "show-status" => {
+                if let Some(show_status) = tau_config::settings::ShowStatus::parse(value) {
+                    self.set_show_status(show_status);
                 }
             }
             _ => {}
@@ -1758,6 +1767,18 @@ impl EventRenderer {
         self.save_cli_state();
     }
 
+    fn set_show_status(&mut self, show_status: tau_config::settings::ShowStatus) {
+        if self.show_status == show_status {
+            return;
+        }
+        self.show_status = show_status;
+        self.save_cli_state();
+    }
+
+    fn show_routine_status(&self) -> bool {
+        self.show_status == tau_config::settings::ShowStatus::All
+    }
+
     fn set_show_tools(&mut self, show_tools: tau_config::settings::ShowTools) {
         if self.show_tools == show_tools {
             return;
@@ -1883,6 +1904,9 @@ impl EventRenderer {
     }
 
     fn render_session_preamble(&mut self) {
+        if !self.show_routine_status() {
+            return;
+        }
         self.handle.print_output(
             "banner",
             tau_cli_term::StyledBlock::new(build_banner(&self.theme)),
@@ -4490,6 +4514,9 @@ impl EventRenderer {
     }
 
     fn handle_extension_starting(&mut self, starting: &tau_proto::ExtensionStarting) {
+        if !self.show_routine_status() {
+            return;
+        }
         let block = extension_status_block(&self.theme, &starting.extension_name, "starting");
         let id = self.handle.new_block(
             format!("extension-starting:{}", starting.instance_id),
@@ -4506,6 +4533,9 @@ impl EventRenderer {
         }
         self.ready_extensions
             .insert(ready.extension_name.to_string());
+        if !self.show_routine_status() {
+            return;
+        }
         self.handle.print_output(
             "extension-ready",
             extension_status_block(&self.theme, &ready.extension_name, "ready"),
@@ -4517,6 +4547,9 @@ impl EventRenderer {
             self.handle.remove_block(bid);
         }
         self.ready_extensions.remove(exited.extension_name.as_str());
+        if !self.show_routine_status() {
+            return;
+        }
         self.handle.print_output(
             "extension-exited",
             extension_status_block(&self.theme, &exited.extension_name, "exited"),
@@ -4531,6 +4564,9 @@ impl EventRenderer {
     }
 
     fn handle_extension_context_ready(&mut self, ready: &tau_proto::ExtensionContextReady) {
+        if !self.show_routine_status() {
+            return;
+        }
         self.handle.print_output(
             "extension-context-ready",
             crate::tool_render::agent_context_ready_block(&self.theme, &ready.agent_id),
@@ -4540,17 +4576,25 @@ impl EventRenderer {
     fn handle_harness_status_events(&mut self, event: &Event) -> bool {
         match event {
             Event::HarnessInfo(info) => {
-                self.handle
-                    .print_output("harness-info", render_harness_info(&self.theme, info));
+                if self.show_routine_status()
+                    || info.level == tau_proto::HarnessInfoLevel::Important
+                {
+                    self.handle
+                        .print_output("harness-info", render_harness_info(&self.theme, info));
+                }
                 true
             }
             Event::HarnessSessionDir(session_dir) => {
-                self.handle_harness_session_dir(session_dir);
+                if self.show_routine_status() {
+                    self.handle_harness_session_dir(session_dir);
+                }
                 true
             }
             Event::HarnessUiDir(ui_dir) => {
-                self.handle
-                    .print_output("ui-dir", ui_dir_block(&self.theme, &ui_dir.path));
+                if self.show_routine_status() {
+                    self.handle
+                        .print_output("ui-dir", ui_dir_block(&self.theme, &ui_dir.path));
+                }
                 true
             }
             Event::HarnessModelsAvailable(_models) => true,

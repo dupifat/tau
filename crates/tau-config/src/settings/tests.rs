@@ -37,7 +37,7 @@ fn cli_settings_user_scalar_override_wins_over_built_in() {
     let dir = td.path();
     std::fs::write(
         dir.join("cli.yaml"),
-        r#"{ greeting: false, show_thinking: false, show_tools: "compact", show_messages: "self-summary" }"#,
+        r#"{ greeting: false, show_thinking: false, show_tools: "compact", show_messages: "self-summary", show_status: "minimal" }"#,
     )
     .expect("write");
 
@@ -46,6 +46,7 @@ fn cli_settings_user_scalar_override_wins_over_built_in() {
     assert!(!s.show_thinking);
     assert_eq!(s.show_tools, ShowTools::Compact);
     assert_eq!(s.show_messages, ShowMessages::SelfSummary);
+    assert_eq!(s.show_status, ShowStatus::Minimal);
     assert_eq!(s.theme, CliTheme::Auto);
 }
 
@@ -125,6 +126,7 @@ fn cli_state_round_trip_through_save_and_load() {
         show_ui_io: true,
         show_tools: crate::settings::ShowTools::SummarizeTurn,
         show_messages: crate::settings::ShowMessages::AllSummary,
+        show_status: crate::settings::ShowStatus::Minimal,
     };
     original.save(&dirs);
     assert!(td.path().join("cli.json").exists());
@@ -167,7 +169,7 @@ fn cli_state_defaults_to_cli_config_when_state_file_is_missing() {
     std::fs::create_dir_all(&state_dir).expect("mkdir state");
     std::fs::write(
         config_dir.join("cli.yaml"),
-        r#"{ show_diff: true, show_thinking: false, show_turn_stats: true, redraw_counter: true, show_ui_io: true, show_tools: "compact", show_messages: "self-full" }"#,
+        r#"{ show_diff: true, show_thinking: false, show_turn_stats: true, redraw_counter: true, show_ui_io: true, show_tools: "compact", show_messages: "self-full", show_status: "minimal" }"#,
     )
     .expect("write");
 
@@ -185,6 +187,7 @@ fn cli_state_defaults_to_cli_config_when_state_file_is_missing() {
             show_ui_io: true,
             show_tools: ShowTools::Compact,
             show_messages: ShowMessages::SelfFull,
+            show_status: ShowStatus::Minimal,
         }
     );
 }

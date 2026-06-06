@@ -91,6 +91,17 @@ const SHOW_TOOLS_VALUES: &[SettingValue] = &[
     },
 ];
 
+const SHOW_STATUS_VALUES: &[SettingValue] = &[
+    SettingValue {
+        value: "all",
+        description: "show routine status messages",
+    },
+    SettingValue {
+        value: "minimal",
+        description: "hide routine status messages; keep important warnings",
+    },
+];
+
 fn bool_str(b: bool) -> &'static str {
     if b { "true" } else { "false" }
 }
@@ -137,6 +148,12 @@ pub const SETTINGS: &[SettingDef] = &[
         description: "Agent message visibility",
         values: SHOW_MESSAGES_VALUES,
         get: |s| s.show_messages.as_str(),
+    },
+    SettingDef {
+        name: "show-status",
+        description: "Routine lifecycle/status message visibility",
+        values: SHOW_STATUS_VALUES,
+        get: |s| s.show_status.as_str(),
     },
 ];
 

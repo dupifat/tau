@@ -448,14 +448,16 @@ switch`, `/agent suspend`, and `/agent resume` do not synchronize selection or
 hidden-agent preferences to other UIs.
 
 Available `/set` names include `show-diff` (expanded vs. compact diffs),
-`show-thinking` (agent reasoning summaries), `show-cache-stats`
-(prompt-cache hit stats in status bar), and `show-turn-stats` (per-turn
-token usage below responses). These take `true` / `false`.
+`show-thinking` (agent reasoning summaries), `show-turn-stats` (per-turn
+token usage below responses), `redraw-counter` (debug redraw counter), and
+`show-ui-io` (UI↔harness socket throughput). These take `true` / `false`.
 `/set show-messages <none|self-summary|self-full|all-summary|all-full>`
 controls how agent-to-agent messages are shown in the transcript; messages sent
-from an agent to `user` always render fully as human-visible broadcasts. The first-arg
-menu shows the meaning of each allowed value. State is persisted to
-`<state_dir>/cli.json`.
+from an agent to `user` always render fully as human-visible broadcasts.
+`/set show-status <all|minimal>` hides routine lifecycle/status chatter in
+`minimal` mode while preserving important warnings such as extension
+configuration errors. The first-arg menu shows the meaning of each allowed
+value. State is persisted to `<state_dir>/cli.json`.
 
 ### Prompt input history
 

@@ -26,3 +26,13 @@ fn show_ui_io_values_are_registered() {
 
     assert_eq!(values, vec!["true", "false"]);
 }
+
+/// `/set show-status` is intentionally not a boolean: `minimal` hides only
+/// routine lifecycle/status chatter, while important warnings remain visible.
+#[test]
+fn show_status_values_are_registered() {
+    let setting = super::find("show-status").expect("show-status setting");
+    let values: Vec<_> = setting.values.iter().map(|value| value.value).collect();
+
+    assert_eq!(values, vec!["all", "minimal"]);
+}

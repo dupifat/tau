@@ -77,6 +77,8 @@ pub struct CliSettings {
     pub show_tools: ShowTools,
     /// How inter-agent and user-agent messages are rendered in the transcript.
     pub show_messages: ShowMessages,
+    /// How routine startup lifecycle and status messages are rendered.
+    pub show_status: ShowStatus,
     /// Which built-in color theme to use for the terminal UI.
     pub theme: CliTheme,
     /// Key bindings for prompt-local actions. Defaults to an
@@ -106,6 +108,7 @@ impl CliSettings {
             show_ui_io: self.show_ui_io,
             show_tools: self.show_tools,
             show_messages: self.show_messages,
+            show_status: self.show_status,
         }
     }
 }
@@ -220,8 +223,10 @@ pub struct CliState {
     /// How messages between the user and agents, or between agents, are
     /// rendered in the transcript. Controlled by `/set show-messages <mode>`.
     pub show_messages: ShowMessages,
+    /// How routine startup lifecycle and status messages are rendered.
+    /// Controlled by `/set show-status <all|minimal>`.
+    pub show_status: ShowStatus,
 }
-
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub enum CliTheme {
     /// Choose a built-in theme from terminal background hints when available.
@@ -316,6 +321,38 @@ impl ShowMessages {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+/// Visibility mode for routine CLI lifecycle and status messages.
+pub enum ShowStatus {
+    /// Show all routine startup lifecycle and status messages.
+    #[serde(rename = "all")]
+    #[default]
+    All,
+    /// Hide routine startup lifecycle/status messages while preserving
+    /// important messages such as extension configuration errors.
+    #[serde(rename = "minimal")]
+    Minimal,
+}
+
+impl ShowStatus {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Minimal => "minimal",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "all" => Some(Self::All),
+            "minimal" => Some(Self::Minimal),
+            _ => None,
+        }
+    }
+}
+
 impl Default for CliState {
     fn default() -> Self {
         Self {
@@ -326,6 +363,7 @@ impl Default for CliState {
             show_ui_io: false,
             show_tools: ShowTools::Full,
             show_messages: ShowMessages::AllFull,
+            show_status: ShowStatus::All,
         }
     }
 }

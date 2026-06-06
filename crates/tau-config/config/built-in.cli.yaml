@@ -10,5 +10,6 @@ redraw_counter: false
 show_ui_io: false
 show_tools: full
 show_messages: all-full
+show_status: all
 theme: auto
 bind: {}

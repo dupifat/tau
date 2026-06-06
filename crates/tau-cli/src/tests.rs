@@ -2161,7 +2161,58 @@ fn new_session_replays_startup_context_and_kept_extensions() {
     assert!(vt.screen_contains(80, "tau"));
     assert!(vt.screen_contains(80, "extension core-shell kept"));
 }
+/// `show-status=minimal` is for routine lifecycle chatter only. Important
+/// harness info carries configuration errors and must still reach the UI.
+#[test]
+fn minimal_status_hides_normal_harness_info_but_keeps_important() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+    renderer.apply_setting("show-status", "minimal");
 
+    renderer.handle(&Event::HarnessInfo(tau_proto::HarnessInfo {
+        message: "routine lifecycle note".into(),
+        level: tau_proto::HarnessInfoLevel::Normal,
+    }));
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "routine lifecycle note"));
+
+    renderer.handle(&Event::HarnessInfo(tau_proto::HarnessInfo {
+        message: "important config error".into(),
+        level: tau_proto::HarnessInfoLevel::Important,
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "important config error"));
+}
+
+/// Extension ready/kept messages are routine lifecycle status, so minimal mode
+/// should keep them out of both live startup and `/session new` preambles.
+#[test]
+fn minimal_status_hides_routine_extension_status() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+    renderer.apply_setting("show-status", "minimal");
+
+    renderer.handle(&Event::ExtensionReady(ExtensionReady {
+        instance_id: 1.into(),
+        extension_name: "core-shell".into(),
+        pid: Some(123),
+    }));
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: "s2".into(),
+        reason: SessionStartReason::New,
+    }));
+    sync(&handle);
+
+    assert!(!vt.screen_contains(80, "extension core-shell"));
+}
 #[test]
 fn new_session_preserves_role_status() {
     let (_term, handle, vt) = setup(80, 24);

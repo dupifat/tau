@@ -755,6 +755,8 @@ pub(crate) fn run_chat(
         .iter()
         .map(|(key, action)| (key.clone(), encode_binding_action(action)));
     let dirs = tau_config::settings::TauDirs::default();
+    let cli_state =
+        tau_config::settings::CliState::load_with_default(&dirs, settings.default_state());
     let prompt_history = PromptHistoryStore::new(&dirs);
     let input_history = match prompt_history.load() {
         Ok(history) => history,
@@ -783,7 +785,9 @@ pub(crate) fn run_chat(
             tau_cli_term::StyledBlock::new(build_banner(&theme)),
         );
     }
-    handle.print_output("ui-dir", ui_dir_block(&theme, ui_logging.dir()));
+    if cli_state.show_status == tau_config::settings::ShowStatus::All {
+        handle.print_output("ui-dir", ui_dir_block(&theme, ui_logging.dir()));
+    }
 
     handle.redraw();
 
@@ -795,8 +799,6 @@ pub(crate) fn run_chat(
     // for the input loop. CLI config provides the default UI toggle values;
     // persisted `cli.json` state overrides them so `/set show-*` changes
     // survive restarts.
-    let cli_state =
-        tau_config::settings::CliState::load_with_default(&dirs, settings.default_state());
     let mut renderer = EventRenderer::new_with_state(
         renderer_handle,
         completion_data.clone(),

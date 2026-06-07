@@ -56,10 +56,12 @@ fn event_for_line(session_id: &str, text: &str) -> Option<Event> {
     if let Some(rest) = text.strip_prefix("/role ") {
         return role_event_for_command(rest.trim());
     }
-    if let Some(role) = text.strip_prefix("/model ") {
-        let role = role.trim();
-        if !role.is_empty() {
-            return Some(crate::ui_events::role_select(role));
+    if let Some(model) = text.strip_prefix("/model ") {
+        let model = model.trim();
+        if let Ok(model) = model.parse::<tau_proto::ModelId>() {
+            return Some(crate::ui_events::agent_model_select(
+                session_id, None, model,
+            ));
         }
         return None;
     }

@@ -1,7 +1,7 @@
 # Provider extensions publish the live model list and model metadata at
 # runtime. Harness config owns role defaults and extension settings.
-# Use `/model <role>` to switch and `/role ...` to edit persisted role
-# overrides.
+# Use `/model <provider>/<model>` to switch the selected agent model and
+# `/role ...` to edit persisted role overrides.
 
 # Optional prompt fragments applied to every role. Fragments are rendered as
 # Handlebars templates and sorted by priority together with role-, tool-, and

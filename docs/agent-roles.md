@@ -81,9 +81,9 @@ Tau ships built-in `junior-engineer`, `senior-engineer`, `staff-engineer`, and `
 
 ## Selecting a role
 
-Use `/model <role>` or `/role <role>`.
+Use `/role <role>`.
 
-`/model` and `/role` completion list roles, not raw models. Each completion description shows the currently resolved model and role settings. `/role` completions also append the configured role `description` when present.
+`/role` completion lists roles. Each completion description shows the currently resolved model and role settings, and appends the configured role `description` when present. `/model <provider>/<model>` switches the model for the currently selected agent without changing the role.
 
 
 ## Editing roles

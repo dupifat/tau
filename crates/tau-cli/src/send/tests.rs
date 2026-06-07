@@ -81,10 +81,10 @@ fn local_configuration_commands_are_ignored() {
     }
 }
 
-/// Role selection aliases are forwarded as role-select events, with bare
-/// `/role` ignored.
+/// Role selection and model selection commands are forwarded to their distinct
+/// control events. `/model` targets an agent model id, not a role name.
 #[test]
-fn role_select_commands_pick_roles() {
+fn role_and_model_selection_commands_are_distinct() {
     assert_eq!(event("/role"), None);
 
     match event("/role reviewer").expect("role select") {
@@ -92,11 +92,16 @@ fn role_select_commands_pick_roles() {
         other => panic!("expected UiRoleSelect, got {other:?}"),
     }
 
-    match event("/model reviewer").expect("model role select") {
-        Event::UiRoleSelect(select) => assert_eq!(select.role, "reviewer"),
-        other => panic!("expected UiRoleSelect, got {other:?}"),
+    match event("/model test/model").expect("agent model select") {
+        Event::UiAgentModelSelect(select) => {
+            assert_eq!(select.session_id, SESSION_ID);
+            assert_eq!(select.target_agent_id, None);
+            assert_eq!(select.model.to_string(), "test/model");
+        }
+        other => panic!("expected UiAgentModelSelect, got {other:?}"),
     }
 
+    assert_eq!(event("/model reviewer"), None);
     assert_eq!(event("/model "), None);
 }
 

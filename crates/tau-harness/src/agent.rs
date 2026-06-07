@@ -15,7 +15,7 @@ use std::collections::VecDeque;
 
 use tau_core::NodeId;
 use tau_proto::{
-    AgentId, AgentPromptId, ConnectionId, PromptMessageClass, PromptOriginator, SessionId,
+    AgentId, AgentPromptId, ConnectionId, ModelId, PromptMessageClass, PromptOriginator, SessionId,
     ToolCallId, ToolUseStats,
 };
 
@@ -124,6 +124,10 @@ pub(crate) struct Agent {
     /// Agent role used for this conversation. `None` means the conversation
     /// follows the harness's globally selected interactive role.
     pub(crate) role: Option<String>,
+    /// Model explicitly selected for this conversation. When set, future
+    /// prompts for this loaded agent use it instead of resolving the model
+    /// from the role.
+    pub(crate) model_override: Option<ModelId>,
     /// Stable id assigned when this conversation first starts an agent turn.
     pub(crate) agent_id: Option<String>,
     /// Number of tool calls currently in flight on this conversation.
@@ -260,6 +264,7 @@ impl Agent {
             task_name: None,
             delegate_input_stats: ToolUseStats::default(),
             role: None,
+            model_override: None,
             agent_id: None,
             tools_in_flight: 0,
             tools_total: 0,

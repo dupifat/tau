@@ -171,9 +171,9 @@ overrides apply next, and individual tool overrides apply last.
 
 `default_role` selects the startup role; if it is omitted Tau starts on the
 first role in `role_groups` order. `tau --role <role>` overrides the startup role
-for one newly spawned session. `/model <role>` switches roles for the current
-run; `/role <role> <setting> <value>` edits role settings for the current
-process only. See
+for one newly spawned session. `/model <provider>/<model>` switches the model
+for the currently selected agent; `/role <role> <setting> <value>` edits role
+settings for the current process only. See
 [`docs/agent-roles.md`](docs/agent-roles.md).
 
 In the UI: `/role engineer effort medium`, `/role engineer verbosity low`,
@@ -434,7 +434,7 @@ Type `/` for menu autocompletion. The built-in set:
 | `/agent switch <id>` | Switch this UI to an active loaded-agent transcript (`none` clears selection) |
 | `/agent suspend [id]` | Hide a loaded agent from this UI's active choices until resumed |
 | `/agent resume <id>` | Return a hidden loaded agent to this UI's active choices |
-| `/model <role>`     | Switch agent role                                    |
+| `/model <provider>/<model>` | Switch selected agent model                         |
 | `/role <role> ...`  | Switch, create, edit, or delete an agent role        |
 | `/fast`             | Toggle Codex Fast mode (`service_tier: fast`)        |
 | `/tree [id]`        | Print selected agent tree; with `id`, rewind head    |

@@ -51,6 +51,18 @@ pub(crate) fn role_select(role: impl Into<String>) -> Event {
     Event::UiRoleSelect(tau_proto::UiRoleSelect { role: role.into() })
 }
 
+pub(crate) fn agent_model_select(
+    session_id: &str,
+    target_agent_id: Option<tau_proto::AgentId>,
+    model: tau_proto::ModelId,
+) -> Event {
+    Event::UiAgentModelSelect(tau_proto::UiAgentModelSelect {
+        session_id: session_id.into(),
+        target_agent_id,
+        model,
+    })
+}
+
 pub(crate) fn role_update(role: impl Into<String>, action: UiRoleUpdateAction) -> Event {
     Event::UiRoleUpdate(tau_proto::UiRoleUpdate {
         role: role.into(),

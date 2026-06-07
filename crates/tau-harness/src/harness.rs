@@ -4324,6 +4324,7 @@ impl Harness {
 
         match event {
             Event::UiRoleSelect(select) => self.handle_ui_role_select(select),
+            Event::UiAgentModelSelect(select) => self.handle_ui_agent_model_select(select),
             Event::UiRoleUpdate(req) => self.handle_ui_role_update(req),
             Event::UiPromptSubmitted(prompt) => self.handle_ui_prompt_submitted(prompt),
             Event::ActionInvoke(invoke) => self.handle_action_invoke(client_id, invoke),
@@ -4394,6 +4395,54 @@ impl Harness {
         Ok(true)
     }
 
+    fn handle_ui_agent_model_select(
+        &mut self,
+        select: tau_proto::UiAgentModelSelect,
+    ) -> Result<bool, HarnessError> {
+        if !self.available_models.contains(&select.model) {
+            self.emit_info(&format!("unknown model: {}", select.model));
+            return Ok(true);
+        }
+        let cid = if let Some(target_agent_id) = select.target_agent_id.as_deref() {
+            self.runtime_agent_id_for_target_agent(Some(target_agent_id))
+        } else {
+            let mut matches = self.agents.iter().filter_map(|(cid, conv)| {
+                (conv.session_id == select.session_id
+                    && conv.originator.is_user()
+                    && conv.agent_id.is_some())
+                .then_some(cid.clone())
+            });
+            let first = matches.next();
+            if matches.next().is_some() {
+                None
+            } else {
+                first
+            }
+        };
+        let Some(cid) = cid else {
+            self.emit_info("/model: no selected agent to update");
+            return Ok(true);
+        };
+        let Some(conv) = self.agents.get_mut(&cid) else {
+            self.emit_info("/model: selected agent is not loaded");
+            return Ok(true);
+        };
+        if conv.session_id != select.session_id {
+            self.emit_info("/model: selected agent is not in this session");
+            return Ok(true);
+        }
+        conv.model_override = Some(select.model.clone());
+        let agent_name = conv
+            .display_name
+            .clone()
+            .or_else(|| conv.agent_id.clone())
+            .unwrap_or_else(|| cid.to_string());
+        self.emit_info(&format!(
+            "agent `{agent_name}` model set to {}",
+            select.model
+        ));
+        Ok(true)
+    }
     fn handle_ui_role_update(
         &mut self,
         req: tau_proto::UiRoleUpdate,
@@ -8036,25 +8085,14 @@ impl Harness {
             .expect("prepare_agent_prompt_for_dispatch: unknown agent id");
         let originator = conv.originator.clone();
         let role_name = self.role_name_for_agent(conv);
-        let (prompt_model, prompt_params) = if conv.role.is_some() {
-            let model = self.model_for_agent_role(conv);
-            let params = model
-                .as_ref()
-                .map(|model| self.params_for_role_model(&role_name, model))
-                .unwrap_or_default();
-            (model, params)
-        } else {
-            (
-                self.selected_model.clone(),
-                self.selected_model
-                    .as_ref()
-                    .map(|model| self.params_for_role_model(&self.selected_role, model))
-                    .unwrap_or_default(),
-            )
-        };
+        let prompt_model = self.model_for_agent_role(conv);
+        let prompt_params = prompt_model
+            .as_ref()
+            .map(|model| self.params_for_role_model(&role_name, model))
+            .unwrap_or_default();
         let Some(model) = prompt_model else {
             self.emit_info(&format!(
-                "role `{role_name}` has no available model — use /model to pick a role or enable a provider"
+                "role `{role_name}` has no available model — use /role to pick a role, /model <provider>/<model> to pick an agent model, or enable a provider"
             ));
             return None;
         };
@@ -8173,6 +8211,11 @@ impl Harness {
     }
 
     fn model_for_agent_role(&self, conv: &Agent) -> Option<ModelId> {
+        if let Some(model) = conv.model_override.clone()
+            && self.provider_model_routes.contains_key(&model)
+        {
+            return Some(model);
+        }
         let role_name = self.role_name_for_agent(conv);
         model_for_role(&self.provider_model_info, &self.available_roles, &role_name)
     }

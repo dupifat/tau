@@ -1860,6 +1860,19 @@ pub struct UiRoleSelect {
     pub role: String,
 }
 
+/// The user requests switching the model used by one loaded agent.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiAgentModelSelect {
+    /// Session whose agent should be updated.
+    pub session_id: SessionId,
+    /// Agent to update. `None` asks the harness to use the session's only
+    /// unambiguous loaded user agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_agent_id: Option<AgentId>,
+    /// Model to use for future prompts sent to the target agent.
+    pub model: ModelId,
+}
+
 /// The user changes or deletes an agent role.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiRoleUpdate {
@@ -2836,6 +2849,8 @@ pub enum Event {
     UiFocusChanged(UiFocusChanged),
     #[serde(rename = "ui.role_select")]
     UiRoleSelect(UiRoleSelect),
+    #[serde(rename = "ui.agent_model_select")]
+    UiAgentModelSelect(UiAgentModelSelect),
     #[serde(rename = "ui.role_update")]
     UiRoleUpdate(UiRoleUpdate),
     #[serde(rename = "ui.detach_request")]
@@ -2981,6 +2996,7 @@ impl Event {
             Self::UiPromptDraft(_) => EventName::UI_PROMPT_DRAFT,
             Self::UiFocusChanged(_) => EventName::UI_FOCUS_CHANGED,
             Self::UiRoleSelect(_) => EventName::UI_ROLE_SELECT,
+            Self::UiAgentModelSelect(_) => EventName::UI_AGENT_MODEL_SELECT,
             Self::UiRoleUpdate(_) => EventName::UI_ROLE_UPDATE,
             Self::UiDetachRequest(_) => EventName::UI_DETACH_REQUEST,
             Self::UiShellCommand(_) => EventName::UI_SHELL_COMMAND,

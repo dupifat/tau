@@ -293,6 +293,115 @@ fn provider_models_snapshot_selects_first_model_and_drains_queue() {
     ));
 }
 
+/// `/model <provider>/<model>` is an agent-local selection, not a role switch
+/// or role mutation. Future prompts for that loaded agent should resolve to the
+/// override while the agent's role stays unchanged.
+#[test]
+fn ui_agent_model_select_sets_model_override_for_target_agent() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    clear_startup_echo_models(&mut h);
+    connect_provider_source(&mut h, "provider-ext");
+    let role = h.selected_role.clone();
+    let cid = h.create_durable_user_agent("s1".into(), &role, test_cwd());
+    let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent id");
+
+    let default_model: ModelId = "test/default".parse().expect("model id");
+    let selected_model: ModelId = "test/selected".parse().expect("model id");
+    h.handle_extension_event(
+        "provider-ext",
+        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+            models: vec![
+                provider_model(default_model, 128_000),
+                provider_model(selected_model.clone(), 128_000),
+            ],
+        })),
+    )
+    .expect("handle provider snapshot");
+
+    h.handle_client_event_inner(
+        "ui-client",
+        Event::UiAgentModelSelect(tau_proto::UiAgentModelSelect {
+            session_id: "s1".into(),
+            target_agent_id: Some(crate::parse_agent_id(&agent_id)),
+            model: selected_model.clone(),
+        }),
+    )
+    .expect("handle model select");
+
+    let conv = &h.agents[&cid];
+    assert_eq!(conv.role.as_deref(), Some(role.as_str()));
+    assert_eq!(conv.model_override.as_ref(), Some(&selected_model));
+    assert_eq!(h.model_for_agent_role(conv), Some(selected_model.clone()));
+
+    h.agents.get_mut(&cid).expect("agent").role = None;
+    assert_eq!(
+        h.model_for_agent_role(&h.agents[&cid]),
+        Some(selected_model)
+    );
+}
+
+/// If a model override disappears from provider routing, the harness must not
+/// emit future prompts to that unrouteable model. It should fall back to normal
+/// role-based resolution instead.
+#[test]
+fn unavailable_agent_model_override_falls_back_to_role_model() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    clear_startup_echo_models(&mut h);
+    connect_provider_source(&mut h, "provider-ext");
+    let role = h.selected_role.clone();
+    let cid = h.create_durable_user_agent("s1".into(), &role, test_cwd());
+    let role_model: ModelId = "test/role-model".parse().expect("model id");
+    h.handle_extension_event(
+        "provider-ext",
+        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+            models: vec![provider_model(role_model.clone(), 128_000)],
+        })),
+    )
+    .expect("handle provider snapshot");
+
+    h.agents.get_mut(&cid).expect("agent").model_override =
+        Some("test/missing".parse().expect("model id"));
+
+    assert_eq!(h.model_for_agent_role(&h.agents[&cid]), Some(role_model));
+}
+
+/// A target-less `/model` request is only safe when the session has exactly one
+/// loaded user agent. With multiple user agents the UI must send an explicit
+/// target so the harness does not depend on `HashMap` iteration order.
+#[test]
+fn targetless_agent_model_select_rejects_ambiguous_user_agents() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    clear_startup_echo_models(&mut h);
+    connect_provider_source(&mut h, "provider-ext");
+    let role = h.selected_role.clone();
+    let first = h.create_durable_user_agent("s1".into(), &role, test_cwd());
+    let second = h.create_durable_user_agent("s1".into(), &role, test_cwd());
+    let selected_model: ModelId = "test/selected".parse().expect("model id");
+    h.handle_extension_event(
+        "provider-ext",
+        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+            models: vec![provider_model(selected_model.clone(), 128_000)],
+        })),
+    )
+    .expect("handle provider snapshot");
+
+    h.handle_client_event_inner(
+        "ui-client",
+        Event::UiAgentModelSelect(tau_proto::UiAgentModelSelect {
+            session_id: "s1".into(),
+            target_agent_id: None,
+            model: selected_model,
+        }),
+    )
+    .expect("handle model select");
+
+    assert!(h.agents[&first].model_override.is_none());
+    assert!(h.agents[&second].model_override.is_none());
+}
+
 /// A role with an explicit model that no provider advertised is a terminal
 /// configuration problem after provider metadata exists. The harness must not
 /// leave the first prompt in `pending_prompts` forever just because the

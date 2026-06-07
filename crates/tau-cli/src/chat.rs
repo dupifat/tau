@@ -496,7 +496,10 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
         "/detach",
         "Leave the UI but keep the harness running for later reattach",
     ),
-    ("/model", "Switch agent role (e.g. /model engineer)"),
+    (
+        "/model",
+        "Switch selected agent model (e.g. /model openai/gpt-5)",
+    ),
     ("/agent", "Manage visible/suspended agent transcripts"),
     ("/new", "Alias for /agent new"),
     ("/role", "Switch, create, edit, or delete an agent role"),
@@ -1804,10 +1807,22 @@ impl<'a> TerminalInputSession<'a> {
             handle_role_command(text, self.writer, &|message| output.system_info(message));
             return true;
         }
-        if let Some(role) = text.strip_prefix("/model ") {
-            let role = role.trim();
-            if !role.is_empty() {
-                let _ = send_event(self.writer, &crate::ui_events::role_select(role));
+        if let Some(model) = text.strip_prefix("/model ") {
+            let model = model.trim();
+            if !model.is_empty() {
+                match model.parse::<tau_proto::ModelId>() {
+                    Ok(model) => {
+                        let _ = send_event(
+                            self.writer,
+                            &crate::ui_events::agent_model_select(
+                                self.session_id,
+                                self.ctx.routing.selected_side_agent_id(),
+                                model,
+                            ),
+                        );
+                    }
+                    Err(error) => self.output.system_info(&error.to_string()),
+                }
             }
             return true;
         }

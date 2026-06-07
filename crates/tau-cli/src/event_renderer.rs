@@ -4597,7 +4597,10 @@ impl EventRenderer {
                 }
                 true
             }
-            Event::HarnessModelsAvailable(_models) => true,
+            Event::HarnessModelsAvailable(models) => {
+                self.handle_harness_models_available(models);
+                true
+            }
             _ => false,
         }
     }
@@ -4642,12 +4645,17 @@ impl EventRenderer {
         }
     }
 
-    fn handle_harness_roles_available(&mut self, roles: &tau_proto::HarnessRolesAvailable) {
-        let model_items: Vec<tau_cli_term::CompletionItem> = roles
-            .roles
+    fn handle_harness_models_available(&mut self, models: &tau_proto::HarnessModelsAvailable) {
+        let model_items: Vec<tau_cli_term::CompletionItem> = models
+            .models
             .iter()
-            .map(|r| tau_cli_term::CompletionItem::new(&r.name, &r.description))
+            .map(|model| tau_cli_term::CompletionItem::new(model.to_string(), "agent model"))
             .collect();
+        self.completion_data
+            .set_arg_completions(tau_cli_term::CommandName::new("/model"), model_items);
+    }
+
+    fn handle_harness_roles_available(&mut self, roles: &tau_proto::HarnessRolesAvailable) {
         let role_defaults: HashMap<String, RoleCompletionDetails> = roles
             .roles
             .iter()
@@ -4664,8 +4672,6 @@ impl EventRenderer {
         if self.current_role.is_some() && self.model_status_block.is_some() {
             self.render_model_status();
         }
-        self.completion_data
-            .set_arg_completions(tau_cli_term::CommandName::new("/model"), model_items);
         let completer: tau_cli_term::ArgCompleter =
             std::sync::Arc::new(move |args| role_command_completions(&role_items, args));
         self.completion_data

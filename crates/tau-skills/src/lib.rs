@@ -119,6 +119,10 @@ const BUILT_IN_SKILL_SOURCES: &[BuiltInSkillSource] = &[
         content: include_str!("../self-knowledge/tau-self-knowledge-architecture.md"),
     },
     BuiltInSkillSource {
+        diagnostic_path: "tau-self-knowledge-harness.md",
+        content: include_str!("../self-knowledge/tau-self-knowledge-harness.md"),
+    },
+    BuiltInSkillSource {
         diagnostic_path: "tau-self-knowledge-config.md",
         content: include_str!("../self-knowledge/tau-self-knowledge-config.md"),
     },

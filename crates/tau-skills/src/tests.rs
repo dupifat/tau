@@ -506,6 +506,7 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
         vec![
             "tau-self-knowledge",
             "tau-self-knowledge-architecture",
+            "tau-self-knowledge-harness",
             "tau-self-knowledge-config",
             "tau-self-knowledge-cli-ui",
             "tau-self-knowledge-email",
@@ -540,6 +541,7 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
             .contains(&format!("Tau version `{TAU_VERSION}`"))
     );
     assert!(skill.content.contains("tau-self-knowledge-architecture"));
+    assert!(skill.content.contains("tau-self-knowledge-harness"));
     assert!(skill.content.contains("tau-self-knowledge-config"));
     assert!(skill.content.contains("tau-self-knowledge-cli-ui"));
     assert!(skill.content.contains("tau-self-knowledge-email"));
@@ -573,6 +575,14 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
         .expect("built-in architecture skill");
     assert!(!architecture.add_to_prompt);
     assert!(architecture.content.contains("# Tau architecture overview"));
+
+    let harness = skills
+        .iter()
+        .find(|skill| skill.name == "tau-self-knowledge-harness")
+        .expect("built-in harness skill");
+    assert!(!harness.add_to_prompt);
+    assert!(harness.content.contains("# Tau harness daemon"));
+    assert!(harness.content.contains("Socket activation"));
 
     let config = skills
         .iter()

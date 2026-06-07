@@ -815,6 +815,7 @@ fn built_in_tau_self_knowledge_skills_are_available_without_file_paths() {
     for (name, advertised) in [
         ("tau-self-knowledge", true),
         ("tau-self-knowledge-architecture", false),
+        ("tau-self-knowledge-harness", false),
         ("tau-self-knowledge-config", false),
         ("tau-self-knowledge-source-code", false),
         ("tau-self-knowledge-community", false),
@@ -836,6 +837,7 @@ fn built_in_tau_self_knowledge_skills_are_available_without_file_paths() {
     assert!(prompt.contains("<name>tau-self-knowledge</name>"));
     assert!(prompt.contains("Use this skill when the user asks about the Tau coding agent"));
     assert!(!prompt.contains("<name>tau-self-knowledge-architecture</name>"));
+    assert!(!prompt.contains("<name>tau-self-knowledge-harness</name>"));
     assert!(!prompt.contains("<name>tau-self-knowledge-config</name>"));
     assert!(!prompt.contains("<name>tau-self-knowledge-source-code</name>"));
     assert!(!prompt.contains("<name>tau-self-knowledge-community</name>"));
@@ -859,6 +861,7 @@ fn built_in_tau_self_knowledge_skills_are_available_without_file_paths() {
     assert!(!content.contains("__TAU_SELF_KNOWLEDGE_VERSION__"));
     assert!(content.contains(&format!("Tau version `{}`", env!("CARGO_PKG_VERSION"))));
     assert!(content.contains("tau-self-knowledge-architecture"));
+    assert!(content.contains("tau-self-knowledge-harness"));
     assert!(content.contains("tau-self-knowledge-config"));
     assert!(content.contains("tau-self-knowledge-source-code"));
     assert!(content.contains("tau-self-knowledge-community"));

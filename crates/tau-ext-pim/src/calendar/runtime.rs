@@ -21,6 +21,7 @@ use super::tool::{
     CalendarCommand, CalendarRangeArgs, CreateEventArgs, DeleteEventArgs, ListCalendarsArgs,
     ReadEventArgs, RespondInviteArgs, ToolInvocation, UpdateEventArgs,
 };
+use crate::storage::SharedStorage;
 
 const LIST_CALENDARS_FORMAT: &str = "calendar_id flags display_name";
 const LIST_EVENTS_FORMAT: &str = "event_id start end flags status summary...";
@@ -167,18 +168,18 @@ struct EventEtagKey {
 
 impl RuntimeState {
     /// Configure the calendar module from an already-decoded calendar config.
-    pub fn configure_with_config(
+    pub(crate) fn configure_with_config(
         &mut self,
         cfg: CalendarExtensionConfig,
         state_dir: Option<PathBuf>,
         secrets: BTreeMap<String, SecretValue>,
+        storage: SharedStorage,
     ) -> Result<(), String> {
         let result = cfg.validate().and_then(|config| {
-            let state_dir = state_dir
-                .ok_or_else(|| "calendar module requires Configure.state_dir".to_owned())?;
+            let state_dir = state_dir.unwrap_or_default();
             Ok(Engine {
                 config,
-                state: StateStore::open(state_dir)?,
+                state: StateStore::open_with_storage(state_dir, storage)?,
                 google: GoogleBackend::new(secrets.clone()),
                 ics_feed: IcsFeedBackend::new(secrets),
                 etags: RefCell::new(BTreeMap::new()),

@@ -1,12 +1,11 @@
 use std::collections::VecDeque;
-use std::fs;
-use std::io::{BufRead, BufReader, Write};
-#[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+
+use crate::storage::{SharedStorage, StorageCreateError, file_name};
 
 const LOG_SCHEMA: u32 = 1;
 const CHANGE_SCHEMA: u32 = 1;
@@ -231,27 +230,52 @@ impl GooglePendingAuth {
     }
 }
 
-/// Calendar module persistent state under the extension state directory.
+/// Calendar module persistent state under the extension storage root.
 pub(crate) struct StateStore {
-    state_dir: PathBuf,
+    storage: SharedStorage,
 }
 
 impl StateStore {
-    /// Open the calendar state area and create required private directories.
+    /// Open the calendar state area.
+    #[cfg(test)]
     pub(crate) fn open(state_dir: PathBuf) -> Result<Self, String> {
-        create_private_dir_all(&state_dir)?;
-        create_private_dir_all(&state_dir.join("logs"))?;
-        create_private_dir_all(&state_dir.join("auth").join("google"))?;
-        create_private_dir_all(&state_dir.join("auth").join("google-pending"))?;
-        for status in ["pending", "sending", "approved", "denied"] {
-            create_private_dir_all(
-                &state_dir
-                    .join("approvals")
-                    .join(CHANGE_APPROVAL_KIND)
-                    .join(status),
-            )?;
-        }
-        Ok(Self { state_dir })
+        Self::open_with_storage(
+            state_dir.clone(),
+            std::rc::Rc::new(crate::storage::FsStorage::new(state_dir)),
+        )
+    }
+
+    /// Open the calendar state area using a supplied storage backend.
+    pub(crate) fn open_with_storage(
+        state_dir: PathBuf,
+        storage: SharedStorage,
+    ) -> Result<Self, String> {
+        let _ = state_dir;
+        Ok(Self { storage })
+    }
+
+    fn read_file(&self, path: &str) -> Result<Option<Vec<u8>>, String> {
+        self.storage.read_file(path)
+    }
+
+    fn write_json<T: Serialize>(&self, path: &str, value: &T) -> Result<(), String> {
+        let bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
+        self.storage.write_file(path, bytes)
+    }
+
+    fn create_json<T: Serialize>(&self, path: &str, value: &T) -> Result<(), CreateNewJsonError> {
+        let bytes = serde_json::to_vec_pretty(value)
+            .map_err(|error| CreateNewJsonError::Other(error.to_string()))?;
+        self.storage
+            .create_file(path, bytes)
+            .map_err(|error| match error {
+                StorageCreateError::AlreadyExists => CreateNewJsonError::AlreadyExists,
+                StorageCreateError::Other(message) => CreateNewJsonError::Other(message),
+            })
+    }
+
+    fn file_exists(&self, path: &str) -> Result<bool, String> {
+        self.storage.file_exists(path)
     }
 
     /// Append one calendar audit log entry.
@@ -259,12 +283,7 @@ impl StateStore {
         let path = self.calendar_log_path();
         let mut bytes = serde_json::to_vec(entry).map_err(|error| error.to_string())?;
         bytes.push(b'\n');
-        let mut file = open_private_append(&path)
-            .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
-        file.write_all(&bytes)
-            .map_err(|error| format!("failed to append {}: {error}", path.display()))?;
-        file.sync_data()
-            .map_err(|error| format!("failed to sync {}: {error}", path.display()))
+        self.storage.append_file(&path, bytes)
     }
 
     /// Load recent calendar audit log entries in chronological order.
@@ -273,15 +292,12 @@ impl StateStore {
         limit: usize,
     ) -> Result<Vec<CalendarLogEntry>, String> {
         let path = self.calendar_log_path();
-        if !path.exists() {
+        let Some(bytes) = self.read_file(&path)? else {
             return Ok(Vec::new());
-        }
-        let bytes = read_sensitive_file(&path)
-            .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
+        };
         let mut entries = VecDeque::new();
         for line in BufReader::new(bytes.as_slice()).lines() {
-            let line =
-                line.map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+            let line = line.map_err(|error| format!("failed to read {path}: {error}"))?;
             if line.trim().is_empty() {
                 continue;
             }
@@ -307,17 +323,17 @@ impl StateStore {
     ) -> Result<(), String> {
         let auth = GoogleStoredAuth::new(account, refresh_token);
         validate_google_stored_auth(&auth, Some(account))?;
-        atomic_json_replace(&self.google_auth_path(account), &auth)
+        self.write_json(&self.google_auth_path(account), &auth)
     }
 
     /// Load a stored Google OAuth refresh token for one account.
     pub(crate) fn google_refresh_token(&self, account: &str) -> Result<Option<String>, String> {
         let path = self.google_auth_path(account);
-        if !path.exists() {
+        let Some(bytes) = self.read_file(&path)? else {
             return Ok(None);
-        }
-        let auth: GoogleStoredAuth = serde_json::from_slice(&read_sensitive_file(&path)?)
-            .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
+        };
+        let auth: GoogleStoredAuth = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("failed to parse {path}: {error}"))?;
         validate_google_stored_auth(&auth, Some(account))?;
         Ok(Some(auth.refresh_token))
     }
@@ -328,30 +344,27 @@ impl StateStore {
         pending: &GooglePendingAuth,
     ) -> Result<(), String> {
         validate_google_pending_auth(pending, Some(&pending.account))?;
-        atomic_json_replace(&self.google_pending_auth_path(&pending.account), pending)
+        self.write_json(&self.google_pending_auth_path(&pending.account), pending)
     }
 
     /// Load a pending Google device authorization request.
     pub(crate) fn pending_google_auth(&self, account: &str) -> Result<GooglePendingAuth, String> {
         let path = self.google_pending_auth_path(account);
-        if !path.exists() {
+        let Some(bytes) = self.read_file(&path)? else {
             return Err(format!(
                 "no pending Google authorization for account `{account}`"
             ));
-        }
-        let pending: GooglePendingAuth = serde_json::from_slice(&read_sensitive_file(&path)?)
-            .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
+        };
+        let pending: GooglePendingAuth = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("failed to parse {path}: {error}"))?;
         validate_google_pending_auth(&pending, Some(account))?;
         Ok(pending)
     }
 
     /// Clear a pending Google device authorization request.
     pub(crate) fn clear_pending_google_auth(&self, account: &str) -> Result<(), String> {
-        match fs::remove_file(self.google_pending_auth_path(account)) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error.to_string()),
-        }
+        self.storage
+            .delete_file(&self.google_pending_auth_path(account))
     }
 
     /// Load pending calendar changes in deterministic order.
@@ -388,7 +401,7 @@ impl StateStore {
             let mut request = request.clone();
             request.id = self.next_change_id()?;
             let path = self.change_path("pending", &request.id)?;
-            match atomic_json_create_new(&path, &request) {
+            match self.create_json(&path, &request) {
                 Ok(()) => return Ok(request.id),
                 Err(CreateNewJsonError::AlreadyExists) => continue,
                 Err(CreateNewJsonError::Other(message)) => return Err(message),
@@ -398,12 +411,12 @@ impl StateStore {
 
     /// Return true if a pending calendar change exists.
     pub(crate) fn change_pending_exists(&self, id: &str) -> Result<bool, String> {
-        Ok(self.change_path("pending", id)?.exists())
+        self.file_exists(&self.change_path("pending", id)?)
     }
 
     /// Return true if a sending calendar change exists.
     pub(crate) fn change_sending_exists(&self, id: &str) -> Result<bool, String> {
-        Ok(self.change_path("sending", id)?.exists())
+        self.file_exists(&self.change_path("sending", id)?)
     }
 
     /// Claim one pending calendar change for execution.
@@ -412,7 +425,7 @@ impl StateStore {
         let mut sending = approval.clone();
         sending.status = "sending".to_owned();
         let sending_path = self.change_path("sending", id)?;
-        match atomic_json_create_new(&sending_path, &sending) {
+        match self.create_json(&sending_path, &sending) {
             Ok(()) => {}
             Err(CreateNewJsonError::AlreadyExists) => {
                 return Err(format!("calendar change `{id}` is already being applied"));
@@ -420,9 +433,9 @@ impl StateStore {
             Err(CreateNewJsonError::Other(message)) => return Err(message),
         }
         let pending_path = self.change_path("pending", id)?;
-        if let Err(error) = fs::remove_file(&pending_path) {
-            let _ = fs::remove_file(&sending_path);
-            return Err(error.to_string());
+        if let Err(error) = self.storage.delete_file(&pending_path) {
+            let _ = self.storage.delete_file(&sending_path);
+            return Err(error);
         }
         Ok(approval)
     }
@@ -432,11 +445,11 @@ impl StateStore {
         let mut approval = self.load_change_approval("sending", id)?;
         approval.status = "pending".to_owned();
         let pending_path = self.change_path("pending", id)?;
-        match atomic_json_create_new(&pending_path, &approval) {
+        match self.create_json(&pending_path, &approval) {
             Ok(()) | Err(CreateNewJsonError::AlreadyExists) => {}
             Err(CreateNewJsonError::Other(message)) => return Err(message),
         }
-        fs::remove_file(self.change_path("sending", id)?).map_err(|error| error.to_string())
+        self.storage.delete_file(&self.change_path("sending", id)?)
     }
 
     /// Mark a claimed calendar change as approved after successful execution.
@@ -449,11 +462,11 @@ impl StateStore {
         approval.status = "approved".to_owned();
         approval.result_event_id = result_event_id.map(safe_persisted_line);
         let approved_path = self.change_path("approved", id)?;
-        match atomic_json_create_new(&approved_path, &approval) {
+        match self.create_json(&approved_path, &approval) {
             Ok(()) | Err(CreateNewJsonError::AlreadyExists) => {}
             Err(CreateNewJsonError::Other(message)) => return Err(message),
         }
-        fs::remove_file(self.change_path("sending", id)?).map_err(|error| error.to_string())
+        self.storage.delete_file(&self.change_path("sending", id)?)
     }
 
     /// Deny a pending calendar change.
@@ -463,22 +476,16 @@ impl StateStore {
 
     fn list_change_approvals(&self, status: &str) -> Result<Vec<CalendarChangeApproval>, String> {
         let dir = self.change_dir(status);
-        let mut paths = fs::read_dir(&dir)
-            .map_err(|error| format!("failed to read {}: {error}", dir.display()))?
-            .map(|entry| {
-                entry
-                    .map(|entry| entry.path())
-                    .map_err(|error| error.to_string())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        paths.sort();
-        paths
+        self.storage
+            .list_files(&dir)?
             .into_iter()
-            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
-            .map(|path| {
-                let approval: CalendarChangeApproval =
-                    serde_json::from_slice(&read_sensitive_file(&path)?)
-                        .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
+            .filter(|entry| !entry.is_dir && entry.path.ends_with(".json"))
+            .map(|entry| {
+                let bytes = self
+                    .read_file(&entry.path)?
+                    .ok_or_else(|| format!("calendar change file `{}` not found", entry.path))?;
+                let approval: CalendarChangeApproval = serde_json::from_slice(&bytes)
+                    .map_err(|error| format!("failed to parse {}: {error}", entry.path))?;
                 validate_calendar_change_approval(&approval, status, None)?;
                 Ok(approval)
             })
@@ -491,11 +498,11 @@ impl StateStore {
         id: &str,
     ) -> Result<CalendarChangeApproval, String> {
         let path = self.change_path(status, id)?;
-        if !path.exists() {
+        let Some(bytes) = self.read_file(&path)? else {
             return Err(format!("calendar change `{id}` not found"));
-        }
-        let approval: CalendarChangeApproval = serde_json::from_slice(&read_sensitive_file(&path)?)
-            .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
+        };
+        let approval: CalendarChangeApproval = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("failed to parse {path}: {error}"))?;
         validate_calendar_change_approval(&approval, status, Some(id))?;
         Ok(approval)
     }
@@ -504,70 +511,54 @@ impl StateStore {
         validate_change_id(id)?;
         let from = self.change_path("pending", id)?;
         let to = self.change_path(new_status, id)?;
-        if from.exists() {
-            let mut record: serde_json::Value =
-                serde_json::from_slice(&read_sensitive_file(&from)?)
-                    .map_err(|error| format!("failed to parse {}: {error}", from.display()))?;
+        if let Some(bytes) = self.read_file(&from)? {
+            let mut record: serde_json::Value = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("failed to parse {from}: {error}"))?;
             validate_change_record(&record, "pending", id)?;
             record["status"] = serde_json::Value::String(new_status.to_owned());
-            match atomic_json_create_new(&to, &record) {
+            match self.create_json(&to, &record) {
                 Ok(()) | Err(CreateNewJsonError::AlreadyExists) => {}
                 Err(CreateNewJsonError::Other(message)) => return Err(message),
             }
-            match fs::remove_file(&from) {
-                Ok(()) => Ok(()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(error.to_string()),
-            }
-        } else if to.exists() {
+            self.storage.delete_file(&from)
+        } else if self.file_exists(&to)? {
             Ok(())
         } else {
             Err(format!("calendar change `{id}` not found"))
         }
     }
 
-    fn calendar_log_path(&self) -> PathBuf {
-        self.state_dir.join("logs").join("calendar.jsonl")
+    fn calendar_log_path(&self) -> String {
+        "logs/calendar.jsonl".to_owned()
     }
 
-    fn google_auth_path(&self, account: &str) -> PathBuf {
-        self.state_dir
-            .join("auth")
-            .join("google")
-            .join(format!("{}.json", account_file_stem(account)))
+    fn google_auth_path(&self, account: &str) -> String {
+        format!("auth/google/{}.json", account_file_stem(account))
     }
 
-    fn google_pending_auth_path(&self, account: &str) -> PathBuf {
-        self.state_dir
-            .join("auth")
-            .join("google-pending")
-            .join(format!("{}.json", account_file_stem(account)))
+    fn google_pending_auth_path(&self, account: &str) -> String {
+        format!("auth/google-pending/{}.json", account_file_stem(account))
     }
 
-    fn change_dir(&self, status: &str) -> PathBuf {
-        self.state_dir
-            .join("approvals")
-            .join(CHANGE_APPROVAL_KIND)
-            .join(status)
+    fn change_dir(&self, status: &str) -> String {
+        format!("approvals/{CHANGE_APPROVAL_KIND}/{status}")
     }
 
-    fn change_path(&self, status: &str, id: &str) -> Result<PathBuf, String> {
+    fn change_path(&self, status: &str, id: &str) -> Result<String, String> {
         validate_change_id(id)?;
-        Ok(self.change_dir(status).join(format!("{id}.json")))
+        Ok(format!("{}/{id}.json", self.change_dir(status)))
     }
 
     fn next_change_id(&self) -> Result<String, String> {
         let mut max_id = 0_u64;
         for status in ["pending", "sending", "approved", "denied"] {
             let dir = self.change_dir(status);
-            for entry in fs::read_dir(&dir)
-                .map_err(|error| format!("failed to read {}: {error}", dir.display()))?
-            {
-                let path = entry.map_err(|error| error.to_string())?.path();
-                if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            for entry in self.storage.list_files(&dir)? {
+                if entry.is_dir || !entry.path.ends_with(".json") {
                     continue;
                 }
-                let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                let Some(stem) = file_name(&entry.path).and_then(|name| name.strip_suffix(".json"))
+                else {
                     continue;
                 };
                 if let Ok(id) = stem.parse::<u64>()
@@ -834,125 +825,6 @@ fn current_unix_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or(0)
-}
-
-fn create_private_dir_all(path: &Path) -> Result<(), String> {
-    fs::create_dir_all(path).map_err(|error| error.to_string())?;
-    chmod_private_dir(path)
-}
-
-fn read_sensitive_file(path: &Path) -> Result<Vec<u8>, String> {
-    chmod_private_file(path)?;
-    fs::read(path).map_err(|error| error.to_string())
-}
-
-fn open_private_append(path: &Path) -> Result<fs::File, std::io::Error> {
-    let mut options = fs::OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let file = options.open(path)?;
-    chmod_private_file_handle(&file)?;
-    Ok(file)
-}
-
-fn create_private_file(path: &Path) -> Result<fs::File, std::io::Error> {
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let file = options.open(path)?;
-    chmod_private_file_handle(&file)?;
-    Ok(file)
-}
-
-#[cfg(unix)]
-fn chmod_private_dir(path: &Path) -> Result<(), String> {
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-        .map_err(|error| format!("failed to chmod {}: {error}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn chmod_private_dir(_path: &Path) -> Result<(), String> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn chmod_private_file(path: &Path) -> Result<(), String> {
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .map_err(|error| format!("failed to chmod {}: {error}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn chmod_private_file(_path: &Path) -> Result<(), String> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn chmod_private_file_handle(file: &fs::File) -> Result<(), std::io::Error> {
-    file.set_permissions(fs::Permissions::from_mode(0o600))
-}
-
-#[cfg(not(unix))]
-fn chmod_private_file_handle(_file: &fs::File) -> Result<(), std::io::Error> {
-    Ok(())
-}
-
-fn temp_json_path(parent: &Path, path: &Path) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    parent.join(format!(
-        ".{}.tmp-{}-{nonce}",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or("state"),
-        std::process::id()
-    ))
-}
-
-fn write_json_temp<T: Serialize>(path: &Path, value: &T) -> Result<PathBuf, String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| "state path has no parent".to_owned())?;
-    create_private_dir_all(parent)?;
-    let tmp = temp_json_path(parent, path);
-    let bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
-    {
-        let mut file = create_private_file(&tmp).map_err(|error| error.to_string())?;
-        file.write_all(&bytes).map_err(|error| error.to_string())?;
-        file.sync_all().map_err(|error| error.to_string())?;
-    }
-    Ok(tmp)
-}
-
-fn atomic_json_create_new<T: Serialize>(path: &Path, value: &T) -> Result<(), CreateNewJsonError> {
-    let tmp = write_json_temp(path, value).map_err(CreateNewJsonError::Other)?;
-    match fs::hard_link(&tmp, path) {
-        Ok(()) => {
-            let _ = fs::remove_file(&tmp);
-            Ok(())
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let _ = fs::remove_file(&tmp);
-            Err(CreateNewJsonError::AlreadyExists)
-        }
-        Err(error) => {
-            let _ = fs::remove_file(&tmp);
-            Err(CreateNewJsonError::Other(error.to_string()))
-        }
-    }
-}
-
-fn atomic_json_replace<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
-    let tmp = write_json_temp(path, value)?;
-    fs::rename(&tmp, path).map_err(|error| {
-        let _ = fs::remove_file(&tmp);
-        format!(
-            "failed to rename {} into {}: {error}",
-            tmp.display(),
-            path.display()
-        )
-    })
 }
 
 #[cfg(test)]

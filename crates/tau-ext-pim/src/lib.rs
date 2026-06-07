@@ -3,8 +3,11 @@
 //! The extension exposes split email and calendar command tools while keeping
 //! shared configuration, approval, and runtime boundaries inside one extension.
 
+use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::error::Error;
 use std::io::{BufReader, BufWriter, Read, Write};
+use std::rc::Rc;
 
 use serde::Deserialize;
 use tau_proto::{
@@ -14,6 +17,7 @@ use tau_proto::{
 
 pub mod calendar;
 pub mod email;
+mod storage;
 
 /// `tracing` target for extension-level events emitted by the PIM wrapper.
 pub const LOG_TARGET: &str = "pim";
@@ -27,11 +31,18 @@ pub fn run_stdio() -> Result<(), Box<dyn Error>> {
 /// Run the extension over the supplied reader/writer pair.
 pub fn run<R, W>(reader: R, writer: W) -> Result<(), Box<dyn Error>>
 where
-    R: Read,
-    W: Write,
+    R: Read + 'static,
+    W: Write + 'static,
 {
-    let mut reader = PeerInputReader::new(BufReader::new(reader));
-    let mut writer = PeerOutputWriter::new(BufWriter::new(writer));
+    let reader = Rc::new(RefCell::new(PeerInputReader::new(BufReader::new(reader))));
+    let writer = Rc::new(RefCell::new(PeerOutputWriter::new(BufWriter::new(writer))));
+    let pending = Rc::new(RefCell::new(VecDeque::new()));
+    let storage: storage::SharedStorage = Rc::new(storage::RpcStorage::new(
+        tau_proto::ExtensionDataScope::User,
+        Rc::clone(&reader),
+        Rc::clone(&writer),
+        Rc::clone(&pending),
+    ));
     let mut runtime = RuntimeState::default();
 
     let handshake = tau_extension::Handshake::tool("tau-ext-pim").subscribe([
@@ -56,10 +67,16 @@ where
     handshake
         .publish_actions(action_schema())
         .ready_message("pim extension ready")
-        .run(&mut writer)?;
+        .run(&mut writer.borrow_mut())?;
 
-    while let Some(message) = reader.read_message()? {
-        if !handle_message(&mut runtime, message, &mut writer)? {
+    loop {
+        let message = if let Some(message) = pending.borrow_mut().pop_front() {
+            Some(message)
+        } else {
+            reader.borrow_mut().read_message()?
+        };
+        let Some(message) = message else { break };
+        if !handle_message(&mut runtime, Rc::clone(&storage), message, &writer)? {
             break;
         }
     }
@@ -80,18 +97,23 @@ struct PimExtensionConfig {
 }
 
 impl RuntimeState {
-    fn configure(&mut self, configure: tau_proto::Configure) -> Result<(), String> {
+    fn configure(
+        &mut self,
+        configure: tau_proto::Configure,
+        storage: storage::SharedStorage,
+    ) -> Result<(), String> {
         match tau_extension::parse_config::<PimExtensionConfig>(&configure.config) {
-            Ok(pim) => self.configure_pim(pim, configure),
+            Ok(pim) => self.configure_pim(pim, configure, storage),
             Err(message) if has_pim_module_keys(&configure.config) => Err(message),
             Err(_) => {
                 let calendar_secrets = configure.secrets.clone();
                 let calendar_state_dir = configure.state_dir.clone();
-                self.email.configure(configure)?;
+                self.email.configure(configure, Rc::clone(&storage))?;
                 self.calendar.configure_with_config(
                     calendar::CalendarExtensionConfig::default(),
                     calendar_state_dir,
                     calendar_secrets,
+                    storage,
                 )
             }
         }
@@ -101,6 +123,7 @@ impl RuntimeState {
         &mut self,
         pim: PimExtensionConfig,
         configure: tau_proto::Configure,
+        storage: storage::SharedStorage,
     ) -> Result<(), String> {
         let email_config = pim.email.unwrap_or_default();
         let calendar_config = pim.calendar.unwrap_or_default();
@@ -109,9 +132,14 @@ impl RuntimeState {
             email_config,
             configure.state_dir.clone(),
             configure.secrets.clone(),
+            Rc::clone(&storage),
         )?;
-        self.calendar
-            .configure_with_config(calendar_config, configure.state_dir, configure.secrets)
+        self.calendar.configure_with_config(
+            calendar_config,
+            configure.state_dir,
+            configure.secrets,
+            storage,
+        )
     }
 
     fn initial_tool_progress(&self, invoke: &tau_proto::ToolStarted) -> Option<Event> {
@@ -206,14 +234,17 @@ fn action_schema() -> ActionSchema {
 
 fn handle_message<W: Write>(
     runtime: &mut RuntimeState,
+    storage: storage::SharedStorage,
     message: HarnessOutputMessage,
-    writer: &mut PeerOutputWriter<W>,
+    writer: &Rc<RefCell<PeerOutputWriter<BufWriter<W>>>>,
 ) -> Result<bool, Box<dyn Error>> {
     match message {
         HarnessOutputMessage::Configure(configure) => {
-            if let Err(message) = runtime.configure(configure) {
-                writer.write_message(&HarnessInputMessage::ConfigError(ConfigError { message }))?;
-                writer.flush()?;
+            if let Err(message) = runtime.configure(configure, storage) {
+                writer
+                    .borrow_mut()
+                    .write_message(&HarnessInputMessage::ConfigError(ConfigError { message }))?;
+                writer.borrow_mut().flush()?;
             }
         }
         HarnessOutputMessage::Deliver(delivery) => {
@@ -222,8 +253,10 @@ fn handle_message<W: Write>(
                 Event::ToolStarted(invoke) => handle_tool_started(runtime, invoke, writer)?,
                 Event::ActionInvoke(invoke) => {
                     let event = runtime.dispatch_action(invoke);
-                    writer.write_message(&HarnessInputMessage::emit(event))?;
-                    writer.flush()?;
+                    writer
+                        .borrow_mut()
+                        .write_message(&HarnessInputMessage::emit(event))?;
+                    writer.borrow_mut().flush()?;
                 }
                 _ => {}
             }
@@ -240,25 +273,34 @@ fn handle_message<W: Write>(
 fn handle_tool_started<W: Write>(
     runtime: &mut RuntimeState,
     invoke: tau_proto::ToolStarted,
-    writer: &mut PeerOutputWriter<W>,
+    writer: &Rc<RefCell<PeerOutputWriter<BufWriter<W>>>>,
 ) -> Result<(), Box<dyn Error>> {
     if let Some(progress) = runtime.initial_tool_progress(&invoke) {
-        writer.write_message(&HarnessInputMessage::emit(progress))?;
-        writer.flush()?;
+        writer
+            .borrow_mut()
+            .write_message(&HarnessInputMessage::emit(progress))?;
+        writer.borrow_mut().flush()?;
     }
     if let Some(event) = runtime.dispatch_tool(invoke) {
-        writer.write_message(&HarnessInputMessage::emit(event))?;
-        writer.flush()?;
+        writer
+            .borrow_mut()
+            .write_message(&HarnessInputMessage::emit(event))?;
+        writer.borrow_mut().flush()?;
     }
     Ok(())
 }
 
 fn ack_log_event<W: Write>(
     id: EventLogSeq,
-    writer: &mut PeerOutputWriter<W>,
+    writer: &Rc<RefCell<PeerOutputWriter<BufWriter<W>>>>,
 ) -> Result<(), tau_proto::EncodeError> {
-    writer.write_message(&HarnessInputMessage::Ack(Ack { up_to: id }))?;
-    writer.flush().map_err(tau_proto::EncodeError::Io)
+    writer
+        .borrow_mut()
+        .write_message(&HarnessInputMessage::Ack(Ack { up_to: id }))?;
+    writer
+        .borrow_mut()
+        .flush()
+        .map_err(tau_proto::EncodeError::Io)
 }
 
 #[cfg(test)]

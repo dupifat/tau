@@ -6,16 +6,16 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
-use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
-#[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use globset::{Glob, GlobMatcher};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+
+use crate::storage::{FsStorage, SharedStorage, StorageCreateError, file_name};
 
 mod real_backend;
 use real_backend::RealEmailBackend;
@@ -108,7 +108,17 @@ where
     while let Some(message) = reader.read_message()? {
         match message {
             HarnessOutputMessage::Configure(configure) => {
-                if let Err(message) = runtime.configure(configure) {
+                let storage = match configure.state_dir.clone() {
+                    Some(state_dir) => Rc::new(FsStorage::new(state_dir)) as SharedStorage,
+                    None => {
+                        writer.write_message(&HarnessInputMessage::ConfigError(ConfigError {
+                            message: "email extension requires Configure.state_dir".to_owned(),
+                        }))?;
+                        writer.flush()?;
+                        continue;
+                    }
+                };
+                if let Err(message) = runtime.configure(configure, storage) {
                     writer.write_message(&HarnessInputMessage::ConfigError(ConfigError {
                         message,
                     }))?;
@@ -1060,39 +1070,56 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-/// Persistent policy/approval state under the injected extension state
-/// directory.
+/// Persistent policy/approval state under the injected extension storage root.
 pub struct StateStore {
-    /// Root state directory provided by the harness.
+    storage: SharedStorage,
+    /// Root state directory provided by the harness, kept for tests and
+    /// diagnostics.
     pub state_dir: PathBuf,
 }
 
 impl StateStore {
     /// Create the state directory and marker file if needed.
     pub fn open(state_dir: PathBuf) -> Result<Self, String> {
-        create_private_dir_all(&state_dir)?;
-        for dir in [
-            "policy",
-            "approvals",
-            "approvals/incoming",
-            "approvals/incoming/pending",
-            "approvals/incoming/sending",
-            "approvals/incoming/approved",
-            "approvals/incoming/denied",
-            "approvals/outgoing",
-            "approvals/outgoing/pending",
-            "approvals/outgoing/sending",
-            "approvals/outgoing/approved",
-            "approvals/outgoing/denied",
-            "logs",
-        ] {
-            create_private_dir_all(&state_dir.join(dir))?;
-        }
-        atomic_json_write(
-            &state_dir.join("state-v1.json"),
-            &serde_json::json!({"schema":1}),
-        )?;
-        Ok(Self { state_dir })
+        Self::open_with_storage(
+            state_dir.clone(),
+            std::rc::Rc::new(FsStorage::new(state_dir)),
+        )
+    }
+
+    /// Create the state marker file if needed using the supplied storage
+    /// backend.
+    pub(crate) fn open_with_storage(
+        state_dir: PathBuf,
+        storage: SharedStorage,
+    ) -> Result<Self, String> {
+        let store = Self { storage, state_dir };
+        store.write_json("state-v1.json", &serde_json::json!({"schema":1}))?;
+        Ok(store)
+    }
+
+    fn read_file(&self, path: &str) -> Result<Option<Vec<u8>>, String> {
+        self.storage.read_file(path)
+    }
+
+    fn write_json<T: Serialize>(&self, path: &str, value: &T) -> Result<(), String> {
+        let bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
+        self.storage.write_file(path, bytes)
+    }
+
+    fn create_json<T: Serialize>(&self, path: &str, value: &T) -> Result<(), CreateNewJsonError> {
+        let bytes = serde_json::to_vec_pretty(value)
+            .map_err(|error| CreateNewJsonError::Other(error.to_string()))?;
+        self.storage
+            .create_file(path, bytes)
+            .map_err(|error| match error {
+                StorageCreateError::AlreadyExists => CreateNewJsonError::AlreadyExists,
+                StorageCreateError::Other(message) => CreateNewJsonError::Other(message),
+            })
+    }
+
+    fn file_exists(&self, path: &str) -> Result<bool, String> {
+        self.storage.file_exists(path)
     }
 
     /// Load persisted incoming allow patterns.
@@ -1168,25 +1195,17 @@ impl StateStore {
         let path = self.email_log_path();
         let mut bytes = serde_json::to_vec(entry).map_err(|error| error.to_string())?;
         bytes.push(b'\n');
-        let mut file = open_private_append(&path)
-            .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
-        file.write_all(&bytes)
-            .map_err(|error| format!("failed to append {}: {error}", path.display()))?;
-        file.sync_data()
-            .map_err(|error| format!("failed to sync {}: {error}", path.display()))
+        self.storage.append_file(&path, bytes)
     }
 
     fn recent_email_log(&self, limit: usize) -> Result<Vec<EmailLogEntry>, String> {
         let path = self.email_log_path();
-        if !path.exists() {
+        let Some(bytes) = self.read_file(&path)? else {
             return Ok(Vec::new());
-        }
-        let bytes = read_sensitive_file(&path)
-            .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
+        };
         let mut entries = VecDeque::new();
         for line in BufReader::new(bytes.as_slice()).lines() {
-            let line =
-                line.map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+            let line = line.map_err(|error| format!("failed to read {path}: {error}"))?;
             if line.trim().is_empty() {
                 continue;
             }
@@ -1204,8 +1223,8 @@ impl StateStore {
         Ok(entries.into_iter().collect())
     }
 
-    fn email_log_path(&self) -> PathBuf {
-        self.state_dir.join("logs").join("email.jsonl")
+    fn email_log_path(&self) -> String {
+        "logs/email.jsonl".to_owned()
     }
 
     fn load_allow_file(&self, name: &str) -> Result<Vec<AddressPattern>, String> {
@@ -1220,17 +1239,16 @@ impl StateStore {
     }
 
     fn load_allow_records(&self, name: &str) -> Result<Vec<StatePattern>, String> {
-        let path = self.state_dir.join("policy").join(name);
-        if !path.exists() {
+        let path = format!("policy/{name}");
+        let Some(bytes) = self.read_file(&path)? else {
             return Ok(Vec::new());
-        }
-        let file: PolicyFile = serde_json::from_slice(&read_sensitive_file(&path)?)
-            .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
+        };
+        let file: PolicyFile = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("failed to parse {path}: {error}"))?;
         if file.schema != 1 {
             return Err(format!(
-                "unsupported policy schema {} in {}",
-                file.schema,
-                path.display()
+                "unsupported policy schema {} in {path}",
+                file.schema
             ));
         }
         Ok(file.patterns)
@@ -1241,7 +1259,7 @@ impl StateStore {
             schema: 1,
             patterns: records.to_vec(),
         };
-        atomic_json_write(&self.state_dir.join("policy").join(name), &file)
+        self.write_json(&format!("policy/{name}"), &file)
     }
 
     fn list_approvals<T: for<'de> Deserialize<'de>>(
@@ -1249,22 +1267,17 @@ impl StateStore {
         kind: &str,
         status: &str,
     ) -> Result<Vec<T>, String> {
-        let dir = self.state_dir.join("approvals").join(kind).join(status);
-        let mut paths = fs::read_dir(&dir)
-            .map_err(|error| format!("failed to read {}: {error}", dir.display()))?
-            .map(|entry| {
-                entry
-                    .map(|entry| entry.path())
-                    .map_err(|error| error.to_string())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        paths.sort();
-        paths
+        let dir = format!("approvals/{kind}/{status}");
+        self.storage
+            .list_files(&dir)?
             .into_iter()
-            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
-            .map(|path| {
-                serde_json::from_slice(&read_sensitive_file(&path)?)
-                    .map_err(|error| format!("failed to parse {}: {error}", path.display()))
+            .filter(|entry| !entry.is_dir && entry.path.ends_with(".json"))
+            .map(|entry| {
+                let bytes = self
+                    .read_file(&entry.path)?
+                    .ok_or_else(|| format!("approval file `{}` not found", entry.path))?;
+                serde_json::from_slice(&bytes)
+                    .map_err(|error| format!("failed to parse {}: {error}", entry.path))
             })
             .collect()
     }
@@ -1276,11 +1289,10 @@ impl StateStore {
         id: &str,
     ) -> Result<T, String> {
         let path = self.approval_path(kind, status, id)?;
-        if !path.exists() {
+        let Some(bytes) = self.read_file(&path)? else {
             return Err(format!("approval `{id}` not found"));
-        }
-        serde_json::from_slice(&read_sensitive_file(&path)?)
-            .map_err(|error| format!("failed to parse {}: {error}", path.display()))
+        };
+        serde_json::from_slice(&bytes).map_err(|error| format!("failed to parse {path}: {error}"))
     }
 
     fn list_incoming_approvals(&self, status: &str) -> Result<Vec<IncomingApproval>, String> {
@@ -1330,7 +1342,7 @@ impl StateStore {
             let mut request = request.clone();
             request.id = self.next_approval_id("incoming")?;
             let path = self.approval_path("incoming", "pending", &request.id)?;
-            match atomic_json_create_new(&path, &request) {
+            match self.create_json(&path, &request) {
                 Ok(()) => return Ok(request.id),
                 Err(CreateNewJsonError::AlreadyExists) => continue,
                 Err(CreateNewJsonError::Other(message)) => return Err(message),
@@ -1349,7 +1361,7 @@ impl StateStore {
             let mut request = request.clone();
             request.id = self.next_approval_id("outgoing")?;
             let path = self.approval_path("outgoing", "pending", &request.id)?;
-            match atomic_json_create_new(&path, &request) {
+            match self.create_json(&path, &request) {
                 Ok(()) => return Ok(request.id),
                 Err(CreateNewJsonError::AlreadyExists) => continue,
                 Err(CreateNewJsonError::Other(message)) => return Err(message),
@@ -1375,11 +1387,11 @@ impl StateStore {
     }
 
     fn outgoing_pending_exists(&self, id: &str) -> Result<bool, String> {
-        Ok(self.approval_path("outgoing", "pending", id)?.exists())
+        self.file_exists(&self.approval_path("outgoing", "pending", id)?)
     }
 
     fn outgoing_sending_exists(&self, id: &str) -> Result<bool, String> {
-        Ok(self.approval_path("outgoing", "sending", id)?.exists())
+        self.file_exists(&self.approval_path("outgoing", "sending", id)?)
     }
 
     fn claim_outgoing(&self, id: &str) -> Result<OutgoingApproval, String> {
@@ -1387,7 +1399,7 @@ impl StateStore {
         let mut sending = approval.clone();
         sending.status = "sending".to_owned();
         let sending_path = self.approval_path("outgoing", "sending", id)?;
-        match atomic_json_create_new(&sending_path, &sending) {
+        match self.create_json(&sending_path, &sending) {
             Ok(()) => {}
             Err(CreateNewJsonError::AlreadyExists) => {
                 return Err(format!("approval `{id}` is already being sent"));
@@ -1395,9 +1407,9 @@ impl StateStore {
             Err(CreateNewJsonError::Other(message)) => return Err(message),
         }
         let pending_path = self.approval_path("outgoing", "pending", id)?;
-        if let Err(error) = fs::remove_file(&pending_path) {
-            let _ = fs::remove_file(&sending_path);
-            return Err(error.to_string());
+        if let Err(error) = self.storage.delete_file(&pending_path) {
+            let _ = self.storage.delete_file(&sending_path);
+            return Err(error);
         }
         Ok(approval)
     }
@@ -1407,12 +1419,12 @@ impl StateStore {
         approval.status = "approved".to_owned();
         approval.sent_message_id = Some(safe_model_line(message_id, MAX_HEADER_VALUE_CHARS));
         let approved_path = self.approval_path("outgoing", "approved", id)?;
-        match atomic_json_create_new(&approved_path, &approval) {
+        match self.create_json(&approved_path, &approval) {
             Ok(()) | Err(CreateNewJsonError::AlreadyExists) => {}
             Err(CreateNewJsonError::Other(message)) => return Err(message),
         }
-        fs::remove_file(self.approval_path("outgoing", "sending", id)?)
-            .map_err(|error| error.to_string())
+        self.storage
+            .delete_file(&self.approval_path("outgoing", "sending", id)?)
     }
 
     fn approve(&self, kind: &str, id: &str) -> Result<(), String> {
@@ -1427,22 +1439,17 @@ impl StateStore {
         validate_approval_id(id)?;
         let from = self.approval_path(kind, "pending", id)?;
         let to = self.approval_path(kind, new_status, id)?;
-        if from.exists() {
-            let mut record: serde_json::Value =
-                serde_json::from_slice(&read_sensitive_file(&from)?)
-                    .map_err(|error| format!("failed to parse {}: {error}", from.display()))?;
+        if let Some(bytes) = self.read_file(&from)? {
+            let mut record: serde_json::Value = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("failed to parse {from}: {error}"))?;
             validate_approval_record(&record, kind, "pending", id)?;
             record["status"] = serde_json::Value::String(new_status.to_owned());
-            match atomic_json_create_new(&to, &record) {
+            match self.create_json(&to, &record) {
                 Ok(()) | Err(CreateNewJsonError::AlreadyExists) => {}
                 Err(CreateNewJsonError::Other(message)) => return Err(message),
             }
-            match fs::remove_file(&from) {
-                Ok(()) => Ok(()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(error.to_string()),
-            }
-        } else if to.exists() {
+            self.storage.delete_file(&from)
+        } else if self.file_exists(&to)? {
             Ok(())
         } else {
             Err(format!("approval `{id}` not found"))
@@ -1478,29 +1485,22 @@ impl StateStore {
             })
     }
 
-    fn approval_path(&self, kind: &str, status: &str, id: &str) -> Result<PathBuf, String> {
+    fn approval_path(&self, kind: &str, status: &str, id: &str) -> Result<String, String> {
         approval_prefix(kind)?;
         validate_approval_id(id)?;
-        Ok(self
-            .state_dir
-            .join("approvals")
-            .join(kind)
-            .join(status)
-            .join(format!("{id}.json")))
+        Ok(format!("approvals/{kind}/{status}/{id}.json"))
     }
 
     fn next_approval_id(&self, kind: &str) -> Result<String, String> {
         let mut max_id = 0_u64;
         for status in ["pending", "sending", "approved", "denied"] {
-            let dir = self.state_dir.join("approvals").join(kind).join(status);
-            for entry in fs::read_dir(&dir)
-                .map_err(|error| format!("failed to read {}: {error}", dir.display()))?
-            {
-                let path = entry.map_err(|error| error.to_string())?.path();
-                if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            let dir = format!("approvals/{kind}/{status}");
+            for entry in self.storage.list_files(&dir)? {
+                if entry.is_dir || !entry.path.ends_with(".json") {
                     continue;
                 }
-                let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                let Some(stem) = file_name(&entry.path).and_then(|name| name.strip_suffix(".json"))
+                else {
                     continue;
                 };
                 if let Ok(id) = stem.parse::<u64>()
@@ -1792,119 +1792,6 @@ fn current_unix_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or(0)
-}
-
-fn create_private_dir_all(path: &Path) -> Result<(), String> {
-    fs::create_dir_all(path).map_err(|error| error.to_string())?;
-    chmod_private_dir(path)
-}
-
-fn read_sensitive_file(path: &Path) -> Result<Vec<u8>, String> {
-    chmod_private_file(path)?;
-    fs::read(path).map_err(|error| error.to_string())
-}
-
-fn open_private_append(path: &Path) -> Result<fs::File, std::io::Error> {
-    let mut options = fs::OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let file = options.open(path)?;
-    chmod_private_file_handle(&file)?;
-    Ok(file)
-}
-
-fn create_private_file(path: &Path) -> Result<fs::File, std::io::Error> {
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let file = options.open(path)?;
-    chmod_private_file_handle(&file)?;
-    Ok(file)
-}
-
-#[cfg(unix)]
-fn chmod_private_dir(path: &Path) -> Result<(), String> {
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-        .map_err(|error| format!("failed to chmod {}: {error}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn chmod_private_dir(_path: &Path) -> Result<(), String> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn chmod_private_file(path: &Path) -> Result<(), String> {
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .map_err(|error| format!("failed to chmod {}: {error}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn chmod_private_file(_path: &Path) -> Result<(), String> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn chmod_private_file_handle(file: &fs::File) -> Result<(), std::io::Error> {
-    file.set_permissions(fs::Permissions::from_mode(0o600))
-}
-
-#[cfg(not(unix))]
-fn chmod_private_file_handle(_file: &fs::File) -> Result<(), std::io::Error> {
-    Ok(())
-}
-
-fn temp_json_path(parent: &Path, path: &Path) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    parent.join(format!(
-        ".{}.tmp-{}-{nonce}",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or("state"),
-        std::process::id()
-    ))
-}
-
-fn write_json_temp<T: Serialize>(path: &Path, value: &T) -> Result<PathBuf, String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| "state path has no parent".to_owned())?;
-    create_private_dir_all(parent)?;
-    let tmp = temp_json_path(parent, path);
-    let bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
-    {
-        let mut file = create_private_file(&tmp).map_err(|error| error.to_string())?;
-        file.write_all(&bytes).map_err(|error| error.to_string())?;
-        file.sync_all().map_err(|error| error.to_string())?;
-    }
-    Ok(tmp)
-}
-
-fn atomic_json_write<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
-    let tmp = write_json_temp(path, value)?;
-    fs::rename(&tmp, path).map_err(|error| error.to_string())?;
-    Ok(())
-}
-
-fn atomic_json_create_new<T: Serialize>(path: &Path, value: &T) -> Result<(), CreateNewJsonError> {
-    let tmp = write_json_temp(path, value).map_err(CreateNewJsonError::Other)?;
-    match fs::hard_link(&tmp, path) {
-        Ok(()) => {
-            let _ = fs::remove_file(&tmp);
-            Ok(())
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let _ = fs::remove_file(&tmp);
-            Err(CreateNewJsonError::AlreadyExists)
-        }
-        Err(error) => {
-            let _ = fs::remove_file(&tmp);
-            Err(CreateNewJsonError::Other(error.to_string()))
-        }
-    }
 }
 
 /// IMAP flag mutation requested by safe message-management commands.
@@ -4512,8 +4399,12 @@ enum ConfigState {
 
 impl RuntimeState {
     /// Configure the email module from harness-supplied extension config.
-    pub fn configure(&mut self, configure: tau_proto::Configure) -> Result<(), String> {
-        match self.try_configure(configure) {
+    pub(crate) fn configure(
+        &mut self,
+        configure: tau_proto::Configure,
+        storage: SharedStorage,
+    ) -> Result<(), String> {
+        match self.try_configure(configure, storage) {
             Ok(engine) => {
                 self.config_state = ConfigState::Configured(Box::new(engine));
                 Ok(())
@@ -4528,13 +4419,14 @@ impl RuntimeState {
     }
 
     /// Configure the email module from an already-decoded email config.
-    pub fn configure_with_config(
+    pub(crate) fn configure_with_config(
         &mut self,
         cfg: EmailExtensionConfig,
         state_dir: Option<PathBuf>,
         secrets: BTreeMap<String, tau_proto::SecretValue>,
+        storage: SharedStorage,
     ) -> Result<(), String> {
-        match self.try_configure_with_config(cfg, state_dir, secrets) {
+        match self.try_configure_with_config(cfg, state_dir, secrets, storage) {
             Ok(engine) => {
                 self.config_state = ConfigState::Configured(Box::new(engine));
                 Ok(())
@@ -4551,9 +4443,10 @@ impl RuntimeState {
     fn try_configure(
         &self,
         configure: tau_proto::Configure,
+        storage: SharedStorage,
     ) -> Result<Engine<RealEmailBackend>, String> {
         let cfg: EmailExtensionConfig = tau_extension::parse_config(&configure.config)?;
-        self.try_configure_with_config(cfg, configure.state_dir, configure.secrets)
+        self.try_configure_with_config(cfg, configure.state_dir, configure.secrets, storage)
     }
 
     fn try_configure_with_config(
@@ -4561,15 +4454,15 @@ impl RuntimeState {
         cfg: EmailExtensionConfig,
         state_dir: Option<PathBuf>,
         secrets: BTreeMap<String, tau_proto::SecretValue>,
+        storage: SharedStorage,
     ) -> Result<Engine<RealEmailBackend>, String> {
-        let state_dir =
-            state_dir.ok_or_else(|| "email extension requires Configure.state_dir".to_owned())?;
+        let state_dir = state_dir.unwrap_or_default();
         let config = cfg.validate()?;
         validate_config_secrets(&config, &secrets)?;
         let backend = RealEmailBackend::new(&config, secrets)?;
         Ok(Engine {
             config,
-            state: StateStore::open(state_dir)?,
+            state: StateStore::open_with_storage(state_dir, storage)?,
             backend,
         })
     }
@@ -4589,7 +4482,7 @@ impl RuntimeState {
                     error_envelope(
                         command.as_deref(),
                         "invalid_input",
-                        "Configure.state_dir has not been received",
+                        "email extension has not been configured",
                     ),
                 )
             }
@@ -4613,9 +4506,7 @@ impl RuntimeState {
             ConfigState::Configured(engine) => {
                 engine.dispatch_action(&invoke.action_id, &invoke.argv)
             }
-            ConfigState::Unconfigured => {
-                Err("Configure.state_dir has not been received".to_owned())
-            }
+            ConfigState::Unconfigured => Err("email extension has not been configured".to_owned()),
             ConfigState::Rejected { reason } => Err(format!(
                 "email extension configuration was rejected: {reason}"
             )),

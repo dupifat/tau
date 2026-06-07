@@ -2129,10 +2129,11 @@ fn outgoing_approve_revalidates_persisted_pending_draft_before_smtp() {
         in_reply_to: None,
     });
     let id = pending_outgoing_id(&engine, 0);
-    let path = engine
+    let relative_path = engine
         .state
         .approval_path("outgoing", "pending", &id)
         .expect("approval path");
+    let path = engine.state.state_dir.join(relative_path);
     let mut json: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).expect("read approval")).expect("json");
     json["from"] = serde_json::Value::String("Mallory <mallory@evil.test>".to_owned());
@@ -3018,10 +3019,12 @@ fn outgoing_exact_message_approval_matching() {
     );
     assert_ne!(pending_outgoing_id(&engine, 3), id);
 
-    let approval_path = engine
-        .state
-        .approval_path("outgoing", "pending", &id)
-        .expect("approval path");
+    let approval_path = engine.state.state_dir.join(
+        engine
+            .state
+            .approval_path("outgoing", "pending", &id)
+            .expect("approval path"),
+    );
     let approval_json = std::fs::read_to_string(approval_path).expect("approval json");
     assert!(approval_json.contains("reply@example.net"));
     assert!(approval_json.contains("<m1>"));
@@ -3102,15 +3105,16 @@ fn approval_file_creation_refuses_to_overwrite_existing_ids() {
     let first = serde_json::json!({"schema": 1, "id": "1"});
     let second = serde_json::json!({"schema": 1, "id": "1", "subject": "other"});
 
-    atomic_json_create_new(&path, &first).expect("first create");
-    let second_result = atomic_json_create_new(&path, &second);
+    state.create_json(&path, &first).expect("first create");
+    let second_result = state.create_json(&path, &second);
 
     assert!(matches!(
         second_result,
         Err(CreateNewJsonError::AlreadyExists)
     ));
+    let stored_path = temp.path().join("state").join(&path);
     let stored: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(path).expect("read")).expect("json");
+        serde_json::from_slice(&std::fs::read(stored_path).expect("read")).expect("json");
     assert!(stored.get("subject").is_none());
 }
 
@@ -3325,20 +3329,10 @@ fn state_paths_are_private_and_existing_files_are_hardened() {
     let state = StateStore::open(state_dir.clone()).expect("state");
 
     assert_eq!(file_mode(&state_dir), 0o700);
-    for dir in [
-        "policy",
-        "approvals",
-        "approvals/incoming",
-        "approvals/incoming/pending",
-        "approvals/outgoing",
-        "approvals/outgoing/pending",
-        "logs",
-    ] {
-        assert_eq!(file_mode(&state_dir.join(dir)), 0o700, "{dir}");
-    }
     assert_eq!(file_mode(&state_dir.join("state-v1.json")), 0o600);
 
     state.load_incoming_allow().expect("load allow");
+    assert_eq!(file_mode(&state_dir.join("policy")), 0o700);
     assert_eq!(file_mode(&allow_path), 0o600);
 
     state
@@ -3376,14 +3370,17 @@ fn state_paths_are_private_and_existing_files_are_hardened() {
     let id = state.pending_outgoing(&approval).expect("pending");
     assert_eq!(
         file_mode(
-            &state
-                .approval_path("outgoing", "pending", &id)
-                .expect("path")
+            &state_dir.join(
+                state
+                    .approval_path("outgoing", "pending", &id)
+                    .expect("path")
+            )
         ),
         0o600
     );
 
     let log_path = state_dir.join("logs/email.jsonl");
+    std::fs::create_dir_all(state_dir.join("logs")).expect("mkdir logs");
     std::fs::write(&log_path, b"").expect("log");
     std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o644)).expect("chmod log");
     state
@@ -3418,6 +3415,7 @@ fn recent_email_log_hardens_existing_log_file_on_read() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let state = StateStore::open(temp.path().join("state")).expect("state");
     let log_path = temp.path().join("state/logs/email.jsonl");
+    std::fs::create_dir_all(temp.path().join("state/logs")).expect("mkdir logs");
     std::fs::write(
         &log_path,
         br#"{"schema":1,"ts_unix_ms":1,"kind":"tool","command":"send","status":"ok","to":[],"title_redacted":false}
@@ -3434,17 +3432,24 @@ fn recent_email_log_hardens_existing_log_file_on_read() {
 
 #[cfg(unix)]
 #[test]
-fn temporary_json_files_are_private_until_committed() {
-    // Atomic state writes briefly place complete JSON content in a temp file,
-    // so the temp path needs the same owner-only mode as the final state file.
+fn fs_storage_created_files_are_private() {
+    // The direct filesystem backend is only a fallback/test backend, but it
+    // should still mirror the harness storage privacy guarantees for files it
+    // creates.
     let temp = tempfile::TempDir::new().expect("tempdir");
-    let path = temp.path().join("state.json");
+    let state = StateStore::open(temp.path().join("state")).expect("state");
+    state
+        .write_json(
+            "policy/private.json",
+            &serde_json::json!({"secret":"value"}),
+        )
+        .expect("write json");
 
-    let tmp = write_json_temp(&path, &serde_json::json!({"secret":"value"})).expect("write tmp");
-
-    assert_eq!(file_mode(&tmp), 0o600);
+    assert_eq!(
+        file_mode(&temp.path().join("state/policy/private.json")),
+        0o600
+    );
 }
-
 #[test]
 fn state_allowlist_load_save_and_policy_extension_disable() {
     let temp = tempfile::TempDir::new().expect("tempdir");

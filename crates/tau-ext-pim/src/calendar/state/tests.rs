@@ -1,3 +1,9 @@
+use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::path::Path;
+
 use super::*;
 
 #[cfg(unix)]
@@ -107,14 +113,14 @@ fn google_auth_tokens_and_pending_requests_are_private() {
         Some("refresh-token")
     );
     let auth_path = state.google_auth_path("work/account");
-    let auth_file = auth_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .expect("auth filename");
+    let auth_file = file_name(&auth_path).expect("auth filename");
     assert!(!auth_file.contains("work"));
     assert!(!auth_file.contains('/'));
     #[cfg(unix)]
-    assert_eq!(file_mode(&auth_path), 0o600);
+    assert_eq!(
+        file_mode(&temp.path().join("state").join(&auth_path)),
+        0o600
+    );
 
     let pending = GooglePendingAuth::new(
         "work/account",
@@ -136,7 +142,10 @@ fn google_auth_tokens_and_pending_requests_are_private() {
     );
     let pending_path = state.google_pending_auth_path("work/account");
     #[cfg(unix)]
-    assert_eq!(file_mode(&pending_path), 0o600);
+    assert_eq!(
+        file_mode(&temp.path().join("state").join(&pending_path)),
+        0o600
+    );
     state
         .clear_pending_google_auth("work/account")
         .expect("clear pending auth");

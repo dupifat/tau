@@ -1,12 +1,11 @@
 use std::io::Write;
 
 use tau_harness::SessionLaunchStatus;
-use tau_proto::{EventSelector, HarnessInputMessage, HarnessOutputMessage};
+use tau_proto::{HarnessInputMessage, HarnessOutputMessage};
 
 use crate::daemon::{DaemonCliOverrides, DaemonHandle, daemon_output_for_session, resolve_daemon};
-use crate::ui_client::{UiInputReader, UiOutputWriter};
+use crate::render_request::RenderResponse;
 use crate::{CliError, mint_short_id};
-
 pub(crate) fn run_print_tools(
     role: &str,
     role_cli_overrides: &[tau_config::settings::RoleCliOverride],
@@ -43,57 +42,32 @@ fn get_rendered_tool_definitions(
     daemon: &mut DaemonHandle,
     role: &str,
 ) -> Result<Vec<tau_proto::ToolDefinition>, CliError> {
-    let (mut reader, mut writer) = connect_print_tools_client(daemon)?;
-    let request_id = crate::ui_client::next_request_id("tau-rendered-tools");
-    crate::ui_client::send_message(
-        &mut writer,
-        &HarnessInputMessage::GetRenderedToolDefinitions(tau_proto::GetRenderedToolDefinitions {
-            request_id: request_id.clone(),
-            role: role.to_owned(),
-        }),
-    )?;
-    loop {
-        let Some(message) = reader.read_message().map_err(std::io::Error::other)? else {
-            return Err(CliError::Participant("daemon disconnected".to_owned()));
-        };
-        match message {
+    crate::render_request::request_rendered_value(
+        daemon,
+        "tau-print-tools",
+        "tau-rendered-tools",
+        |request_id| {
+            HarnessInputMessage::GetRenderedToolDefinitions(tau_proto::GetRenderedToolDefinitions {
+                request_id,
+                role: role.to_owned(),
+            })
+        },
+        |message, request_id| match message {
             HarnessOutputMessage::RenderedToolDefinitionsResult(result)
                 if result.request_id == request_id =>
             {
-                disconnect_print_tools_client(&mut writer);
-                if let Some(error) = result.error {
-                    return Err(CliError::Participant(error));
-                }
-                return result.tools.ok_or_else(|| {
-                    CliError::Participant("daemon returned no rendered tool definitions".to_owned())
-                });
+                let tools = if let Some(error) = result.error {
+                    Err(CliError::Participant(error))
+                } else {
+                    result.tools.ok_or_else(|| {
+                        CliError::Participant(
+                            "daemon returned no rendered tool definitions".to_owned(),
+                        )
+                    })
+                };
+                RenderResponse::Matched(tools)
             }
-            HarnessOutputMessage::Disconnect(disconnect) => {
-                return Err(CliError::Participant(
-                    disconnect
-                        .reason
-                        .unwrap_or_else(|| "daemon disconnected".to_owned()),
-                ));
-            }
-            _ => {}
-        }
-    }
-}
-
-fn connect_print_tools_client(
-    daemon: &mut DaemonHandle,
-) -> Result<(UiInputReader, UiOutputWriter), CliError> {
-    let (reader, mut writer) =
-        crate::ui_client::connect_daemon_ui_client(daemon, "tau-print-tools")?;
-    crate::ui_client::subscribe(&mut writer, Vec::<EventSelector>::new())?;
-    Ok((reader, writer))
-}
-
-fn disconnect_print_tools_client(writer: &mut UiOutputWriter) {
-    let _ = crate::ui_client::send_message(
-        writer,
-        &HarnessInputMessage::Disconnect(tau_proto::Disconnect {
-            reason: Some("done".to_owned()),
-        }),
-    );
+            _ => RenderResponse::Ignore,
+        },
+    )
 }

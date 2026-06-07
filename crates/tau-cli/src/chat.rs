@@ -692,7 +692,6 @@ pub(crate) fn run_chat(
             extension: extension_cli_overrides,
             harness_config: harness_config_overrides,
         },
-        !attach,
     )?;
     let ui_io_meter = UiIoMeter::default();
     let UiConnection {

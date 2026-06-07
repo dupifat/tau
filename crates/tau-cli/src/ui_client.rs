@@ -1,16 +1,19 @@
 //! Shared UI socket client helpers.
 
-use std::io::{self, BufReader, BufWriter};
+use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tau_proto::{
     ClientKind, EventSelector, HarnessInputMessage, Hello, PROTOCOL_VERSION, PeerInputReader,
     PeerOutputWriter, Subscribe,
 };
 
-pub(crate) type UiInputReader = PeerInputReader<BufReader<UnixStream>>;
-pub(crate) type UiOutputWriter = PeerOutputWriter<BufWriter<UnixStream>>;
+use crate::daemon::DaemonHandle;
+
+pub(crate) type UiInputReader = PeerInputReader<BufReader<Box<dyn Read + Send>>>;
+pub(crate) type UiOutputWriter = PeerOutputWriter<BufWriter<Box<dyn Write + Send>>>;
 
 pub(crate) fn connect_ui_client(
     socket_path: &Path,
@@ -18,10 +21,34 @@ pub(crate) fn connect_ui_client(
 ) -> io::Result<(UiInputReader, UiOutputWriter)> {
     let stream = UnixStream::connect(socket_path)?;
     let read_stream = stream.try_clone()?;
-    let mut writer = PeerOutputWriter::new(BufWriter::new(stream));
+    connect_ui_streams(read_stream, stream, client_name)
+}
+
+pub(crate) fn connect_ui_streams<R, W>(
+    reader: R,
+    writer: W,
+    client_name: impl Into<tau_proto::ExtensionName>,
+) -> io::Result<(UiInputReader, UiOutputWriter)>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+{
+    let mut writer =
+        PeerOutputWriter::new(BufWriter::new(Box::new(writer) as Box<dyn Write + Send>));
     send_hello(&mut writer, client_name)?;
-    let reader = PeerInputReader::new(BufReader::new(read_stream));
+    let reader = PeerInputReader::new(BufReader::new(Box::new(reader) as Box<dyn Read + Send>));
     Ok((reader, writer))
+}
+
+pub(crate) fn connect_daemon_ui_client(
+    daemon: &mut DaemonHandle,
+    client_name: impl Into<tau_proto::ExtensionName>,
+) -> io::Result<(UiInputReader, UiOutputWriter)> {
+    if let Some(initial_ui) = daemon.take_initial_ui_stdio() {
+        connect_ui_streams(initial_ui.stdout, initial_ui.stdin, client_name)
+    } else {
+        connect_ui_client(&daemon.socket_path(), client_name)
+    }
 }
 
 pub(crate) fn connect_ui_writer(
@@ -29,7 +56,8 @@ pub(crate) fn connect_ui_writer(
     client_name: impl Into<tau_proto::ExtensionName>,
 ) -> io::Result<UiOutputWriter> {
     let stream = UnixStream::connect(socket_path)?;
-    let mut writer = PeerOutputWriter::new(BufWriter::new(stream));
+    let mut writer =
+        PeerOutputWriter::new(BufWriter::new(Box::new(stream) as Box<dyn Write + Send>));
     send_hello(&mut writer, client_name)?;
     Ok(writer)
 }
@@ -83,4 +111,14 @@ pub(crate) fn send_message(
 ) -> io::Result<()> {
     writer.write_message(message).map_err(io::Error::other)?;
     writer.flush()
+}
+
+pub(crate) fn next_request_id(prefix: &str) -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "{}-{}-{}",
+        prefix,
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
 }

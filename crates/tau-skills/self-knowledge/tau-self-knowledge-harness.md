@@ -26,15 +26,9 @@ Common startup flow:
 
 The runtime-dir harness path always binds its generated socket path itself. It does not use socket activation, because Tau attach/discovery expects the socket to exist at the generated runtime-dir path.
 
-## CLI readiness-pipe runtime-dir startup
-
-CLI-managed non-chat/helper launches use the runtime-dir socket plus a readiness pipe. The parent passes `TAU_READY_FD=0` to the child and wires child stdin to a pipe. After the harness binds its runtime-dir socket and writes discovery markers, it writes one readiness byte to that fd. The parent then connects over the runtime-dir Unix socket.
-
-This path is used when child stdin/stdout are not needed for the initial UI protocol.
-
 ## CLI-spawned initial UI stdio mode
 
-When the terminal UI itself starts the harness, the CLI uses the hidden `tau ext harness --initial-ui-stdio` mode.
+When the terminal UI or one-shot CLI helpers start the harness, the CLI uses the hidden `tau ext harness --initial-ui-stdio` mode.
 
 In this mode:
 
@@ -45,6 +39,8 @@ In this mode:
 - runtime markers are written after the startup state is ready for later socket attaches.
 
 This prevents startup events from being missed by the UI that spawned the daemon. Later UIs still attach over the normal runtime-dir Unix socket.
+
+The older readiness-pipe handshake (`TAU_READY_FD`) has been removed. CLI-spawned harnesses use initial UI stdio; attach mode connects to an existing socket and does not spawn a child.
 
 CLI-managed daemon spawns explicitly remove `LISTEN_FDS`, `LISTEN_PID`, `LISTEN_FDS_FIRST_FD`, and `LISTEN_FDNAMES` from the child environment so unrelated socket-activation wrappers cannot accidentally change normal Tau startup.
 

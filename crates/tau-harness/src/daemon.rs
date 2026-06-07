@@ -1,7 +1,7 @@
 //! Public entry points: blocking `run_*` daemons, the embedded
 //! single-message helpers, and the small types passed to/from them.
 
-use std::io::{self, Write as _};
+use std::io::{self, Read as _, Write as _};
 use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -750,11 +750,6 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
     daemon_dir.write_session_id(eager_session_id)?;
     tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "daemon ready markers written");
 
-    // Signal the parent CLI (if it passed us a pipe fd via `TAU_READY_FD`) that
-    // the socket is bound and discoverable. Initial stdio UI launches do not
-    // set that env var, so this is a no-op for them.
-    runtime_dir::signal_ready_to_parent();
-
     let tx = harness.tx.clone();
     thread::spawn(move || {
         for stream in listener.incoming().flatten() {
@@ -854,7 +849,21 @@ fn spawn_stdio_bridge(mut stream: UnixStream) -> io::Result<()> {
     });
     thread::spawn(move || {
         let mut stdout = io::stdout().lock();
-        let _ = io::copy(&mut stream_read, &mut stdout);
+        let mut buffer = [0_u8; 8192];
+        loop {
+            match stream_read.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if stdout.write_all(&buffer[..n]).is_err() {
+                        break;
+                    }
+                    if stdout.flush().is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
         let _ = stdout.flush();
     });
     Ok(())

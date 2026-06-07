@@ -1,11 +1,9 @@
-//! Harness daemon lifecycle: discovery, spawning, and the
-//! parent↔child readiness handshake.
+//! Harness daemon lifecycle: discovery, spawning, and initial UI wiring.
 
 use std::fs::OpenOptions;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Instant;
 
 use tau_cli_picker::{PickerError, PickerItem, pick};
 use tau_harness::{SessionLaunchStatus, runtime_dir};
@@ -187,45 +185,26 @@ fn pick_resume_session(_cwd: &Path) -> Result<Option<String>, CliError> {
 }
 
 pub(crate) struct DaemonOutput {
-    pub(crate) stdout: Stdio,
     pub(crate) stderr: Stdio,
-    pub(crate) log_path: PathBuf,
-    pub(crate) start_offset: u64,
 }
 
 pub(crate) fn daemon_output_for_session(session_id: &str) -> Result<DaemonOutput, CliError> {
-    // Route the daemon's stdout+stderr (where its tracing subscriber
-    // writes) into the per-session harness log so it sits next to
-    // per-extension logs under `<session>/logs/`. The CLI's own tracing
-    // still goes to `ui.log`; the two streams are intentionally separated
-    // so a session post-mortem doesn't need to pull from two places.
+    // Route the daemon's stderr (where its tracing subscriber writes) into the
+    // per-session harness log so it sits next to per-extension logs under
+    // `<session>/logs/`. The CLI's own tracing still goes to `ui.log`; the two
+    // streams are intentionally separated so a session post-mortem doesn't need
+    // to pull from two places.
     let sessions_dir = tau_session_inspect::default_sessions_dir();
     let harness_log = tau_harness::harness_log_path(&sessions_dir, session_id);
     if let Some(parent) = harness_log.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let start_offset = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&harness_log)?
-        .metadata()?
-        .len();
-    let stdout = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&harness_log)
-        .map(Stdio::from)?;
     let stderr = OpenOptions::new()
         .create(true)
         .append(true)
         .open(&harness_log)
         .map(Stdio::from)?;
-    Ok(DaemonOutput {
-        stdout,
-        stderr,
-        log_path: harness_log,
-        start_offset,
-    })
+    Ok(DaemonOutput { stderr })
 }
 
 pub(crate) struct DaemonCliOverrides<'a> {
@@ -241,7 +220,6 @@ pub(crate) fn resolve_daemon(
     daemon_output: Option<DaemonOutput>,
     startup_role: Option<&str>,
     cli_overrides: DaemonCliOverrides<'_>,
-    initial_ui_stdio: bool,
 ) -> Result<DaemonHandle, CliError> {
     tracing::debug!(target: "tau_cli::startup", attach, session_id, "resolving harness daemon");
     let project_root = std::env::current_dir()?;
@@ -258,55 +236,33 @@ pub(crate) fn resolve_daemon(
         daemon_output.expect("daemon output for spawned harness"),
         startup_role,
         cli_overrides,
-        initial_ui_stdio,
     )
-}
-
-fn read_daemon_output_since(path: &Path, start_offset: u64) -> io::Result<String> {
-    let mut file = OpenOptions::new().read(true).open(path)?;
-    file.seek(SeekFrom::Start(start_offset))?;
-    let mut output = String::new();
-    file.read_to_string(&mut output)?;
-    Ok(output)
 }
 
 /// Spawns a new harness daemon.
 ///
-/// Normal daemon startup uses a readiness pipe wired to the child process's
-/// stdin. The harness writes one byte once the socket is bound and the runtime
-/// markers are in place (see [`runtime_dir::signal_ready_to_parent`]).
-///
-/// Initial-UI stdio startup instead reserves the child stdin/stdout pipes for
-/// the UI protocol and returns them immediately; the harness delays extension
-/// startup internally until that UI sends its subscribe message.
+/// Child stdin/stdout are reserved for the initial UI protocol and returned
+/// immediately; the harness delays extension startup internally until that UI
+/// sends its subscribe message.
 fn start_daemon(
     session_id: &str,
     session_status: SessionLaunchStatus,
     output: DaemonOutput,
     startup_role: Option<&str>,
     cli_overrides: DaemonCliOverrides<'_>,
-    initial_ui_stdio: bool,
 ) -> Result<DaemonHandle, CliError> {
     let tau_binary = std::env::current_exe()?;
     tracing::debug!(target: "tau_cli::startup", tau_binary = %tau_binary.display(), session_id, "spawning harness daemon");
-
-    let (read_pipe, stdin, stdout) = if initial_ui_stdio {
-        (None, Stdio::piped(), Stdio::piped())
-    } else {
-        let (read_pipe, write_pipe) = io::pipe()?;
-        (Some(read_pipe), Stdio::from(write_pipe), output.stdout)
-    };
 
     let spawn_result = build_daemon_command(DaemonCommandSpec {
         tau_binary: &tau_binary,
         session_id,
         session_status,
-        stdout,
+        stdout: Stdio::piped(),
         stderr: output.stderr,
-        stdin,
+        stdin: Stdio::piped(),
         startup_role,
         cli_overrides,
-        initial_ui_stdio,
     })
     .spawn();
 
@@ -314,49 +270,19 @@ fn start_daemon(
 
     tracing::debug!(target: "tau_cli::startup", pid = child.id(), "harness daemon spawned");
     let daemon_dir = runtime_dir::root_runtime_dir().join(child.id().to_string());
-    let started_at = Instant::now();
-
-    if initial_ui_stdio {
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| CliError::Participant("missing harness stdin pipe".to_owned()))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| CliError::Participant("missing harness stdout pipe".to_owned()))?;
-        return Ok(DaemonHandle::Owned {
-            child: Some(child),
-            daemon_dir,
-            initial_ui: Some(InitialUiStdio { stdin, stdout }),
-        });
-    }
-
-    let mut read_pipe = read_pipe.expect("ready pipe for socket startup");
-    let mut byte = [0u8; 1];
-    match read_pipe.read_exact(&mut byte) {
-        Ok(()) => {
-            tracing::debug!(target: "tau_cli::startup", pid = child.id(), daemon_dir = %daemon_dir.display(), elapsed_ms = started_at.elapsed().as_millis(), "harness daemon signaled ready");
-            Ok(DaemonHandle::Owned {
-                child: Some(child),
-                daemon_dir,
-                initial_ui: None,
-            })
-        }
-        Err(_eof_or_err) => {
-            // Read end closed without a byte. The child exited before
-            // signaling ready. Reap it so we can surface the captured stderr.
-            let status = child.wait()?;
-            tracing::debug!(target: "tau_cli::startup", pid = child.id(), %status, elapsed_ms = started_at.elapsed().as_millis(), "harness daemon exited before signaling ready");
-            let captured = read_daemon_output_since(&output.log_path, output.start_offset)?;
-            let mut message = format!("exit status: {status}");
-            if !captured.trim().is_empty() {
-                message.push_str("\n\nHarness output:\n");
-                message.push_str(captured.trim_end());
-            }
-            Err(CliError::DaemonExited(message))
-        }
-    }
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| CliError::Participant("missing harness stdin pipe".to_owned()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| CliError::Participant("missing harness stdout pipe".to_owned()))?;
+    Ok(DaemonHandle::Owned {
+        child: Some(child),
+        daemon_dir,
+        initial_ui: Some(InitialUiStdio { stdin, stdout }),
+    })
 }
 
 struct DaemonCommandSpec<'a> {
@@ -368,11 +294,10 @@ struct DaemonCommandSpec<'a> {
     stdin: Stdio,
     startup_role: Option<&'a str>,
     cli_overrides: DaemonCliOverrides<'a>,
-    initial_ui_stdio: bool,
 }
 
-/// Build the `tau ext harness` command, optionally reserving stdio for the
-/// initial UI protocol instead of the readiness pipe.
+/// Build the `tau ext harness` command, reserving stdio for the initial UI
+/// protocol.
 fn build_daemon_command(spec: DaemonCommandSpec<'_>) -> Command {
     let mut cmd = Command::new(spec.tau_binary);
     cmd.arg("ext")
@@ -431,12 +356,7 @@ fn build_daemon_command(spec: DaemonCommandSpec<'_>) -> Command {
         cmd.env_remove(tau_harness::HARNESS_CONFIG_CLI_OVERRIDES_ENV);
     }
 
-    if spec.initial_ui_stdio {
-        cmd.arg("--initial-ui-stdio");
-        cmd.env_remove(tau_harness::runtime_dir::READY_FD_ENV);
-    } else {
-        cmd.env(tau_harness::runtime_dir::READY_FD_ENV, "0");
-    }
+    cmd.arg("--initial-ui-stdio");
 
     cmd
 }

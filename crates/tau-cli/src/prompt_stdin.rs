@@ -10,7 +10,7 @@ use tau_proto::{
 };
 
 use crate::CliError;
-use crate::daemon::{DaemonCliOverrides, daemon_output_for_session, resolve_daemon};
+use crate::daemon::{DaemonCliOverrides, DaemonHandle, daemon_output_for_session, resolve_daemon};
 use crate::ui_prompt::{DEFAULT_AGENT_ROLE, create_user_agent_prompt};
 
 /// Read a single user prompt from stdin, submit it to a daemon, print the final
@@ -36,7 +36,7 @@ pub(crate) fn run_prompt_stdin(
     } else {
         Some(daemon_output_for_session(session_id)?)
     };
-    let daemon = resolve_daemon(
+    let mut daemon = resolve_daemon(
         attach,
         session_id,
         session_status,
@@ -47,9 +47,8 @@ pub(crate) fn run_prompt_stdin(
             extension: extension_cli_overrides,
             harness_config: harness_config_overrides,
         },
-        false,
     )?;
-    let (mut reader, mut writer) = connect_prompt_stdin_client(&daemon.socket_path())?;
+    let (mut reader, mut writer) = connect_prompt_stdin_client(&mut daemon)?;
     let role = prompt_stdin_role(startup_role);
     submit_prompt(&mut writer, session_id, role, prompt)?;
 
@@ -80,10 +79,10 @@ fn prompt_stdin_role(startup_role: Option<&str>) -> &str {
 }
 
 fn connect_prompt_stdin_client(
-    socket_path: &std::path::Path,
+    daemon: &mut DaemonHandle,
 ) -> io::Result<(OneShotReader, OneShotWriter)> {
     let (reader, mut writer) =
-        crate::ui_client::connect_ui_client(socket_path, "tau-prompt-stdin")?;
+        crate::ui_client::connect_daemon_ui_client(daemon, "tau-prompt-stdin")?;
     subscribe_to_prompt_stdin_events(&mut writer)?;
     Ok((reader, writer))
 }

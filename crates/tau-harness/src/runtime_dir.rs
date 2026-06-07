@@ -19,52 +19,6 @@ const DIR_FILENAME: &str = "tau.dir";
 const PID_FILENAME: &str = "tau.pid";
 const SESSION_ID_FILENAME: &str = "tau.session_id";
 
-/// Env var used to hand a parent→child readiness pipe fd from `tau` to
-/// the spawned `tau ext harness` process. The child writes one byte and
-/// closes the fd once the socket is bound and the runtime markers are
-/// in place; the parent blocks on `read()` until that byte arrives, or
-/// gets EOF if the child exited early.
-pub const READY_FD_ENV: &str = "TAU_READY_FD";
-
-/// Send the ready signal to the parent CLI if it passed a [`READY_FD_ENV`]
-/// pipe fd. Always closes the fd after writing.
-///
-/// Returning early without writing causes the parent to see EOF and
-/// report the harness as exited.
-pub fn signal_ready_to_parent() {
-    let Ok(fd_var) = std::env::var(READY_FD_ENV) else {
-        return;
-    };
-    let Ok(fd) = fd_var.parse::<libc::c_int>() else {
-        tracing::warn!(target: "tau_harness::startup", value = %fd_var, "ignoring malformed TAU_READY_FD");
-        return;
-    };
-    let byte: u8 = 1;
-    // Safety: `byte` is a stack-allocated u8 we read for exactly one
-    // byte; `libc::write` does not retain the pointer past the call.
-    #[allow(unsafe_code)]
-    let written = unsafe { libc::write(fd, std::ptr::addr_of!(byte).cast(), 1) };
-    if written != 1 {
-        let err = std::io::Error::last_os_error();
-        tracing::warn!(target: "tau_harness::startup", fd, %err, "failed to signal ready to parent");
-    }
-    // Safety: `fd` was passed in by the parent and is owned by this
-    // process; closing it once is correct.
-    #[allow(unsafe_code)]
-    unsafe {
-        libc::close(fd);
-    }
-    // Future spawned processes must not inherit this env var (would
-    // make them try to write to a now-closed fd or — worse — to whatever
-    // unrelated thing has since taken that number).
-    // Safety: called during single-threaded startup, before
-    // extensions are spawned, so no concurrent env access can race.
-    #[allow(unsafe_code)]
-    unsafe {
-        std::env::remove_var(READY_FD_ENV);
-    }
-}
-
 /// Returns the root runtime directory for all tau daemon instances.
 #[must_use]
 pub fn root_runtime_dir() -> PathBuf {

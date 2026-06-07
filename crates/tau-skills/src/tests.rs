@@ -511,6 +511,7 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
             "tau-self-knowledge-email",
             "tau-self-knowledge-ext-pim",
             "tau-self-knowledge-ext-provider-builtin",
+            "tau-self-knowledge-ext-rhai",
             "tau-self-knowledge-ext-shell",
             "tau-self-knowledge-ext-std-notifications",
             "tau-self-knowledge-ext-test-dummy",
@@ -548,6 +549,7 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
             .content
             .contains("tau-self-knowledge-ext-provider-builtin")
     );
+    assert!(skill.content.contains("tau-self-knowledge-ext-rhai"));
     assert!(skill.content.contains("tau-self-knowledge-ext-shell"));
     assert!(
         skill
@@ -619,6 +621,14 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
     assert!(!provider_builtin.add_to_prompt);
     assert!(provider_builtin.content.contains("tau provider add"));
     assert!(provider_builtin.content.contains("ChatGPT/Codex"));
+
+    let rhai = skills
+        .iter()
+        .find(|skill| skill.name == "tau-self-knowledge-ext-rhai")
+        .expect("built-in rhai extension skill");
+    assert!(!rhai.add_to_prompt);
+    assert!(rhai.content.contains("std-rhai"));
+    assert!(rhai.content.contains("on_intercept"));
 
     let shell = skills
         .iter()

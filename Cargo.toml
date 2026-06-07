@@ -11,6 +11,7 @@ members = [
   "crates/tau-core",
   "crates/tau-ext-pim",
   "crates/tau-ext-provider-builtin",
+  "crates/tau-ext-rhai",
   "crates/tau-ext-shell",
   "crates/tau-ext-std-notifications",
   "crates/tau-ext-test-dummy",
@@ -66,6 +67,7 @@ tau-config = { path = "crates/tau-config" }
 tau-core = { path = "crates/tau-core" }
 tau-ext-pim = { path = "crates/tau-ext-pim" }
 tau-ext-provider-builtin = { path = "crates/tau-ext-provider-builtin" }
+tau-ext-rhai = { path = "crates/tau-ext-rhai" }
 tau-ext-shell = { path = "crates/tau-ext-shell" }
 tau-ext-std-notifications = { path = "crates/tau-ext-std-notifications" }
 tau-ext-test-dummy = { path = "crates/tau-ext-test-dummy" }
@@ -157,6 +159,7 @@ regex = { version = "1", default-features = false, features = [
   "std",
   "unicode-perl",
 ] }
+rhai = { version = "1", default-features = false, features = ["serde", "std"] }
 rrule = { version = "0.14", default-features = false }
 rustls = { version = "0.23", default-features = false, features = [
   "ring",

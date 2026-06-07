@@ -68,6 +68,14 @@ delegate progress tracker plug in without modifying the harness core.
 See [`docs/interceptors.md`](docs/interceptors.md) and
 `crates/tau-harness/src/interception.rs`.
 
+### Rhai scripting extension
+
+Tau ships a disabled `std-rhai` prototype extension for trusted local event hooks.
+A configured Rhai script can subscribe to event selectors, handle delivered events,
+intercept matching events, and emit JSON-shaped Tau events through a small host API.
+The Rust extension owns protocol framing and script failures are reported as
+transient `harness.info` diagnostics instead of crashing the process.
+
 ### Remote extensions over SSH
 
 Because extensions are stdio child processes, running one on another machine

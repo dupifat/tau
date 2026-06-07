@@ -25,6 +25,13 @@
         config: {},
     },
     {
+        name: "std-rhai",
+        suffix: ["ext", "ext-rhai"],
+        role: "tool",
+        enable: false,
+        config: {},
+    },
+    {
         name: "std-notifications",
         suffix: ["ext", "ext-std-notifications"],
         role: "tool",

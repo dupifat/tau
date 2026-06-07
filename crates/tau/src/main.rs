@@ -16,6 +16,11 @@ fn main() -> std::process::ExitCode {
             logging: tau_cli::ComponentLogging::RunnerManaged,
         },
         tau_cli::Component {
+            name: "ext-rhai",
+            runner: tau_ext_rhai::run_stdio,
+            logging: tau_cli::ComponentLogging::RunnerManaged,
+        },
+        tau_cli::Component {
             name: "ext-email",
             runner: tau_ext_pim::run_stdio,
             logging: tau_cli::ComponentLogging::RunnerManaged,

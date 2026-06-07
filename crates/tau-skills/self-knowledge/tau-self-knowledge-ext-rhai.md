@@ -25,7 +25,7 @@ extensions:
         max_operations: 1000000
 ```
 
-`script` is required. Absolute paths are preferred; relative paths are resolved from the extension process current working directory. `vars` is arbitrary JSON-compatible data passed into `init(config)`. The harness-provided `state_dir`, when present, is also passed to `init`.
+`script` is required. Absolute paths are preferred; relative paths are resolved from the extension process current working directory. `vars` is arbitrary JSON-compatible data passed into `init(config)` and `start(config)`. The harness-provided `state_dir`, when present, is also passed to both callbacks.
 
 If config parsing, script reading, compilation, or `init` fails, the extension sends `ConfigError`, then `Ready` with a `rhai disabled: ...` message, and stays alive inert instead of exiting in a restart loop.
 
@@ -52,6 +52,10 @@ fn init(config) {
     };
 }
 
+fn start(config) {
+    tau_info(`rhai started with greeting: ${config.vars.greeting}`);
+}
+
 fn on_event(event, meta) {
     if event.event == "agent.prompt_submitted" {
         tau_info(`saw prompt: ${event.payload.text}`);
@@ -66,6 +70,8 @@ fn on_intercept(event, transient) {
 
 `init(config)` is optional. Missing `init` or unit/no-op return means no subscriptions, no intercepts, and the default ready message. `subscribe` uses selector maps with `kind: "exact"` or `kind: "prefix"`. Multiple `intercept` entries are allowed only when they share the same priority; their selectors are merged into one registration because the harness supports one interceptor registration per extension connection.
 
+`start(config)` is optional and runs once after `init` succeeds, subscriptions/intercepts are sent, `Ready` is sent, and host functions are registered. Use it for startup side effects such as `tau_info`; callback errors are reported as transient important `harness.info` diagnostics without disabling the extension.
+
 `on_event(event, meta)` is optional and is called for delivered subscribed events. `meta.seq` and `meta.recorded_at` are present when the harness supplies them. Sequenced deliveries are acknowledged after the callback attempt, even if the script errors, so a bad script cannot wedge delivery.
 
 `on_intercept(event, transient)` is optional and returns one of:
@@ -79,7 +85,7 @@ On script errors or invalid intercept returns, Tau reports a transient important
 
 ## Host functions
 
-Host functions are registered only after `init` succeeds, not during `init`:
+Host functions are registered only after `init` succeeds. They are available to `start`, `on_event`, and `on_intercept`, not during `init`:
 
 - `tau_emit(event)` emits a durable Tau event map.
 - `tau_emit_transient(event)` emits a transient Tau event map.

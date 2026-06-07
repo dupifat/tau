@@ -106,8 +106,9 @@ where
     });
 
     let mut runtime = match load_runtime(&configure, tx.clone()) {
-        Ok((runtime, init)) => {
+        Ok((mut runtime, init, config_json)) => {
             send_init_messages(&tx, init)?;
+            runtime.start(config_json, &tx);
             Some(runtime)
         }
         Err(message) => {
@@ -168,7 +169,7 @@ fn read_initial_config<R: Read>(
 fn load_runtime(
     configure: &Configure,
     tx: mpsc::Sender<HarnessInputMessage>,
-) -> Result<(ScriptRuntime, InitOutput), String> {
+) -> Result<(ScriptRuntime, InitOutput, serde_json::Value), String> {
     let cfg = tau_extension::parse_config::<ExtConfig>(&configure.config)?;
     let script = cfg
         .script
@@ -193,9 +194,10 @@ fn load_runtime(
         ast,
         scope: Scope::new(),
     };
-    let init = runtime.init(init_config_json(&cfg.vars, configure.state_dir.as_ref()))?;
+    let config_json = init_config_json(&cfg.vars, configure.state_dir.as_ref());
+    let init = runtime.init(config_json.clone())?;
     register_host_functions(&mut runtime.engine, tx);
-    Ok((runtime, init))
+    Ok((runtime, init, config_json))
 }
 
 fn init_config_json(vars: &serde_json::Value, state_dir: Option<&PathBuf>) -> serde_json::Value {
@@ -363,6 +365,37 @@ impl ScriptRuntime {
                 .and_then(|value| serde_json::from_value(value).map_err(|e| e.to_string()))
                 .and_then(normalize_init_output),
             Err(err) => Err(format!("running init: {err}")),
+        }
+    }
+
+    fn start(&mut self, config: serde_json::Value, tx: &mpsc::Sender<HarnessInputMessage>) {
+        if self.has_function("start", 1) {
+            let config = match json_to_dynamic(&config) {
+                Ok(config) => config,
+                Err(message) => {
+                    report_callback_error(tx, format!("preparing start config: {message}"));
+                    return;
+                }
+            };
+            match self
+                .engine
+                .call_fn::<Dynamic>(&mut self.scope, &self.ast, "start", (config,))
+            {
+                Ok(_) => {}
+                Err(err) => report_callback_error(tx, format!("rhai start failed: {err}")),
+            }
+            return;
+        }
+
+        if !self.has_function("start", 0) {
+            return;
+        }
+        match self
+            .engine
+            .call_fn::<Dynamic>(&mut self.scope, &self.ast, "start", ())
+        {
+            Ok(_) => {}
+            Err(err) => report_callback_error(tx, format!("rhai start failed: {err}")),
         }
     }
 

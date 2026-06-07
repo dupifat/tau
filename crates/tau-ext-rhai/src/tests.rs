@@ -178,6 +178,91 @@ fn init_host_emit_failure_is_inert() {
     )));
 }
 #[test]
+fn start_runs_after_ready_with_host_functions() {
+    // `init` remains a pure planning phase, but `start` is an explicit
+    // side-effect phase that runs after host functions are registered.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = write_script(
+        &dir,
+        r#"
+            fn init(config) {
+                return #{ ready_message: "demo ready" };
+            }
+            fn start(config) {
+                tau_info(`started with ${config.vars.greeting}`);
+            }
+        "#,
+    );
+    let configure = HarnessOutputMessage::Configure(Configure {
+        config: CborValue::Map(vec![
+            (
+                CborValue::Text("script".to_owned()),
+                CborValue::Text(script.display().to_string()),
+            ),
+            (
+                CborValue::Text("vars".to_owned()),
+                CborValue::Map(vec![(
+                    CborValue::Text("greeting".to_owned()),
+                    CborValue::Text("honk".to_owned()),
+                )]),
+            ),
+        ]),
+        state_dir: None,
+        secrets: BTreeMap::new(),
+    });
+
+    let frames = run_frames(&[configure]);
+
+    let ready_pos = frames
+        .iter()
+        .position(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
+        .expect("ready frame");
+    let info_pos = frames
+        .iter()
+        .position(|frame| {
+            matches!(
+                emitted_event(frame),
+                Some(Event::HarnessInfo(info)) if info.message == "started with honk"
+            )
+        })
+        .expect("start info");
+    assert!(ready_pos < info_pos);
+}
+
+#[test]
+fn start_error_reports_but_keeps_extension_ready() {
+    // A broken start hook is isolated like on_event/on_intercept failures: the
+    // script is already configured, so report the callback error instead of
+    // disabling the extension.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = write_script(
+        &dir,
+        r#"
+            fn start() {
+                unknown_function();
+            }
+        "#,
+    );
+
+    let frames = run_frames(&[configure_with_script(&script)]);
+
+    assert!(
+        frames
+            .iter()
+            .any(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
+    );
+    assert!(
+        frames
+            .iter()
+            .all(|frame| !matches!(frame, HarnessInputMessage::ConfigError(_)))
+    );
+    assert!(frames.iter().any(|frame| matches!(
+        emitted_event(frame),
+        Some(Event::HarnessInfo(info)) if info.message.contains("rhai start failed")
+    )));
+}
+
+#[test]
 fn missing_script_config_reports_error_and_stays_inert() {
     // Missing scripts are configuration errors, but the process stays
     // alive long enough to avoid a harness restart loop.

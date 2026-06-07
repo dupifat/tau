@@ -1,22 +1,25 @@
 //! `apply_patch` custom tool: parse Codex-style patch text and apply it.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use tau_proto::{CborValue, ToolUsePayload};
 
 use crate::diff::compute_diff;
 use crate::display::{ToolFailure, ToolOutput};
+use crate::tools::world::ShellWorld;
 
 const SUMMARY_HEADER: &str = "Success. Updated the following files:";
 
 pub(crate) const APPLY_PATCH_LARK_GRAMMAR: &str = include_str!("apply_patch.lark");
 
-pub(crate) fn apply_patch(arguments: &CborValue) -> Result<ToolOutput, ToolFailure> {
+pub(crate) fn apply_patch(
+    arguments: &CborValue,
+    world: &mut ShellWorld,
+) -> Result<ToolOutput, ToolFailure> {
     let patch = patch_text(arguments)?;
 
     let hunks = parse_patch(patch).map_err(ToolFailure::new)?;
-    let changes = match apply_hunks(&hunks) {
+    let changes = match apply_hunks(&hunks, world) {
         Ok(changes) => changes,
         Err(failure) => {
             return Err(ToolFailure::new(failure.message)
@@ -141,7 +144,10 @@ impl ApplyPatchFailure {
     }
 }
 
-fn apply_hunks(hunks: &[Hunk]) -> Result<Vec<AppliedChange>, ApplyPatchFailure> {
+fn apply_hunks(
+    hunks: &[Hunk],
+    world: &mut ShellWorld,
+) -> Result<Vec<AppliedChange>, ApplyPatchFailure> {
     if hunks.is_empty() {
         return Err(ApplyPatchFailure::new("No files were modified.", &[]));
     }
@@ -154,10 +160,10 @@ fn apply_hunks(hunks: &[Hunk]) -> Result<Vec<AppliedChange>, ApplyPatchFailure> 
         match hunk {
             Hunk::Add { path, contents } => {
                 let abs = resolve_path(&cwd, path);
-                let old_content = read_optional_file(&abs)
+                let old_content = read_optional_file(&abs, world)
                     .map_err(|message| ApplyPatchFailure::new(message, &changes))?
                     .unwrap_or_default();
-                write_file_with_missing_parent_retry(&abs, contents).map_err(|error| {
+                write_file_creating_parent(&abs, contents, world).map_err(|error| {
                     ApplyPatchFailure::new(
                         format!("Failed to write file {}: {error}", abs.display()),
                         &changes,
@@ -173,19 +179,24 @@ fn apply_hunks(hunks: &[Hunk]) -> Result<Vec<AppliedChange>, ApplyPatchFailure> 
             }
             Hunk::Delete { path } => {
                 let abs = resolve_path(&cwd, path);
-                ensure_not_directory(&abs).map_err(|_| {
+                if world.is_dir(&abs).map_err(|_| {
+                    ApplyPatchFailure::new(
+                        format!("Failed to delete file {}", abs.display()),
+                        &changes,
+                    )
+                })? {
+                    return Err(ApplyPatchFailure::new(
+                        format!("Failed to delete file {}", abs.display()),
+                        &changes,
+                    ));
+                }
+                let old_content = world.read_to_string(&abs).map_err(|_| {
                     ApplyPatchFailure::new(
                         format!("Failed to delete file {}", abs.display()),
                         &changes,
                     )
                 })?;
-                let old_content = fs::read_to_string(&abs).map_err(|_| {
-                    ApplyPatchFailure::new(
-                        format!("Failed to delete file {}", abs.display()),
-                        &changes,
-                    )
-                })?;
-                fs::remove_file(&abs).map_err(|_| {
+                world.remove_file(&abs).map_err(|_| {
                     ApplyPatchFailure::new(
                         format!("Failed to delete file {}", abs.display()),
                         &changes,
@@ -205,7 +216,7 @@ fn apply_hunks(hunks: &[Hunk]) -> Result<Vec<AppliedChange>, ApplyPatchFailure> 
                 chunks,
             } => {
                 let abs = resolve_path(&cwd, path);
-                let old_content = fs::read_to_string(&abs).map_err(|error| {
+                let old_content = world.read_to_string(&abs).map_err(|error| {
                     ApplyPatchFailure::new(
                         format!("Failed to read file to update {}: {error}", abs.display()),
                         &changes,
@@ -216,9 +227,9 @@ fn apply_hunks(hunks: &[Hunk]) -> Result<Vec<AppliedChange>, ApplyPatchFailure> 
 
                 let (change_path, display_path) = if let Some(move_path) = move_path {
                     let dest_abs = resolve_path(&cwd, move_path);
-                    let overwritten_move_content = read_optional_file(&dest_abs)
+                    let overwritten_move_content = read_optional_file(&dest_abs, world)
                         .map_err(|message| ApplyPatchFailure::new(message, &changes))?;
-                    write_file_with_missing_parent_retry(&dest_abs, &new_content).map_err(
+                    write_file_creating_parent(&dest_abs, &new_content, world).map_err(
                         |error| {
                             ApplyPatchFailure::new(
                                 format!("Failed to write file {}: {error}", dest_abs.display()),
@@ -234,13 +245,18 @@ fn apply_hunks(hunks: &[Hunk]) -> Result<Vec<AppliedChange>, ApplyPatchFailure> 
                         old_content: overwritten_move_content.unwrap_or_default(),
                         new_content: Some(new_content.clone()),
                     });
-                    ensure_not_directory(&abs).map_err(|_| {
+                    if world.is_dir(&abs).map_err(|_| {
                         ApplyPatchFailure::new(
                             format!("Failed to remove original {}", abs.display()),
                             &changes,
                         )
-                    })?;
-                    fs::remove_file(&abs).map_err(|_| {
+                    })? {
+                        return Err(ApplyPatchFailure::new(
+                            format!("Failed to remove original {}", abs.display()),
+                            &changes,
+                        ));
+                    }
+                    world.remove_file(&abs).map_err(|_| {
                         ApplyPatchFailure::new(
                             format!("Failed to remove original {}", abs.display()),
                             &changes,
@@ -255,12 +271,14 @@ fn apply_hunks(hunks: &[Hunk]) -> Result<Vec<AppliedChange>, ApplyPatchFailure> 
                     };
                     continue;
                 } else {
-                    fs::write(&abs, &new_content).map_err(|error| {
-                        ApplyPatchFailure::new(
-                            format!("Failed to write file {}: {error}", abs.display()),
-                            &changes,
-                        )
-                    })?;
+                    world
+                        .write_file(&abs, new_content.as_bytes())
+                        .map_err(|error| {
+                            ApplyPatchFailure::new(
+                                format!("Failed to write file {}: {error}", abs.display()),
+                                &changes,
+                            )
+                        })?;
                     (abs.clone(), path.display().to_string())
                 };
 
@@ -334,36 +352,23 @@ fn format_summary(changes: &[AppliedChange]) -> String {
     lines.join("\n")
 }
 
-fn read_optional_file(path: &Path) -> Result<Option<String>, String> {
-    match fs::read_to_string(path) {
+fn read_optional_file(path: &Path, world: &mut ShellWorld) -> Result<Option<String>, String> {
+    match world.read_to_string(path) {
         Ok(content) => Ok(Some(content)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.to_string()),
     }
 }
 
-fn ensure_not_directory(path: &Path) -> Result<(), std::io::Error> {
-    let metadata = fs::metadata(path)?;
-    if metadata.is_dir() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "path is a directory",
-        ));
+fn write_file_creating_parent(
+    path: &Path,
+    contents: &str,
+    world: &mut ShellWorld,
+) -> Result<(), std::io::Error> {
+    if let Some(parent) = path.parent() {
+        world.create_dir_all(parent)?;
     }
-    Ok(())
-}
-
-fn write_file_with_missing_parent_retry(path: &Path, contents: &str) -> Result<(), std::io::Error> {
-    match fs::write(path, contents) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::write(path, contents)
-        }
-        Err(error) => Err(error),
-    }
+    world.write_file(path, contents.as_bytes())
 }
 
 fn resolve_path(cwd: &Path, path: &Path) -> PathBuf {

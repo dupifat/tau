@@ -17,11 +17,11 @@ use crate::argument::{
     cbor_map_int, cbor_map_text, optional_argument_bool, optional_argument_text,
 };
 use crate::dir_lock::DIR_LOCK_TOOL_NAME;
-use crate::tools::edit::edit_file;
+use crate::tools::edit::edit_file as edit_file_with_world;
 use crate::tools::find::run_find;
 use crate::tools::grep::{RipgrepError, classify_ripgrep_stderr, grep_result_map, run_grep};
 use crate::tools::ls::run_ls;
-use crate::tools::read::{format_read_range, read_file, slice_lines};
+use crate::tools::read::{format_read_range, read_file as read_file_with_world, slice_lines};
 use crate::tools::shell::{CommandDetails, command_details_value, run_command};
 use crate::tools::{
     APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, FIND_TOOL_NAME, GPT_SHELL_TOOL_NAME, LS_TOOL_NAME,
@@ -30,6 +30,20 @@ use crate::tools::{
 use crate::truncate::{
     MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, mark_line, truncate_head, truncate_tail,
 };
+
+fn read_file(
+    arguments: &CborValue,
+) -> Result<crate::display::ToolOutput, crate::display::ToolFailure> {
+    let mut world = crate::tools::world::ShellWorld::real();
+    read_file_with_world(arguments, &mut world)
+}
+
+fn edit_file(
+    arguments: &CborValue,
+) -> Result<crate::display::ToolOutput, crate::display::ToolFailure> {
+    let mut world = crate::tools::world::ShellWorld::real();
+    edit_file_with_world(arguments, &mut world)
+}
 
 /// Test-side wrapper around [`HarnessInputReader`] that exposes an
 /// `Event`-flavoured API so the existing tests can stay mechanical. Non-event
@@ -5230,7 +5244,8 @@ fn run_ls_lists_directory_contents() {
         CborValue::Text("path".to_owned()),
         CborValue::Text(tempdir.path().display().to_string()),
     )]);
-    let result = run_ls(&args).expect("ls").result;
+    let mut world = crate::tools::world::ShellWorld::real();
+    let result = run_ls(&args, &mut world).expect("ls").result;
 
     assert!(cbor_map_field(&result, "path").is_none());
     assert_eq!(cbor_int_field(&result, "entries"), Some(3));

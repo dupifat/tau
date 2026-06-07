@@ -1,33 +1,32 @@
 //! `ls` tool: directory listing with truncation.
 
-use std::ffi::OsStr;
-use std::fs;
-#[cfg(unix)]
-use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use tau_proto::{CborValue, ToolUseStats};
 
 use crate::argument::{optional_argument_int_strict, optional_argument_text};
 use crate::display::{ToolFailure, ToolOutput, ok_display, text_stats};
+use crate::tools::world::{ShellWorld, WorldEntryName};
 use crate::truncate::truncate_line_oriented_lines;
 
 pub(crate) const DEFAULT_LS_LIMIT: usize = 500;
 
-pub(crate) fn run_ls(arguments: &CborValue) -> Result<ToolOutput, ToolFailure> {
+pub(crate) fn run_ls(
+    arguments: &CborValue,
+    world: &mut ShellWorld,
+) -> Result<ToolOutput, ToolFailure> {
     let path = optional_argument_text(arguments, "path").unwrap_or_else(|| ".".to_owned());
     let limit = parse_limit(arguments)?;
     let dir_path = PathBuf::from(&path);
     let display_args = dir_path.display().to_string();
     let with_args = |f: ToolFailure| f.with_args(display_args.clone());
 
-    let metadata = fs::metadata(&dir_path).map_err(|e| {
+    if !world.is_dir(&dir_path).map_err(|e| {
         with_args(ToolFailure::from(format!(
             "failed to access {}: {e}",
             dir_path.display()
         )))
-    })?;
-    if !metadata.is_dir() {
+    })? {
         return Err(with_args(ToolFailure::from(format!(
             "not a directory: {}",
             dir_path.display()
@@ -35,29 +34,13 @@ pub(crate) fn run_ls(arguments: &CborValue) -> Result<ToolOutput, ToolFailure> {
     }
 
     let mut entries = Vec::new();
-    for entry in fs::read_dir(&dir_path).map_err(|e| {
+    for entry in world.read_dir(&dir_path).map_err(|e| {
         with_args(ToolFailure::from(format!(
             "failed to read {}: {e}",
             dir_path.display()
         )))
     })? {
-        let entry = entry.map_err(|e| {
-            with_args(ToolFailure::from(format!(
-                "failed to read {}: {e}",
-                dir_path.display()
-            )))
-        })?;
-        let name = entry.file_name();
-        let is_dir = entry
-            .file_type()
-            .map_err(|e| {
-                with_args(ToolFailure::from(format!(
-                    "failed to read {}: {e}",
-                    dir_path.display()
-                )))
-            })?
-            .is_dir();
-        entries.push(render_entry_name(&name, is_dir));
+        entries.push(render_entry_name(&entry.name, entry.is_dir));
     }
     entries.sort_by_key(|entry| entry.sort_key());
 
@@ -172,18 +155,13 @@ fn line_oriented_len<'a>(lines: impl IntoIterator<Item = &'a str>) -> usize {
     bytes + count.saturating_sub(1)
 }
 
-fn render_entry_name(name: &OsStr, is_dir: bool) -> LsEntry {
-    #[cfg(unix)]
-    {
-        render_entry_bytes(name.as_bytes(), is_dir)
-    }
-    #[cfg(not(unix))]
-    {
-        render_entry_text(&name.to_string_lossy(), is_dir, false)
+fn render_entry_name(name: &WorldEntryName, is_dir: bool) -> LsEntry {
+    match name {
+        WorldEntryName::Utf8(text) => render_entry_text(text, is_dir, false),
+        WorldEntryName::Bytes(bytes) => render_entry_bytes(bytes, is_dir),
     }
 }
 
-#[cfg(unix)]
 fn render_entry_bytes(bytes: &[u8], is_dir: bool) -> LsEntry {
     match std::str::from_utf8(bytes) {
         Ok(text) => render_entry_text(text, is_dir, false),

@@ -1,6 +1,5 @@
 //! `edit` tool: line-oriented replacements on a file.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use tau_proto::{CborValue, ToolUsePayload, ToolUseState, ToolUseStatus};
@@ -9,12 +8,16 @@ use crate::argument::{argument_array, argument_text, cbor_map_int, cbor_map_text
 use crate::diff::compute_diff;
 use crate::display::{ToolFailure, ToolOutput, text_stats};
 use crate::tools::read::{ReadLineRange, format_read_range, slice_line_ranges};
+use crate::tools::world::ShellWorld;
 use crate::truncate::truncate_line_oriented;
 
 const MAX_EDITS_PER_CALL: usize = 100;
 const GUARD_MISMATCH_CONTEXT_LINES: usize = 10;
 
-pub(crate) fn edit_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure> {
+pub(crate) fn edit_file(
+    arguments: &CborValue,
+    world: &mut ShellWorld,
+) -> Result<ToolOutput, ToolFailure> {
     let path = argument_text(arguments, "path").map_err(ToolFailure::from)?;
     let path_buf = PathBuf::from(&path);
     let display_path = path_buf.display().to_string();
@@ -37,7 +40,8 @@ pub(crate) fn edit_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
         ));
     }
 
-    let (original_bytes, original_missing) = read_original_or_empty(&path_buf, &display_args)?;
+    let (original_bytes, original_missing) =
+        read_original_or_empty(&path_buf, &display_args, world)?;
     let original_lines = LineIndex::new(&original_bytes);
 
     let mut replacements = Vec::new();
@@ -99,8 +103,8 @@ pub(crate) fn edit_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure
 
     let changed = original_missing || result != original_bytes;
     if changed {
-        create_missing_parent_dirs(&path_buf, &display_args)?;
-        fs::write(&path_buf, &result).map_err(|error| {
+        create_missing_parent_dirs(&path_buf, &display_args, world)?;
+        world.write_file(&path_buf, &result).map_err(|error| {
             with_display_args(&display_args, ToolFailure::from(error.to_string()))
         })?;
     }
@@ -391,8 +395,12 @@ fn guard_mismatch_failure(
     failure
 }
 
-fn read_original_or_empty(path: &Path, display_args: &str) -> Result<(Vec<u8>, bool), ToolFailure> {
-    match fs::read(path) {
+fn read_original_or_empty(
+    path: &Path,
+    display_args: &str,
+    world: &mut ShellWorld,
+) -> Result<(Vec<u8>, bool), ToolFailure> {
+    match world.read_file(path) {
         Ok(bytes) => Ok((bytes, false)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((Vec::new(), true)),
         Err(error) => Err(with_display_args(
@@ -402,14 +410,23 @@ fn read_original_or_empty(path: &Path, display_args: &str) -> Result<(Vec<u8>, b
     }
 }
 
-fn create_missing_parent_dirs(path: &Path, display_args: &str) -> Result<(), ToolFailure> {
+fn create_missing_parent_dirs(
+    path: &Path,
+    display_args: &str,
+    world: &mut ShellWorld,
+) -> Result<(), ToolFailure> {
     let Some(parent) = path.parent() else {
         return Ok(());
     };
-    if parent.as_os_str().is_empty() || parent.exists() {
+    if parent.as_os_str().is_empty()
+        || world.path_exists(parent).map_err(|error| {
+            with_display_args(display_args, ToolFailure::from(error.to_string()))
+        })?
+    {
         return Ok(());
     }
-    fs::create_dir_all(parent)
+    world
+        .create_dir_all(parent)
         .map_err(|error| with_display_args(display_args, ToolFailure::from(error.to_string())))
 }
 

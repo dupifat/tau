@@ -54,7 +54,8 @@ fn ls_args(path: &std::path::Path) -> CborValue {
 fn empty_ls_display_uses_zero_line_and_byte_stats() {
     let tempdir = tempfile::TempDir::new().expect("tempdir");
 
-    let output = run_ls(&ls_args(tempdir.path())).expect("ls output");
+    let mut world = crate::tools::world::ShellWorld::real();
+    let output = run_ls(&ls_args(tempdir.path()), &mut world).expect("ls output");
 
     assert!(output.display.info_chips.is_empty());
     assert_eq!(output.display.stats.lines, Some(0));
@@ -70,7 +71,8 @@ fn ls_display_uses_line_and_byte_stats_instead_of_entry_chip() {
     std::fs::write(tempdir.path().join("alpha"), "a").expect("write alpha");
     std::fs::write(tempdir.path().join("beta"), "b").expect("write beta");
 
-    let output = run_ls(&ls_args(tempdir.path())).expect("ls output");
+    let mut world = crate::tools::world::ShellWorld::real();
+    let output = run_ls(&ls_args(tempdir.path()), &mut world).expect("ls output");
 
     assert!(output.display.info_chips.is_empty());
     assert_eq!(output.display.stats.lines, Some(2));
@@ -93,7 +95,8 @@ fn ls_escapes_line_breaks_and_control_characters_in_names() {
     std::fs::write(tempdir.path().join("escape\u{1b}char"), "e").expect("write escape char name");
     std::fs::create_dir(tempdir.path().join("dir\nname")).expect("create escaped dir");
 
-    let output = run_ls(&ls_args(tempdir.path())).expect("ls output");
+    let mut world = crate::tools::world::ShellWorld::real();
+    let output = run_ls(&ls_args(tempdir.path()), &mut world).expect("ls output");
     let text = cbor_map_text(&output.result, "output").expect("output");
 
     assert_eq!(text.lines().count(), 6);
@@ -115,7 +118,8 @@ fn ls_marks_invalid_utf8_names_and_shows_replacement_characters() {
     let invalid_name = std::ffi::OsString::from_vec(vec![b'a', 0xff, b'b']);
     std::fs::write(tempdir.path().join(invalid_name), "a").expect("write invalid name");
 
-    let output = run_ls(&ls_args(tempdir.path())).expect("ls output");
+    let mut world = crate::tools::world::ShellWorld::real();
+    let output = run_ls(&ls_args(tempdir.path()), &mut world).expect("ls output");
     let text = cbor_map_text(&output.result, "output").expect("output");
 
     assert_eq!(text, "1(invalid-utf8) a�b");
@@ -135,7 +139,8 @@ fn ls_rejects_non_positive_limit() {
         ),
     ]);
 
-    let failure = run_ls(&args).expect_err("limit should fail");
+    let mut world = crate::tools::world::ShellWorld::real();
+    let failure = run_ls(&args, &mut world).expect_err("limit should fail");
 
     assert_eq!(failure.message, "limit must be >= 1");
 }
@@ -156,7 +161,8 @@ fn ls_limit_truncation_reports_standard_total_headers() {
         ),
     ]);
 
-    let output = run_ls(&args).expect("ls output");
+    let mut world = crate::tools::world::ShellWorld::real();
+    let output = run_ls(&args, &mut world).expect("ls output");
     let text = cbor_map_text(&output.result, "output").expect("output");
 
     assert_eq!(text, "1 alpha");
@@ -186,7 +192,8 @@ fn ls_byte_budget_truncation_reports_standard_total_headers() {
         ),
     ]);
 
-    let output = run_ls(&args).expect("ls output");
+    let mut world = crate::tools::world::ShellWorld::real();
+    let output = run_ls(&args, &mut world).expect("ls output");
     let text = cbor_map_text(&output.result, "output").expect("output");
 
     assert!(text.len() <= MAX_OUTPUT_BYTES);
@@ -212,7 +219,8 @@ fn ls_line_count_truncation_keeps_head_tail_separator_and_totals() {
         ),
     ]);
 
-    let output = run_ls(&args).expect("ls output");
+    let mut world = crate::tools::world::ShellWorld::real();
+    let output = run_ls(&args, &mut world).expect("ls output");
     let text = cbor_map_text(&output.result, "output").expect("output");
 
     assert!(text.contains("\n...\n"));

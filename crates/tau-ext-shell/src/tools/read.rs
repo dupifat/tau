@@ -1,28 +1,31 @@
 //! `read` tool: read a file (optionally a line slice).
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use tau_proto::CborValue;
 
 use crate::argument::{argument_text, cbor_map_int, optional_argument_int};
 use crate::display::{ToolFailure, ToolOutput, ok_display, text_stats};
+use crate::tools::world::ShellWorld;
 use crate::truncate::truncate_line_oriented;
 
 const MAX_READ_RANGES_PER_CALL: usize = 100;
 
-pub(crate) fn read_file(arguments: &CborValue) -> Result<ToolOutput, ToolFailure> {
+pub(crate) fn read_file(
+    arguments: &CborValue,
+    world: &mut ShellWorld,
+) -> Result<ToolOutput, ToolFailure> {
     let path = argument_text(arguments, "path").map_err(ToolFailure::from)?;
     let request = parse_read_request(arguments)?;
     let path_buf = PathBuf::from(&path);
     let display_path = path_buf.display().to_string();
     let display_args = format!("{} {}", display_path, request.display_ranges.join(","));
 
-    let file_bytes = fs::metadata(&path_buf)
-        .map_err(|error| ToolFailure::from(error.to_string()).with_args(display_args.clone()))?
-        .len() as usize;
-    let sliced = stream_slice_line_ranges(&path_buf, &request.ranges)
+    let bytes = world
+        .read_file(&path_buf)
         .map_err(|error| ToolFailure::from(error.to_string()).with_args(display_args.clone()))?;
+    let file_bytes = bytes.len();
+    let sliced = slice_line_ranges(&bytes, &request.ranges);
     validate_ranges_with_total(&request.ranges, sliced.total_lines, &display_args)?;
     let total_lines = sliced.total_lines;
     let truncated = truncate_line_oriented(&sliced.content);
@@ -96,12 +99,6 @@ pub(crate) struct ReadSlice {
     /// Total lines in the source. For [`slice_line_ranges`] this is computed
     /// by scanning the whole file after collecting requested ranges.
     pub(crate) total_lines: usize,
-}
-
-/// Stream line ranges from `path` while reading the file contents once.
-fn stream_slice_line_ranges(path: &Path, ranges: &[ReadLineRange]) -> std::io::Result<ReadSlice> {
-    let bytes = fs::read(path)?;
-    Ok(slice_line_ranges(&bytes, ranges))
 }
 
 /// Render line ranges from already-loaded file bytes using `read` output rules.

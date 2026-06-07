@@ -25,6 +25,8 @@ Model-visible tools:
 
 Test builds or the `echo-agent` cargo feature also register `echo` for harness tests.
 
+For Tau VCR runs, `ls`, `read`, `edit`, and `apply_patch` use the shared ext-shell world-operation recorder. Replay substitutes recorded filesystem effects such as directory listing, file reads, parent-path checks, directory creation, and asserted writes/removes while still running normal tool argument handling, guard validation, patch application, diff generation, escaping, invalid-UTF-8 handling, and truncation logic.
+
 
 ## Directory locks and mutation safety
 

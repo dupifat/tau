@@ -15,6 +15,7 @@ pub(crate) mod grep;
 pub(crate) mod ls;
 pub(crate) mod read;
 pub(crate) mod shell;
+pub(crate) mod world;
 
 #[cfg(any(test, feature = "echo-agent"))]
 pub const ECHO_TOOL_NAME: &str = "echo";
@@ -46,13 +47,13 @@ pub(crate) fn execute_tool(
     }
 
     if invoke.tool_name == READ_TOOL_NAME {
-        return wrap_pure(invoke, read::read_file);
+        return wrap_world(invoke, read::read_file);
     }
     if invoke.tool_name == EDIT_TOOL_NAME {
-        return wrap_pure(invoke, edit::edit_file);
+        return wrap_world(invoke, edit::edit_file);
     }
     if invoke.tool_name == APPLY_PATCH_TOOL_NAME {
-        return wrap_pure(invoke, apply_patch::apply_patch);
+        return wrap_world(invoke, apply_patch::apply_patch);
     }
     if invoke.tool_name == GREP_TOOL_NAME {
         return wrap_pure(invoke, grep::run_grep);
@@ -61,7 +62,7 @@ pub(crate) fn execute_tool(
         return wrap_pure(invoke, find::run_find);
     }
     if invoke.tool_name == LS_TOOL_NAME {
-        return wrap_pure(invoke, ls::run_ls);
+        return wrap_world(invoke, ls::run_ls);
     }
 
     if invoke.tool_name == SHELL_TOOL_NAME || invoke.tool_name == GPT_SHELL_TOOL_NAME {
@@ -103,6 +104,44 @@ pub(crate) fn execute_tool(
         originator: invoke.originator.clone(),
     })]
 }
+fn wrap_world(
+    invoke: tau_proto::ToolStarted,
+    handler: fn(&CborValue, &mut world::ShellWorld) -> Result<ToolOutput, ToolFailure>,
+) -> Vec<Event> {
+    let mut events = Vec::new();
+    let vcr_config = match tau_vcr::VcrConfig::from_env() {
+        Ok(config) => config,
+        Err(error) => {
+            push_failure(
+                &mut events,
+                invoke,
+                ToolFailure::new(format!("vcr error: {error}")),
+            );
+            return events;
+        }
+    };
+    let mut world = match world::ShellWorld::for_tool(
+        invoke.tool_name.as_str(),
+        invoke.call_id.as_str(),
+        &invoke.arguments,
+        vcr_config,
+    ) {
+        Ok(world) => world,
+        Err(failure) => {
+            push_failure(&mut events, invoke, failure);
+            return events;
+        }
+    };
+    let result = handler(&invoke.arguments, &mut world);
+    let finish = world.finish();
+    match (result, finish) {
+        (Ok(output), Ok(())) => push_output(&mut events, invoke, output),
+        (Ok(_), Err(failure)) | (Err(failure), Ok(())) | (Err(failure), Err(_)) => {
+            push_failure(&mut events, invoke, failure);
+        }
+    }
+    events
+}
 
 /// Common Ok/Err → Result/Error wrapping for tools whose handler is a
 /// pure `(arguments) -> Result<ToolOutput, ToolFailure>`. The handler's
@@ -114,30 +153,40 @@ fn wrap_pure(
 ) -> Vec<Event> {
     let mut events = Vec::new();
     match handler(&invoke.arguments) {
-        Ok(ToolOutput { result, display }) => events.push(Event::ToolResult(ToolResult {
-            call_id: invoke.call_id,
-            tool_name: invoke.tool_name,
-            tool_type: tau_proto::ToolType::Function,
-            result,
-            kind: ToolResultKind::Final,
-            display: Some(display),
-            originator: invoke.originator.clone(),
-        })),
-        Err(ToolFailure {
-            message,
-            details,
-            display,
-        }) => events.push(Event::ToolError(ToolError {
-            call_id: invoke.call_id,
-            tool_name: invoke.tool_name,
-            tool_type: tau_proto::ToolType::Function,
-            message,
-            details: details.map(|details| *details),
-            display: Some(*display),
-            originator: invoke.originator.clone(),
-        })),
+        Ok(output) => push_output(&mut events, invoke, output),
+        Err(failure) => push_failure(&mut events, invoke, failure),
     }
     events
+}
+
+fn push_output(events: &mut Vec<Event>, invoke: tau_proto::ToolStarted, output: ToolOutput) {
+    let ToolOutput { result, display } = output;
+    events.push(Event::ToolResult(ToolResult {
+        call_id: invoke.call_id,
+        tool_name: invoke.tool_name,
+        tool_type: tau_proto::ToolType::Function,
+        result,
+        kind: ToolResultKind::Final,
+        display: Some(display),
+        originator: invoke.originator.clone(),
+    }));
+}
+
+fn push_failure(events: &mut Vec<Event>, invoke: tau_proto::ToolStarted, failure: ToolFailure) {
+    let ToolFailure {
+        message,
+        details,
+        display,
+    } = failure;
+    events.push(Event::ToolError(ToolError {
+        call_id: invoke.call_id,
+        tool_name: invoke.tool_name,
+        tool_type: tau_proto::ToolType::Function,
+        message,
+        details: details.map(|details| *details),
+        display: Some(*display),
+        originator: invoke.originator.clone(),
+    }));
 }
 
 pub(crate) fn initial_display(invoke: &tau_proto::ToolStarted) -> Option<ToolUseState> {

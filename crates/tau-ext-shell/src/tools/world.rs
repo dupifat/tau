@@ -8,7 +8,7 @@ use std::io;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use tau_proto::CborValue;
+use tau_proto::{CborValue, ToolUseState};
 
 use crate::display::ToolFailure;
 
@@ -364,6 +364,37 @@ impl ShellWorld {
             }
         }
     }
+    pub(crate) fn replay_shell_outcome(
+        &mut self,
+    ) -> Result<Option<WorldShellOutcome>, ToolFailure> {
+        match &mut self.mode {
+            WorldMode::Real | WorldMode::Recording { .. } => Ok(None),
+            WorldMode::Replay {
+                key,
+                cassette,
+                next_op,
+            } => {
+                let Some(op) = cassette.ops.get(*next_op) else {
+                    return Err(ToolFailure::new(format!(
+                        "vcr replay for {key} expected shell outcome but cassette ended"
+                    )));
+                };
+                *next_op += 1;
+                let WorldOp::Shell { outcome } = op else {
+                    return Err(ToolFailure::new(format!(
+                        "vcr replay for {key} expected shell outcome but found different op"
+                    )));
+                };
+                Ok(Some(outcome.clone()))
+            }
+        }
+    }
+
+    pub(crate) fn record_shell_outcome(&mut self, outcome: WorldShellOutcome) {
+        if let WorldMode::Recording { cassette, .. } = &mut self.mode {
+            cassette.ops.push(WorldOp::Shell { outcome });
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -377,6 +408,17 @@ pub(crate) struct WorldDirEntry {
 pub(crate) enum WorldEntryName {
     Utf8(String),
     Bytes(Vec<u8>),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum WorldShellOutcome {
+    Finished {
+        result: CborValue,
+        display: Box<ToolUseState>,
+        elapsed_ms: u64,
+    },
+    Cancelled,
 }
 
 #[cfg(unix)]
@@ -490,6 +532,9 @@ enum WorldOp {
     RemoveFile {
         path: String,
         result: OpResult<()>,
+    },
+    Shell {
+        outcome: WorldShellOutcome,
     },
 }
 

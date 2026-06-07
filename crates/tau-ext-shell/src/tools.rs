@@ -5,7 +5,6 @@ use tau_proto::{
     cbor_array_field, cbor_text_field,
 };
 
-use crate::config::ShellConfig;
 use crate::display::{ToolFailure, ToolOutput};
 
 pub(crate) mod apply_patch;
@@ -29,12 +28,14 @@ pub const FIND_TOOL_NAME: &str = "find";
 pub const LS_TOOL_NAME: &str = "ls";
 
 /// Execute a tool and return the response event(s).
-pub(crate) fn execute_tool(
-    invoke: tau_proto::ToolStarted,
-    shell_config: &ShellConfig,
-) -> Vec<Event> {
+pub(crate) fn execute_tool(invoke: tau_proto::ToolStarted, world: world::ShellWorld) -> Vec<Event> {
     #[cfg(any(test, feature = "echo-agent"))]
     if invoke.tool_name == ECHO_TOOL_NAME {
+        let mut events = Vec::new();
+        if let Err(failure) = world.finish() {
+            push_failure(&mut events, invoke, failure);
+            return events;
+        }
         return vec![Event::ToolResult(ToolResult {
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
@@ -47,91 +48,49 @@ pub(crate) fn execute_tool(
     }
 
     if invoke.tool_name == READ_TOOL_NAME {
-        return wrap_world(invoke, read::read_file);
+        return wrap_pure(invoke, world, read::read_file);
     }
     if invoke.tool_name == EDIT_TOOL_NAME {
-        return wrap_world(invoke, edit::edit_file);
+        return wrap_pure(invoke, world, edit::edit_file);
     }
     if invoke.tool_name == APPLY_PATCH_TOOL_NAME {
-        return wrap_world(invoke, apply_patch::apply_patch);
+        return wrap_pure(invoke, world, apply_patch::apply_patch);
     }
     if invoke.tool_name == GREP_TOOL_NAME {
-        return wrap_pure(invoke, grep::run_grep);
+        return wrap_pure(invoke, world, |arguments, _world| grep::run_grep(arguments));
     }
     if invoke.tool_name == FIND_TOOL_NAME {
-        return wrap_pure(invoke, find::run_find);
+        return wrap_pure(invoke, world, |arguments, _world| find::run_find(arguments));
     }
     if invoke.tool_name == LS_TOOL_NAME {
-        return wrap_world(invoke, ls::run_ls);
+        return wrap_pure(invoke, world, ls::run_ls);
     }
 
     if invoke.tool_name == SHELL_TOOL_NAME || invoke.tool_name == GPT_SHELL_TOOL_NAME {
-        let mut events = Vec::new();
-        match shell::run_command(&invoke.arguments, shell_config) {
-            Ok(ToolOutput { result, display }) => events.push(Event::ToolResult(ToolResult {
-                call_id: invoke.call_id,
-                tool_name: invoke.tool_name,
-                tool_type: tau_proto::ToolType::Function,
-                result,
-                kind: ToolResultKind::Final,
-                display: Some(display),
-                originator: invoke.originator.clone(),
-            })),
-            Err(ToolFailure {
-                message,
-                details,
-                display,
-            }) => events.push(Event::ToolError(ToolError {
-                call_id: invoke.call_id,
-                tool_name: invoke.tool_name,
-                tool_type: tau_proto::ToolType::Function,
-                message,
-                details: details.map(|details| *details),
-                display: Some(*display),
-                originator: invoke.originator.clone(),
-            })),
-        }
-        return events;
+        unreachable!("shell tools are dispatched through dispatch_cancellable_shell_tool");
     }
 
-    vec![Event::ToolError(ToolError {
-        call_id: invoke.call_id,
-        tool_name: invoke.tool_name,
-        tool_type: tau_proto::ToolType::Function,
-        message: "unknown tool".to_owned(),
-        details: None,
-        display: None,
-        originator: invoke.originator.clone(),
-    })]
+    let mut events = Vec::new();
+    let finish = world.finish();
+    push_failure(
+        &mut events,
+        invoke,
+        finish
+            .err()
+            .unwrap_or_else(|| ToolFailure::new("unknown tool".to_owned())),
+    );
+    events
 }
-fn wrap_world(
+/// Common Ok/Err → Result/Error wrapping for tool handlers. The handler's
+/// display descriptor and purpose-built failure details are forwarded to the
+/// event, then the world is finished so VCR recordings are saved and replays
+/// assert all operations were consumed.
+fn wrap_pure(
     invoke: tau_proto::ToolStarted,
-    handler: fn(&CborValue, &mut world::ShellWorld) -> Result<ToolOutput, ToolFailure>,
+    mut world: world::ShellWorld,
+    handler: impl FnOnce(&CborValue, &mut world::ShellWorld) -> Result<ToolOutput, ToolFailure>,
 ) -> Vec<Event> {
     let mut events = Vec::new();
-    let vcr_config = match tau_vcr::VcrConfig::from_env() {
-        Ok(config) => config,
-        Err(error) => {
-            push_failure(
-                &mut events,
-                invoke,
-                ToolFailure::new(format!("vcr error: {error}")),
-            );
-            return events;
-        }
-    };
-    let mut world = match world::ShellWorld::for_tool(
-        invoke.tool_name.as_str(),
-        invoke.call_id.as_str(),
-        &invoke.arguments,
-        vcr_config,
-    ) {
-        Ok(world) => world,
-        Err(failure) => {
-            push_failure(&mut events, invoke, failure);
-            return events;
-        }
-    };
     let result = handler(&invoke.arguments, &mut world);
     let finish = world.finish();
     match (result, finish) {
@@ -139,22 +98,6 @@ fn wrap_world(
         (Ok(_), Err(failure)) | (Err(failure), Ok(())) | (Err(failure), Err(_)) => {
             push_failure(&mut events, invoke, failure);
         }
-    }
-    events
-}
-
-/// Common Ok/Err → Result/Error wrapping for tools whose handler is a
-/// pure `(arguments) -> Result<ToolOutput, ToolFailure>`. The handler's
-/// display descriptor and purpose-built failure details are forwarded to
-/// the event.
-fn wrap_pure(
-    invoke: tau_proto::ToolStarted,
-    handler: fn(&CborValue) -> Result<ToolOutput, ToolFailure>,
-) -> Vec<Event> {
-    let mut events = Vec::new();
-    match handler(&invoke.arguments) {
-        Ok(output) => push_output(&mut events, invoke, output),
-        Err(failure) => push_failure(&mut events, invoke, failure),
     }
     events
 }

@@ -369,7 +369,7 @@ fn apply_sse_data(
 }
 
 fn load_vcr_config() -> Result<Option<tau_vcr::VcrConfig>, LlmError> {
-    tau_vcr::VcrConfig::from_env().map_err(LlmError::Vcr)
+    Ok(tau_vcr::VcrConfig::from_env())
 }
 
 pub(super) fn load_provider_stream_cassette(

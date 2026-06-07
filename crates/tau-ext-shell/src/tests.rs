@@ -22,7 +22,9 @@ use crate::tools::find::run_find;
 use crate::tools::grep::{RipgrepError, classify_ripgrep_stderr, grep_result_map, run_grep};
 use crate::tools::ls::run_ls;
 use crate::tools::read::{format_read_range, read_file as read_file_with_world, slice_lines};
-use crate::tools::shell::{CommandDetails, command_details_value, run_command};
+use crate::tools::shell::{
+    CommandDetails, CommandOutcome, command_details_value, run_command_live,
+};
 use crate::tools::{
     APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, FIND_TOOL_NAME, GPT_SHELL_TOOL_NAME, LS_TOOL_NAME,
     READ_TOOL_NAME, SHELL_TOOL_NAME,
@@ -3628,7 +3630,12 @@ fn shell_ro_mode_is_advisory_by_default() {
         ),
     ]);
 
-    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
+    let CommandOutcome::Finished(output) =
+        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
+    else {
+        panic!("expected finished shell outcome");
+    };
+    let output = *output;
     assert_eq!(output.display.mode, "ro");
     assert_eq!(
         fs::read_to_string(td.path().join("probe")).expect("probe"),
@@ -3649,7 +3656,12 @@ fn shell_tool_multiline_display_uses_short_args_and_text_payload() {
         ),
     ]);
 
-    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
+    let CommandOutcome::Finished(output) =
+        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
+    else {
+        panic!("expected finished shell outcome");
+    };
+    let output = *output;
     assert_eq!(output.display.mode, "rw");
     assert_eq!(output.display.args, "printf hello");
     assert_eq!(
@@ -3673,7 +3685,12 @@ fn shell_tool_long_display_args_are_middle_shortened() {
         ),
     ]);
 
-    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
+    let CommandOutcome::Finished(output) =
+        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
+    else {
+        panic!("expected finished shell outcome");
+    };
+    let output = *output;
     assert_eq!(output.display.mode, "rw");
     assert_eq!(
         output.display.args,
@@ -3697,7 +3714,12 @@ fn shell_tool_use_state_mode_carries_access_mode() {
         ),
     ]);
 
-    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
+    let CommandOutcome::Finished(output) =
+        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
+    else {
+        panic!("expected finished shell outcome");
+    };
+    let output = *output;
     assert_eq!(output.display.mode, "ro");
     assert_eq!(output.display.args, "printf hello");
 }
@@ -3712,7 +3734,12 @@ fn shell_tool_marks_invalid_utf8_stdout_line_and_marks_output_invalid() {
         CborValue::Text("printf '\\377stdout'".to_owned()),
     )]);
 
-    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
+    let CommandOutcome::Finished(output) =
+        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
+    else {
+        panic!("expected finished shell outcome");
+    };
+    let output = *output;
     assert_eq!(
         cbor_map_text(&output.result, "output"),
         Some("out(invalid-utf8,no_nl) �stdout")
@@ -3730,7 +3757,12 @@ fn shell_tool_replaces_invalid_utf8_stderr_and_marks_output_invalid() {
         CborValue::Text("printf '\\376stderr' >&2".to_owned()),
     )]);
 
-    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
+    let CommandOutcome::Finished(output) =
+        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
+    else {
+        panic!("expected finished shell outcome");
+    };
+    let output = *output;
     assert_eq!(
         cbor_map_text(&output.result, "output"),
         Some("err(invalid-utf8,no_nl) �stderr")
@@ -3747,7 +3779,12 @@ fn shell_tool_replaces_invalid_utf8_both_streams_in_combined_output() {
         CborValue::Text("printf '\\377stdout'; printf '\\376stderr' >&2".to_owned()),
     )]);
 
-    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
+    let CommandOutcome::Finished(output) =
+        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
+    else {
+        panic!("expected finished shell outcome");
+    };
+    let output = *output;
     assert_eq!(
         cbor_map_text(&output.result, "output"),
         Some("out(invalid-utf8,no_nl) �stdout\nerr(invalid-utf8,no_nl) �stderr")
@@ -3764,7 +3801,12 @@ fn shell_tool_marks_crlf_and_cr_line_endings() {
         CborValue::Text("printf 'a\r\nb\rc\n'".to_owned()),
     )]);
 
-    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
+    let CommandOutcome::Finished(output) =
+        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
+    else {
+        panic!("expected finished shell outcome");
+    };
+    let output = *output;
     assert_eq!(
         cbor_map_text(&output.result, "output"),
         Some("out(crlf) a\nout(cr) b\nout c")
@@ -3780,7 +3822,12 @@ fn shell_tool_omits_truncation_marker_without_truncation() {
         CborValue::Text("printf 'ok\\n'".to_owned()),
     )]);
 
-    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
+    let CommandOutcome::Finished(output) =
+        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
+    else {
+        panic!("expected finished shell outcome");
+    };
+    let output = *output;
     assert_eq!(cbor_map_text(&output.result, "output"), Some("out ok"));
     let field = "truncated";
     assert!(
@@ -3803,7 +3850,12 @@ fn shell_tool_reports_truncation_marker_and_original_totals() {
         CborValue::Text(command),
     )]);
 
-    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
+    let CommandOutcome::Finished(output) =
+        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
+    else {
+        panic!("expected finished shell outcome");
+    };
+    let output = *output;
     let combined = cbor_map_text(&output.result, "output").expect("output");
     assert!(combined.starts_with("out x") || combined.starts_with("err e"));
     assert!(combined.contains("\n...\n"));
@@ -3829,7 +3881,12 @@ fn shell_tool_marks_invalid_utf8_and_truncation_together() {
         CborValue::Text(command),
     )]);
 
-    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
+    let CommandOutcome::Finished(output) =
+        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
+    else {
+        panic!("expected finished shell outcome");
+    };
+    let output = *output;
     assert_eq!(cbor_bool_field(&output.result, "valid_utf8"), Some(false));
     assert_eq!(cbor_bool_field(&output.result, "truncated"), Some(true));
 }
@@ -3850,7 +3907,12 @@ fn shell_tool_runs_in_requested_cwd() {
         ),
     ]);
 
-    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
+    let CommandOutcome::Finished(output) =
+        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
+    else {
+        panic!("expected finished shell outcome");
+    };
+    let output = *output;
     let cwd = tempdir.path().canonicalize().expect("canonical cwd");
     let expected_stdout = format!("out {}", cwd.display());
     assert_eq!(
@@ -3873,8 +3935,13 @@ fn shell_tool_timeout_preserves_partial_output() {
         ),
     ]);
 
-    let output =
-        run_command(&args, &crate::config::ShellConfig::default()).expect("timeout result");
+    let CommandOutcome::Finished(output) =
+        run_command_live(&args, &crate::config::ShellConfig::default(), false, None)
+            .expect("timeout result")
+    else {
+        panic!("expected finished shell outcome");
+    };
+    let output = *output;
     assert_eq!(output.display.status, ToolUseStatus::Error);
     assert_eq!(output.display.status_text, "timeout");
     assert_eq!(cbor_map_text(&output.result, "output"), Some("out before"));
@@ -3905,7 +3972,12 @@ fn shell_tool_returns_after_foreground_exit_even_if_background_holds_pipe() {
     ]);
 
     let started = std::time::Instant::now();
-    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
+    let CommandOutcome::Finished(output) =
+        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
+    else {
+        panic!("expected finished shell outcome");
+    };
+    let output = *output;
     let elapsed = started.elapsed();
     assert!(
         elapsed < std::time::Duration::from_secs(2),
@@ -3945,8 +4017,13 @@ fn shell_tool_timeout_returns_without_waiting_for_escaped_pipe_holder() {
     ]);
 
     let started = std::time::Instant::now();
-    let result =
-        run_command(&args, &crate::config::ShellConfig::default()).expect("timeout result");
+    let CommandOutcome::Finished(result) =
+        run_command_live(&args, &crate::config::ShellConfig::default(), false, None)
+            .expect("timeout result")
+    else {
+        panic!("expected finished shell outcome");
+    };
+    let result = *result;
     let elapsed = started.elapsed();
     assert!(
         elapsed < std::time::Duration::from_secs(2),
@@ -3975,7 +4052,12 @@ fn shell_tool_bounded_huge_output_reports_original_totals() {
         CborValue::Text(command),
     )]);
 
-    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("run");
+    let CommandOutcome::Finished(output) =
+        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
+    else {
+        panic!("expected finished shell outcome");
+    };
+    let output = *output;
     let combined = cbor_map_text(&output.result, "output").expect("output");
     assert!(combined.contains("..."));
     assert!(combined.len() < byte_count);
@@ -3998,8 +4080,13 @@ fn shell_tool_timeout_zero_is_immediate_timeout() {
         ),
     ]);
 
-    let output =
-        run_command(&args, &crate::config::ShellConfig::default()).expect("timeout result");
+    let CommandOutcome::Finished(output) =
+        run_command_live(&args, &crate::config::ShellConfig::default(), false, None)
+            .expect("timeout result")
+    else {
+        panic!("expected finished shell outcome");
+    };
+    let output = *output;
     assert_eq!(output.display.status, ToolUseStatus::Error);
     assert_eq!(output.display.status_text, "timeout");
     assert_eq!(cbor_bool_field(&output.result, "timed_out"), Some(true));
@@ -4025,7 +4112,8 @@ fn shell_tool_rejects_negative_timeout() {
         ),
     ]);
 
-    let error = run_command(&args, &crate::config::ShellConfig::default()).expect_err("timeout");
+    let error = run_command_live(&args, &crate::config::ShellConfig::default(), false, None)
+        .expect_err("timeout");
     assert_eq!(error.message, "argument `timeout` must be non-negative");
 }
 
@@ -4057,11 +4145,14 @@ fn shell_tool_enforced_read_only_mode_bind_mounts_cwd_read_only() {
         ),
     ]);
 
+    let mut world = crate::tools::world::ShellWorld::real();
     let output = match crate::tools::shell::run_command_cancellable(
+        "enforced_ro_test",
         &args,
         &crate::config::ShellConfig::default(),
         true,
         None,
+        &mut world,
     ) {
         Ok(crate::tools::shell::CommandOutcome::Finished(output)) => *output,
         Ok(crate::tools::shell::CommandOutcome::Cancelled) => panic!("unexpected cancellation"),
@@ -4100,7 +4191,8 @@ fn shell_tool_rejects_wrong_type_mode() {
         ),
     ]);
 
-    let error = run_command(&args, &crate::config::ShellConfig::default()).expect_err("mode");
+    let error = run_command_live(&args, &crate::config::ShellConfig::default(), false, None)
+        .expect_err("mode");
     assert_eq!(error.message, "argument `mode` must be `ro` or `rw`");
 }
 
@@ -4119,7 +4211,8 @@ fn shell_tool_rejects_wrong_type_timeout() {
         ),
     ]);
 
-    let error = run_command(&args, &crate::config::ShellConfig::default()).expect_err("timeout");
+    let error = run_command_live(&args, &crate::config::ShellConfig::default(), false, None)
+        .expect_err("timeout");
     assert_eq!(error.message, "argument `timeout` must be an integer");
 }
 
@@ -4139,7 +4232,13 @@ fn shell_tool_reports_signal_termination_details() {
         ),
     ]);
 
-    let output = run_command(&args, &crate::config::ShellConfig::default()).expect("signal result");
+    let CommandOutcome::Finished(output) =
+        run_command_live(&args, &crate::config::ShellConfig::default(), false, None)
+            .expect("signal result")
+    else {
+        panic!("expected finished shell outcome");
+    };
+    let output = *output;
     assert_eq!(output.display.status, ToolUseStatus::Error);
     assert_eq!(output.display.status_text, "signal 15");
     assert_eq!(cbor_int_field(&output.result, "signal"), Some(15));

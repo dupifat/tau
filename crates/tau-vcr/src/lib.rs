@@ -58,21 +58,24 @@ impl VcrConfig {
 
     /// Reads VCR config from `TAU_VCR` and `TAU_VCR_DIR`.
     ///
-    /// Returns `Ok(None)` when `TAU_VCR` is unset or `off`. `TAU_VCR_DIR` is
-    /// required for `record-if-missing` and `replay-only` modes.
-    pub fn from_env() -> Result<Option<Self>, VcrError> {
+    /// Returns `None` when `TAU_VCR` is unset or `off`. Invalid VCR
+    /// environment values panic because Tau's test/runtime environment is
+    /// misconfigured and should fail loudly. `TAU_VCR_DIR` is required for
+    /// `record-if-missing` and `replay-only` modes.
+    #[must_use]
+    pub fn from_env() -> Option<Self> {
         let mode = match std::env::var(ENV_MODE) {
-            Ok(value) => VcrMode::parse(&value)?,
+            Ok(value) => VcrMode::parse(&value).unwrap_or_else(|error| panic!("{error}")),
             Err(std::env::VarError::NotPresent) => VcrMode::Off,
-            Err(std::env::VarError::NotUnicode(_)) => {
-                return Err(VcrError::EnvNotUnicode(ENV_MODE));
-            }
+            Err(std::env::VarError::NotUnicode(_)) => panic!("{} is not valid Unicode", ENV_MODE),
         };
         if mode == VcrMode::Off {
-            return Ok(None);
+            return None;
         }
-        let dir = std::env::var_os(ENV_DIR).ok_or(VcrError::MissingEnv(ENV_DIR))?;
-        Ok(Some(Self::new(mode, PathBuf::from(dir))))
+        let dir = std::env::var_os(ENV_DIR).unwrap_or_else(|| {
+            panic!("{} must be set when TAU_VCR is enabled", ENV_DIR);
+        });
+        Some(Self::new(mode, PathBuf::from(dir)))
     }
 
     /// Returns a cassette store rooted at this config's directory.
@@ -158,10 +161,6 @@ where
 pub enum VcrError {
     /// `TAU_VCR` contained an unknown mode.
     InvalidMode(String),
-    /// Required environment variable was not present.
-    MissingEnv(&'static str),
-    /// Environment variable was not valid Unicode.
-    EnvNotUnicode(&'static str),
     /// Cassette key contained unsupported characters.
     InvalidKey(String),
     /// Requested cassette was not found.
@@ -230,8 +229,6 @@ impl fmt::Display for VcrError {
                 f,
                 "invalid cassette key `{key}`; expected only a-z, A-Z, 0-9, -, or _"
             ),
-            Self::MissingEnv(name) => write!(f, "{name} must be set when TAU_VCR is enabled"),
-            Self::EnvNotUnicode(name) => write!(f, "{name} is not valid Unicode"),
             Self::Missing { key } => write!(f, "missing cassette `{key}`"),
             Self::CreateDir { path, source } => {
                 write!(
@@ -276,8 +273,6 @@ impl std::error::Error for VcrError {
             Self::InvalidMode(_)
             | Self::InvalidKey(_)
             | Self::Missing { .. }
-            | Self::MissingEnv(_)
-            | Self::EnvNotUnicode(_)
             | Self::UnsupportedVersion { .. }
             | Self::RequestMismatch { .. } => None,
         }

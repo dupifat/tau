@@ -992,6 +992,34 @@ fn dispatch_tool_invoke(
     lock_wait_duration_seconds: Option<u64>,
     enforce_ro_mode: bool,
 ) {
+    let vcr_config = tau_vcr::VcrConfig::from_env();
+    let world = match crate::tools::world::ShellWorld::for_tool(
+        invoke.tool_name.as_str(),
+        invoke.call_id.as_str(),
+        &invoke.arguments,
+        vcr_config,
+    ) {
+        Ok(world) => world,
+        Err(crate::display::ToolFailure {
+            message,
+            details,
+            display,
+        }) => {
+            let event = Event::ToolError(tau_proto::ToolError {
+                call_id: invoke.call_id.clone(),
+                tool_name: invoke.tool_name.clone(),
+                tool_type: tau_proto::ToolType::Function,
+                message,
+                details: details.map(|details| *details),
+                display: Some(*display),
+                originator: invoke.originator.clone(),
+            });
+            let event = with_lock_wait_duration(event, lock_wait_duration_seconds);
+            let _ = tx.send(HarnessInputMessage::emit(event));
+            return;
+        }
+    };
+
     if invoke.tool_name == SHELL_TOOL_NAME || invoke.tool_name == GPT_SHELL_TOOL_NAME {
         dispatch_cancellable_shell_tool(
             invoke,
@@ -1000,6 +1028,7 @@ fn dispatch_tool_invoke(
             running_shells,
             lock_wait_duration_seconds,
             enforce_ro_mode,
+            world,
         );
         return;
     }
@@ -1016,7 +1045,7 @@ fn dispatch_tool_invoke(
         )));
     }
 
-    let events = execute_tool(invoke, &shell_config);
+    let events = execute_tool(invoke, world);
     for event in events {
         let event = with_lock_wait_duration(event, lock_wait_duration_seconds);
         let _ = tx.send(HarnessInputMessage::emit(event));
@@ -1030,6 +1059,7 @@ fn dispatch_cancellable_shell_tool(
     running_shells: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
     lock_wait_duration_seconds: Option<u64>,
     enforce_ro_mode: bool,
+    mut world: crate::tools::world::ShellWorld,
 ) {
     let (cancel_tx, cancel_rx) = mpsc::channel();
     debug!(
@@ -1051,12 +1081,19 @@ fn dispatch_cancellable_shell_tool(
             display: Some(crate::tools::shell::initial_display(&invoke.arguments)),
         },
     )));
-    let event = match crate::tools::shell::run_command_cancellable(
+    let result = crate::tools::shell::run_command_cancellable(
+        invoke.call_id.as_str(),
         &invoke.arguments,
         &shell_config,
         enforce_ro_mode,
         Some(cancel_rx),
-    ) {
+        &mut world,
+    );
+    let outcome = match (result, world.finish()) {
+        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Ok(_), Err(failure)) | (Err(failure), Ok(())) | (Err(failure), Err(_)) => Err(failure),
+    };
+    let event = match outcome {
         Ok(crate::tools::shell::CommandOutcome::Finished(output)) => {
             debug!(call_id = %invoke.call_id, tool_name = %invoke.tool_name, "cancellable shell call finished");
             Event::ToolResult(ToolResult {

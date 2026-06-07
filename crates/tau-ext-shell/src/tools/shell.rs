@@ -10,10 +10,12 @@ use tracing::{debug, trace};
 use crate::argument::{argument_text, optional_argument_int_strict, optional_argument_text};
 use crate::config::ShellConfig;
 use crate::display::{ToolFailure, ToolOutput, ok_display, text_stats};
+use crate::tools::world::{ShellWorld, WorldShellOutcome};
 use crate::truncate::{MAX_OUTPUT_LINES, truncate_line_oriented_lines};
 
 pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 120;
 pub(crate) const SLOW_COMMAND_EXEC_TIME_THRESHOLD_SECS: u64 = 5;
+const VCR_REPLAY_SPEEDUP: u64 = 100;
 
 /// Agent-declared filesystem access intent for a shell command.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -73,22 +75,40 @@ pub(crate) fn initial_display(arguments: &CborValue) -> ToolUseState {
 /// result fields such as `status`, `timed_out`, `signal`, and
 /// `termination_reason`; true invocation/config/start errors remain
 /// `ToolError`.
+#[derive(Debug)]
 pub(crate) enum CommandOutcome {
     Finished(Box<ToolOutput>),
     Cancelled,
 }
 
-pub(crate) fn run_command(
+pub(crate) fn run_command_cancellable(
+    call_id: &str,
     arguments: &CborValue,
     shell_config: &ShellConfig,
-) -> Result<ToolOutput, ToolFailure> {
-    match run_command_cancellable(arguments, shell_config, false, None)? {
-        CommandOutcome::Finished(output) => Ok(*output),
-        CommandOutcome::Cancelled => Err(ToolFailure::from("shell command cancelled".to_owned())),
+    enforce_ro_mode: bool,
+    cancel_rx: Option<mpsc::Receiver<()>>,
+    world: &mut ShellWorld,
+) -> Result<CommandOutcome, ToolFailure> {
+    if let Some(outcome) = world.replay_shell_outcome()? {
+        return replay_shell_outcome(call_id, outcome, arguments, cancel_rx);
     }
+
+    let started = std::time::Instant::now();
+    let outcome = run_command_live(arguments, shell_config, enforce_ro_mode, cancel_rx)?;
+    let elapsed_ms = elapsed_millis(started.elapsed());
+    let recorded = match &outcome {
+        CommandOutcome::Finished(output) => WorldShellOutcome::Finished {
+            result: output.result.clone(),
+            display: Box::new(output.display.clone()),
+            elapsed_ms,
+        },
+        CommandOutcome::Cancelled => WorldShellOutcome::Cancelled,
+    };
+    world.record_shell_outcome(recorded);
+    Ok(outcome)
 }
 
-pub(crate) fn run_command_cancellable(
+pub(crate) fn run_command_live(
     arguments: &CborValue,
     shell_config: &ShellConfig,
     enforce_ro_mode: bool,
@@ -211,6 +231,71 @@ pub(crate) fn run_command_cancellable(
         result,
         display,
     })))
+}
+
+fn replay_shell_outcome(
+    key: &str,
+    outcome: WorldShellOutcome,
+    arguments: &CborValue,
+    cancel_rx: Option<mpsc::Receiver<()>>,
+) -> Result<CommandOutcome, ToolFailure> {
+    match outcome {
+        WorldShellOutcome::Finished {
+            result,
+            display,
+            elapsed_ms,
+        } => {
+            if cancel_rx.as_ref().is_some_and(|rx| rx.try_recv().is_ok()) {
+                return Err(ToolFailure::new(format!(
+                    "vcr replay for {key} expected finished shell call but cancellation was requested"
+                )));
+            }
+            sleep_for_replay_elapsed(elapsed_ms);
+            if cancel_rx.as_ref().is_some_and(|rx| rx.try_recv().is_ok()) {
+                return Err(ToolFailure::new(format!(
+                    "vcr replay for {key} expected finished shell call but cancellation was requested"
+                )));
+            }
+            Ok(CommandOutcome::Finished(Box::new(ToolOutput {
+                result,
+                display: *display,
+            })))
+        }
+        WorldShellOutcome::Cancelled => {
+            let timeout = std::time::Duration::from_secs(
+                parse_timeout_secs(arguments).map_err(ToolFailure::from)?,
+            );
+            let Some(cancel_rx) = cancel_rx else {
+                return Err(ToolFailure::new(format!(
+                    "vcr replay for {key} expected shell cancellation but call is not cancellable"
+                )));
+            };
+            match cancel_rx.recv_timeout(timeout) {
+                Ok(()) => Ok(CommandOutcome::Cancelled),
+                Err(mpsc::RecvTimeoutError::Timeout) => Err(ToolFailure::new(format!(
+                    "vcr replay for {key} expected shell cancellation before timeout"
+                ))),
+                Err(mpsc::RecvTimeoutError::Disconnected) => Err(ToolFailure::new(format!(
+                    "vcr replay for {key} expected shell cancellation but cancellation channel closed"
+                ))),
+            }
+        }
+    }
+}
+
+fn elapsed_millis(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1)
+}
+
+fn sleep_for_replay_elapsed(elapsed_ms: u64) {
+    if elapsed_ms == 0 {
+        return;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(
+        elapsed_ms.div_ceil(VCR_REPLAY_SPEEDUP),
+    ));
 }
 
 fn parse_timeout_secs(arguments: &CborValue) -> Result<u64, String> {
@@ -1261,4 +1346,274 @@ pub(crate) fn command_details_value(details: CommandDetails) -> CborValue {
         ));
     }
     CborValue::Map(entries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shell_args(command: &str, timeout: i64) -> CborValue {
+        CborValue::Map(vec![
+            (
+                CborValue::Text("command".to_owned()),
+                CborValue::Text(command.to_owned()),
+            ),
+            (
+                CborValue::Text("mode".to_owned()),
+                CborValue::Text("ro".to_owned()),
+            ),
+            (
+                CborValue::Text("timeout".to_owned()),
+                CborValue::Integer(timeout.into()),
+            ),
+        ])
+    }
+
+    fn output_text(result: &CborValue) -> &str {
+        let CborValue::Map(entries) = result else {
+            panic!("expected result map");
+        };
+        entries
+            .iter()
+            .find_map(|(key, value)| match (key, value) {
+                (CborValue::Text(key), CborValue::Text(value)) if key == "output" => {
+                    Some(value.as_str())
+                }
+                _ => None,
+            })
+            .expect("output field")
+    }
+
+    fn record_cancelled_shell(
+        cassette_dir: &std::path::Path,
+        call_id: &str,
+        timeout: i64,
+    ) -> CborValue {
+        let args = shell_args("sleep 10", timeout);
+        let (cancel_tx, cancel_rx) = mpsc::channel();
+        let cassette_path = cassette_dir.to_owned();
+        let args_for_thread = args.clone();
+        let call_id = call_id.to_owned();
+        let handle = std::thread::spawn(move || {
+            let mut world = ShellWorld::for_tool(
+                "shell",
+                &call_id,
+                &args_for_thread,
+                Some(tau_vcr::VcrConfig::new(
+                    tau_vcr::VcrMode::RecordIfMissing,
+                    &cassette_path,
+                )),
+            )?;
+            let outcome = run_command_cancellable(
+                &call_id,
+                &args_for_thread,
+                &ShellConfig::default(),
+                false,
+                Some(cancel_rx),
+                &mut world,
+            );
+            world.finish()?;
+            outcome
+        });
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        cancel_tx.send(()).expect("send cancel");
+        let outcome = handle
+            .join()
+            .expect("join recording")
+            .expect("record shell");
+        assert!(matches!(outcome, CommandOutcome::Cancelled));
+        args
+    }
+
+    #[test]
+    fn shell_vcr_replays_finished_result_without_running_command() {
+        let cassette_dir = tempfile::TempDir::new().expect("cassette dir");
+        let data_dir = tempfile::TempDir::new().expect("data dir");
+        let file = data_dir.path().join("value.txt");
+        std::fs::write(&file, "recorded-output").expect("write recorded value");
+        let args = shell_args(&format!("cat {}", file.display()), 1);
+        let mut world = ShellWorld::for_tool(
+            "shell",
+            "call_shell",
+            &args,
+            Some(tau_vcr::VcrConfig::new(
+                tau_vcr::VcrMode::RecordIfMissing,
+                cassette_dir.path(),
+            )),
+        )
+        .expect("record world");
+        let recorded = run_command_cancellable(
+            "call_shell",
+            &args,
+            &ShellConfig::default(),
+            false,
+            None,
+            &mut world,
+        )
+        .expect("record shell");
+        world.finish().expect("finish recording");
+        assert!(matches!(recorded, CommandOutcome::Finished(_)));
+        let cassette = std::fs::read_to_string(cassette_dir.path().join("call_shell.yaml"))
+            .expect("read cassette");
+        assert!(cassette.contains("op: shell"));
+        std::fs::write(&file, "live-output").expect("write live value");
+
+        let mut world = ShellWorld::for_tool(
+            "shell",
+            "call_shell",
+            &args,
+            Some(tau_vcr::VcrConfig::new(
+                tau_vcr::VcrMode::ReplayOnly,
+                cassette_dir.path(),
+            )),
+        )
+        .expect("replay world");
+        let outcome = run_command_cancellable(
+            "call_shell",
+            &args,
+            &ShellConfig::default(),
+            false,
+            None,
+            &mut world,
+        )
+        .expect("replay shell");
+        world.finish().expect("finish replay");
+
+        let CommandOutcome::Finished(output) = outcome else {
+            panic!("expected finished outcome");
+        };
+        assert_eq!(output_text(&output.result), "out(no_nl) recorded-output");
+    }
+
+    #[test]
+    fn shell_vcr_finished_replay_sleeps_at_scaled_recorded_duration() {
+        let cassette_dir = tempfile::TempDir::new().expect("cassette dir");
+        let args = shell_args("printf live-output", 1);
+        let mut world = ShellWorld::for_tool(
+            "shell",
+            "call_slow_finished_shell",
+            &args,
+            Some(tau_vcr::VcrConfig::new(
+                tau_vcr::VcrMode::RecordIfMissing,
+                cassette_dir.path(),
+            )),
+        )
+        .expect("record world");
+        world.record_shell_outcome(WorldShellOutcome::Finished {
+            result: CborValue::Map(vec![(
+                CborValue::Text("output".to_owned()),
+                CborValue::Text("out(no_nl) recorded-output".to_owned()),
+            )]),
+            display: Box::new(ok_display("recorded")),
+            elapsed_ms: 5_000,
+        });
+        world.finish().expect("finish recording");
+
+        let mut world = ShellWorld::for_tool(
+            "shell",
+            "call_slow_finished_shell",
+            &args,
+            Some(tau_vcr::VcrConfig::new(
+                tau_vcr::VcrMode::ReplayOnly,
+                cassette_dir.path(),
+            )),
+        )
+        .expect("replay world");
+        let started = std::time::Instant::now();
+        let outcome = run_command_cancellable(
+            "call_slow_finished_shell",
+            &args,
+            &ShellConfig::default(),
+            false,
+            None,
+            &mut world,
+        )
+        .expect("replay shell");
+        let elapsed = started.elapsed();
+        world.finish().expect("finish replay");
+
+        assert!(
+            elapsed >= std::time::Duration::from_millis(40),
+            "replay should preserve scaled shell timing, elapsed={elapsed:?}"
+        );
+        let CommandOutcome::Finished(output) = outcome else {
+            panic!("expected finished outcome");
+        };
+        assert_eq!(output_text(&output.result), "out(no_nl) recorded-output");
+    }
+
+    #[test]
+    fn shell_vcr_cancelled_replay_requires_cancel_request() {
+        let cassette_dir = tempfile::TempDir::new().expect("cassette dir");
+        let args = record_cancelled_shell(cassette_dir.path(), "call_cancelled_shell", 1);
+        let (cancel_tx, cancel_rx) = mpsc::channel();
+        let cassette_path = cassette_dir.path().to_owned();
+        let args_for_thread = args.clone();
+        let handle = std::thread::spawn(move || {
+            let mut world = ShellWorld::for_tool(
+                "shell",
+                "call_cancelled_shell",
+                &args_for_thread,
+                Some(tau_vcr::VcrConfig::new(
+                    tau_vcr::VcrMode::ReplayOnly,
+                    &cassette_path,
+                )),
+            )?;
+            let outcome = run_command_cancellable(
+                "call_cancelled_shell",
+                &args_for_thread,
+                &ShellConfig::default(),
+                false,
+                Some(cancel_rx),
+                &mut world,
+            );
+            world.finish()?;
+            outcome
+        });
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        cancel_tx.send(()).expect("send cancel");
+
+        let outcome = handle.join().expect("join replay").expect("replay shell");
+        assert!(matches!(outcome, CommandOutcome::Cancelled));
+    }
+
+    #[test]
+    fn shell_vcr_records_cancelled_outcome() {
+        let cassette_dir = tempfile::TempDir::new().expect("cassette dir");
+        record_cancelled_shell(cassette_dir.path(), "call_record_cancelled_shell", 5);
+        let cassette =
+            std::fs::read_to_string(cassette_dir.path().join("call_record_cancelled_shell.yaml"))
+                .expect("read cassette");
+        assert!(cassette.contains("op: shell"));
+        assert!(cassette.contains("kind: cancelled"));
+    }
+
+    #[test]
+    fn shell_vcr_cancelled_replay_errors_without_cancel_request() {
+        let cassette_dir = tempfile::TempDir::new().expect("cassette dir");
+        let args = record_cancelled_shell(cassette_dir.path(), "call_cancelled_shell", 1);
+        let (_cancel_tx, cancel_rx) = mpsc::channel();
+        let mut world = ShellWorld::for_tool(
+            "shell",
+            "call_cancelled_shell",
+            &args,
+            Some(tau_vcr::VcrConfig::new(
+                tau_vcr::VcrMode::ReplayOnly,
+                cassette_dir.path(),
+            )),
+        )
+        .expect("replay world");
+
+        let error = run_command_cancellable(
+            "call_cancelled_shell",
+            &args,
+            &ShellConfig::default(),
+            false,
+            Some(cancel_rx),
+            &mut world,
+        )
+        .expect_err("missing cancel should fail");
+
+        assert!(error.message.contains("expected shell cancellation"));
+    }
 }

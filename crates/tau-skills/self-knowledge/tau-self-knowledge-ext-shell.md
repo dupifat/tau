@@ -14,7 +14,7 @@ advertise: false
 Model-visible tools:
 
 - `read` — reads UTF-8 and non-UTF-8 files with line numbers, line-ending markers, Unicode replacement for invalid bytes plus `invalid-utf8` flags, range/ranges support, and line/byte truncation metadata.
-- `edit` — applies guarded line-oriented replacements. The agent-visible result is minimal status only; the UI receives a separate structured diff payload for changed UTF-8 files, including inline changed-token segments. Non-empty replacements stay whole-line before remaining content; if a missing line ending is added, the result includes `newline_added: true`.
+- `edit` — applies guarded line-oriented replacements. `newText` fully replaces the inclusive selected line range; the first line after `end_line` is preserved unchanged and should not be included unless the range includes it. The agent-visible result is minimal status only; the UI receives a separate structured diff payload for changed UTF-8 files, including inline changed-token segments. Non-empty replacements stay whole-line; if a missing line ending is added, the result includes `newline_added: true`.
 - `apply_patch` — applies patch-style file edits and also sends structured UI-only diffs for changed UTF-8 files. It is registered but disabled by default.
 - `shell` — runs `sh -c`-style commands with `mode: "ro"` or `mode: "rw"`, optional `cwd`, timeout, stdout/stderr capture, Unicode replacement for invalid output bytes plus `invalid-utf8` flags, truncation, and tool cancellation support.
 - `gpt_shell` — shell-like execution surface advertised as model-visible `shell_command` for GPT-style tool compatibility. It is registered but disabled by default.

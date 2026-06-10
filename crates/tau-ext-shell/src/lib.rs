@@ -163,19 +163,15 @@ where
             name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
             model_visible_name: None,
             description: Some(
-                "Edit a file using line-oriented replacements. Each edit replaces \
-                 the inclusive 1-based `start_line`..`end_line` range with `newText`; \
-                 all ranges use the original file numbering as if applied simultaneously. \
-                 Non-empty replacements are kept as whole lines before remaining content; \
-                 if the tool adds the missing line ending, the result includes \
-                 `newline_added: true`. Ranges must be non-overlapping and may include the \
+                "Edit a file using line-oriented replacements. Each edit fully replaces \
+                 the inclusive 1-based `start_line`..`end_line` range with `newText` \
+                 . All ranges use the original file numbering as if applied \
+                 simultaneously. Non-empty replacements are kept as whole lines. \
+                 Ranges must be non-overlapping and may include the \
                  single virtual empty line used for creation/appending, but must not extend \
                  beyond it. Missing files are treated as empty and missing parent directories \
                  are created. Per-edit `guard` must exactly match the first original line \
-                 content excluding the line ending; embedded newlines in `guard` are invalid. \
-                 On mismatch, the edit fails and returns the guard line plus up to 10 context \
-                 lines. Returns minimal status headers: replacements, changed, \
-                 new_max_valid_start_line, total_bytes, and newline_added when applicable."
+                 content."
                     .to_owned(),
             ),
             tool_type: tau_proto::ToolType::Function,
@@ -206,11 +202,11 @@ where
                                 },
                                 "newText": {
                                     "type": "string",
-                                    "description": "Replacement text; may contain newlines. Non-empty replacements stay whole-line before remaining content; missing line endings are added and reported as newline_added."
+                                    "description": "Replacement text. Non-empty replacements stay whole-line."
                                 },
                                 "guard": {
                                     "type": "string",
-                                    "description": "Exact expected content of the first original line in this range, including spaces and tabs, after trimming trailing newline characters and excluding the line ending. Embedded newline characters are invalid. Use an empty string for an empty, missing, or append line. If it does not match, the edit fails and returns the guard line plus up to 10 lines before and after it."
+                                    "description": "Exact expected content of the single first original line in the replaced range, including spaces and tabs. Use an empty string for an empty, missing, or append line. If it does not match, the edit fails and returns correct current content of the guard line with context around it."
                                 }
                             },
                             "required": ["start_line", "end_line", "newText", "guard"],

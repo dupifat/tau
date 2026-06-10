@@ -142,14 +142,14 @@ pub(crate) fn initial_display(invoke: &tau_proto::ToolStarted) -> Option<ToolUse
         READ_TOOL_NAME => {
             let path = cbor_text_field(&invoke.arguments, "path").unwrap_or_default();
             let ranges = cbor_array_field(&invoke.arguments, "ranges")
-                .map(format_requested_line_ranges)
-                .unwrap_or_else(|| format_requested_line_range(&invoke.arguments));
+                .map(format_requested_read_line_ranges)
+                .unwrap_or_else(|| format_requested_read_line_range(&invoke.arguments));
             format!("{path} {ranges}")
         }
         EDIT_TOOL_NAME | APPLY_PATCH_TOOL_NAME => {
             let path = cbor_text_field(&invoke.arguments, "path").unwrap_or_default();
             let ranges = cbor_array_field(&invoke.arguments, "edits")
-                .map(format_requested_line_ranges)
+                .map(format_requested_edit_line_ranges)
                 .unwrap_or_default();
             if ranges.is_empty() {
                 path
@@ -185,10 +185,18 @@ pub(crate) fn initial_display(invoke: &tau_proto::ToolStarted) -> Option<ToolUse
     })
 }
 
-fn format_requested_line_ranges(values: &[CborValue]) -> String {
+fn format_requested_read_line_ranges(values: &[CborValue]) -> String {
+    format_requested_ranges(values, format_requested_read_line_range)
+}
+
+fn format_requested_edit_line_ranges(values: &[CborValue]) -> String {
+    format_requested_ranges(values, format_requested_edit_line_range)
+}
+
+fn format_requested_ranges(values: &[CborValue], format_range: fn(&CborValue) -> String) -> String {
     let ranges: Vec<String> = values
         .iter()
-        .map(format_requested_line_range)
+        .map(format_range)
         .filter(|range| !range.is_empty())
         .collect();
     if ranges.is_empty() {
@@ -198,7 +206,26 @@ fn format_requested_line_ranges(values: &[CborValue]) -> String {
     }
 }
 
-fn format_requested_line_range(arguments: &CborValue) -> String {
+fn format_requested_edit_line_range(arguments: &CborValue) -> String {
+    let after_line = nonnegative_usize_field(arguments, "after_line");
+    let before_line = positive_usize_field(arguments, "before_line");
+    match (after_line, before_line) {
+        (None, None) => "..".to_owned(),
+        (Some(after), Some(before)) => {
+            let start = after.saturating_add(1);
+            let end = if before == start {
+                start
+            } else {
+                before.saturating_sub(1)
+            };
+            format!("{start}..{end}")
+        }
+        (Some(after), None) => format!("{}..", after.saturating_add(1)),
+        (None, Some(before)) => format!("?..{}", before.saturating_sub(1)),
+    }
+}
+
+fn format_requested_read_line_range(arguments: &CborValue) -> String {
     let start_line = positive_usize_field(arguments, "start_line");
     let end_line = positive_usize_field(arguments, "end_line");
     match (start_line, end_line) {
@@ -207,6 +234,14 @@ fn format_requested_line_range(arguments: &CborValue) -> String {
         (None, Some(end)) => format!("1..{end}"),
         (Some(start), Some(end)) => format!("{start}..{end}"),
     }
+}
+
+fn nonnegative_usize_field(arguments: &CborValue, key: &str) -> Option<usize> {
+    let value = tau_proto::cbor_int_field(arguments, key)?;
+    if value < 0 {
+        return None;
+    }
+    usize::try_from(value).ok()
 }
 
 fn positive_usize_field(arguments: &CborValue, key: &str) -> Option<usize> {

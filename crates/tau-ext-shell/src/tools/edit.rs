@@ -7,7 +7,7 @@ use tau_proto::{CborValue, ToolUsePayload, ToolUseState, ToolUseStatus};
 use crate::argument::{argument_array, argument_text, cbor_map_int, cbor_map_text};
 use crate::diff::compute_diff;
 use crate::display::{ToolFailure, ToolOutput, text_stats};
-use crate::tools::read::{ReadLineRange, format_read_range, slice_line_ranges};
+use crate::tools::read::{ReadLineRange, slice_line_ranges};
 use crate::tools::world::ShellWorld;
 use crate::truncate::truncate_line_oriented;
 
@@ -48,34 +48,31 @@ pub(crate) fn edit_file(
     let mut requested_ranges = Vec::new();
     for edit in edits {
         reject_legacy_line_count(edit, &display_args)?;
-        let start_line = parse_required_line(edit, "start_line", &display_args)?;
-        let end_line = parse_required_line(edit, "end_line", &display_args)?;
+        let range = parse_edit_range(edit, &original_lines, &display_args)?;
         let new_text = cbor_map_text(edit, "newText").ok_or_else(|| {
             with_display_args(
                 &display_args,
                 ToolFailure::new("each edit must have a string newText"),
             )
         })?;
-        requested_ranges.push(format_read_range(Some(start_line), Some(end_line)));
+        requested_ranges.push(range.display.clone());
         display_args = edit_display_args(&display_path, &requested_ranges);
         let guard = parse_required_guard(edit, &display_args)?;
-        original_lines.validate_range(start_line, end_line, &display_args)?;
-        let end_line_exclusive = end_line.checked_add(1).ok_or_else(|| {
-            with_display_args(&display_args, ToolFailure::new("end_line is too large"))
-        })?;
-        let start_byte = original_lines.byte_start_for_line(start_line, original_bytes.len());
-        let end_byte = original_lines.byte_start_for_line(end_line_exclusive, original_bytes.len());
+        let start_byte = original_lines.byte_start_for_line(range.start_line, original_bytes.len());
+        let end_byte =
+            original_lines.byte_start_for_line(range.end_line_exclusive, original_bytes.len());
         let mut new_text = new_text.as_bytes().to_vec();
-        let newline_added = maybe_add_line_ending(
+        let newline_added = normalize_new_text_line_ending(
             &mut new_text,
             &original_bytes,
             &original_lines,
-            end_line,
+            &range,
+            start_byte,
             end_byte,
         );
         replacements.push(LineReplacement {
-            start_line,
-            end_line_exclusive,
+            start_line: range.start_line,
+            end_line_exclusive: range.end_line_exclusive,
             start_byte,
             end_byte,
             new_text,
@@ -145,6 +142,18 @@ pub(crate) fn edit_file(
     })
 }
 
+struct EditRange {
+    start_line: usize,
+    end_line_exclusive: usize,
+    display: String,
+}
+
+impl EditRange {
+    fn is_empty(&self) -> bool {
+        self.start_line == self.end_line_exclusive
+    }
+}
+
 struct LineReplacement<'a> {
     start_line: usize,
     end_line_exclusive: usize,
@@ -155,25 +164,47 @@ struct LineReplacement<'a> {
     newline_added: bool,
 }
 
-fn maybe_add_line_ending(
+fn normalize_new_text_line_ending(
     new_text: &mut Vec<u8>,
     original_bytes: &[u8],
     original_lines: &LineIndex,
-    end_line: usize,
+    range: &EditRange,
+    start_byte: usize,
     end_byte: usize,
 ) -> bool {
-    if new_text.is_empty()
-        || original_bytes.len() <= end_byte
-        || new_text.ends_with(b"\n")
-        || new_text.ends_with(b"\r")
-    {
+    if new_text.is_empty() {
         return false;
     }
 
-    let Some(line_ending) = original_lines.line_ending_for_line(end_line, original_bytes) else {
+    if range.is_empty()
+        && 0 < start_byte
+        && start_byte == original_bytes.len()
+        && !original_lines.has_trailing_line_ending()
+    {
+        return maybe_prepend_missing_boundary_line_ending(new_text);
+    }
+
+    if original_bytes.len() <= end_byte || new_text.ends_with(b"\n") || new_text.ends_with(b"\r") {
         return false;
+    }
+
+    let line = if range.is_empty() {
+        range.start_line
+    } else {
+        range.end_line_exclusive.saturating_sub(1)
     };
+    let line_ending = original_lines
+        .line_ending_for_line(line, original_bytes)
+        .unwrap_or(b"\n");
     new_text.extend_from_slice(line_ending);
+    true
+}
+
+fn maybe_prepend_missing_boundary_line_ending(new_text: &mut Vec<u8>) -> bool {
+    if new_text.starts_with(b"\n") || new_text.starts_with(b"\r") {
+        return false;
+    }
+    new_text.splice(0..0, b"\n".iter().copied());
     true
 }
 
@@ -244,6 +275,13 @@ impl LineIndex {
         Some(&input[span.content_end..next_start])
     }
 
+    fn has_trailing_line_ending(&self) -> bool {
+        self.has_trailing_line_ending
+    }
+
+    fn total_lines(&self) -> usize {
+        self.spans.len()
+    }
     fn max_valid_start_line(&self) -> usize {
         if self.spans.is_empty() {
             return 1;
@@ -253,38 +291,6 @@ impl LineIndex {
         } else {
             self.spans.len()
         }
-    }
-
-    fn validate_range(
-        &self,
-        start_line: usize,
-        end_line: usize,
-        display_args: &str,
-    ) -> Result<(), ToolFailure> {
-        let max_valid_start_line = self.max_valid_start_line();
-        if max_valid_start_line < start_line {
-            return Err(with_display_args(
-                display_args,
-                ToolFailure::new(format!(
-                    "start_line {start_line} is past end of file (max_valid_start_line: {max_valid_start_line})"
-                )),
-            ));
-        }
-        if end_line < start_line {
-            return Err(with_display_args(
-                display_args,
-                ToolFailure::new("end_line must be at least start_line"),
-            ));
-        }
-        if max_valid_start_line < end_line {
-            return Err(with_display_args(
-                display_args,
-                ToolFailure::new(format!(
-                    "line range {start_line}..{end_line} exceeds max_valid_start_line {max_valid_start_line}"
-                )),
-            ));
-        }
-        Ok(())
     }
 
     fn byte_start_for_line(&self, line: usize, eof: usize) -> usize {
@@ -309,7 +315,9 @@ fn validate_non_overlapping(
     let mut ranges: Vec<_> = replacements.iter().collect();
     ranges.sort_by_key(|replacement| replacement.start_line);
     for pair in ranges.windows(2) {
-        if pair[1].start_line < pair[0].end_line_exclusive {
+        if pair[1].start_line == pair[0].start_line
+            || pair[1].start_line < pair[0].end_line_exclusive
+        {
             return Err(with_display_args(
                 display_args,
                 ToolFailure::new("overlapping edits"),
@@ -327,6 +335,15 @@ fn validate_guards(
 ) -> Result<(), ToolFailure> {
     for replacement in replacements {
         let guard = replacement.guard;
+        if replacement.start_line == replacement.end_line_exclusive {
+            if guard.is_empty() {
+                continue;
+            }
+            return Err(with_display_args(
+                display_args,
+                ToolFailure::new("guard must be empty for empty insertion ranges"),
+            ));
+        }
         if original_lines.line_content_text(replacement.start_line, original_bytes) == Some(guard) {
             continue;
         }
@@ -430,6 +447,106 @@ fn create_missing_parent_dirs(
         .map_err(|error| with_display_args(display_args, ToolFailure::from(error.to_string())))
 }
 
+fn parse_edit_range(
+    edit: &CborValue,
+    original_lines: &LineIndex,
+    display_args: &str,
+) -> Result<EditRange, ToolFailure> {
+    if has_field(edit, "start_line") || has_field(edit, "end_line") {
+        return Err(with_display_args(
+            display_args,
+            ToolFailure::new(
+                "start_line and end_line are no longer supported; use after_line and before_line",
+            ),
+        ));
+    }
+
+    if !has_field(edit, "after_line") || !has_field(edit, "before_line") {
+        return Err(with_display_args(
+            display_args,
+            ToolFailure::new("each edit must have integer after_line and before_line"),
+        ));
+    }
+
+    parse_boundary_edit_range(edit, original_lines, display_args)
+}
+
+fn parse_boundary_edit_range(
+    edit: &CborValue,
+    original_lines: &LineIndex,
+    display_args: &str,
+) -> Result<EditRange, ToolFailure> {
+    let after_line = parse_required_boundary_after_line(edit, display_args)?;
+    let before_line = parse_required_line(edit, "before_line", display_args)?;
+    if before_line <= after_line {
+        return Err(with_display_args(
+            display_args,
+            ToolFailure::new("before_line must be greater than after_line"),
+        ));
+    }
+    let max_before_line = original_lines.total_lines().saturating_add(1);
+    if max_before_line < before_line {
+        return Err(with_display_args(
+            display_args,
+            ToolFailure::new(format!(
+                "before_line {before_line} is past end of file (max_valid_before_line: {max_before_line})"
+            )),
+        ));
+    }
+    if original_lines.total_lines() < after_line {
+        return Err(with_display_args(
+            display_args,
+            ToolFailure::new(format!(
+                "after_line {after_line} is past end of file (total_lines: {})",
+                original_lines.total_lines()
+            )),
+        ));
+    }
+    let start_line = after_line.checked_add(1).ok_or_else(|| {
+        with_display_args(display_args, ToolFailure::new("after_line is too large"))
+    })?;
+    Ok(EditRange {
+        start_line,
+        end_line_exclusive: before_line,
+        display: format!(
+            "{start_line}..{}",
+            if before_line == start_line {
+                start_line
+            } else {
+                before_line.saturating_sub(1)
+            }
+        ),
+    })
+}
+
+fn parse_required_boundary_after_line(
+    edit: &CborValue,
+    display_args: &str,
+) -> Result<usize, ToolFailure> {
+    match cbor_map_int(edit, "after_line") {
+        Some(n) if n < 0 => Err(with_display_args(
+            display_args,
+            ToolFailure::new("after_line must be at least 0"),
+        )),
+        Some(n) => usize::try_from(n).map_err(|_| {
+            with_display_args(display_args, ToolFailure::new("after_line is too large"))
+        }),
+        None => Err(with_display_args(
+            display_args,
+            ToolFailure::new("each edit must have an integer after_line"),
+        )),
+    }
+}
+
+fn has_field(value: &CborValue, field: &str) -> bool {
+    let CborValue::Map(entries) = value else {
+        return false;
+    };
+    entries
+        .iter()
+        .any(|(key, _)| matches!(key, CborValue::Text(key) if key == field))
+}
+
 fn reject_legacy_line_count(edit: &CborValue, display_args: &str) -> Result<(), ToolFailure> {
     let CborValue::Map(entries) = edit else {
         return Ok(());
@@ -440,7 +557,7 @@ fn reject_legacy_line_count(edit: &CborValue, display_args: &str) -> Result<(), 
     {
         return Err(with_display_args(
             display_args,
-            ToolFailure::new("line_count is no longer supported; use end_line"),
+            ToolFailure::new("line_count is no longer supported; use before_line"),
         ));
     }
     Ok(())

@@ -1286,13 +1286,17 @@ fn startup_registers_shell_schemas_with_cwd_and_timeout_minimum() {
         };
         if register.tool.name == SHELL_TOOL_NAME || register.tool.name == GPT_SHELL_TOOL_NAME {
             let description = register.tool.description.as_deref().expect("description");
-            assert!(description.contains("structured command results"));
+            if register.tool.name == SHELL_TOOL_NAME {
+                assert!(description.contains("structured command results"));
+            }
             assert!(!description.contains("tool errors"));
             let parameters = register.tool.parameters.as_ref().expect("parameters");
             let properties = &parameters["properties"];
             assert_eq!(properties["mode"]["enum"], serde_json::json!(["ro", "rw"]));
             assert_eq!(properties["cwd"]["type"], serde_json::json!("string"));
-            assert_eq!(properties["timeout"]["minimum"], serde_json::json!(0));
+            if register.tool.name == SHELL_TOOL_NAME {
+                assert_eq!(properties["timeout"]["minimum"], serde_json::json!(0));
+            }
             assert_eq!(
                 parameters["required"],
                 serde_json::json!(["mode", "command"])

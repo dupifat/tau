@@ -283,14 +283,7 @@ impl LineIndex {
         self.spans.len()
     }
     fn max_valid_start_line(&self) -> usize {
-        if self.spans.is_empty() {
-            return 1;
-        }
-        if self.has_trailing_line_ending {
-            self.spans.len().saturating_add(1)
-        } else {
-            self.spans.len()
-        }
+        self.spans.len().saturating_add(1)
     }
 
     fn byte_start_for_line(&self, line: usize, eof: usize) -> usize {
@@ -452,90 +445,68 @@ fn parse_edit_range(
     original_lines: &LineIndex,
     display_args: &str,
 ) -> Result<EditRange, ToolFailure> {
-    if has_field(edit, "start_line") || has_field(edit, "end_line") {
+    if has_field(edit, "after_line") || has_field(edit, "before_line") {
         return Err(with_display_args(
             display_args,
             ToolFailure::new(
-                "start_line and end_line are no longer supported; use after_line and before_line",
+                "after_line and before_line are no longer supported; use start_line and end_line_exclusive",
+            ),
+        ));
+    }
+    if has_field(edit, "end_line") {
+        return Err(with_display_args(
+            display_args,
+            ToolFailure::new(
+                "edit uses end_line_exclusive; to replace read output lines A through B, use start_line A and end_line_exclusive B+1",
             ),
         ));
     }
 
-    if !has_field(edit, "after_line") || !has_field(edit, "before_line") {
+    if !has_field(edit, "start_line") || !has_field(edit, "end_line_exclusive") {
         return Err(with_display_args(
             display_args,
-            ToolFailure::new("each edit must have integer after_line and before_line"),
+            ToolFailure::new("each edit must have integer start_line and end_line_exclusive"),
         ));
     }
 
-    parse_boundary_edit_range(edit, original_lines, display_args)
+    parse_half_open_edit_range(edit, original_lines, display_args)
 }
 
-fn parse_boundary_edit_range(
+fn parse_half_open_edit_range(
     edit: &CborValue,
     original_lines: &LineIndex,
     display_args: &str,
 ) -> Result<EditRange, ToolFailure> {
-    let after_line = parse_required_boundary_after_line(edit, display_args)?;
-    let before_line = parse_required_line(edit, "before_line", display_args)?;
-    if before_line <= after_line {
+    let start_line = parse_required_line(edit, "start_line", display_args)?;
+    let end_line_exclusive = parse_required_line(edit, "end_line_exclusive", display_args)?;
+    if end_line_exclusive < start_line {
         return Err(with_display_args(
             display_args,
-            ToolFailure::new("before_line must be greater than after_line"),
+            ToolFailure::new("end_line_exclusive must be at least start_line"),
         ));
     }
-    let max_before_line = original_lines.total_lines().saturating_add(1);
-    if max_before_line < before_line {
-        return Err(with_display_args(
-            display_args,
-            ToolFailure::new(format!(
-                "before_line {before_line} is past end of file (max_valid_before_line: {max_before_line})"
-            )),
-        ));
-    }
-    if original_lines.total_lines() < after_line {
+    let max_valid_start_line = original_lines.total_lines().saturating_add(1);
+    if max_valid_start_line < start_line {
         return Err(with_display_args(
             display_args,
             ToolFailure::new(format!(
-                "after_line {after_line} is past end of file (total_lines: {})",
-                original_lines.total_lines()
+                "start_line {start_line} is past end of file (max_valid_start_line: {max_valid_start_line})"
             )),
         ));
     }
-    let start_line = after_line.checked_add(1).ok_or_else(|| {
-        with_display_args(display_args, ToolFailure::new("after_line is too large"))
-    })?;
+    if max_valid_start_line < end_line_exclusive {
+        return Err(with_display_args(
+            display_args,
+            ToolFailure::new(format!(
+                "end_line_exclusive {end_line_exclusive} is past end of file (max_valid_start_line: {max_valid_start_line})"
+            )),
+        ));
+    }
     Ok(EditRange {
         start_line,
-        end_line_exclusive: before_line,
-        display: format!(
-            "{start_line}..{}",
-            if before_line == start_line {
-                start_line
-            } else {
-                before_line.saturating_sub(1)
-            }
-        ),
+        end_line_exclusive,
+        display: format!("{start_line}..<{end_line_exclusive}"),
     })
-}
-
-fn parse_required_boundary_after_line(
-    edit: &CborValue,
-    display_args: &str,
-) -> Result<usize, ToolFailure> {
-    match cbor_map_int(edit, "after_line") {
-        Some(n) if n < 0 => Err(with_display_args(
-            display_args,
-            ToolFailure::new("after_line must be at least 0"),
-        )),
-        Some(n) => usize::try_from(n).map_err(|_| {
-            with_display_args(display_args, ToolFailure::new("after_line is too large"))
-        }),
-        None => Err(with_display_args(
-            display_args,
-            ToolFailure::new("each edit must have an integer after_line"),
-        )),
-    }
 }
 
 fn has_field(value: &CborValue, field: &str) -> bool {
@@ -557,7 +528,7 @@ fn reject_legacy_line_count(edit: &CborValue, display_args: &str) -> Result<(), 
     {
         return Err(with_display_args(
             display_args,
-            ToolFailure::new("line_count is no longer supported; use before_line"),
+            ToolFailure::new("line_count is no longer supported; use end_line_exclusive"),
         ));
     }
     Ok(())

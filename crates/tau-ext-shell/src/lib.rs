@@ -164,17 +164,18 @@ where
             model_visible_name: None,
             description: Some(
                 "Edit a file using line-oriented replacements. Each edit fully replaces \
-                 the range between `after_line` and `before_line` with `newText`. \
-                 `after_line` is the line before the range, with 0 meaning the start of \
-                 the file; `before_line` is the preserved line after the range, with \
-                 total_lines + 1 meaning EOF. Empty insertion ranges use \
-                 `before_line == after_line + 1`. All ranges use the original file \
-                 numbering as if applied simultaneously. Non-empty replacements are kept \
-                 as whole lines. Ranges must be non-overlapping. Missing files are \
-                 treated as empty and missing parent directories are created. Per-edit \
-                 `guard` must exactly match the first original line content for \
-                 non-empty ranges; empty insertion ranges have no first line and must \
-                 use an empty guard."
+                 the 1-based half-open `start_line`..`end_line_exclusive` range \
+                 with `newText`. `start_line` is included and `end_line_exclusive` \
+                 is excluded. Empty insertion ranges use \
+                 `start_line == end_line_exclusive`; for example, `1..<1` inserts \
+                 at the start of the file and `total_lines + 1 ..< total_lines + 1` \
+                 appends at EOF. All ranges use the original file numbering as if \
+                 applied simultaneously. Non-empty replacements are kept as whole \
+                 lines. Ranges must be non-overlapping. Missing files are treated as \
+                 empty and missing parent directories are created. Per-edit `guard` \
+                 must exactly match the first original line content for non-empty \
+                 ranges; empty insertion ranges have no first line and must use an \
+                 empty guard."
                     .to_owned(),
             ),
             tool_type: tau_proto::ToolType::Function,
@@ -193,15 +194,15 @@ where
                         "items": {
                             "type": "object",
                             "properties": {
-                                "after_line": {
-                                    "type": "integer",
-                                    "minimum": 0,
-                                    "description": "Boundary line before the replacement range. Use 0 for the start of the file. The replaced range starts at after_line + 1. Use together with before_line."
-                                },
-                                "before_line": {
+                                "start_line": {
                                     "type": "integer",
                                     "minimum": 1,
-                                    "description": "Boundary line after the replacement range. The line numbered before_line is preserved. Use total_lines + 1 for EOF append. Empty insertion ranges have before_line == after_line + 1. Use together with after_line."
+                                    "description": "1-based included start line or insertion slot. Use 1 for the start of the file. To append at EOF, use total_lines + 1. Use together with end_line_exclusive."
+                                },
+                                "end_line_exclusive": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "description": "1-based excluded end line or insertion slot. Empty insertion ranges have end_line_exclusive == start_line. To replace read output lines A through B, use start_line A and end_line_exclusive B + 1. Use together with start_line."
                                 },
                                 "newText": {
                                     "type": "string",
@@ -212,7 +213,7 @@ where
                                     "description": "For non-empty ranges, exact expected content of the first original line in the replaced range, including spaces and tabs. Empty insertion ranges have no first original line and must use an empty string. For non-empty ranges, an empty guard only matches an actually empty first line. If it does not match, the edit fails and returns correct current content of the guard line with context around it."
                                 }
                             },
-                            "required": ["after_line", "before_line", "newText", "guard"],
+                            "required": ["start_line", "end_line_exclusive", "newText", "guard"],
                             "additionalProperties": false
                         }
                     }

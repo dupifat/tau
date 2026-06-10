@@ -203,35 +203,44 @@ fn edit_arguments(path: &Path, edits: Vec<CborValue>) -> CborValue {
 
 fn line_edit(start_line: i64, end_line: i64, new_text: &str) -> CborValue {
     cbor_map(vec![
-        ("after_line", CborValue::Integer((start_line - 1).into())),
-        ("before_line", CborValue::Integer((end_line + 1).into())),
+        ("start_line", CborValue::Integer(start_line.into())),
+        (
+            "end_line_exclusive",
+            CborValue::Integer((end_line + 1).into()),
+        ),
         ("newText", CborValue::Text(new_text.to_owned())),
     ])
 }
 
 fn guarded_line_edit(start_line: i64, end_line: i64, new_text: &str, guard: &str) -> CborValue {
-    let before_line = if guard.is_empty() && start_line == end_line {
+    let end_line_exclusive = if guard.is_empty() && start_line == end_line {
         end_line
     } else {
         end_line + 1
     };
     cbor_map(vec![
-        ("after_line", CborValue::Integer((start_line - 1).into())),
-        ("before_line", CborValue::Integer(before_line.into())),
+        ("start_line", CborValue::Integer(start_line.into())),
+        (
+            "end_line_exclusive",
+            CborValue::Integer(end_line_exclusive.into()),
+        ),
         ("newText", CborValue::Text(new_text.to_owned())),
         ("guard", CborValue::Text(guard.to_owned())),
     ])
 }
 
-fn guarded_boundary_edit(
-    after_line: i64,
-    before_line: i64,
+fn guarded_half_open_edit(
+    start_line: i64,
+    end_line_exclusive: i64,
     new_text: &str,
     guard: &str,
 ) -> CborValue {
     cbor_map(vec![
-        ("after_line", CborValue::Integer(after_line.into())),
-        ("before_line", CborValue::Integer(before_line.into())),
+        ("start_line", CborValue::Integer(start_line.into())),
+        (
+            "end_line_exclusive",
+            CborValue::Integer(end_line_exclusive.into()),
+        ),
         ("newText", CborValue::Text(new_text.to_owned())),
         ("guard", CborValue::Text(guard.to_owned())),
     ])
@@ -362,10 +371,14 @@ fn startup_registers_echo_disabled_by_default_and_gpt_shell_visible_name() {
             let edit_item = &parameters["properties"]["edits"]["items"];
             assert_eq!(
                 edit_item["required"],
-                serde_json::json!(["after_line", "before_line", "newText", "guard"])
+                serde_json::json!(["start_line", "end_line_exclusive", "newText", "guard"])
             );
             assert_eq!(
-                edit_item["properties"]["start_line"],
+                edit_item["properties"]["after_line"],
+                serde_json::Value::Null
+            );
+            assert_eq!(
+                edit_item["properties"]["before_line"],
                 serde_json::Value::Null
             );
             assert_eq!(edit_item["properties"]["end_line"], serde_json::Value::Null);
@@ -1949,7 +1962,7 @@ fn edit_guard_rejects_invalid_utf8_original_line() {
 
     let error = edit_file(&edit_arguments(
         &file_path,
-        vec![guarded_boundary_edit(0, 2, "", "")],
+        vec![guarded_half_open_edit(1, 2, "", "")],
     ))
     .expect_err("invalid UTF-8 guard should fail");
 
@@ -2573,8 +2586,8 @@ fn edit_rejects_missing_new_text() {
             arguments: edit_arguments(
                 &file_path,
                 vec![cbor_map(vec![
-                    ("after_line", CborValue::Integer(0.into())),
-                    ("before_line", CborValue::Integer(2.into())),
+                    ("start_line", CborValue::Integer(1.into())),
+                    ("end_line_exclusive", CborValue::Integer(2.into())),
                 ])],
             ),
             agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
@@ -2597,7 +2610,7 @@ fn edit_rejects_missing_new_text() {
 }
 
 #[test]
-fn edit_rejects_negative_after_line_with_path_args() {
+fn edit_rejects_negative_start_line_with_path_args() {
     let tempdir = TempDir::new().expect("tempdir");
     let file_path = tempdir.path().join("edit.txt");
     fs::write(&file_path, "hello\nworld\n").expect("write");
@@ -2621,7 +2634,7 @@ fn edit_rejects_negative_after_line_with_path_args() {
         panic!("expected tool error");
     };
     assert_eq!(error.tool_name, EDIT_TOOL_NAME);
-    assert_eq!(error.message, "after_line must be at least 0");
+    assert_eq!(error.message, "start_line must be at least 1");
     assert!(
         error.details.is_none(),
         "edit errors should not echo arguments"
@@ -2638,7 +2651,7 @@ fn edit_rejects_negative_after_line_with_path_args() {
 }
 
 #[test]
-fn edit_rejects_zero_before_line() {
+fn edit_rejects_zero_end_line_exclusive() {
     let tempdir = TempDir::new().expect("tempdir");
     let file_path = tempdir.path().join("edit.txt");
     fs::write(&file_path, "hello\n").expect("write");
@@ -2646,15 +2659,15 @@ fn edit_rejects_zero_before_line() {
     let error = edit_file(&edit_arguments(
         &file_path,
         vec![cbor_map(vec![
-            ("after_line", CborValue::Integer(0.into())),
-            ("before_line", CborValue::Integer(0.into())),
+            ("start_line", CborValue::Integer(1.into())),
+            ("end_line_exclusive", CborValue::Integer(0.into())),
             ("newText", CborValue::Text("x".to_owned())),
             ("guard", CborValue::Text("hello".to_owned())),
         ])],
     ))
-    .expect_err("before_line=0 should fail");
+    .expect_err("end_line_exclusive=0 should fail");
 
-    assert_eq!(error.message, "before_line must be at least 1");
+    assert_eq!(error.message, "end_line_exclusive must be at least 1");
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
         "hello\n"
@@ -2662,18 +2675,21 @@ fn edit_rejects_zero_before_line() {
 }
 
 #[test]
-fn edit_rejects_before_line_not_after_after_line() {
+fn edit_rejects_end_line_exclusive_before_start_line() {
     let tempdir = TempDir::new().expect("tempdir");
     let file_path = tempdir.path().join("edit.txt");
     fs::write(&file_path, "hello\nworld\n").expect("write");
 
     let error = edit_file(&edit_arguments(
         &file_path,
-        vec![guarded_boundary_edit(2, 2, "x", "world")],
+        vec![guarded_half_open_edit(3, 1, "x", "world")],
     ))
-    .expect_err("before_line must be greater than after_line");
+    .expect_err("end_line_exclusive before start_line should fail");
 
-    assert_eq!(error.message, "before_line must be greater than after_line");
+    assert_eq!(
+        error.message,
+        "end_line_exclusive must be at least start_line"
+    );
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
         "hello\nworld\n"
@@ -2807,8 +2823,8 @@ fn edit_rejects_legacy_line_count() {
     let error = edit_file(&edit_arguments(
         &file_path,
         vec![cbor_map(vec![
-            ("after_line", CborValue::Integer(0.into())),
-            ("before_line", CborValue::Integer(2.into())),
+            ("start_line", CborValue::Integer(1.into())),
+            ("end_line_exclusive", CborValue::Integer(2.into())),
             ("line_count", CborValue::Integer(1.into())),
             ("newText", CborValue::Text("x".to_owned())),
         ])],
@@ -2817,7 +2833,7 @@ fn edit_rejects_legacy_line_count() {
 
     assert_eq!(
         error.message,
-        "line_count is no longer supported; use before_line"
+        "line_count is no longer supported; use end_line_exclusive"
     );
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
@@ -2895,7 +2911,7 @@ fn edit_replaces_exact_line_range() {
     let Event::ToolResult(result) = result else {
         panic!("expected tool result");
     };
-    let expected_args = format!("{} 2..2", file_path.display());
+    let expected_args = format!("{} 2..<3", file_path.display());
     assert_eq!(
         result.display.as_ref().map(|display| display.args.as_str()),
         Some(expected_args.as_str())
@@ -2933,14 +2949,14 @@ fn edit_appends_to_line_after_trailing_newline() {
 }
 
 #[test]
-fn edit_boundary_replaces_line_between_boundaries() {
+fn edit_half_open_replaces_line_range() {
     let tempdir = TempDir::new().expect("tempdir");
     let file_path = tempdir.path().join("edit.txt");
     fs::write(&file_path, "one\ntwo\nthree\n").expect("write");
 
     let result = edit_file(&edit_arguments(
         &file_path,
-        vec![guarded_boundary_edit(1, 3, "TWO", "two")],
+        vec![guarded_half_open_edit(2, 3, "TWO", "two")],
     ))
     .expect("boundary replacement should edit line 2")
     .result;
@@ -2953,7 +2969,7 @@ fn edit_boundary_replaces_line_between_boundaries() {
 }
 
 #[test]
-fn edit_boundary_inserts_at_top_and_middle() {
+fn edit_half_open_inserts_at_top_and_middle() {
     let tempdir = TempDir::new().expect("tempdir");
     let file_path = tempdir.path().join("edit.txt");
     fs::write(&file_path, "one\ntwo\n").expect("write");
@@ -2961,15 +2977,15 @@ fn edit_boundary_inserts_at_top_and_middle() {
     let output = edit_file(&edit_arguments(
         &file_path,
         vec![
-            guarded_boundary_edit(0, 1, "zero", ""),
-            guarded_boundary_edit(1, 2, "middle", ""),
+            guarded_half_open_edit(1, 1, "zero", ""),
+            guarded_half_open_edit(2, 2, "middle", ""),
         ],
     ))
-    .expect("empty boundary ranges should insert");
+    .expect("empty half-open ranges should insert");
 
     assert_eq!(
         output.display.args,
-        format!("{} 1..1,2..2", file_path.display())
+        format!("{} 1..<1,2..<2", file_path.display())
     );
 
     assert_eq!(
@@ -2979,14 +2995,14 @@ fn edit_boundary_inserts_at_top_and_middle() {
 }
 
 #[test]
-fn edit_boundary_rejects_non_empty_guard_for_empty_insertion() {
+fn edit_half_open_rejects_non_empty_guard_for_empty_insertion() {
     let tempdir = TempDir::new().expect("tempdir");
     let file_path = tempdir.path().join("edit.txt");
     fs::write(&file_path, "one\n").expect("write");
 
     let error = edit_file(&edit_arguments(
         &file_path,
-        vec![guarded_boundary_edit(0, 1, "zero\n", "one")],
+        vec![guarded_half_open_edit(1, 1, "zero\n", "one")],
     ))
     .expect_err("empty insertion should require empty guard");
 
@@ -2998,14 +3014,14 @@ fn edit_boundary_rejects_non_empty_guard_for_empty_insertion() {
 }
 
 #[test]
-fn edit_boundary_appends_after_file_with_trailing_newline() {
+fn edit_half_open_appends_after_file_with_trailing_newline() {
     let tempdir = TempDir::new().expect("tempdir");
     let file_path = tempdir.path().join("edit.txt");
     fs::write(&file_path, "one\n").expect("write");
 
     edit_file(&edit_arguments(
         &file_path,
-        vec![guarded_boundary_edit(1, 2, "two\n", "")],
+        vec![guarded_half_open_edit(2, 2, "two\n", "")],
     ))
     .expect("EOF insertion should not add blank line after existing line ending");
 
@@ -3016,14 +3032,14 @@ fn edit_boundary_appends_after_file_with_trailing_newline() {
 }
 
 #[test]
-fn edit_boundary_inserts_before_line_without_trailing_newline() {
+fn edit_half_open_inserts_before_line_without_trailing_newline() {
     let tempdir = TempDir::new().expect("tempdir");
     let file_path = tempdir.path().join("edit.txt");
     fs::write(&file_path, "one").expect("write");
 
     let result = edit_file(&edit_arguments(
         &file_path,
-        vec![guarded_boundary_edit(0, 1, "zero", "")],
+        vec![guarded_half_open_edit(1, 1, "zero", "")],
     ))
     .expect("insertion before unterminated content should stay line-oriented")
     .result;
@@ -3036,14 +3052,14 @@ fn edit_boundary_inserts_before_line_without_trailing_newline() {
 }
 
 #[test]
-fn edit_boundary_insertion_preserves_following_crlf() {
+fn edit_half_open_insertion_preserves_following_crlf() {
     let tempdir = TempDir::new().expect("tempdir");
     let file_path = tempdir.path().join("edit.txt");
     fs::write(&file_path, b"one\r\ntwo\r\n").expect("write");
 
     edit_file(&edit_arguments(
         &file_path,
-        vec![guarded_boundary_edit(1, 2, "middle", "")],
+        vec![guarded_half_open_edit(2, 2, "middle", "")],
     ))
     .expect("boundary insertion should use following line ending style");
 
@@ -3054,14 +3070,14 @@ fn edit_boundary_insertion_preserves_following_crlf() {
 }
 
 #[test]
-fn edit_boundary_appends_after_file_without_trailing_newline() {
+fn edit_half_open_appends_after_file_without_trailing_newline() {
     let tempdir = TempDir::new().expect("tempdir");
     let file_path = tempdir.path().join("edit.txt");
     fs::write(&file_path, "one").expect("write");
 
     let result = edit_file(&edit_arguments(
         &file_path,
-        vec![guarded_boundary_edit(1, 2, "two\n", "")],
+        vec![guarded_half_open_edit(2, 2, "two\n", "")],
     ))
     .expect("EOF insertion should keep line boundary")
     .result;
@@ -3074,15 +3090,15 @@ fn edit_boundary_appends_after_file_without_trailing_newline() {
 }
 
 #[test]
-fn edit_boundary_creates_empty_file() {
+fn edit_half_open_creates_empty_file() {
     let tempdir = TempDir::new().expect("tempdir");
     let file_path = tempdir.path().join("missing.txt");
 
     edit_file(&edit_arguments(
         &file_path,
-        vec![guarded_boundary_edit(0, 1, "hello\n", "")],
+        vec![guarded_half_open_edit(1, 1, "hello\n", "")],
     ))
-    .expect("boundary insertion should create missing file");
+    .expect("half-open insertion should create missing file");
 
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
@@ -3109,7 +3125,30 @@ fn edit_rejects_legacy_start_line_and_end_line() {
 
     assert_eq!(
         error.message,
-        "start_line and end_line are no longer supported; use after_line and before_line"
+        "edit uses end_line_exclusive; to replace read output lines A through B, use start_line A and end_line_exclusive B+1"
+    );
+}
+
+#[test]
+fn edit_rejects_legacy_after_line_and_before_line() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("edit.txt");
+    fs::write(&file_path, "one\n").expect("write");
+
+    let error = edit_file(&edit_arguments(
+        &file_path,
+        vec![cbor_map(vec![
+            ("after_line", CborValue::Integer(0.into())),
+            ("before_line", CborValue::Integer(2.into())),
+            ("newText", CborValue::Text("x\n".to_owned())),
+            ("guard", CborValue::Text("one".to_owned())),
+        ])],
+    ))
+    .expect_err("legacy boundary edit ranges should fail");
+
+    assert_eq!(
+        error.message,
+        "after_line and before_line are no longer supported; use start_line and end_line_exclusive"
     );
 }
 
@@ -3134,7 +3173,7 @@ fn edit_replaces_empty_file_line_one() {
 }
 
 #[test]
-fn edit_rejects_before_line_past_end() {
+fn edit_rejects_end_line_exclusive_past_end() {
     let tempdir = TempDir::new().expect("tempdir");
     let file_path = tempdir.path().join("edit.txt");
     fs::write(&file_path, "hello\n").expect("write");
@@ -3146,7 +3185,7 @@ fn edit_rejects_before_line_past_end() {
         .write_event(&Event::ToolStarted(ToolStarted {
             call_id: "call-1".into(),
             tool_name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
-            arguments: edit_arguments(&file_path, vec![guarded_boundary_edit(1, 4, "x", "")]),
+            arguments: edit_arguments(&file_path, vec![guarded_half_open_edit(2, 4, "x", "")]),
             agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
             originator: tau_proto::PromptOriginator::User,
         }))
@@ -3158,8 +3197,12 @@ fn edit_rejects_before_line_past_end() {
         panic!("expected tool error");
     };
     assert_eq!(error.tool_name, EDIT_TOOL_NAME);
-    assert!(error.message.contains("before_line 4 is past end of file"));
-    assert!(error.message.contains("max_valid_before_line: 2"));
+    assert!(
+        error
+            .message
+            .contains("end_line_exclusive 4 is past end of file")
+    );
+    assert!(error.message.contains("max_valid_start_line: 2"));
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
         "hello\n"
@@ -3185,7 +3228,7 @@ fn edit_rejects_range_past_end_without_trailing_newline() {
 
     assert_eq!(
         error.message,
-        "before_line 3 is past end of file (max_valid_before_line: 2)"
+        "end_line_exclusive 3 is past end of file (max_valid_start_line: 2)"
     );
     assert_eq!(fs::read_to_string(&file_path).expect("read back"), "hello");
 }
@@ -3262,7 +3305,7 @@ fn edit_rejects_non_empty_guard_for_missing_file_insertion() {
     // use an empty guard because there is no first replaced line.
     let error = edit_file(&edit_arguments(
         &file_path,
-        vec![guarded_boundary_edit(0, 1, "created\n", "not-empty")],
+        vec![guarded_half_open_edit(1, 1, "created\n", "not-empty")],
     ))
     .expect_err("non-empty guard on empty insertion should fail");
 
@@ -3302,8 +3345,8 @@ fn edit_guard_rejects_non_string_guard_without_writing() {
     let error = edit_file(&edit_arguments(
         &file_path,
         vec![cbor_map(vec![
-            ("after_line", CborValue::Integer(0.into())),
-            ("before_line", CborValue::Integer(2.into())),
+            ("start_line", CborValue::Integer(1.into())),
+            ("end_line_exclusive", CborValue::Integer(2.into())),
             ("newText", CborValue::Text("ALPHA\n".to_owned())),
             ("guard", CborValue::Integer(1.into())),
         ])],

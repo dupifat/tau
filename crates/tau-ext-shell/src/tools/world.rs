@@ -784,11 +784,11 @@ mod tests {
                 CborValue::Text("edits".to_owned()),
                 CborValue::Array(vec![CborValue::Map(vec![
                     (
-                        CborValue::Text("after_line".to_owned()),
-                        CborValue::Integer(1.into()),
+                        CborValue::Text("start_line".to_owned()),
+                        CborValue::Integer(2.into()),
                     ),
                     (
-                        CborValue::Text("before_line".to_owned()),
+                        CborValue::Text("end_line_exclusive".to_owned()),
                         CborValue::Integer(3.into()),
                     ),
                     (

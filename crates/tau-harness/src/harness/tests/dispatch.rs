@@ -2601,11 +2601,11 @@ fn tool_turn_dispatches_provider_calls_without_global_locking() {
             CborValue::Text("edits".to_owned()),
             CborValue::Array(vec![CborValue::Map(vec![
                 (
-                    CborValue::Text("after_line".to_owned()),
-                    CborValue::Integer(0.into()),
+                    CborValue::Text("start_line".to_owned()),
+                    CborValue::Integer(1.into()),
                 ),
                 (
-                    CborValue::Text("before_line".to_owned()),
+                    CborValue::Text("end_line_exclusive".to_owned()),
                     CborValue::Integer(1.into()),
                 ),
                 (
@@ -2714,11 +2714,11 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
                 CborValue::Text("edits".to_owned()),
                 CborValue::Array(vec![CborValue::Map(vec![
                     (
-                        CborValue::Text("after_line".to_owned()),
-                        CborValue::Integer(0.into()),
+                        CborValue::Text("start_line".to_owned()),
+                        CborValue::Integer(1.into()),
                     ),
                     (
-                        CborValue::Text("before_line".to_owned()),
+                        CborValue::Text("end_line_exclusive".to_owned()),
                         CborValue::Integer(1.into()),
                     ),
                     (
@@ -2931,11 +2931,11 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
             CborValue::Text("edits".to_owned()),
             CborValue::Array(vec![CborValue::Map(vec![
                 (
-                    CborValue::Text("after_line".to_owned()),
-                    CborValue::Integer(0.into()),
+                    CborValue::Text("start_line".to_owned()),
+                    CborValue::Integer(1.into()),
                 ),
                 (
-                    CborValue::Text("before_line".to_owned()),
+                    CborValue::Text("end_line_exclusive".to_owned()),
                     CborValue::Integer(1.into()),
                 ),
                 (

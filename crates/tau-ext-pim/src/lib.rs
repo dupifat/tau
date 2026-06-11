@@ -11,8 +11,8 @@ use std::rc::Rc;
 
 use serde::Deserialize;
 use tau_proto::{
-    Ack, ActionSchema, CborValue, ConfigError, Event, EventLogSeq, HarnessInputMessage,
-    HarnessOutputMessage, PeerInputReader, PeerOutputWriter,
+    ActionSchema, CborValue, ConfigError, Event, HarnessInputMessage, HarnessOutputMessage,
+    PeerInputReader, PeerOutputWriter,
 };
 
 pub mod calendar;
@@ -248,8 +248,12 @@ fn handle_message<W: Write>(
             }
         }
         HarnessOutputMessage::Deliver(delivery) => {
-            let (event, log_id, _) = delivery.into_parts();
-            match event {
+            // Tool/action invocations are execution triggers; replay-marked
+            // frames re-send history and must not re-run them.
+            if delivery.is_replay() {
+                return Ok(true);
+            }
+            match delivery.into_event() {
                 Event::ToolStarted(invoke) => handle_tool_started(runtime, invoke, writer)?,
                 Event::ActionInvoke(invoke) => {
                     let event = runtime.dispatch_action(invoke);
@@ -259,9 +263,6 @@ fn handle_message<W: Write>(
                     writer.borrow_mut().flush()?;
                 }
                 _ => {}
-            }
-            if let Some(id) = log_id {
-                ack_log_event(id, writer)?;
             }
         }
         HarnessOutputMessage::Disconnect(_) => return Ok(false),
@@ -288,19 +289,6 @@ fn handle_tool_started<W: Write>(
         writer.borrow_mut().flush()?;
     }
     Ok(())
-}
-
-fn ack_log_event<W: Write>(
-    id: EventLogSeq,
-    writer: &Rc<RefCell<PeerOutputWriter<BufWriter<W>>>>,
-) -> Result<(), tau_proto::EncodeError> {
-    writer
-        .borrow_mut()
-        .write_message(&HarnessInputMessage::Ack(Ack { up_to: id }))?;
-    writer
-        .borrow_mut()
-        .flush()
-        .map_err(tau_proto::EncodeError::Io)
 }
 
 #[cfg(test)]

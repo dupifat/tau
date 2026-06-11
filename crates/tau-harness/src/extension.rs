@@ -57,11 +57,6 @@ pub(crate) struct ExtensionEntry {
     /// Current lifecycle state. See `extensions_all_ready` for how this
     /// gates dispatch.
     pub(crate) state: ExtensionState,
-    /// Highest `EventLogSeq` the extension has acknowledged. Cumulative —
-    /// any id `<= last_acked` is considered processed. Used by future
-    /// reconnect/replay machinery; today it's tracked but not yet
-    /// consumed.
-    pub(crate) last_acked: tau_proto::EventLogSeq,
 }
 
 /// Private one-shot ack that lets an extension reader start forwarding frames

@@ -21,6 +21,8 @@ If an idle hook's `agent_summary` is true, the idle path first asks the agent fo
 
 Hook items can also emit `term.bell` with `bell: true`.
 
+The extension reacts only to live events. Replay-marked frames (subscribe-time catch-up history the harness re-delivers when an extension joins an already-initialized session) are skipped, so old prompts and responses never ring sounds or fire idle notifications.
+
 
 ## Configuration
 

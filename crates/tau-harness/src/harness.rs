@@ -1642,9 +1642,9 @@ pub struct Harness {
     /// historical debug logs.
     pub(crate) replayable_harness_infos: Vec<tau_proto::HarnessInfo>,
     /// Every spawned or in-process extension, keyed by current
-    /// `ConnectionId`. Supervises restart, shutdown, and per-extension
-    /// ack state. Lookups by connection id (the hot per-event path —
-    /// every `Ack`, `Hello`, `Ready`, `Disconnected`) are O(1).
+    /// `ConnectionId`. Supervises restart and shutdown. Lookups by
+    /// connection id (the hot per-event path — every `Hello`, `Ready`,
+    /// `Disconnected`) are O(1).
     pub(crate) extensions: std::collections::HashMap<tau_proto::ConnectionId, ExtensionEntry>,
     /// Extension-originated state announced during handshake and withheld until
     /// the extension sends `Ready`. Activation happens in the main harness loop
@@ -1835,7 +1835,7 @@ where
     use std::io::{BufReader, BufWriter};
 
     use tau_proto::{
-        Ack, ContentPart, ContextItem, ContextRole, Effort, EventName, HarnessInputMessage,
+        ContentPart, ContextItem, ContextRole, Effort, EventName, HarnessInputMessage,
         HarnessOutputMessage, Hello, MessageItem, PROTOCOL_VERSION, PeerInputReader,
         PeerOutputWriter, ProviderModelInfo, ProviderModelsUpdated, ProviderPromptSubmitted, Ready,
         Subscribe, ThinkingSummary, ToolCallItem, ToolName, Verbosity,
@@ -1888,13 +1888,10 @@ where
         let Some(message) = reader.read_message()? else {
             return Ok(());
         };
-        let (log_id, event) = match message {
-            HarnessOutputMessage::Deliver(delivery) => {
-                let (event, log_id, _) = delivery.into_parts();
-                (log_id, Some(event))
-            }
+        let event = match message {
+            HarnessOutputMessage::Deliver(delivery) => Some(delivery.into_event()),
             HarnessOutputMessage::Disconnect(_) => return Ok(()),
-            _ => (None, None),
+            _ => None,
         };
         if let Some(Event::AgentPromptCreated(prompt)) = event {
             let spid = prompt.agent_prompt_id.clone();
@@ -2009,10 +2006,6 @@ where
             }
             writer.flush()?;
         }
-        if let Some(id) = log_id {
-            writer.write_message(&HarnessInputMessage::Ack(Ack { up_to: id }))?;
-            writer.flush()?;
-        }
     }
 }
 
@@ -2090,7 +2083,6 @@ impl Harness {
                 secrets: BTreeMap::new(),
                 restart_attempt: 0,
                 state: ExtensionState::Spawning,
-                last_acked: tau_proto::EventLogSeq::default(),
             },
             origin: ConnectionOrigin::Supervised,
             writer_tx: provider_spawn.writer_tx,
@@ -2114,7 +2106,6 @@ impl Harness {
                     secrets: BTreeMap::new(),
                     restart_attempt: 0,
                     state: ExtensionState::Spawning,
-                    last_acked: tau_proto::EventLogSeq::default(),
                 },
                 origin: ConnectionOrigin::Supervised,
                 writer_tx: tool_spawn.writer_tx,
@@ -2526,7 +2517,6 @@ impl Harness {
                         .unwrap_or_default(),
                     restart_attempt: 0,
                     state: ExtensionState::Spawning,
-                    last_acked: tau_proto::EventLogSeq::default(),
                 },
                 origin: ConnectionOrigin::Supervised,
                 writer_tx: spawned.writer_tx,
@@ -3064,6 +3054,8 @@ impl Harness {
         #[cfg(test)]
         self.event_log
             .record_for_test(seq, recorded_at, source_id.clone(), event.clone());
+        #[cfg(not(test))]
+        let _ = seq;
         // Mirror every committed event into the JSONL debug log as a
         // `published` line. The inbound `from_connection` lines carry
         // the raw frame the agent sent us, but for events that the
@@ -3144,7 +3136,7 @@ impl Harness {
         }
         // Wrap in a harness-owned delivery so subscribers get the runtime
         // event-log sequence and can ack after processing.
-        let log_frame = HarnessOutputMessage::deliver_sequenced(seq, recorded_at, event.clone());
+        let log_frame = HarnessOutputMessage::deliver_live(recorded_at, event.clone());
         if let Some(provider_connection_id) = self.provider_route_for_prompt_request(&event) {
             // Provider-owned prompt execution is point-to-point: observers still
             // see the durable prompt fact, but execution clients do not all race
@@ -4285,15 +4277,6 @@ impl Harness {
     ) -> Result<(), HarnessError> {
         let message = message.into();
         match message {
-            HarnessInputMessage::Ack(ack) => {
-                // Cumulative ack: advance the cursor if it moves
-                // forward, ignore otherwise (duplicates, late acks).
-                if let Some(entry) = self.extensions.get_mut(source_id)
-                    && entry.last_acked.get() < ack.up_to.get()
-                {
-                    entry.last_acked = ack.up_to;
-                }
-            }
             HarnessInputMessage::Hello(hello) => {
                 validate_protocol_version(&hello)?;
                 self.set_extension_state(source_id, ExtensionState::Handshaking);
@@ -4317,12 +4300,13 @@ impl Harness {
                 ));
             }
             HarnessInputMessage::Subscribe(subscribe) => {
-                // Extension subscriptions are live-only today: set routing for
-                // future events, without replaying past log entries. Do not
-                // treat first-party extensions that want live-only delivery as
-                // universal; any external-extension replay support needs an
-                // explicit opt-in separate from selectors.
-                self.bus.set_subscriptions(source_id, subscribe.selectors)?;
+                // Extensions get the same subscribe-time catch-up as UI
+                // clients: current-state announcements plus selector-matched
+                // durable facts as replay-marked frames. Side-effecting
+                // extensions must skip replay frames instead of being
+                // protected by withheld delivery.
+                self.complete_subscription(source_id, subscribe.selectors)
+                    .map_err(HarnessError::Route)?;
             }
             HarnessInputMessage::Intercept(intercept) => {
                 if self.should_stage_extension_capabilities(source_id) {
@@ -4764,18 +4748,8 @@ impl Harness {
                 Ok(true)
             }
             HarnessInputMessage::Subscribe(subscribe) => {
-                // Socket/UI clients replay selected past state after subscribing.
-                // Extensions use `handle_extension_message`, which is live-only.
-                match self
-                    .bus
-                    .set_subscriptions(client_id, subscribe.selectors.clone())
-                {
-                    Ok(()) => {
-                        let selectors_for_replay = subscribe.selectors;
-                        self.replay_session_events(client_id, &selectors_for_replay);
-                        self.replay_harness_info(client_id, &selectors_for_replay);
-                        Ok(true)
-                    }
+                match self.complete_subscription(client_id, subscribe.selectors) {
+                    Ok(()) => Ok(true),
                     Err(RouteError::SubscriptionDenied { reason, .. }) => {
                         let _ = self.bus.send_to(
                             client_id,
@@ -4808,8 +4782,7 @@ impl Harness {
                 Ok(true)
             }
             // Other input messages from clients are ignored.
-            HarnessInputMessage::Ack(_)
-            | HarnessInputMessage::ConfigError(_)
+            HarnessInputMessage::ConfigError(_)
             | HarnessInputMessage::Intercept(_)
             | HarnessInputMessage::InterceptReply(_)
             | HarnessInputMessage::Ready(_)
@@ -6020,7 +5993,6 @@ impl Harness {
                 secrets,
                 restart_attempt: attempt,
                 state: ExtensionState::Spawning,
-                last_acked: tau_proto::EventLogSeq::default(),
             },
             origin: ConnectionOrigin::Supervised,
             writer_tx: spawned.writer_tx,
@@ -10457,7 +10429,7 @@ impl Harness {
         session_id: &SessionId,
         prompt_id: &AgentPromptId,
     ) -> Result<AgentPromptCreated, HarnessError> {
-        let mut cursor = tau_proto::EventLogSeq::new(0);
+        let mut cursor = crate::event_log::EventLogSeq::new(0);
         loop {
             let entry = self.event_log.get_next_from(cursor).ok_or_else(|| {
                 HarnessError::Participant("prompt event missing from test observer".to_owned())

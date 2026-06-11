@@ -24,7 +24,6 @@ fn message_variant(msg: &HarnessInputMessage) -> &'static str {
         HarnessInputMessage::GetRenderedSystemPrompt(_) => "GetRenderedSystemPrompt",
         HarnessInputMessage::GetRenderedToolDefinitions(_) => "GetRenderedToolDefinitions",
         HarnessInputMessage::ExtensionDataRequest(_) => "ExtensionDataRequest",
-        HarnessInputMessage::Ack(_) => "Ack",
     }
 }
 
@@ -360,6 +359,46 @@ fn emits_start_and_end_user_var_in_order() {
         }
         other => panic!("expected Osc1337SetUserVar, got {other:?}"),
     }
+}
+
+/// Subscribe-time catch-up re-delivers durable history as replay-marked
+/// frames. Notifications are user-facing side effects, so replayed prompts
+/// and responses must stay silent — only live frames may ring or chime.
+#[test]
+fn replay_marked_frames_emit_no_notifications() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&default_notifications_config_frame())
+        .expect("write config");
+    writer
+        .write_frame(&HarnessOutputMessage::deliver_replay(
+            tau_proto::UnixMicros::new(1),
+            user_prompt_submitted("hello", tau_proto::PromptOriginator::User),
+        ))
+        .expect("write replayed prompt");
+    writer
+        .write_frame(&HarnessOutputMessage::deliver_replay(
+            tau_proto::UnixMicros::new(2),
+            Event::ProviderResponseFinished(assistant_finished_response(
+                "sp-0",
+                "done",
+                tau_proto::PromptOriginator::User,
+            )),
+        ))
+        .expect("write replayed response");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
+    writer.flush().expect("flush");
+
+    let mut output = Vec::new();
+    run_with_idle(Cursor::new(input), &mut output, Duration::from_millis(1)).expect("run");
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    drain_lifecycle(&mut reader);
+    assert!(
+        reader.read_event().expect("read").is_none(),
+        "replayed history must not trigger notifications",
+    );
 }
 
 /// Bell mode is an intentionally narrow transport: it only asks the

@@ -57,6 +57,13 @@ $ tau -r <id>             # resume a specific one
 Inside the UI, `/tree` prints the selected agent's branch graph and `/tree
 <node-id>` rewinds that agent's head to the node.
 
+Any subscriber that joins after a session is initialized — UI clients and
+extensions alike — gets the same subscribe-time catch-up: the current session
+snapshot plus durable transcript facts, delivered as frames carrying an
+explicit `replay` marker so side-effecting consumers (notifications, tool
+executors) can skip history while stateful ones fold it. Execution triggers
+such as `tool.started` are never replayed.
+
 ### Interception system
 
 Components can register as event interceptors with priority + selector pairs;

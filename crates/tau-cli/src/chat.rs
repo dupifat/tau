@@ -315,7 +315,6 @@ fn ui_io_harness_input_message_name(message: &HarnessInputMessage) -> &'static s
         HarnessInputMessage::GetRenderedSystemPrompt(_) => "get_rendered_system_prompt",
         HarnessInputMessage::GetRenderedToolDefinitions(_) => "get_rendered_tool_definitions",
         HarnessInputMessage::ExtensionDataRequest(_) => "extension_data_request",
-        HarnessInputMessage::Ack(_) => "ack",
     }
 }
 
@@ -743,11 +742,11 @@ pub(crate) fn run_chat(
             match reader.read_message() {
                 Ok(Some(message)) => {
                     socket_ui_io_meter.record_downlink_frame(&message);
-                    // The UI is a best-effort consumer and does not ack
-                    // sequenced event deliveries.
                     let cmd = match message {
                         HarnessOutputMessage::Deliver(delivery) => {
-                            let (event, _seq, recorded_at) = delivery.into_parts();
+                            // The renderer folds replay frames like live ones:
+                            // the UI renders state, so history is welcome.
+                            let (event, _replay, recorded_at) = delivery.into_parts();
                             RendererCmd::Remote {
                                 event: Box::new(event),
                                 recorded_at: recorded_at.unwrap_or_else(UnixMicros::now),

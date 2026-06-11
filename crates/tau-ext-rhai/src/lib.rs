@@ -12,10 +12,10 @@ use std::sync::mpsc;
 use rhai::{Array, Dynamic, Engine, ImmutableString, Map, Scope};
 use serde::Deserialize;
 use tau_proto::{
-    Ack, ClientKind, ConfigError, Configure, Event, EventLogSeq, EventSelector, HarnessInfo,
-    HarnessInfoLevel, HarnessInputMessage, HarnessOutputMessage, Hello, Intercept, InterceptAction,
-    InterceptReply, InterceptionPriority, PROTOCOL_VERSION, PeerInputReader, PeerOutputWriter,
-    Ready, Subscribe, UnixMicros,
+    ClientKind, ConfigError, Configure, Event, EventSelector, HarnessInfo, HarnessInfoLevel,
+    HarnessInputMessage, HarnessOutputMessage, Hello, Intercept, InterceptAction, InterceptReply,
+    InterceptionPriority, PROTOCOL_VERSION, PeerInputReader, PeerOutputWriter, Ready, Subscribe,
+    UnixMicros,
 };
 
 /// `tracing` target for events emitted from this extension.
@@ -121,12 +121,9 @@ where
     while let Some(message) = reader.read_message()? {
         match message {
             HarnessOutputMessage::Deliver(delivery) => {
-                let (event, seq, recorded_at) = delivery.into_parts();
+                let (event, replay, recorded_at) = delivery.into_parts();
                 if let Some(runtime) = runtime.as_mut() {
-                    runtime.on_event(event, seq, recorded_at, &tx);
-                }
-                if let Some(up_to) = seq {
-                    let _ = tx.send(HarnessInputMessage::Ack(Ack { up_to }));
+                    runtime.on_event(event, replay, recorded_at, &tx);
                 }
             }
             HarnessOutputMessage::InterceptRequest(req) => {
@@ -402,7 +399,7 @@ impl ScriptRuntime {
     fn on_event(
         &mut self,
         event: Event,
-        seq: Option<EventLogSeq>,
+        replay: bool,
         recorded_at: Option<UnixMicros>,
         tx: &mpsc::Sender<HarnessInputMessage>,
     ) {
@@ -416,7 +413,7 @@ impl ScriptRuntime {
                 return;
             }
         };
-        let meta = match json_to_dynamic(&meta_json(seq, recorded_at)) {
+        let meta = match json_to_dynamic(&meta_json(replay, recorded_at)) {
             Ok(meta) => meta,
             Err(message) => {
                 report_callback_error(tx, format!("preparing on_event metadata: {message}"));
@@ -483,11 +480,9 @@ fn report_callback_error(tx: &mpsc::Sender<HarnessInputMessage>, message: String
     enqueue_info(tx, &message, HarnessInfoLevel::Important, true);
 }
 
-fn meta_json(seq: Option<EventLogSeq>, recorded_at: Option<UnixMicros>) -> serde_json::Value {
+fn meta_json(replay: bool, recorded_at: Option<UnixMicros>) -> serde_json::Value {
     let mut map = serde_json::Map::new();
-    if let Some(seq) = seq {
-        map.insert("seq".to_owned(), u64_meta_value(seq.get()));
-    }
+    map.insert("replay".to_owned(), serde_json::Value::Bool(replay));
     if let Some(recorded_at) = recorded_at {
         map.insert("recorded_at".to_owned(), u64_meta_value(recorded_at.get()));
     }

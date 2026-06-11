@@ -126,56 +126,8 @@ pub struct ConfigError {
 }
 
 // ---------------------------------------------------------------------------
-// Wire transport — sequenced delivery for runtime events
+// Wire transport — event delivery
 // ---------------------------------------------------------------------------
-
-/// Monotonic sequence assigned by the harness runtime event stream.
-///
-/// This sequence is relative to the running harness as a whole. Every
-/// Committed [`EventDelivery`] emitted by the running harness gets the next
-/// value in
-/// persisted in an agent log, persisted in a session log, or replayed from
-/// history. It is not comparable to persisted agent/session event sequences.
-/// Receivers acknowledge processing by returning the same sequence in
-/// [`Ack::up_to`].
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Default,
-    Eq,
-    PartialEq,
-    Ord,
-    PartialOrd,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-#[serde(transparent)]
-pub struct EventLogSeq(u64);
-
-impl EventLogSeq {
-    #[must_use]
-    pub fn new(v: u64) -> Self {
-        Self(v)
-    }
-
-    #[must_use]
-    pub fn get(self) -> u64 {
-        self.0
-    }
-
-    #[must_use]
-    pub fn next(self) -> Self {
-        Self(self.0 + 1)
-    }
-}
-
-impl std::fmt::Display for EventLogSeq {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
 
 /// Wall-clock timestamp as microseconds since the UNIX epoch.
 ///
@@ -241,10 +193,11 @@ impl std::fmt::Display for UnixMicros {
 /// this payload so delivery metadata is explicitly harness-owned and
 /// direction-specific.
 ///
-/// `seq: Some(_)` marks an ackable event from the committed runtime stream; the
-/// receiver should process the inner event and send an [`Ack`] for that
-/// sequence (or any later sequence, because acks are cumulative). `seq: None`
-/// marks an unsequenced direct or replay delivery that must not be acked.
+/// `replay` distinguishes historical record from live occurrence: subscribe
+/// time catch-up re-sends durable facts with `replay: true`. Consumers that
+/// render state (UI transcripts) fold replay frames like live events;
+/// consumers that perform side effects (sounds, tool execution, idle timers)
+/// must skip them.
 ///
 /// `recorded_at` is present for committed runtime deliveries and for durable
 /// replay entries when a historical timestamp is meaningful. It is absent for
@@ -253,41 +206,44 @@ impl std::fmt::Display for UnixMicros {
 pub struct EventDelivery {
     /// Inner bus fact delivered to the peer.
     pub event: Box<Event>,
-    /// Harness runtime event-log sequence when this delivery is ackable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seq: Option<EventLogSeq>,
+    /// True when this delivery re-sends a durable historical fact to a late
+    /// subscriber instead of announcing a live occurrence.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replay: bool,
     /// Runtime or historical append timestamp associated with the event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recorded_at: Option<UnixMicros>,
 }
 
 impl EventDelivery {
-    /// Creates an unsequenced direct or replay delivery.
+    /// Creates a direct delivery for a synthesized current-state
+    /// announcement (no meaningful append timestamp).
     #[must_use]
-    pub fn unsequenced(event: Event) -> Self {
+    pub fn direct(event: Event) -> Self {
         Self {
             event: Box::new(event),
-            seq: None,
+            replay: false,
             recorded_at: None,
         }
     }
 
-    /// Creates an ackable committed runtime delivery.
+    /// Creates a delivery for a live committed runtime event.
     #[must_use]
-    pub fn sequenced(seq: EventLogSeq, recorded_at: UnixMicros, event: Event) -> Self {
+    pub fn live(recorded_at: UnixMicros, event: Event) -> Self {
         Self {
             event: Box::new(event),
-            seq: Some(seq),
+            replay: false,
             recorded_at: Some(recorded_at),
         }
     }
 
-    /// Creates an unsequenced replay delivery carrying a persisted timestamp.
+    /// Creates a replay delivery re-sending a durable historical fact with
+    /// its persisted timestamp.
     #[must_use]
     pub fn replay(recorded_at: UnixMicros, event: Event) -> Self {
         Self {
             event: Box::new(event),
-            seq: None,
+            replay: true,
             recorded_at: Some(recorded_at),
         }
     }
@@ -298,10 +254,15 @@ impl EventDelivery {
         &self.event
     }
 
-    /// Returns the ack sequence for committed runtime deliveries.
+    /// Returns true when this delivery re-sends a durable historical fact to
+    /// a late subscriber instead of announcing a live occurrence.
+    ///
+    /// Replay frames describe the past. Consumers that render state (UI
+    /// transcripts) fold them like live events; consumers that perform side
+    /// effects (sounds, tool execution, idle timers) must skip them.
     #[must_use]
-    pub fn ack_sequence(&self) -> Option<EventLogSeq> {
-        self.seq
+    pub fn is_replay(&self) -> bool {
+        self.replay
     }
 
     /// Consumes this delivery and returns the inner event.
@@ -310,10 +271,11 @@ impl EventDelivery {
         *self.event
     }
 
-    /// Consumes this delivery and returns event, ack sequence, and timestamp.
+    /// Consumes this delivery and returns the event, the replay marker, and
+    /// the append timestamp.
     #[must_use]
-    pub fn into_parts(self) -> (Event, Option<EventLogSeq>, Option<UnixMicros>) {
-        (*self.event, self.seq, self.recorded_at)
+    pub fn into_parts(self) -> (Event, bool, Option<UnixMicros>) {
+        (*self.event, self.replay, self.recorded_at)
     }
 }
 
@@ -599,14 +561,6 @@ pub struct ExtensionDataEntry {
     pub len: Option<u64>,
 }
 
-/// Receiver → sender acknowledgement that all ackable deliveries with sequence
-/// `<= up_to` have been processed. Cumulative — newer acks supersede older
-/// ones. Only [`EventDelivery`] values with `seq: Some(_)` should be acked.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Ack {
-    pub up_to: EventLogSeq,
-}
-
 // ---------------------------------------------------------------------------
 // Directional protocol envelopes
 // ---------------------------------------------------------------------------
@@ -632,7 +586,6 @@ pub enum HarnessInputMessage {
     GetRenderedSystemPrompt(GetRenderedSystemPrompt),
     GetRenderedToolDefinitions(GetRenderedToolDefinitions),
     ExtensionDataRequest(ExtensionDataRequest),
-    Ack(Ack),
 }
 
 impl HarnessInputMessage {
@@ -668,19 +621,20 @@ pub enum HarnessOutputMessage {
 }
 
 impl HarnessOutputMessage {
-    /// Wraps an event for unsequenced direct or replay delivery.
+    /// Wraps an event for direct delivery of a synthesized current-state
+    /// announcement.
     #[must_use]
     pub fn deliver(event: Event) -> Self {
-        Self::Deliver(EventDelivery::unsequenced(event))
+        Self::Deliver(EventDelivery::direct(event))
     }
 
-    /// Wraps an event for ackable committed runtime delivery.
+    /// Wraps a live committed runtime event for delivery.
     #[must_use]
-    pub fn deliver_sequenced(seq: EventLogSeq, recorded_at: UnixMicros, event: Event) -> Self {
-        Self::Deliver(EventDelivery::sequenced(seq, recorded_at, event))
+    pub fn deliver_live(recorded_at: UnixMicros, event: Event) -> Self {
+        Self::Deliver(EventDelivery::live(recorded_at, event))
     }
 
-    /// Wraps a historical event for unsequenced replay delivery.
+    /// Wraps a historical event for replay-marked delivery.
     #[must_use]
     pub fn deliver_replay(recorded_at: UnixMicros, event: Event) -> Self {
         Self::Deliver(EventDelivery::replay(recorded_at, event))
@@ -699,12 +653,6 @@ impl HarnessOutputMessage {
     #[must_use]
     pub fn delivered_event(&self) -> Option<&Event> {
         self.as_delivery().map(EventDelivery::event)
-    }
-
-    /// Returns the ack sequence for committed runtime deliveries.
-    #[must_use]
-    pub fn ack_sequence(&self) -> Option<EventLogSeq> {
-        self.as_delivery().and_then(EventDelivery::ack_sequence)
     }
 
     /// Consumes this output message and returns its delivery payload, if any.

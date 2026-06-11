@@ -23,7 +23,7 @@ fn test_observer_records_committed_events() {
     log.record_for_test(seq, recorded_at, Some("conn-1".into()), info("hello"));
 
     let entry = log
-        .get_next_from(tau_proto::EventLogSeq::new(0))
+        .get_next_from(crate::event_log::EventLogSeq::new(0))
         .expect("entry should exist");
     assert_eq!(entry.seq.get(), 0);
     assert_eq!(entry.recorded_at, recorded_at);
@@ -39,7 +39,7 @@ fn get_next_from_skips_earlier_test_observer_entries() {
     }
 
     let entry = log
-        .get_next_from(tau_proto::EventLogSeq::new(1))
+        .get_next_from(crate::event_log::EventLogSeq::new(1))
         .expect("entry should exist");
     assert_eq!(entry.seq.get(), 1);
     let Event::HarnessInfo(info) = &entry.event else {

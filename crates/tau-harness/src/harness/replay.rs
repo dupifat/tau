@@ -1,16 +1,24 @@
 //! Late-subscriber replay.
 //!
-//! When a UI client subscribes after the harness has already emitted
-//! events, two replay paths catch it up. Extension subscriptions do not
-//! enter these paths today; their `Subscribe` only changes live routing.
+//! Every peer — UI client or extension — that subscribes after the harness
+//! has already emitted events is caught up through the same
+//! [`Harness::complete_subscription`] path. Catch-up is semantic state
+//! reconstruction, not a readback of a retained event log:
 //!
 //! - [`Harness::replay_session_events`] announces the current loaded-agent
 //!   snapshot, then replays each loaded agent's durable transcript facts from
 //!   the global agent store.
 //! - [`Harness::replay_harness_info`] reconstructs current harness status from
-//!   live state snapshots, so a UI that just joined sees the same indicators as
-//!   one that was here from the start without retaining old runtime events.
+//!   live state snapshots, so a subscriber that just joined sees the same
+//!   indicators as one that was here from the start without retaining old
+//!   runtime events.
+//!
+//! Historical transcript facts are delivered as replay-marked frames
+//! ([`tau_proto::EventDelivery::is_replay`]); side-effecting consumers (sound
+//! notifications, tool execution) must skip those frames and react only to
+//! live deliveries.
 
+use tau_core::RouteError;
 use tau_proto::{
     ActionSchemaPublished, AgentPromptQueued, Event, EventSelector, HarnessContextUsageChanged,
     HarnessModelsAvailable, HarnessOutputMessage, HarnessRoleSelected, HarnessRolesAvailable,
@@ -25,6 +33,29 @@ use crate::model::{
 };
 
 impl Harness {
+    /// Completes a `Subscribe` from any peer: installs live routing, then
+    /// catches the subscriber up to current state.
+    ///
+    /// UI clients and extensions share this path on purpose — subscribe
+    /// semantics must not drift between peer kinds. Catch-up is skipped while
+    /// the current session is still initializing: a subscriber connecting
+    /// during startup has missed nothing and will observe the session
+    /// lifecycle live, so replaying it here would deliver duplicate
+    /// `SessionStarted`/`SessionAgentLoaded` announcements.
+    pub(crate) fn complete_subscription(
+        &mut self,
+        connection_id: &str,
+        selectors: Vec<EventSelector>,
+    ) -> Result<(), RouteError> {
+        self.bus
+            .set_subscriptions(connection_id, selectors.clone())?;
+        if self.session_initialized(&self.current_session_id) {
+            self.replay_session_events(connection_id, &selectors);
+            self.replay_harness_info(connection_id, &selectors);
+        }
+        Ok(())
+    }
+
     pub(crate) fn replay_session_events(&mut self, client_id: &str, selectors: &[EventSelector]) {
         let session_started = Event::SessionStarted(tau_proto::SessionStarted {
             session_id: self.current_session_id.clone(),

@@ -2,7 +2,7 @@ use std::error::Error;
 use std::io::{BufReader, BufWriter};
 
 use tau_proto::{
-    Ack, CborValue, ClientKind, Event, HarnessInputMessage, HarnessOutputMessage, Hello,
+    CborValue, ClientKind, Event, HarnessInputMessage, HarnessOutputMessage, Hello,
     PROTOCOL_VERSION, PeerInputReader, PeerOutputWriter, Ready, Subscribe, ToolRegister,
     ToolResult, ToolSpec,
 };
@@ -50,19 +50,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
         match message {
             HarnessOutputMessage::Deliver(delivery) => {
-                let (event, log_id, _) = delivery.into_parts();
-                let Event::ToolStarted(invoke) = event else {
-                    if let Some(id) = log_id {
-                        writer.write_message(&HarnessInputMessage::Ack(Ack { up_to: id }))?;
-                        writer.flush()?;
-                    }
+                // Tool invocations are execution triggers; replay-marked
+                // frames re-send history and must not re-run them.
+                if delivery.is_replay() {
+                    continue;
+                }
+                let Event::ToolStarted(invoke) = delivery.into_event() else {
                     continue;
                 };
                 if invoke.tool_name != tau_proto::ToolName::new("echo") {
-                    if let Some(id) = log_id {
-                        writer.write_message(&HarnessInputMessage::Ack(Ack { up_to: id }))?;
-                    }
-                    writer.flush()?;
                     continue;
                 }
                 writer.write_message(&HarnessInputMessage::emit(Event::ToolResult(
@@ -79,9 +75,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                         originator: tau_proto::PromptOriginator::User,
                     },
                 )))?;
-                if let Some(id) = log_id {
-                    writer.write_message(&HarnessInputMessage::Ack(Ack { up_to: id }))?;
-                }
                 writer.flush()?;
             }
             HarnessOutputMessage::Disconnect(_) => return Ok(()),

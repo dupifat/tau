@@ -56,7 +56,7 @@ fn on_intercept(event, transient) {
 
 `start(config)` is optional and runs once after `init` succeeds, subscriptions/intercepts are sent, `Ready` is sent, and host functions are registered. Use it for startup side effects such as `tau_info`; callback errors are reported as important transient diagnostics without disabling the extension.
 
-`on_event(event, meta)` is optional. `meta.seq` and `meta.recorded_at` are present when Tau supplies them. The extension acknowledges sequenced deliveries after the callback has had a chance to run.
+`on_event(event, meta)` is optional. `meta.replay` is `true` when the delivery is subscribe-time catch-up history rather than a live occurrence; `meta.recorded_at` carries the original commit timestamp when Tau supplies it. Scripts with user-visible side effects should skip replayed events.
 
 `on_intercept(event, transient)` is optional. Return values are:
 

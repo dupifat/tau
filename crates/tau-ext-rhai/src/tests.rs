@@ -4,9 +4,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use tau_proto::{
-    CborValue, Configure, Event, EventLogSeq, EventSelector, HarnessInputMessage,
-    HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter, InterceptAction,
-    InterceptRequest, InterceptionPriority, UnixMicros,
+    CborValue, Configure, Event, EventSelector, HarnessInputMessage, HarnessInputReader,
+    HarnessOutputMessage, HarnessOutputWriter, InterceptAction, InterceptRequest,
+    InterceptionPriority, UnixMicros,
 };
 
 use super::*;
@@ -283,9 +283,10 @@ fn missing_script_config_reports_error_and_stays_inert() {
 }
 
 #[test]
-fn delivered_event_invokes_script_and_acks_sequence() {
-    // A delivered event is converted to the JSON-shaped Rhai map and
-    // acknowledged after the callback has had a chance to run.
+fn delivered_event_invokes_script_with_replay_meta() {
+    // A delivered event is converted to the JSON-shaped Rhai map; the meta
+    // map exposes the replay marker and recorded_at timestamp so scripts can
+    // distinguish catch-up history from live events.
     let dir = tempfile::tempdir().expect("tempdir");
     let script = write_script(
         &dir,
@@ -294,32 +295,29 @@ fn delivered_event_invokes_script_and_acks_sequence() {
                 return #{ subscribe: [#{ kind: "exact", value: "agent.prompt_submitted" }] };
             }
             fn on_event(event, meta) {
-                tau_info(`saw ${meta.seq}: ${event.payload.text}`);
+                tau_info(`saw ${meta.replay}/${meta.recorded_at}: ${event.payload.text}`);
             }
         "#,
     );
-    let delivered = HarnessOutputMessage::deliver_sequenced(
-        EventLogSeq::new(7),
-        UnixMicros::new(11),
-        prompt_event("hello"),
-    );
+    let live = HarnessOutputMessage::deliver_live(UnixMicros::new(11), prompt_event("hello"));
+    let replayed = HarnessOutputMessage::deliver_replay(UnixMicros::new(7), prompt_event("old"));
 
-    let frames = run_frames(&[configure_with_script(&script), delivered]);
+    let frames = run_frames(&[configure_with_script(&script), live, replayed]);
 
     assert!(frames.iter().any(|frame| matches!(
         emitted_event(frame),
-        Some(Event::HarnessInfo(info)) if info.message.contains("saw 7: hello")
+        Some(Event::HarnessInfo(info)) if info.message.contains("saw false/11: hello")
     )));
     assert!(frames.iter().any(|frame| matches!(
-        frame,
-        HarnessInputMessage::Ack(ack) if ack.up_to == EventLogSeq::new(7)
+        emitted_event(frame),
+        Some(Event::HarnessInfo(info)) if info.message.contains("saw true/7: old")
     )));
 }
 
 #[test]
-fn script_error_during_on_event_still_acks_and_reports() {
-    // Callback errors are isolated to the failing callback. The ack is
-    // still sent so one bad hook cannot wedge sequenced delivery.
+fn script_error_during_on_event_reports_and_keeps_running() {
+    // Callback errors are isolated to the failing callback so one bad hook
+    // cannot wedge delivery of later events.
     let dir = tempfile::tempdir().expect("tempdir");
     let script = write_script(
         &dir,
@@ -328,25 +326,25 @@ fn script_error_during_on_event_still_acks_and_reports() {
                 return #{ subscribe: [#{ kind: "exact", value: "agent.prompt_submitted" }] };
             }
             fn on_event(event, meta) {
-                unknown_function();
+                if event.payload.text == "boom" {
+                    unknown_function();
+                }
+                tau_info(`handled ${event.payload.text}`);
             }
         "#,
     );
-    let delivered = HarnessOutputMessage::deliver_sequenced(
-        EventLogSeq::new(8),
-        UnixMicros::new(12),
-        prompt_event("hello"),
-    );
+    let failing = HarnessOutputMessage::deliver_live(UnixMicros::new(12), prompt_event("boom"));
+    let following = HarnessOutputMessage::deliver_live(UnixMicros::new(13), prompt_event("after"));
 
-    let frames = run_frames(&[configure_with_script(&script), delivered]);
+    let frames = run_frames(&[configure_with_script(&script), failing, following]);
 
-    assert!(frames.iter().any(|frame| matches!(
-        frame,
-        HarnessInputMessage::Ack(ack) if ack.up_to == EventLogSeq::new(8)
-    )));
     assert!(frames.iter().any(|frame| matches!(
         emitted_event(frame),
         Some(Event::HarnessInfo(info)) if info.message.contains("on_event failed")
+    )));
+    assert!(frames.iter().any(|frame| matches!(
+        emitted_event(frame),
+        Some(Event::HarnessInfo(info)) if info.message.contains("handled after")
     )));
 }
 

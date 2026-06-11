@@ -44,7 +44,12 @@ pub use token_usage::*;
 /// Version 3 removes the old top-level event frame lane. Events sent by peers
 /// must be wrapped in [`HarnessInputMessage::Emit`], and events sent by the
 /// harness are wrapped in [`HarnessOutputMessage::Deliver`].
-pub const PROTOCOL_VERSION: u32 = 3;
+///
+/// Version 4 removes the ack lane (`Ack`, delivery `seq`) — the harness never
+/// consumed acknowledgements — and replaces the implicit seq/recorded_at
+/// replay encoding with an explicit [`EventDelivery::replay`] marker.
+/// Subscribe-time catch-up is uniform across UI clients and extensions.
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// UI marker text for responses, thinking blocks, and tool calls that
 /// are still in progress.

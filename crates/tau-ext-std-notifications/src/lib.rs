@@ -338,8 +338,9 @@ where
     // Live config. `idle_duration` is the default delay supplied by tests or
     // production startup; explicit per-hook `delay_seconds` values override it.
     let mut config = ExtConfig::default();
-    // No past events requested: notifications start from fresh live state.
-    // Replaying prior prompts/results would replay sounds and idle nudges.
+    // Subscribe-time catch-up delivers prior prompts/results as replay-marked
+    // frames; the receive loop skips those so sounds and idle nudges only
+    // fire for live activity.
     tau_extension::Handshake::tool("tau-ext-std-notifications")
         .subscribe([
             tau_proto::EventName::PROVIDER_PROMPT_SUBMITTED,
@@ -474,7 +475,22 @@ where
                         tracing::info!(target: LOG_TARGET, "disconnect received, exiting");
                         break;
                     }
-                    HarnessOutputMessage::Deliver(delivery) => delivery.into_event(),
+                    HarnessOutputMessage::Deliver(delivery) => {
+                        // Subscribe-time catch-up re-sends durable facts
+                        // (prompts, responses, tool results) as replay-marked
+                        // frames. Reacting to those would replay sounds and
+                        // idle nudges for turns that already happened, so
+                        // notifications react to live deliveries only.
+                        if delivery.is_replay() {
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                name = %delivery.event().name(),
+                                "skipping replayed event",
+                            );
+                            continue;
+                        }
+                        delivery.into_event()
+                    }
                     _ => continue,
                 };
                 tracing::trace!(target: LOG_TARGET, name = %inner.name(), "event received");

@@ -43,12 +43,8 @@ fn encode_frames(frames: &[HarnessOutputMessage]) -> Vec<u8> {
     bytes
 }
 
-fn sequenced_event(seq: u64, recorded_at: u64, event: Event) -> HarnessOutputMessage {
-    HarnessOutputMessage::deliver_sequenced(
-        tau_proto::EventLogSeq::new(seq),
-        tau_proto::UnixMicros::new(recorded_at),
-        event,
-    )
+fn live_event(recorded_at: u64, event: Event) -> HarnessOutputMessage {
+    HarnessOutputMessage::deliver_live(tau_proto::UnixMicros::new(recorded_at), event)
 }
 
 fn input_event(message: &HarnessInputMessage) -> Option<&Event> {
@@ -199,23 +195,6 @@ fn verbosity_metadata_is_published_for_chatgpt_models() {
 }
 
 #[test]
-fn ack_tracker_waits_for_contiguous_completed_log_events() {
-    // Parallel prompt workers can finish out of order, but `Ack { up_to }`
-    // is cumulative. Do not ack a later prompt until earlier received log
-    // events have completed, or a crash could lose accepted work.
-    let mut tracker = AckTracker::default();
-    tracker.register(tau_proto::EventLogSeq::new(7));
-    tracker.register(tau_proto::EventLogSeq::new(8));
-
-    tracker.complete(tau_proto::EventLogSeq::new(8));
-    assert_eq!(tracker.next_ack(), None);
-
-    tracker.complete(tau_proto::EventLogSeq::new(7));
-    assert_eq!(tracker.next_ack(), Some(tau_proto::EventLogSeq::new(8)));
-    assert_eq!(tracker.next_ack(), None);
-}
-
-#[test]
 fn prompt_workers_start_concurrently() {
     // Regression coverage for backend-agent parallelism: two accepted
     // provider prompts must both enter worker execution before the first
@@ -226,8 +205,8 @@ fn prompt_workers_start_concurrently() {
     let mut second = prompt();
     second.agent_prompt_id = "sp-par-2".into();
     let input = encode_frames(&[
-        sequenced_event(7, 11, Event::AgentPromptCreated(first)),
-        sequenced_event(8, 12, Event::AgentPromptCreated(second)),
+        live_event(11, Event::AgentPromptCreated(first)),
+        live_event(12, Event::AgentPromptCreated(second)),
     ]);
     let started = std::sync::Arc::new((Mutex::new((0_usize, 0_usize)), Condvar::new()));
     let executor_started = started.clone();
@@ -293,11 +272,6 @@ fn prompt_workers_start_concurrently() {
         .filter(|frame| matches!(input_event(frame), Some(Event::ProviderResponseFinished(_))))
         .count();
     assert_eq!(finished_count, 2);
-    assert!(
-        frames.iter().any(|frame| {
-            matches!(frame, HarnessInputMessage::Ack(ack) if ack.up_to.get() == 8)
-        })
-    );
 }
 
 #[test]
@@ -336,11 +310,11 @@ fn run_announces_provider_models_before_ready() {
 }
 
 #[test]
-fn direct_prompt_request_with_missing_backend_is_acknowledged_and_closed() {
+fn direct_prompt_request_with_missing_backend_is_closed_with_error() {
     // Direct provider routing must never leave the harness waiting forever,
     // even if a prompt reaches this extension without usable credentials.
     let input = encode_frames(&[
-        sequenced_event(7, 11, Event::AgentPromptCreated(prompt())),
+        live_event(11, Event::AgentPromptCreated(prompt())),
         HarnessOutputMessage::Disconnect(tau_proto::Disconnect {
             reason: Some("done".to_owned()),
         }),
@@ -368,16 +342,7 @@ fn direct_prompt_request_with_missing_backend_is_acknowledged_and_closed() {
                         == Some("cannot resolve provider backend for: chatgpt/gpt-5.5")
         )
     });
-    let ack = frames.iter().position(|frame| {
-        matches!(
-            frame,
-            HarnessInputMessage::Ack(ack) if ack.up_to.get() == 7
-        )
-    });
-
     let submitted = submitted.expect("prompt submitted event");
     let finished = finished.expect("missing-backend response finished event");
-    let ack = ack.expect("ack for prompt delivery");
     assert!(submitted < finished, "submission should precede finish");
-    assert!(finished < ack, "ack should follow prompt handling");
 }

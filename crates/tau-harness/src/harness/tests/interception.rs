@@ -2,7 +2,7 @@ use super::*;
 use crate::harness::PendingTool;
 
 fn prompt_created_count(h: &Harness) -> u64 {
-    let mut cursor = tau_proto::EventLogSeq::new(0);
+    let mut cursor = crate::event_log::EventLogSeq::new(0);
     let mut count = 0;
     while let Some(entry) = h.event_log.get_next_from(cursor) {
         cursor = entry.seq.next();

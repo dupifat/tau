@@ -45,11 +45,11 @@ const ACCESS_PREVIEW: &str = "preview";
 const ACCESS_NONE: &str = "none";
 
 use tau_proto::{
-    ACTION_SCHEMA_VERSION, Ack, ActionArg, ActionArgKind, ActionChoice, ActionCommand, ActionError,
+    ACTION_SCHEMA_VERSION, ActionArg, ActionArgKind, ActionChoice, ActionCommand, ActionError,
     ActionInvoke, ActionOutput, ActionResult, ActionSchema, CborValue, ConfigError, Event,
-    EventLogSeq, HarnessInputMessage, HarnessOutputMessage, PeerInputReader, PeerOutputWriter,
-    PromptFragment, PromptPriority, ToolError, ToolProgress, ToolResult, ToolSpec, ToolStarted,
-    ToolUseState, ToolUseStats, ToolUseStatus,
+    HarnessInputMessage, HarnessOutputMessage, PeerInputReader, PeerOutputWriter, PromptFragment,
+    PromptPriority, ToolError, ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState,
+    ToolUseStats, ToolUseStatus,
 };
 
 /// `tracing` target for events emitted from this extension.
@@ -125,8 +125,12 @@ where
                 }
             }
             HarnessOutputMessage::Deliver(delivery) => {
-                let (event, log_id, _) = delivery.into_parts();
-                match event {
+                // Tool/action invocations are execution triggers; replay-marked
+                // frames re-send history and must not re-run them.
+                if delivery.is_replay() {
+                    continue;
+                }
+                match delivery.into_event() {
                     Event::ToolStarted(invoke) if is_tool_name(invoke.tool_name.as_str()) => {
                         writer
                             .write_message(&HarnessInputMessage::emit(initial_progress(&invoke)))?;
@@ -140,9 +144,6 @@ where
                         writer.flush()?;
                     }
                     _ => {}
-                }
-                if let Some(id) = log_id {
-                    ack_log_event(id, &mut writer)?;
                 }
             }
             HarnessOutputMessage::Disconnect(_) => break,
@@ -4524,14 +4525,6 @@ impl RuntimeState {
             }),
         }
     }
-}
-
-fn ack_log_event<W: Write>(
-    id: EventLogSeq,
-    writer: &mut PeerOutputWriter<W>,
-) -> Result<(), tau_proto::EncodeError> {
-    writer.write_message(&HarnessInputMessage::Ack(Ack { up_to: id }))?;
-    writer.flush().map_err(tau_proto::EncodeError::Io)
 }
 
 /// Return the model-visible split email tool specifications.

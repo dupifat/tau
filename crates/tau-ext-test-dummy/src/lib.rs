@@ -187,15 +187,14 @@ where
                 }
             }
             HarnessOutputMessage::Deliver(delivery) => {
-                let (event, log_id, _) = delivery.into_parts();
-                if let Event::ToolStarted(invoke) = event
+                // Tool invocations are execution triggers; replay-marked
+                // frames re-send history and must not re-run them.
+                if delivery.is_replay() {
+                    continue;
+                }
+                if let Event::ToolStarted(invoke) = delivery.into_event()
                     && invoke.tool_name == RESTART_TEST_DUMMY_TOOL_NAME
                 {
-                    if let Some(id) = log_id {
-                        writer.write_message(&HarnessInputMessage::Ack(tau_proto::Ack {
-                            up_to: id,
-                        }))?;
-                    }
                     match restart_mode {
                         RestartMode::Random if rng.gen_bool(0.5) => {
                             writer.flush()?;

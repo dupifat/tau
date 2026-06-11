@@ -11,9 +11,9 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Duration;
 
 use tau_proto::{
-    Ack, CborValue, ConfigError, Event, EventLogSeq, HarnessInputMessage, HarnessOutputMessage,
-    PeerInputReader, PeerOutputWriter, ToolError, ToolProgress, ToolResult, ToolSpec, ToolStarted,
-    ToolUseState, ToolUseStats, ToolUseStatus,
+    CborValue, ConfigError, Event, HarnessInputMessage, HarnessOutputMessage, PeerInputReader,
+    PeerOutputWriter, ToolError, ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState,
+    ToolUseStats, ToolUseStatus,
 };
 /// `tracing` target for events emitted from this extension.
 pub const LOG_TARGET: &str = "websearch";
@@ -168,14 +168,14 @@ where
                 }
             }
             HarnessOutputMessage::Deliver(delivery) => {
-                let (event, log_id, _) = delivery.into_parts();
-                if let Event::ToolStarted(invoke) = event {
+                // Tool invocations are execution triggers; replay-marked
+                // frames re-send history and must not re-run searches.
+                if delivery.is_replay() {
+                    continue;
+                }
+                if let Event::ToolStarted(invoke) = delivery.into_event() {
                     if !is_websearch_tool(invoke.tool_name.as_str()) {
-                        ack_if_logged(log_id, &tx)?;
                         continue;
-                    }
-                    if let Some(id) = log_id {
-                        ack_log_event(id, &tx);
                     }
                     let permit = sem.acquire();
                     let tx = tx.clone();
@@ -203,21 +203,6 @@ where
         .map_err(|e| -> Box<dyn Error> { format!("writer thread panicked: {e:?}").into() })?
         .map_err(|e| -> Box<dyn Error> { e })?;
     Ok(())
-}
-
-fn ack_if_logged(
-    id: Option<EventLogSeq>,
-    tx: &mpsc::Sender<HarnessInputMessage>,
-) -> Result<(), Box<mpsc::SendError<HarnessInputMessage>>> {
-    if let Some(id) = id {
-        tx.send(HarnessInputMessage::Ack(Ack { up_to: id }))
-            .map_err(Box::new)?;
-    }
-    Ok(())
-}
-
-fn ack_log_event(id: EventLogSeq, tx: &mpsc::Sender<HarnessInputMessage>) {
-    let _ = tx.send(HarnessInputMessage::Ack(Ack { up_to: id }));
 }
 
 fn is_websearch_tool(name: &str) -> bool {

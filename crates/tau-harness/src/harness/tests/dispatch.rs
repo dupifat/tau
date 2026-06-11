@@ -160,7 +160,7 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
     let mut reader = TestOutputReader::new(BufReader::new(client_end));
     let mut queued = Vec::new();
     while let Ok(Some(frame)) = reader.read_frame() {
-        let (_log_id, inner) = frame.into_event_frame();
+        let inner = frame.into_event_frame();
         if let TestProtocolItem::Event(Event::AgentPromptQueued(event)) = inner {
             queued.push(event);
         }
@@ -679,7 +679,7 @@ fn background_placeholder_count(h: &Harness, call_id: &str) -> usize {
 }
 
 fn event_log_contains(h: &Harness, source: &str, matches_event: impl Fn(&Event) -> bool) -> bool {
-    let mut seq = tau_proto::EventLogSeq::new(0);
+    let mut seq = crate::event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if entry.source.as_deref() == Some(source) && matches_event(&entry.event) {
@@ -690,7 +690,7 @@ fn event_log_contains(h: &Harness, source: &str, matches_event: impl Fn(&Event) 
 }
 
 fn event_log_position(h: &Harness, matches_event: impl Fn(&Event) -> bool) -> Option<u64> {
-    let mut seq = tau_proto::EventLogSeq::new(0);
+    let mut seq = crate::event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if matches_event(&entry.event) {
@@ -705,7 +705,7 @@ fn event_log_position_after(
     after_seq: u64,
     matches_event: impl Fn(&Event) -> bool,
 ) -> Option<u64> {
-    let mut seq = tau_proto::EventLogSeq::new(after_seq + 1);
+    let mut seq = crate::event_log::EventLogSeq::new(after_seq + 1);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if matches_event(&entry.event) {
@@ -716,7 +716,7 @@ fn event_log_position_after(
 }
 
 fn event_log_contains_any_source(h: &Harness, matches_event: impl Fn(&Event) -> bool) -> bool {
-    let mut seq = tau_proto::EventLogSeq::new(0);
+    let mut seq = crate::event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if matches_event(&entry.event) {
@@ -872,7 +872,7 @@ fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
 
     let mut provider_error = None;
     let mut logical_events = Vec::new();
-    let mut seq = tau_proto::EventLogSeq::new(0);
+    let mut seq = crate::event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         match &entry.event {
@@ -3014,7 +3014,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
     // is published before the next-round AgentPromptCreated, and the
     // latter's `context_items` includes the steered text alongside the
     // original user prompt.
-    let mut cursor = tau_proto::EventLogSeq::new(0);
+    let mut cursor = crate::event_log::EventLogSeq::new(0);
     let mut saw_steered = false;
     let mut saw_next_round = false;
     while let Some(entry) = h.event_log.get_next_from(cursor) {
@@ -3419,7 +3419,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
     })
     .expect("finish second");
 
-    let mut cursor = tau_proto::EventLogSeq::new(0);
+    let mut cursor = crate::event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(cursor) {
         cursor = entry.seq.next();
         assert!(
@@ -4349,7 +4349,7 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
         .expect("switch");
 
     let mut saw_session_dir = false;
-    let mut cursor = tau_proto::EventLogSeq::new(0);
+    let mut cursor = crate::event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(cursor) {
         cursor = entry.seq.next();
         if let Event::HarnessSessionDir(session_dir) = &entry.event
@@ -4424,7 +4424,7 @@ fn manual_compact_appends_trigger_and_dispatches_normal_prompt() {
         Event::AgentCompactionTriggered(triggered)
             if triggered.agent_id.as_str() == target_agent_id.as_str()
     )));
-    let mut cursor = tau_proto::EventLogSeq::new(0);
+    let mut cursor = crate::event_log::EventLogSeq::new(0);
     let mut prompt = None;
     while let Some(entry) = h.event_log.get_next_from(cursor) {
         cursor = entry.seq.next();
@@ -5358,7 +5358,6 @@ fn start_agent_request_conversation_id_is_public_agent_id() {
                 secrets: std::collections::BTreeMap::new(),
                 restart_attempt: 0,
                 state: crate::extension::ExtensionState::Ready,
-                last_acked: tau_proto::EventLogSeq::default(),
             },
         );
         h.extension_order.push(connection_id);

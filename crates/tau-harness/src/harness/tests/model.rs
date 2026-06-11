@@ -12,7 +12,7 @@ use crate::model::LoadedRoles;
 /// the test inspects the log every check_*_parses event is already
 /// committed — no need to pump the bus.
 fn find_important_info(h: &Harness, needle: &str) -> Option<String> {
-    let mut seq = tau_proto::EventLogSeq::new(0);
+    let mut seq = crate::event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if let Event::HarnessInfo(info) = &entry.event
@@ -26,7 +26,7 @@ fn find_important_info(h: &Harness, needle: &str) -> Option<String> {
 }
 
 fn find_info(h: &Harness, needle: &str) -> Option<String> {
-    let mut seq = tau_proto::EventLogSeq::new(0);
+    let mut seq = crate::event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if let Event::HarnessInfo(info) = &entry.event
@@ -143,7 +143,7 @@ fn provider_models_snapshot_updates_available_models() {
     let mut saw_provider_snapshot = false;
     let mut saw_harness_models = false;
     let mut saw_harness_roles = false;
-    let mut seq = tau_proto::EventLogSeq::new(0);
+    let mut seq = crate::event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         match entry.event {
@@ -188,7 +188,7 @@ fn provider_models_snapshot_from_non_provider_is_ignored() {
     assert!(!h.available_models.contains(&model_id));
     assert!(!h.provider_model_info.contains_key(&model_id));
     assert!(!h.provider_model_routes.contains_key(&model_id));
-    let mut seq = tau_proto::EventLogSeq::new(0);
+    let mut seq = crate::event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         assert!(
@@ -221,7 +221,7 @@ fn provider_models_snapshot_from_ui_client_is_ignored() {
     assert!(!h.available_models.contains(&model_id));
     assert!(!h.provider_model_info.contains_key(&model_id));
     assert!(!h.provider_model_routes.contains_key(&model_id));
-    let mut seq = tau_proto::EventLogSeq::new(0);
+    let mut seq = crate::event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         assert!(
@@ -478,7 +478,7 @@ fn provider_model_metadata_drives_selection_state() {
         ThinkingSummary::Auto
     );
 
-    let mut seq = tau_proto::EventLogSeq::new(0);
+    let mut seq = crate::event_log::EventLogSeq::new(0);
     let mut selected = None;
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
@@ -515,7 +515,7 @@ fn provider_model_metadata_drives_selection_state() {
         ThinkingSummary::Off
     );
 
-    let mut seq = tau_proto::EventLogSeq::new(0);
+    let mut seq = crate::event_log::EventLogSeq::new(0);
     let mut selected = None;
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();

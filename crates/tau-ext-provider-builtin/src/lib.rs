@@ -4,7 +4,7 @@
 //! storage scan, model publication, and dispatch across built-in provider
 //! backends. Individual backend crates own provider-specific wire formats.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::error::Error;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -16,7 +16,7 @@ use backon::BackoffBuilder;
 use dialoguer::Input;
 use serde::{Deserialize, Serialize};
 use tau_proto::{
-    Ack, ClientKind, ContextItem, Event, EventName, HarnessInputMessage, HarnessOutputMessage,
+    ClientKind, ContextItem, Event, EventName, HarnessInputMessage, HarnessOutputMessage,
     InProgressOutputItem, ModelId, ModelName, PeerInputReader, PeerOutputWriter, ProviderBackend,
     ProviderBackendKind, ProviderBackendTransport, ProviderCacheMissDiagnostic, ProviderModelInfo,
     ProviderModelsUpdated, ProviderName, ProviderPromptSubmitted, ProviderResponseFinished,
@@ -530,25 +530,17 @@ where
         chatgpt_runtime: &chatgpt_runtime,
     };
     let mut active_prompts = 0_usize;
-    let mut ack_tracker = AckTracker::default();
     let mut input_closed = false;
 
     loop {
-        drain_worker_messages(
-            &worker_rx,
-            &mut writer,
-            &mut active_prompts,
-            &mut ack_tracker,
-        )?;
+        drain_worker_messages(&worker_rx, &mut writer, &mut active_prompts)?;
         start_queued_prompts(
             &mut prompt_queue,
             &mut active_prompts,
             prompt_concurrency_limit,
             &prompt_worker_context,
             &mut writer,
-            &mut ack_tracker,
         )?;
-        write_ready_acks(&mut writer, &mut ack_tracker)?;
 
         if input_closed && active_prompts == 0 && prompt_queue.is_empty() {
             return Ok(());
@@ -577,21 +569,22 @@ where
             continue;
         };
 
-        let (log_id, event) = match frame {
+        let event = match frame {
             HarnessOutputMessage::Deliver(delivery) => {
-                let (event, log_id, _) = delivery.into_parts();
-                (log_id, Some(event))
+                // Prompt execution is an effect; replay-marked frames
+                // re-send history and must never start a provider call.
+                if delivery.is_replay() {
+                    None
+                } else {
+                    Some(delivery.into_event())
+                }
             }
             HarnessOutputMessage::Disconnect(_) => {
                 cancellation.shutdown();
                 return Ok(());
             }
-            _ => (None, None),
+            _ => None,
         };
-        if let Some(id) = log_id {
-            ack_tracker.register(id);
-        }
-        let mut complete_log_now = true;
         match event {
             Some(Event::AgentPromptPrewarmRequested(prewarm)) => {
                 let mut profiles = load_prompt_profiles();
@@ -604,10 +597,6 @@ where
                 if cancellation.take_canceled(&agent_prompt_id) {
                     let mut frame_writer = PeerOutputWriter::new(&mut writer);
                     finish_canceled(&agent_prompt_id, &prompt, &mut frame_writer)?;
-                    if let Some(id) = log_id {
-                        ack_tracker.complete(id);
-                    }
-                    write_ready_acks(&mut writer, &mut ack_tracker)?;
                     continue;
                 }
 
@@ -617,7 +606,6 @@ where
                 match resolve_prompt_backend(&prompt.model, &mut profiles) {
                     Some(backend) => {
                         let job = PromptJob {
-                            log_id,
                             agent_prompt_id,
                             prompt,
                             backend,
@@ -627,7 +615,6 @@ where
                         } else {
                             prompt_queue.push_back(job);
                         }
-                        complete_log_now = false;
                     }
                     None => {
                         let mut frame_writer = PeerOutputWriter::new(&mut writer);
@@ -643,22 +630,11 @@ where
             Some(Event::UiCancelPrompt(cancel)) => match cancel.agent_prompt_id {
                 Some(apid) => {
                     cancellation.cancel(apid.clone());
-                    finish_queued_canceled(
-                        &apid,
-                        &mut prompt_queue,
-                        &mut writer,
-                        &mut ack_tracker,
-                    )?;
+                    finish_queued_canceled(&apid, &mut prompt_queue, &mut writer)?;
                 }
                 None => cancellation.cancel_retry_sleeps(),
             },
             _ => {}
-        }
-        if complete_log_now {
-            if let Some(id) = log_id {
-                ack_tracker.complete(id);
-            }
-            write_ready_acks(&mut writer, &mut ack_tracker)?;
         }
     }
 }
@@ -666,7 +642,6 @@ where
 type PromptExecutor = Arc<dyn Fn(PromptExecution) + Send + Sync + 'static>;
 
 struct PromptJob {
-    log_id: Option<tau_proto::EventLogSeq>,
     agent_prompt_id: tau_proto::AgentPromptId,
     prompt: tau_proto::AgentPromptCreated,
     backend: PromptBackend,
@@ -703,9 +678,7 @@ impl PromptExecution {
 
 enum WorkerMessage {
     Output(Vec<u8>),
-    PromptDone {
-        log_id: Option<tau_proto::EventLogSeq>,
-    },
+    PromptDone,
 }
 
 struct ChannelWrite {
@@ -736,41 +709,6 @@ impl Write for ChannelWrite {
         self.tx
             .send(WorkerMessage::Output(bytes))
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "writer closed"))
-    }
-}
-
-#[derive(Default)]
-struct AckTracker {
-    pending: BTreeSet<u64>,
-    completed: BTreeSet<u64>,
-    acked_up_to: Option<u64>,
-}
-
-impl AckTracker {
-    fn register(&mut self, id: tau_proto::EventLogSeq) {
-        self.pending.insert(id.get());
-    }
-
-    fn complete(&mut self, id: tau_proto::EventLogSeq) {
-        let raw = id.get();
-        self.pending.remove(&raw);
-        if self.acked_up_to.is_none_or(|acked| acked < raw) {
-            self.completed.insert(raw);
-        }
-    }
-
-    fn next_ack(&mut self) -> Option<tau_proto::EventLogSeq> {
-        let limit = self.pending.first().copied();
-        let raw = match limit {
-            Some(first_pending) => self.completed.range(..first_pending).next_back().copied()?,
-            None => self.completed.last().copied()?,
-        };
-        if self.acked_up_to.is_some_and(|acked| raw <= acked) {
-            return None;
-        }
-        self.completed.retain(|completed| raw < *completed);
-        self.acked_up_to = Some(raw);
-        Some(tau_proto::EventLogSeq::new(raw))
     }
 }
 
@@ -885,7 +823,6 @@ fn production_prompt_executor() -> PromptExecutor {
 
 fn start_prompt_job(job: PromptJob, active_prompts: &mut usize, context: &PromptWorkerContext<'_>) {
     *active_prompts += 1;
-    let log_id = job.log_id;
     let execution = PromptExecution {
         job,
         output_tx: context.worker_tx.clone(),
@@ -896,7 +833,7 @@ fn start_prompt_job(job: PromptJob, active_prompts: &mut usize, context: &Prompt
     let done_tx = context.worker_tx.clone();
     thread::spawn(move || {
         executor(execution);
-        let _ = done_tx.send(WorkerMessage::PromptDone { log_id });
+        let _ = done_tx.send(WorkerMessage::PromptDone);
     });
 }
 
@@ -906,7 +843,6 @@ fn start_queued_prompts<W: Write>(
     prompt_concurrency_limit: usize,
     context: &PromptWorkerContext<'_>,
     writer: &mut BufWriter<W>,
-    ack_tracker: &mut AckTracker,
 ) -> Result<(), Box<dyn Error>> {
     while *active_prompts < prompt_concurrency_limit {
         let Some(job) = prompt_queue.pop_front() else {
@@ -915,9 +851,6 @@ fn start_queued_prompts<W: Write>(
         if context.cancellation.take_canceled(&job.agent_prompt_id) {
             let mut frame_writer = PeerOutputWriter::new(&mut *writer);
             finish_canceled(&job.agent_prompt_id, &job.prompt, &mut frame_writer)?;
-            if let Some(id) = job.log_id {
-                ack_tracker.complete(id);
-            }
             continue;
         }
         start_prompt_job(job, active_prompts, context);
@@ -929,7 +862,6 @@ fn finish_queued_canceled<W: Write>(
     apid: &tau_proto::AgentPromptId,
     prompt_queue: &mut VecDeque<PromptJob>,
     writer: &mut BufWriter<W>,
-    ack_tracker: &mut AckTracker,
 ) -> Result<(), Box<dyn Error>> {
     let Some(index) = prompt_queue
         .iter()
@@ -942,9 +874,6 @@ fn finish_queued_canceled<W: Write>(
     };
     let mut frame_writer = PeerOutputWriter::new(writer);
     finish_canceled(&job.agent_prompt_id, &job.prompt, &mut frame_writer)?;
-    if let Some(id) = job.log_id {
-        ack_tracker.complete(id);
-    }
     Ok(())
 }
 
@@ -952,7 +881,6 @@ fn drain_worker_messages<W: Write>(
     worker_rx: &Receiver<WorkerMessage>,
     writer: &mut BufWriter<W>,
     active_prompts: &mut usize,
-    ack_tracker: &mut AckTracker,
 ) -> Result<(), Box<dyn Error>> {
     loop {
         match worker_rx.try_recv() {
@@ -960,30 +888,13 @@ fn drain_worker_messages<W: Write>(
                 writer.write_all(&bytes)?;
                 writer.flush()?;
             }
-            Ok(WorkerMessage::PromptDone { log_id }) => {
+            Ok(WorkerMessage::PromptDone) => {
                 *active_prompts = active_prompts.saturating_sub(1);
-                if let Some(id) = log_id {
-                    ack_tracker.complete(id);
-                }
             }
             Err(TryRecvError::Empty) => return Ok(()),
             Err(TryRecvError::Disconnected) => return Ok(()),
         }
     }
-}
-
-fn write_ready_acks<W: Write>(
-    writer: &mut BufWriter<W>,
-    ack_tracker: &mut AckTracker,
-) -> Result<(), Box<dyn Error>> {
-    while let Some(id) = ack_tracker.next_ack() {
-        tau_proto::encode_message(
-            writer.by_ref(),
-            &HarnessInputMessage::Ack(Ack { up_to: id }),
-        )?;
-        writer.flush()?;
-    }
-    Ok(())
 }
 
 fn materialize_prompt(prompt: &tau_proto::AgentPromptCreated) -> tau_proto::AgentPromptCreated {

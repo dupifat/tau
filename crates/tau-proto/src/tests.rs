@@ -385,9 +385,6 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
                 path: "notes/state.cbor".to_owned(),
             },
         }),
-        HarnessInputMessage::Ack(Ack {
-            up_to: EventLogSeq::new(42),
-        }),
     ]
 }
 
@@ -401,18 +398,19 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
         HarnessOutputMessage::Disconnect(Disconnect {
             reason: Some("shutdown".to_owned()),
         }),
-        HarnessOutputMessage::Deliver(EventDelivery::sequenced(
-            EventLogSeq::new(42),
+        HarnessOutputMessage::Deliver(EventDelivery::live(
             UnixMicros::new(1_700_000_000_000_000),
             sample_session_started(),
         )),
-        HarnessOutputMessage::Deliver(EventDelivery::unsequenced(Event::ExtensionEvent(
-            CustomEvent {
-                name: "demo.snapshot".parse().expect("event name"),
-                session_id: Some("s1".into()),
-                payload: CborValue::Text("snapshot".to_owned()),
-            },
-        ))),
+        HarnessOutputMessage::Deliver(EventDelivery::replay(
+            UnixMicros::new(1_700_000_000_000_000),
+            sample_session_started(),
+        )),
+        HarnessOutputMessage::Deliver(EventDelivery::direct(Event::ExtensionEvent(CustomEvent {
+            name: "demo.snapshot".parse().expect("event name"),
+            session_id: Some("s1".into()),
+            payload: CborValue::Text("snapshot".to_owned()),
+        }))),
         HarnessOutputMessage::InterceptRequest(InterceptRequest {
             event: Box::new(sample_session_started()),
             transient: false,
@@ -563,11 +561,8 @@ fn multiple_directional_messages_can_share_one_stream() {
 fn input_emit_and_output_deliver_are_distinct_wire_messages() {
     let event = sample_session_started();
     let input = HarnessInputMessage::emit_with_transient(event.clone(), true);
-    let output = HarnessOutputMessage::deliver_sequenced(
-        EventLogSeq::new(7),
-        UnixMicros::new(1_700_000_000_000_000),
-        event.clone(),
-    );
+    let output =
+        HarnessOutputMessage::deliver_live(UnixMicros::new(1_700_000_000_000_000), event.clone());
 
     let input_json = serde_json::to_value(&input).expect("serialize input");
     assert_eq!(input_json["message"], "emit");
@@ -577,7 +572,14 @@ fn input_emit_and_output_deliver_are_distinct_wire_messages() {
     let output_json = serde_json::to_value(&output).expect("serialize output");
     assert_eq!(output_json["message"], "deliver");
     assert_eq!(output_json["payload"]["event"]["event"], "session.started");
-    assert_eq!(output_json["payload"]["seq"], serde_json::json!(7));
+    assert_eq!(
+        output_json["payload"]["recorded_at"],
+        serde_json::json!(1_700_000_000_000_000_u64)
+    );
+    // Live deliveries omit the replay marker entirely; only replayed
+    // history pays for the extra field on the wire.
+    assert!(output_json["payload"].get("replay").is_none());
+    assert!(output_json["payload"].get("seq").is_none());
     assert!(output_json["payload"].get("transient").is_none());
 
     let input_bytes = encode_harness_input_to_vec(&input).expect("encode input");
@@ -885,26 +887,29 @@ fn tool_name_rejects_overlong_input() {
 }
 
 #[test]
-fn event_delivery_helpers_expose_ack_metadata_and_inner_event() {
+fn event_delivery_helpers_expose_replay_marker_and_inner_event() {
+    // The replay marker is the contract side-effecting consumers rely on to
+    // skip historical frames; live and direct deliveries must not carry it.
     let inner = sample_session_started();
-    let message = HarnessOutputMessage::deliver_sequenced(
-        EventLogSeq::new(7),
-        UnixMicros::new(1_700_000_000_000_000),
-        inner.clone(),
-    );
+    let message =
+        HarnessOutputMessage::deliver_live(UnixMicros::new(1_700_000_000_000_000), inner.clone());
 
     let delivery = message.as_delivery().expect("delivery payload");
-    assert_eq!(delivery.ack_sequence(), Some(EventLogSeq::new(7)));
+    assert!(!delivery.is_replay());
     assert_eq!(delivery.event(), &inner);
-    assert_eq!(message.ack_sequence(), Some(EventLogSeq::new(7)));
-    assert_eq!(message.clone().into_delivered_event(), Some(inner));
+    assert_eq!(message.clone().into_delivered_event(), Some(inner.clone()));
+
+    let replayed = HarnessOutputMessage::deliver_replay(
+        UnixMicros::new(1_700_000_000_000_000),
+        sample_session_started(),
+    );
+    assert!(replayed.as_delivery().expect("delivery").is_replay());
 
     let direct = HarnessOutputMessage::deliver(sample_session_started());
-    assert_eq!(direct.ack_sequence(), None);
+    assert!(!direct.as_delivery().expect("delivery").is_replay());
 
     let non_delivery = HarnessOutputMessage::Disconnect(Disconnect { reason: None });
     assert_eq!(non_delivery.as_delivery(), None);
-    assert_eq!(non_delivery.ack_sequence(), None);
     assert_eq!(non_delivery.into_delivered_event(), None);
 }
 

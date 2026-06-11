@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use tau_proto::{
-    Ack, ActionError, ActionInvoke, ActionOutput, ActionResult, AgentContextKey, AgentContextValue,
-    CborValue, ConfigError, Event, EventLogSeq, ExtAgentContextPublish, ExtPromptFragmentPublish,
+    ActionError, ActionInvoke, ActionOutput, ActionResult, AgentContextKey, AgentContextValue,
+    CborValue, ConfigError, Event, ExtAgentContextPublish, ExtPromptFragmentPublish,
     ExtensionContextReady, HarnessInputMessage, HarnessOutputMessage, PeerInputReader,
     PeerOutputWriter, PromptContent, PromptFragment, PromptPriority, SessionAgentLoaded,
     SessionStarted, ToolCancelled, ToolResult, ToolResultKind, ToolSpec,
@@ -545,11 +545,18 @@ where
                 }
             }
             HarnessOutputMessage::Deliver(delivery) => {
-                let (event, log_id, _) = delivery.into_parts();
-                match event {
+                // Replay-marked frames re-send historical facts to late
+                // subscribers. Everything this extension reacts to is either
+                // an execution trigger (tool calls, shell commands — acting
+                // on history would re-run side effects) or a current-state
+                // announcement the harness never replay-marks, so replay
+                // frames are skipped wholesale.
+                if delivery.is_replay() {
+                    continue;
+                }
+                match delivery.into_event() {
                     Event::ToolStarted(invoke) => {
                         if !is_shell_tool(invoke.tool_name.as_str()) {
-                            ack_if_logged(log_id, &tx)?;
                             continue;
                         }
                         let tx = tx.clone();
@@ -663,9 +670,6 @@ where
                         });
                     }
                     _ => {}
-                }
-                if let Some(id) = log_id {
-                    ack_log_event(id, &tx);
                 }
             }
             HarnessOutputMessage::Disconnect(_) => break,
@@ -1162,21 +1166,6 @@ fn dispatch_session_agent_loaded(
             agent_id: loaded.agent_id,
         },
     )));
-}
-
-fn ack_if_logged(
-    id: Option<EventLogSeq>,
-    tx: &mpsc::Sender<HarnessInputMessage>,
-) -> Result<(), Box<mpsc::SendError<HarnessInputMessage>>> {
-    if let Some(id) = id {
-        tx.send(HarnessInputMessage::Ack(Ack { up_to: id }))
-            .map_err(Box::new)?;
-    }
-    Ok(())
-}
-
-fn ack_log_event(id: EventLogSeq, tx: &mpsc::Sender<HarnessInputMessage>) {
-    let _ = tx.send(HarnessInputMessage::Ack(Ack { up_to: id }));
 }
 
 fn is_shell_tool(name: &str) -> bool {

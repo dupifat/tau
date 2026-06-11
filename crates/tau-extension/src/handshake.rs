@@ -9,11 +9,12 @@
 //! drifts out of sync; this helper writes it once and lets each extension
 //! declare only what differs.
 //!
-//! For extensions, `Subscribe` is live-only today: it records selectors
-//! for future delivery and does not replay already logged events. Some
-//! first-party extensions intentionally want only future events, but external
-//! extensions may need past events; any future replay support must be an
-//! explicit opt-in, not inferred from selectors.
+//! `Subscribe` semantics are uniform across UI clients and extensions: the
+//! harness installs live routing, then catches the subscriber up with
+//! current-state announcements plus selector-matched durable facts delivered
+//! as replay-marked frames. Side-effecting extensions must check
+//! [`tau_proto::EventDelivery::is_replay`] and skip historical frames instead
+//! of relying on history being withheld.
 //!
 //! ```ignore
 //! tau_extension::Handshake::tool("tau-ext-websearch")
@@ -70,14 +71,13 @@ impl Handshake {
         }
     }
 
-    /// Subscribe to a set of future events by exact name. Equivalent to
-    /// extending the existing selectors with one `EventSelector::Exact`
-    /// per item.
+    /// Subscribe to a set of events by exact name. Equivalent to extending
+    /// the existing selectors with one `EventSelector::Exact` per item.
     ///
-    /// Extension subscriptions are live-only in the current harness:
-    /// this does not request replay of past events. That is a first-party
-    /// default, not a statement that external extensions never need replay;
-    /// any replay mode should be a separate opt-in.
+    /// Subscribing also requests subscribe-time catch-up: the harness sends
+    /// current-state announcements and selector-matched durable facts (as
+    /// replay-marked frames) before live delivery begins. Check
+    /// [`tau_proto::EventDelivery::is_replay`] before performing side effects.
     pub fn subscribe(mut self, names: impl IntoIterator<Item = EventName>) -> Self {
         self.selectors
             .extend(names.into_iter().map(EventSelector::Exact));

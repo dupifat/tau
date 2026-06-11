@@ -65,10 +65,9 @@ enum TestMessage {
     ConfigError(tau_proto::ConfigError),
     Emit(tau_proto::Emit),
     InterceptReply(InterceptReply),
-    Ack(tau_proto::Ack),
     Configure(tau_proto::Configure),
     InterceptRequest(tau_proto::InterceptRequest),
-    SequencedDelivery(EventDelivery),
+    LiveDelivery(EventDelivery),
     AgentPromptCreatedResult(Box<tau_proto::AgentPromptCreatedResult>),
     RenderedSystemPromptResult(Box<tau_proto::RenderedSystemPromptResult>),
     RenderedToolDefinitionsResult(Box<tau_proto::RenderedToolDefinitionsResult>),
@@ -92,8 +91,8 @@ impl TestProtocolItem {
                 Self::Message(TestMessage::Disconnect(message))
             }
             HarnessOutputMessage::Deliver(delivery) => {
-                if delivery.seq.is_some() {
-                    Self::Message(TestMessage::SequencedDelivery(delivery))
+                if !delivery.replay && delivery.recorded_at.is_some() {
+                    Self::Message(TestMessage::LiveDelivery(delivery))
                 } else {
                     Self::Event(delivery.into_event())
                 }
@@ -116,12 +115,12 @@ impl TestProtocolItem {
         }
     }
 
-    fn into_event_frame(self) -> (Option<tau_proto::EventLogSeq>, Self) {
+    fn into_event_frame(self) -> Self {
         match self {
-            Self::Message(TestMessage::SequencedDelivery(delivery)) => {
-                (delivery.seq, Self::Event(delivery.into_event()))
+            Self::Message(TestMessage::LiveDelivery(delivery)) => {
+                Self::Event(delivery.into_event())
             }
-            other => (None, other),
+            other => other,
         }
     }
 }
@@ -143,10 +142,9 @@ impl TestMessage {
             Self::ConfigError(message) => HarnessInputMessage::ConfigError(message),
             Self::Emit(message) => HarnessInputMessage::Emit(message),
             Self::InterceptReply(message) => HarnessInputMessage::InterceptReply(message),
-            Self::Ack(message) => HarnessInputMessage::Ack(message),
             Self::Configure(_)
             | Self::InterceptRequest(_)
-            | Self::SequencedDelivery(_)
+            | Self::LiveDelivery(_)
             | Self::AgentPromptCreatedResult(_)
             | Self::RenderedSystemPromptResult(_)
             | Self::RenderedToolDefinitionsResult(_)
@@ -689,7 +687,7 @@ fn default_agent_node(h: &Harness, id: NodeId) -> &tau_core::AgentNode {
 
 fn event_log_events(h: &Harness) -> Vec<Event> {
     let mut events = Vec::new();
-    let mut seq = tau_proto::EventLogSeq::new(0);
+    let mut seq = crate::event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         events.push(entry.event);
@@ -858,7 +856,7 @@ fn quiet_provider_harness_with_start_reason(
             writer.flush()?;
 
             while let Some(frame) = reader.read_frame()? {
-                let (_, frame) = frame.into_event_frame();
+                let frame = frame.into_event_frame();
                 if matches!(frame, TestProtocolItem::Message(TestMessage::Disconnect(_))) {
                     return Ok(());
                 }
@@ -1156,7 +1154,7 @@ fn drain_delegate_progress(
 }
 
 fn read_raw_prompt_created(h: &Harness, spid: &AgentPromptId) -> AgentPromptCreated {
-    let mut cursor = tau_proto::EventLogSeq::new(0);
+    let mut cursor = crate::event_log::EventLogSeq::new(0);
     loop {
         let entry = h
             .event_log
@@ -1173,7 +1171,7 @@ fn read_raw_prompt_created(h: &Harness, spid: &AgentPromptId) -> AgentPromptCrea
 }
 
 fn read_nth_prompt_created(h: &Harness, index: usize) -> AgentPromptCreated {
-    let mut cursor = tau_proto::EventLogSeq::new(0);
+    let mut cursor = crate::event_log::EventLogSeq::new(0);
     let mut seen = 0;
     loop {
         let entry = h

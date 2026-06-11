@@ -53,7 +53,7 @@ fn event_log_contains_source_event(
     source: &str,
     mut predicate: impl FnMut(&Event) -> bool,
 ) -> bool {
-    let mut seq = tau_proto::EventLogSeq::new(0);
+    let mut seq = crate::event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
         if entry.source.as_deref() == Some(source) && predicate(&entry.event) {
@@ -171,7 +171,6 @@ fn connect_handshaking_extension(
             secrets: BTreeMap::new(),
             restart_attempt: 0,
             state: ExtensionState::Handshaking,
-            last_acked: tau_proto::EventLogSeq::default(),
         },
     );
     h.extension_order.push(connection_id);
@@ -1879,7 +1878,7 @@ fn extension_connect_command_installs_state_before_reader_ack() {
 
         let mut reader = TestOutputReader::new(BufReader::new(r));
         while let Some(frame) = reader.read_frame().map_err(|e| e.to_string())? {
-            let (_, frame) = frame.into_event_frame();
+            let frame = frame.into_event_frame();
             if matches!(frame, TestProtocolItem::Message(TestMessage::Disconnect(_))) {
                 break;
             }
@@ -1911,7 +1910,6 @@ fn extension_connect_command_installs_state_before_reader_ack() {
             secrets: BTreeMap::new(),
             restart_attempt: 0,
             state: ExtensionState::Spawning,
-            last_acked: tau_proto::EventLogSeq::default(),
         },
         origin: ConnectionOrigin::Supervised,
         writer_tx: spawned.writer_tx,
@@ -2524,66 +2522,6 @@ fn cancel_during_tools_terminalizes_inflight_calls() {
         .map(|item| item.call_id.as_str().to_owned())
         .collect();
     assert_eq!(cancelled, vec!["c1".to_owned(), "c2".to_owned()]);
-}
-
-#[test]
-fn extension_ack_advances_cursor() {
-    // Verifies the at-least-once cursor: after the harness receives
-    // an Ack from an extension, that extension's `last_acked` field
-    // reflects the highest acked id.
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    let tools_id = h
-        .extension_connection_id("shell")
-        .expect("shell")
-        .to_owned();
-
-    h.handle_extension_event(
-        &tools_id,
-        TestProtocolItem::Message(TestMessage::Ack(tau_proto::Ack {
-            up_to: tau_proto::EventLogSeq::new(7),
-        })),
-    )
-    .expect("ack");
-
-    let tools = h.extensions.get(tools_id.as_str()).expect("entry");
-    assert_eq!(tools.last_acked, tau_proto::EventLogSeq::new(7));
-    h.shutdown().expect("shutdown");
-}
-
-#[test]
-fn duplicate_ack_is_ignored() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-    let tools_id = h
-        .extension_connection_id("shell")
-        .expect("shell")
-        .to_owned();
-    let before = h
-        .extensions
-        .get(tools_id.as_str())
-        .expect("entry")
-        .last_acked;
-
-    // Resending an old ack must not move the cursor backward and
-    // must not bump it forward either.
-    h.handle_extension_event(
-        &tools_id,
-        TestProtocolItem::Message(TestMessage::Ack(tau_proto::Ack {
-            up_to: tau_proto::EventLogSeq::new(0),
-        })),
-    )
-    .expect("ack");
-
-    let after = h
-        .extensions
-        .get(tools_id.as_str())
-        .expect("entry")
-        .last_acked;
-    assert_eq!(before, after, "stale ack should not change cursor");
-    h.shutdown().expect("shutdown");
 }
 
 #[test]

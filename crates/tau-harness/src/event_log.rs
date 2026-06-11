@@ -1,17 +1,48 @@
-//! Thread-safe runtime event sequencer used by ackable event delivery.
+//! Thread-safe runtime event sequencer.
 //!
-//! The harness still assigns one globally monotonic [`EventLogSeq`] to every
-//! committed runtime event, but the sequencer does not retain event payloads.
-//! Replay comes from semantic state instead: durable session/agent stores,
-//! current harness snapshots, and the append-only `events.jsonl` debug trace.
+//! The harness assigns one globally monotonic [`EventLogSeq`] to every
+//! committed runtime event, but the sequencer does not retain event payloads
+//! and the sequence never leaves the process. Subscribe-time catch-up comes
+//! from semantic state instead: durable session/agent stores, current harness
+//! snapshots, and the append-only `events.jsonl` debug trace.
 
 #[cfg(test)]
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use tau_proto::UnixMicros;
 #[cfg(test)]
 use tau_proto::{ConnectionId, Event};
-use tau_proto::{EventLogSeq, UnixMicros};
+
+/// Monotonic sequence assigned by the harness runtime event sequencer.
+///
+/// This sequence is relative to the running harness as a whole and is
+/// harness-internal: it is not part of the wire protocol and is not
+/// comparable to persisted agent/session event sequences. Production code
+/// uses it only to order test observations; nothing on the wire carries it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub(crate) struct EventLogSeq(u64);
+
+impl EventLogSeq {
+    /// Creates a sequence from a raw counter value.
+    #[must_use]
+    pub(crate) fn new(v: u64) -> Self {
+        Self(v)
+    }
+
+    /// Returns the raw counter value.
+    #[must_use]
+    #[cfg(test)]
+    pub(crate) fn get(self) -> u64 {
+        self.0
+    }
+
+    /// Returns the next sequence value.
+    #[must_use]
+    pub(crate) fn next(self) -> Self {
+        Self(self.0 + 1)
+    }
+}
 
 /// One committed event captured by the test-only observer.
 #[cfg(test)]

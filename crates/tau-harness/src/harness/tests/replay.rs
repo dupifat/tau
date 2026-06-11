@@ -369,7 +369,7 @@ fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
         let Ok(Some(frame)) = reader.read_frame() else {
             break;
         };
-        let (_log_id, inner) = frame.into_event_frame();
+        let inner = frame.into_event_frame();
         got_message = matches!(
             inner,
             TestProtocolItem::Event(Event::AgentMessageSent(message))
@@ -449,7 +449,7 @@ fn late_joining_ui_client_receives_replayed_session_events() {
         let Ok(Some(frame)) = reader.read_frame() else {
             break;
         };
-        let (_log_id, inner) = frame.into_event_frame();
+        let inner = frame.into_event_frame();
         match inner {
             TestProtocolItem::Event(Event::SessionStarted(started))
                 if started.session_id.as_str() == "s1" =>
@@ -494,11 +494,22 @@ fn late_joining_ui_client_receives_replayed_session_events() {
     h.shutdown().expect("shutdown");
 }
 
-/// Regression: extension subscriptions are live-only even for durable events
-/// that a late UI client would replay. This protects live-only extensions such
-/// as std-notifications from replaying sounds or idle work for old turns.
+/// Returns the delivery wrapper for frames carrying an event payload.
+fn peel_delivery(message: &HarnessOutputMessage) -> Option<&tau_proto::EventDelivery> {
+    match message {
+        HarnessOutputMessage::Deliver(delivery) => Some(delivery),
+        _ => None,
+    }
+}
+
+/// Extension subscriptions share the UI late-join path: a late extension is
+/// caught up with selector-matched durable facts, delivered as replay-marked
+/// frames so side-effecting consumers can distinguish history from live
+/// occurrences. This replaced the older live-only rule, whose protection
+/// (e.g. std-notifications not replaying sounds) now lives in the replay
+/// marker instead of withheld delivery.
 #[test]
-fn extension_subscribe_receives_no_replayed_past_events() {
+fn extension_subscribe_replays_durable_facts_as_replay_frames() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -513,12 +524,12 @@ fn extension_subscribe_receives_no_replayed_past_events() {
             matches!(event, Event::ProviderResponseFinished(finished)
                 if provider_response_contains_text(finished, past_text))
         }),
-        "test setup: past provider response should be durable and eligible for UI replay",
+        "test setup: past provider response should be durable and eligible for replay",
     );
 
-    let extension_events = connect_test_tool(&mut h, "live-only-extension");
+    let extension_events = connect_test_tool(&mut h, "late-extension");
     h.handle_extension_message(
-        "live-only-extension",
+        "late-extension",
         TestMessage::Subscribe(Subscribe {
             selectors: vec![EventSelector::Exact(
                 tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
@@ -530,8 +541,17 @@ fn extension_subscribe_receives_no_replayed_past_events() {
     {
         let events = extension_events.lock().expect("sink");
         assert!(
-            events.is_empty(),
-            "extension subscribe must not replay the past provider response",
+            events.iter().any(|routed| {
+                peel_delivery(&routed.frame).is_some_and(|delivery| {
+                    delivery.is_replay()
+                        && matches!(
+                            delivery.event(),
+                            Event::ProviderResponseFinished(finished)
+                                if provider_response_contains_text(finished, past_text)
+                        )
+                })
+            }),
+            "late extension should receive the past provider response as a replay frame",
         );
     }
 
@@ -543,25 +563,68 @@ fn extension_subscribe_receives_no_replayed_past_events() {
         let events = extension_events.lock().expect("sink");
         assert!(
             events.iter().any(|routed| {
-                matches!(
-                    peel_inner_event(&routed.frame),
-                    Some(Event::ProviderResponseFinished(finished))
-                        if provider_response_contains_text(finished, live_text)
-                )
+                peel_delivery(&routed.frame).is_some_and(|delivery| {
+                    !delivery.is_replay()
+                        && matches!(
+                            delivery.event(),
+                            Event::ProviderResponseFinished(finished)
+                                if provider_response_contains_text(finished, live_text)
+                        )
+                })
             }),
-            "extension should receive future live provider responses",
-        );
-        assert!(
-            events.iter().all(|routed| {
-                !matches!(
-                    peel_inner_event(&routed.frame),
-                    Some(Event::ProviderResponseFinished(finished))
-                        if provider_response_contains_text(finished, past_text)
-                )
-            }),
-            "extension must not receive replayed past provider responses",
+            "live provider responses must not be marked as replay",
         );
     }
+
+    h.shutdown().expect("shutdown");
+}
+
+/// A late extension subscribe announces the current session state — the same
+/// `SessionStarted`/`SessionAgentLoaded` snapshot a late UI gets. This is what
+/// lets a respawned extension rebuild per-agent state (e.g. agent context)
+/// after a mid-session crash instead of rejoining with amnesia.
+#[test]
+fn extension_subscribe_announces_current_session_snapshot() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    // Load an agent into the session before the extension subscribes.
+    h.send_user_message("s1", "hello snapshot", None)
+        .expect("send message");
+
+    let extension_events = connect_test_tool(&mut h, "respawned-extension");
+    h.handle_extension_message(
+        "respawned-extension",
+        TestMessage::Subscribe(Subscribe {
+            selectors: vec![
+                EventSelector::Exact(tau_proto::EventName::SESSION_STARTED),
+                EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_LOADED),
+            ],
+        }),
+    )
+    .expect("extension subscribe");
+
+    let events = extension_events.lock().expect("sink");
+    assert!(
+        events.iter().any(|routed| {
+            matches!(
+                peel_inner_event(&routed.frame),
+                Some(Event::SessionStarted(started)) if started.session_id.as_str() == "s1"
+            )
+        }),
+        "late extension should be told the current session",
+    );
+    assert!(
+        events.iter().any(|routed| {
+            matches!(
+                peel_inner_event(&routed.frame),
+                Some(Event::SessionAgentLoaded(loaded)) if loaded.session_id.as_str() == "s1"
+            )
+        }),
+        "late extension should be told about already-loaded agents",
+    );
+    drop(events);
 
     h.shutdown().expect("shutdown");
 }
@@ -711,7 +774,7 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
     let mut reader = TestOutputReader::new(BufReader::new(client_end));
     let mut replayed = Vec::new();
     while let Ok(Some(frame)) = reader.read_frame() {
-        let (_log_id, inner) = frame.into_event_frame();
+        let inner = frame.into_event_frame();
         if let TestProtocolItem::Event(event) = inner {
             replayed.push(event.name());
         }
@@ -769,7 +832,7 @@ fn late_joining_ui_client_replays_only_current_active_queue() {
     let mut reader = TestOutputReader::new(BufReader::new(client_end));
     let mut queued = Vec::new();
     while let Ok(Some(frame)) = reader.read_frame() {
-        let (_log_id, inner) = frame.into_event_frame();
+        let inner = frame.into_event_frame();
         if let TestProtocolItem::Event(Event::AgentPromptQueued(event)) = inner {
             queued.push(event);
         }
@@ -954,7 +1017,7 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
         let Ok(Some(frame)) = reader.read_frame() else {
             break;
         };
-        let (_log_id, inner) = frame.into_event_frame();
+        let inner = frame.into_event_frame();
         let TestProtocolItem::Event(event) = inner else {
             continue;
         };
@@ -1067,7 +1130,7 @@ fn late_joining_ui_client_does_not_replay_runtime_extension_setup() {
         let Ok(Some(frame)) = reader.read_frame() else {
             break;
         };
-        let (_log_id, inner) = frame.into_event_frame();
+        let inner = frame.into_event_frame();
         let TestProtocolItem::Event(inner) = inner else {
             continue;
         };

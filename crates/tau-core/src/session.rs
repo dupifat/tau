@@ -45,7 +45,7 @@ impl std::error::Error for AgentEventValidationError {}
 ///
 /// This sequence is relative only to one agent's `events.cbor` stream: the
 /// first record in that file has sequence 0, the second has sequence 1, and so
-/// on. It is not comparable to [`tau_proto::EventLogSeq`] or to
+/// on. It is not comparable to the harness runtime event sequence or to
 /// [`crate::PersistedSessionEventSeq`]. The value is persisted as corruption
 /// detection metadata; replay semantics are still defined by file order, so
 /// load code verifies that stored values match their implied position.

@@ -62,7 +62,7 @@ pub(crate) fn edit_file(
         let end_byte =
             original_lines.byte_start_for_line(range.end_line_exclusive, original_bytes.len());
         let mut new_text = new_text.as_bytes().to_vec();
-        let newline_added = normalize_new_text_line_ending(
+        normalize_new_text_line_ending(
             &mut new_text,
             &original_bytes,
             &original_lines,
@@ -77,7 +77,6 @@ pub(crate) fn edit_file(
             end_byte,
             new_text,
             guard,
-            newline_added,
         });
     }
 
@@ -134,9 +133,6 @@ pub(crate) fn edit_file(
             changed,
             result_lines.max_valid_start_line(),
             result.len(),
-            replacements
-                .iter()
-                .any(|replacement| replacement.newline_added),
         ),
         display,
     })
@@ -161,7 +157,6 @@ struct LineReplacement<'a> {
     end_byte: usize,
     new_text: Vec<u8>,
     guard: &'a str,
-    newline_added: bool,
 }
 
 impl LineReplacement<'_> {
@@ -624,9 +619,8 @@ fn edit_result_value(
     changed: bool,
     new_max_valid_start_line: usize,
     total_bytes: usize,
-    newline_added: bool,
 ) -> CborValue {
-    let mut fields = vec![
+    CborValue::Map(vec![
         (
             CborValue::Text("edits".to_owned()),
             CborValue::Integer((edits as i64).into()),
@@ -643,12 +637,5 @@ fn edit_result_value(
             CborValue::Text("total_bytes".to_owned()),
             CborValue::Integer((total_bytes as i64).into()),
         ),
-    ];
-    if newline_added {
-        fields.push((
-            CborValue::Text("newline_added".to_owned()),
-            CborValue::Bool(true),
-        ));
-    }
-    CborValue::Map(fields)
+    ])
 }

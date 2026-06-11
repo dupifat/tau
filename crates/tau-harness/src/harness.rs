@@ -3740,6 +3740,10 @@ impl Harness {
                 self.publish_event(Some(source_id), Event::ToolUnregister(unregister));
             }
             Event::ToolRequest(request) => {
+                if let Some(message) = self.extension_tool_request_rejection(&request) {
+                    self.reject_extension_tool_request(source_id, request, message);
+                    return Ok(());
+                }
                 // Track extension-originated runtime metadata before
                 // publishing so terminal events can be attributed and enriched.
                 self.track_extension_tool_request_metadata(&request);
@@ -5424,6 +5428,49 @@ impl Harness {
             replaces: Some(old_key),
         })?;
         Ok(())
+    }
+
+    fn extension_tool_request_rejection(&self, request: &ToolRequest) -> Option<String> {
+        if request.call_id.is_empty() {
+            return Some(format!(
+                "extension emitted tool request `{}` with an empty call_id; refusing to route it",
+                request.tool_name
+            ));
+        }
+        self.known_tool_call_ids().contains(&request.call_id).then(|| {
+            format!(
+                "extension emitted tool request `{}` with already-known call_id `{}`; refusing to route it",
+                request.tool_name, request.call_id
+            )
+        })
+    }
+
+    fn reject_extension_tool_request(
+        &mut self,
+        source_id: &str,
+        request: ToolRequest,
+        message: String,
+    ) {
+        let rejected = ToolRejected {
+            call_id: request.call_id.clone(),
+            tool_name: request.tool_name.clone(),
+            tool_type: request.tool_type,
+            message: message.clone(),
+            originator: request.originator.clone(),
+        };
+        self.publish_event(Some(source_id), Event::ToolRejected(rejected));
+        self.publish_event(
+            Some(source_id),
+            Event::ToolError(ToolError {
+                call_id: request.call_id,
+                tool_name: request.tool_name,
+                tool_type: request.tool_type,
+                message,
+                details: None,
+                display: None,
+                originator: request.originator,
+            }),
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -8890,12 +8937,26 @@ impl Harness {
     }
 
     fn known_tool_call_ids(&self) -> HashSet<ToolCallId> {
-        self.tool_agents
+        let mut ids: HashSet<ToolCallId> = self
+            .tool_agents
             .keys()
             .chain(self.pending_tools.keys())
             .chain(self.completed_tool_calls.iter())
             .cloned()
-            .collect()
+            .collect();
+        for tree in self.agent_store.agents() {
+            for node in tree.nodes() {
+                let tau_core::AgentEntry::AssistantResponse { output_items, .. } = &node.entry
+                else {
+                    continue;
+                };
+                ids.extend(output_items.iter().filter_map(|item| match item {
+                    ContextItem::ToolCall(call) => Some(call.call_id.clone()),
+                    _ => None,
+                }));
+            }
+        }
+        ids
     }
 
     /// Update one agent's `context_input_tokens` /

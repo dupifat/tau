@@ -2908,6 +2908,158 @@ fn client_hello_protocol_mismatch_disconnects_only_client() {
 }
 
 #[test]
+fn extension_tool_request_cannot_reuse_in_flight_agent_call_id() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let call_id: ToolCallId = "shared-call".into();
+    h.tool_agents.insert(call_id.clone(), cid.clone());
+    h.pending_tools.insert(
+        call_id.clone(),
+        PendingTool {
+            name: ToolName::new("read"),
+            internal_name: ToolName::new("read"),
+            tool_type: tau_proto::ToolType::Function,
+        },
+    );
+    h.pending_tool_providers
+        .insert(call_id.clone(), "owner-ext".into());
+
+    h.handle_extension_event(
+        "hijacker-ext",
+        TestProtocolItem::Event(Event::ToolRequest(tau_proto::ToolRequest {
+            call_id: call_id.clone(),
+            tool_name: ToolName::new("write"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+            agent_id: crate::parse_agent_id("agent-1"),
+            originator: tau_proto::PromptOriginator::User,
+        })),
+    )
+    .expect("reject reused extension call id");
+
+    assert_eq!(h.tool_agents.get(&call_id), Some(&cid));
+    assert_eq!(
+        h.pending_tools.get(&call_id).map(|tool| tool.name.as_str()),
+        Some("read")
+    );
+    assert_eq!(
+        h.pending_tool_providers
+            .get(&call_id)
+            .map(tau_proto::ConnectionId::as_str),
+        Some("owner-ext")
+    );
+    assert!(event_log_contains_source_event(
+        &h,
+        "hijacker-ext",
+        |event| {
+            matches!(
+                event,
+                Event::ToolRejected(rejected)
+                    if rejected.call_id == call_id
+                        && rejected.message.contains("already-known call_id")
+            )
+        }
+    ));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn resumed_historical_tool_call_id_reuse_becomes_model_visible_tool_error() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    {
+        let mut h = echo_harness(&sp).expect("start");
+        let cid = ensure_test_user_agent(&mut h);
+        seed_agent_thinking(&mut h, &cid, "sp-old");
+        h.prompt_agents.insert("sp-old".into(), cid.clone());
+        h.handle_provider_response_finished(ProviderResponseFinished {
+            agent_prompt_id: "sp-old".into(),
+            agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+            output_items: vec![ContextItem::ToolCall(ToolCallItem {
+                call_id: "historical-call".into(),
+                name: ToolName::new("not_a_tool"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+            })],
+            stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+            error: None,
+            usage: None,
+            originator: tau_proto::PromptOriginator::User,
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
+            backend: None,
+            provider_response_id: None,
+            ws_pool_delta: None,
+        })
+        .expect("seed historical call id");
+        h.shutdown().expect("shutdown");
+    }
+
+    let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
+        .expect("resume");
+    let cid = test_user_agent(&h);
+    seed_agent_thinking(&mut h, &cid, "sp-new");
+    h.prompt_agents.insert("sp-new".into(), cid.clone());
+
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: "sp-new".into(),
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "historical-call".into(),
+            name: ToolName::new("not_a_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("historical reuse should be repaired");
+
+    let mut assistant_call_ids = Vec::new();
+    let mut reused_error_ids = Vec::new();
+    for node in default_agent_tree(&h).nodes() {
+        match &node.entry {
+            AgentEntry::AssistantResponse { output_items, .. } => {
+                assistant_call_ids.extend(output_items.iter().filter_map(|item| match item {
+                    ContextItem::ToolCall(call) => Some(call.call_id.to_string()),
+                    _ => None,
+                }));
+            }
+            AgentEntry::ToolResults { items } => {
+                reused_error_ids.extend(items.iter().filter_map(|item| match &item.status {
+                    ToolResultStatus::Error { message }
+                        if message.contains("reused prior tool call_id") =>
+                    {
+                        Some(item.call_id.to_string())
+                    }
+                    _ => None,
+                }));
+            }
+            _ => {}
+        }
+    }
+    assert!(assistant_call_ids.iter().any(|id| id == "historical-call"));
+    assert!(
+        assistant_call_ids
+            .iter()
+            .any(|id| id == "invalid_tool_call_sp-new_1")
+    );
+    assert_eq!(reused_error_ids, vec!["invalid_tool_call_sp-new_1"]);
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
 fn disconnect_removes_extension_prompt_and_agent_context() {
     let tmp = TempDir::new().expect("temp dir");
     let mut h = echo_harness(tmp.path()).expect("harness");

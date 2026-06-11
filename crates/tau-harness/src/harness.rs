@@ -936,6 +936,20 @@ pub(crate) fn tool_calls_from_output_items(output_items: &[ContextItem]) -> Vec<
         .collect()
 }
 
+fn unique_synthetic_tool_call_id(
+    seen_tool_call_ids: &mut HashSet<ToolCallId>,
+    index: usize,
+) -> ToolCallId {
+    let mut suffix = index + 1;
+    loop {
+        let candidate: ToolCallId = format!("invalid_tool_call_{suffix}").into();
+        if seen_tool_call_ids.insert(candidate.clone()) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
 fn response_requests_tool_calls(response: &ProviderResponseFinished) -> bool {
     if response.stop_reason.requests_tool_calls() {
         return true;
@@ -8742,14 +8756,6 @@ impl Harness {
             ));
             requested_tool_calls = false;
         }
-        if requested_tool_calls
-            && let Some(call) = tool_calls.iter().find(|call| call.id.as_str().is_empty())
-        {
-            return Err(HarnessError::Participant(format!(
-                "agent response {} contained tool call {} with empty call_id",
-                response.agent_prompt_id, call.name
-            )));
-        }
         let is_non_tool_ext_query = self.agents.get(&cid).is_some_and(|conv| {
             matches!(
                 conv.originator,
@@ -8757,12 +8763,35 @@ impl Harness {
             ) && conv.parent_tool_call_id.is_none()
         });
 
+        let mut invalid_tool_call_errors: HashMap<ToolCallId, String> = HashMap::new();
         let mut normalized_calls: Vec<(AgentToolCall, BackgroundSupport)> = Vec::new();
         if requested_tool_calls {
+            let mut seen_tool_call_ids = HashSet::new();
             normalized_calls = tool_calls
                 .iter()
-                .map(|call| {
-                    let call = call.clone();
+                .enumerate()
+                .map(|(index, call)| {
+                    let mut call = call.clone();
+                    if call.id.as_str().is_empty() {
+                        call.id = unique_synthetic_tool_call_id(&mut seen_tool_call_ids, index);
+                        invalid_tool_call_errors.insert(
+                            call.id.clone(),
+                            format!(
+                                "provider emitted tool call `{}` with an empty call_id; refusing to execute it",
+                                call.name
+                            ),
+                        );
+                    } else if !seen_tool_call_ids.insert(call.id.clone()) {
+                        let duplicate_call_id = call.id.clone();
+                        call.id = unique_synthetic_tool_call_id(&mut seen_tool_call_ids, index);
+                        invalid_tool_call_errors.insert(
+                            call.id.clone(),
+                            format!(
+                                "provider emitted duplicate tool call_id `{duplicate_call_id}` for tool `{}`; refusing to execute the duplicate",
+                                call.name
+                            ),
+                        );
+                    }
                     let background_support =
                         self.resolve_tool_background_support(call.name.as_str());
                     (call, background_support)
@@ -8909,14 +8938,11 @@ impl Harness {
             // `UserMessage` entries onto this agent's branch)
             // and sends a new prompt with the results plus those
             // steering messages.
-            // Normalize empty call_ids to a synthetic one. Models
-            // sometimes emit hallucinated tool calls with both a
-            // missing name *and* a missing id; an empty id would
-            // collide with itself in `in_flight_tool_invocations` /
-            // `pending_tool_sessions`, and would later render into
-            // conversation history as an empty `call_id` which the
-            // OpenAI Responses API rejects with
-            // `input[N].call_id: empty string`. Fix it at the boundary.
+            // Malformed provider call ids were normalized before the assistant
+            // response was published. Keep them in the turn as synthetic
+            // rejected calls so the next model prompt sees a matched
+            // tool-call/tool-error pair instead of the harness returning an
+            // event-loop error or overwriting duplicate map entries.
             let remaining_calls: Vec<ToolCallId> = normalized_calls
                 .iter()
                 .map(|(call, _)| call.id.clone())
@@ -8940,11 +8966,20 @@ impl Harness {
                 self.apply_pending_cancel_for_agent(&cid);
                 return Ok(());
             }
-            // Queue all tool calls emitted by the provider response. The turn
-            // machine preserves provider order while tracking foreground and
-            // background completion state.
+            // Queue well-formed tool calls and turn malformed calls into
+            // model-visible errors. The turn machine preserves provider order
+            // for calls that are safe to dispatch.
             for (call, background_support) in normalized_calls {
-                self.tool_turn.push(cid.clone(), call, background_support);
+                if let Some(message) = invalid_tool_call_errors.remove(&call.id) {
+                    self.reject_agent_tool_call_before_dispatch(
+                        &cid,
+                        &call,
+                        call.name.clone(),
+                        message,
+                    );
+                } else {
+                    self.tool_turn.push(cid.clone(), call, background_support);
+                }
             }
             self.drain_pending_tool_invocations()?;
         } else {

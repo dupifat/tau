@@ -2346,12 +2346,10 @@ fn unavailable_tool_name_does_not_panic_and_surfaces_error() {
     h.shutdown().expect("shutdown");
 }
 
+/// Ensures empty provider call ids become synthetic tool errors instead of an
+/// event-loop error that leaves prompt bookkeeping wedged.
 #[test]
-fn empty_tool_call_id_rejects_response_before_commit() {
-    // Empty provider call ids cannot be correlated into a durable
-    // transcript. Reject them before committing an assistant response
-    // or dispatching tools; synthesizing ids would hide malformed
-    // provider output and let unsafe tool work proceed.
+fn empty_tool_call_id_becomes_model_visible_tool_error() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -2385,7 +2383,7 @@ fn empty_tool_call_id_rejects_response_before_commit() {
         }),
     );
 
-    let response = ProviderResponseFinished {
+    h.handle_provider_response_finished(ProviderResponseFinished {
         agent_prompt_id: "sp-x".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         output_items: vec![
@@ -2404,42 +2402,117 @@ fn empty_tool_call_id_rejects_response_before_commit() {
         ],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
-        usage: match (None, None, None) {
-            (None, None, None) => None,
-            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
-                model: None,
-                prompt_sent_tokens: input_tokens.unwrap_or(0),
-                prompt_cached_tokens: cached_tokens.unwrap_or(0),
-                response_received_tokens: output_tokens.unwrap_or(0),
-                stats: Default::default(),
-            }),
-        },
+        usage: None,
         originator: tau_proto::PromptOriginator::User,
-
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
         backend: None,
         provider_response_id: None,
         ws_pool_delta: None,
-    };
+    })
+    .expect("empty call ids should be terminalized as tool errors");
 
-    let error = h
-        .handle_provider_response_finished(response)
-        .expect_err("empty call id must reject the response");
-    assert!(
-        error.to_string().contains("empty call_id"),
-        "unexpected error: {error}"
-    );
-
-    // No tool work should be scheduled and the malformed assistant
-    // response should not be committed to the agent tree.
     assert!(h.tool_turn.is_empty());
-    assert!(default_agent_tree(&h).nodes().iter().all(|node| {
-        !matches!(
-            node.entry,
-            AgentEntry::AssistantResponse { .. } | AgentEntry::ToolResults { .. }
-        )
-    }));
+    assert!(!h.pending_tools.contains_key(&ToolCallId::from("")));
+    assert!(!h.tool_agents.contains_key(&ToolCallId::from("")));
+
+    let mut assistant_call_ids = Vec::new();
+    let mut tool_error_ids = Vec::new();
+    for node in default_agent_tree(&h).nodes() {
+        match &node.entry {
+            AgentEntry::AssistantResponse { output_items, .. } => {
+                assistant_call_ids.extend(output_items.iter().filter_map(|item| match item {
+                    ContextItem::ToolCall(call) => Some(call.call_id.to_string()),
+                    _ => None,
+                }));
+            }
+            AgentEntry::ToolResults { items } => {
+                tool_error_ids.extend(items.iter().filter_map(|item| match &item.status {
+                    ToolResultStatus::Error { message } if message.contains("empty call_id") => {
+                        Some(item.call_id.to_string())
+                    }
+                    _ => None,
+                }));
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        assistant_call_ids,
+        vec!["invalid_tool_call_1", "invalid_tool_call_2"]
+    );
+    assert_eq!(tool_error_ids, assistant_call_ids);
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Ensures duplicate provider call ids are normalized before they reach maps
+/// keyed by call id, while the duplicate is reported back to the model.
+#[test]
+fn duplicate_tool_call_id_becomes_model_visible_tool_error() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    let cid = ensure_test_user_agent(&mut h);
+    seed_agent_thinking(&mut h, &cid, "sp-x");
+    h.prompt_agents.insert("sp-x".into(), cid.clone());
+
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: "sp-x".into(),
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        output_items: vec![
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "dup".into(),
+                name: ToolName::new("not_a_tool"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+            }),
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "dup".into(),
+                name: ToolName::new("not_a_tool"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+            }),
+        ],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("duplicate call ids should not wedge the harness");
+
+    assert!(h.tool_turn.is_empty());
+    let mut assistant_call_ids = Vec::new();
+    let mut duplicate_error_ids = Vec::new();
+    for node in default_agent_tree(&h).nodes() {
+        match &node.entry {
+            AgentEntry::AssistantResponse { output_items, .. } => {
+                assistant_call_ids.extend(output_items.iter().filter_map(|item| match item {
+                    ContextItem::ToolCall(call) => Some(call.call_id.to_string()),
+                    _ => None,
+                }));
+            }
+            AgentEntry::ToolResults { items } => {
+                duplicate_error_ids.extend(items.iter().filter_map(|item| match &item.status {
+                    ToolResultStatus::Error { message }
+                        if message.contains("duplicate tool call_id") =>
+                    {
+                        Some(item.call_id.to_string())
+                    }
+                    _ => None,
+                }));
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(assistant_call_ids, vec!["dup", "invalid_tool_call_2"]);
+    assert_eq!(duplicate_error_ids, vec!["invalid_tool_call_2"]);
 
     h.shutdown().expect("shutdown");
 }

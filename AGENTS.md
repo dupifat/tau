@@ -43,14 +43,12 @@
 
 ## Definition of done
 
-- Code is formatted.
-- Relevant tests pass.
-- Run `selfci check` after every major change.
+- `selfci check` (CI) passes
 - Update `FEATURES.md` after editing any new major features.
 
 ## Rules
 
-- Do not preserve backwards compatibility for renamed or removed Tau tool names unless the user explicitly asks for compatibility.
+- This project is still very immuture and backward compatibility is never needed.
 - ALWAYS consult `tau-commit` skill before making commits
 - When asked to debug existing tau sessions, read `tau-self-knowledge-debugging` skill
 - Extension configuration errors must never be silent. Extensions that fail to parse or apply their `Configure.config` MUST send `HarnessInputMessage::ConfigError`; the harness MUST surface those as Important `harness.info` and replay them to late UI subscribers.

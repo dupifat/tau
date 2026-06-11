@@ -7936,9 +7936,6 @@ impl Harness {
             }),
         );
         if waiting_on.is_empty() {
-            if matches!(reason, tau_proto::SessionStartReason::Resume) {
-                self.repair_restored_session_tool_state(&session_id);
-            }
             if let Err(error) = self.complete_session_init(session_id, reason) {
                 self.emit_info(&format!("failed to initialize session: {error}"));
                 self.turn_state = TurnState::Idle;
@@ -7951,13 +7948,10 @@ impl Harness {
         }
 
         self.turn_state = TurnState::InitializingSession {
-            session_id: session_id.clone(),
+            session_id,
             reason,
             waiting_on,
         };
-        if matches!(reason, tau_proto::SessionStartReason::Resume) {
-            self.repair_restored_session_tool_state(&session_id);
-        }
     }
 
     fn handle_extension_context_ready(
@@ -7985,9 +7979,6 @@ impl Harness {
             _ => None,
         };
         if let Some((session_id, reason)) = completed_session {
-            if matches!(reason, tau_proto::SessionStartReason::Resume) {
-                self.repair_restored_session_tool_state(&session_id);
-            }
             self.complete_session_init(session_id, reason)?;
         }
         if let Some(waiting_on) = self.pending_agent_context_ready.get_mut(&ready.agent_id) {
@@ -8029,13 +8020,20 @@ impl Harness {
     fn complete_session_init(
         &mut self,
         session_id: SessionId,
-        _reason: tau_proto::SessionStartReason,
+        reason: tau_proto::SessionStartReason,
     ) -> Result<(), HarnessError> {
         // AGENTS.md and skill context is agent-scoped. Session init only waits
         // for discovery; the discovered context is injected when a durable agent
         // is explicitly created from the UI's current role/cwd state.
         self.initialized_sessions.insert(session_id.clone());
+        // Catch up before repair: repair appends its synthetic tool errors to
+        // the durable log as it publishes them live, so running it first
+        // would deliver each error twice (live, then replay-marked) to peers
+        // subscribed before init.
         self.catch_up_subscribers_after_session_init();
+        if matches!(reason, tau_proto::SessionStartReason::Resume) {
+            self.repair_restored_session_tool_state(&session_id);
+        }
         self.request_prompt_prewarm(&session_id);
         self.turn_state = TurnState::Idle;
         self.try_advance_queue();

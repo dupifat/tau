@@ -1365,3 +1365,49 @@ fn resumed_session_init_catches_up_subscribers_that_joined_before_init() {
 
     h.shutdown().expect("shutdown");
 }
+
+/// Resume repair appends its synthetic tool errors to the durable log as it
+/// publishes them live. Init-completion catch-up therefore runs before
+/// repair, so a peer subscribed before init sees each synthetic error exactly
+/// once — live — and not again as a replay-marked frame.
+#[test]
+fn resumed_session_repair_errors_are_not_duplicated_for_pre_init_subscribers() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    seed_restored_tool_round(&sp, &["call-restored"], &[]);
+
+    let mut h = echo_harness_for("s2", &sp).expect("start");
+    let extension_events = connect_test_tool(&mut h, "early-extension");
+    h.handle_extension_message(
+        "early-extension",
+        TestMessage::Subscribe(Subscribe {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::TOOL_ERROR)],
+        }),
+    )
+    .expect("extension subscribe");
+    extension_events.lock().expect("sink").clear();
+
+    h.switch_session("s1".into(), tau_proto::SessionStartReason::Resume)
+        .expect("switch to resumed session");
+
+    let events = extension_events.lock().expect("sink");
+    let deliveries: Vec<bool> = events
+        .iter()
+        .filter_map(|routed| {
+            peel_delivery(&routed.frame).and_then(|delivery| match delivery.event() {
+                Event::ToolError(error) if error.call_id.as_str() == "call-restored" => {
+                    Some(delivery.is_replay())
+                }
+                _ => None,
+            })
+        })
+        .collect();
+    assert_eq!(
+        deliveries,
+        vec![false],
+        "synthetic repair error must arrive exactly once, live (got live/replay flags: {deliveries:?})",
+    );
+    drop(events);
+
+    h.shutdown().expect("shutdown");
+}

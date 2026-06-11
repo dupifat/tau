@@ -908,6 +908,7 @@ mod extensions;
 mod interception;
 mod pending_notices;
 mod replay;
+mod semantic_event_router;
 #[allow(dead_code)]
 mod skill_tool;
 mod subagents_tool;
@@ -2754,22 +2755,11 @@ impl Harness {
         sync_head_for: Option<&ConversationHeadSync>,
         recorded_at: tau_proto::UnixMicros,
     ) -> Result<Option<tau_proto::NodeId>, HarnessError> {
-        if transient
-            && !matches!(
-                event,
-                Event::ToolResult(_)
-                    | Event::ToolError(_)
-                    | Event::ProviderToolResult(_)
-                    | Event::ProviderToolError(_)
-                    | Event::ToolCancelled(_)
-                    | Event::ToolBackgroundResult(_)
-                    | Event::ToolBackgroundError(_)
-            )
-        {
+        if !semantic_event_router::should_persist_event(event, transient) {
             return Ok(None);
         }
         let source = source.map(tau_proto::ConnectionId::from);
-        if let Some(session_id) = self.session_membership_id_for_event(event) {
+        if let Some(session_id) = semantic_event_router::session_membership_id_for_event(event) {
             self.store.append_session_event_at(
                 session_id.as_str(),
                 source,
@@ -2794,14 +2784,6 @@ impl Harness {
                 recorded_at,
             )?
             .folded_node_id)
-    }
-
-    fn session_membership_id_for_event(&self, event: &Event) -> Option<SessionId> {
-        match event {
-            Event::SessionAgentLoaded(loaded) => Some(loaded.session_id.clone()),
-            Event::SessionAgentUnloaded(unloaded) => Some(unloaded.session_id.clone()),
-            _ => None,
-        }
     }
 
     fn agent_scoped_agent_id_for_event(

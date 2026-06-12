@@ -127,7 +127,8 @@ impl Sender {
 /// Receiving half of a notify channel. Not cloneable — single consumer.
 ///
 /// `Receiver` is intentionally [`Send`] but not [`Sync`], so safe code cannot
-/// share a receiver between multiple blocking consumers.
+/// call `recv` concurrently through shared references such as `Arc<Receiver>`
+/// without adding its own synchronization.
 ///
 /// ```compile_fail
 /// use std::sync::Arc;
@@ -140,6 +141,9 @@ impl Sender {
 /// ```
 pub struct Receiver {
     shared: Arc<Shared>,
+    // This marker shapes auto-traits: `Cell<()>` is `Send` but not `Sync`, so
+    // `Receiver` remains movable to another thread while preventing shared
+    // references from being used concurrently without external synchronization.
     single_consumer: PhantomData<Cell<()>>,
 }
 

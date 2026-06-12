@@ -1,3 +1,4 @@
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
@@ -54,12 +55,19 @@ fn receiver_is_send() {
 #[test]
 fn recv_blocks_until_notified() {
     let (tx, rx) = channel();
+    let (result_tx, result_rx) = mpsc::channel();
     let handle = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(50));
-        tx.notify();
+        result_tx.send(rx.recv()).expect("receiver result sent");
     });
-    assert_eq!(rx.recv(), Ok(()));
-    handle.join().expect("sender thread panicked");
+
+    assert_eq!(
+        result_rx.recv_timeout(Duration::from_millis(50)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    );
+
+    tx.notify();
+    assert_eq!(result_rx.recv_timeout(Duration::from_secs(1)), Ok(Ok(())));
+    handle.join().expect("receiver thread panicked");
 }
 
 /// Ensures cloned senders can notify concurrently and disconnect after the last
@@ -152,10 +160,20 @@ fn notification_takes_priority_over_disconnect() {
 #[test]
 fn recv_unblocks_on_disconnect() {
     let (tx, rx) = channel();
+    let (result_tx, result_rx) = mpsc::channel();
     let handle = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(50));
-        drop(tx);
+        result_tx.send(rx.recv()).expect("receiver result sent");
     });
-    assert_eq!(rx.recv(), Err(Disconnected));
-    handle.join().expect("sender thread panicked");
+
+    assert_eq!(
+        result_rx.recv_timeout(Duration::from_millis(50)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    );
+
+    drop(tx);
+    assert_eq!(
+        result_rx.recv_timeout(Duration::from_secs(1)),
+        Ok(Err(Disconnected))
+    );
+    handle.join().expect("receiver thread panicked");
 }

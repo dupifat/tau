@@ -11,6 +11,10 @@ When every sender is dropped, the channel becomes disconnected. A pending
 notification is still delivered before `recv` or `try_recv` reports
 `Disconnected`.
 
+The receiving half may be moved to another thread, but it is intentionally not
+`Sync`: clone `Sender` for multiple producers rather than sharing one receiver
+between concurrent consumers.
+
 ## Why this exists
 
 Tau uses this primitive for wakeups where only “something changed” matters, such

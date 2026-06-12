@@ -11,7 +11,7 @@
 //!   String>` is the contract callers see.
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -566,15 +566,27 @@ pub fn load_skill_from_content(
 ///    skills.
 /// 3. Recurse into subdirectories to find `SKILL.md`.
 /// 4. Skip dot-prefixed entries and `node_modules`.
-/// 5. Symlinked directories are checked only for their own `SKILL.md`, without
-///    recursing into children.
+/// 5. Follow symlinked directories recursively, with canonical-path cycle
+///    protection.
 pub fn discover_skill_paths(root: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    discover_skill_paths_inner(root, true, &mut paths);
+    let mut visited = BTreeSet::new();
+    discover_skill_paths_inner(root, true, &mut paths, &mut visited);
     paths
 }
 
-fn discover_skill_paths_inner(dir: &Path, is_root: bool, out: &mut Vec<PathBuf>) {
+fn discover_skill_paths_inner(
+    dir: &Path,
+    is_root: bool,
+    out: &mut Vec<PathBuf>,
+    visited: &mut BTreeSet<PathBuf>,
+) {
+    if let Ok(canonical) = dir.canonicalize()
+        && !visited.insert(canonical)
+    {
+        return;
+    }
+
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -611,38 +623,11 @@ fn discover_skill_paths_inner(dir: &Path, is_root: bool, out: &mut Vec<PathBuf>)
         };
 
         let path = entry.path();
-        if file_type.is_dir() {
-            discover_skill_paths_inner(&path, false, out);
-        } else if file_type.is_symlink() {
-            scan_symlink_dir_once(&path, out);
+        if file_type.is_dir() || file_type.is_symlink() {
+            discover_skill_paths_inner(&path, false, out, visited);
         } else if file_type.is_file() && is_root && name_str.ends_with(".md") {
             out.push(path);
         }
-    }
-}
-
-fn scan_symlink_dir_once(path: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(metadata) = fs::metadata(path) else {
-        return;
-    };
-    if !metadata.is_dir() {
-        return;
-    }
-
-    let Ok(entries) = fs::read_dir(path) else {
-        return;
-    };
-    let mut children: Vec<fs::DirEntry> = entries.flatten().collect();
-    children.sort_by_key(|entry| entry.path());
-
-    let skill_md = children.iter().find(|e| {
-        if e.file_name() != SKILL_FILENAME {
-            return false;
-        }
-        e.file_type().map(|ft| ft.is_file()).unwrap_or(false)
-    });
-    if let Some(entry) = skill_md {
-        out.push(entry.path());
     }
 }
 

@@ -777,9 +777,10 @@ fn discover_follows_symlinked_dirs() {
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let real = tmp.path().join("real-skill");
-    fs::create_dir_all(&real).expect("mkdir");
+    let nested = real.join("nested");
+    fs::create_dir_all(&nested).expect("mkdir");
     fs::write(
-        real.join("SKILL.md"),
+        nested.join("SKILL.md"),
         "---\nname: real-skill\ndescription: real skill\n---\n",
     )
     .expect("write");
@@ -790,6 +791,7 @@ fn discover_follows_symlinked_dirs() {
     let paths = discover_skill_paths(&link);
     assert_eq!(paths.len(), 1);
     assert!(paths[0].starts_with(&link));
+    assert!(paths[0].ends_with("nested/SKILL.md"));
 }
 
 #[test]

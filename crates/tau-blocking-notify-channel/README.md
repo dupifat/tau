@@ -13,7 +13,8 @@ notification is still delivered before `recv` or `try_recv` reports
 
 The receiving half may be moved to another thread, but it is intentionally not
 `Sync`: clone `Sender` for multiple producers rather than sharing one receiver
-between concurrent consumers.
+between concurrent consumers. Dropping the receiver is not observable by senders;
+later `notify` calls still set the coalesced bit and return normally.
 
 ## Why this exists
 

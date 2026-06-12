@@ -7,7 +7,8 @@
 //! When every `Sender` has been dropped the channel becomes *disconnected*.
 //! A pending notification always takes priority over disconnection: the
 //! receiver will see `Ok(())` first and only get `Err(Disconnected)` on the
-//! next call.
+//! next call. Dropping the receiver is not observable by senders; later
+//! notifications still set the coalesced bit and return normally.
 //!
 //! # Why a custom primitive
 //!
@@ -59,13 +60,18 @@ impl std::fmt::Display for Disconnected {
 impl std::error::Error for Disconnected {}
 
 struct State {
+    // Whether a notification is currently pending for the receiver.
     notified: bool,
+    // Whether all senders have been dropped.
     disconnected: bool,
 }
 
 struct Shared {
+    // Protected notification/disconnection state.
     state: Mutex<State>,
+    // Waits and wakes the single blocking receiver.
     condvar: Condvar,
+    // Number of live sender handles, including clones.
     sender_count: AtomicUsize,
 }
 
@@ -77,6 +83,7 @@ impl Shared {
 
 /// Sending half of a notify channel. Cloneable for multiple producers.
 pub struct Sender {
+    // Shared channel state retained by each producer handle.
     shared: Arc<Shared>,
 }
 
@@ -114,6 +121,9 @@ impl Sender {
     /// # Panics
     ///
     /// Panics if another thread panicked while holding the channel mutex.
+    ///
+    /// Dropping the receiver is not observable here; `notify` still sets the
+    /// coalesced bit and returns normally.
     pub fn notify(&self) {
         let mut state = self.shared.lock();
         if state.notified {
@@ -140,6 +150,7 @@ impl Sender {
 /// thread::spawn(move || worker_rx.recv()).join().unwrap();
 /// ```
 pub struct Receiver {
+    // Shared channel state retained by the single consumer handle.
     shared: Arc<Shared>,
     // This marker shapes auto-traits: `Cell<()>` is `Send` but not `Sync`, so
     // `Receiver` remains movable to another thread while preventing shared
@@ -180,7 +191,7 @@ impl Receiver {
         }
     }
 
-    /// Non-blocking check.
+    /// Attempts to receive a pending notification without blocking.
     ///
     /// Returns `Ok(true)` if a notification was pending (and resets it),
     /// `Ok(false)` if nothing was pending, or `Err(Disconnected)` when all

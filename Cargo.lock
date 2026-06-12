@@ -2610,6 +2610,9 @@ dependencies = [
 [[package]]
 name = "tau-blocking-notify-channel"
 version = "0.1.0"
+dependencies = [
+ "static_assertions",
+]
 
 [[package]]
 name = "tau-cli"

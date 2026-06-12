@@ -4,12 +4,24 @@ use std::time::Duration;
 
 use super::*;
 
+const PRE_TRIGGER_WAIT: Duration = Duration::from_millis(50);
+const RESULT_WAIT: Duration = Duration::from_secs(1);
+
 /// Ensures a single notification is delivered to a blocking receive.
 #[test]
 fn single_notify_wakes_receiver() {
     let (tx, rx) = channel();
     tx.notify();
     assert_eq!(rx.recv(), Ok(()));
+}
+
+/// Ensures dropping the receiver does not make later sender notifications
+/// panic.
+#[test]
+fn notify_after_receiver_drop_returns_normally() {
+    let (tx, rx) = channel();
+    drop(rx);
+    tx.notify();
 }
 
 /// Ensures burst notifications coalesce into one pending wakeup instead of
@@ -51,22 +63,33 @@ fn receiver_is_send() {
     assert_eq!(handle.join().expect("receiver thread panicked"), Ok(()));
 }
 
+/// Ensures the public auto-trait contract stays single-consumer: movable to a
+/// worker thread, but not shareable by reference across threads.
+#[test]
+fn receiver_auto_traits_match_single_consumer_contract() {
+    static_assertions::assert_impl_all!(Receiver: Send);
+    static_assertions::assert_not_impl_any!(Receiver: Sync);
+}
+
 /// Ensures `recv` waits for a later notification rather than returning early.
 #[test]
 fn recv_blocks_until_notified() {
     let (tx, rx) = channel();
+    let (ready_tx, ready_rx) = mpsc::channel();
     let (result_tx, result_rx) = mpsc::channel();
     let handle = thread::spawn(move || {
+        ready_tx.send(()).expect("receiver readiness sent");
         result_tx.send(rx.recv()).expect("receiver result sent");
     });
 
+    assert_eq!(ready_rx.recv_timeout(RESULT_WAIT), Ok(()));
     assert_eq!(
-        result_rx.recv_timeout(Duration::from_millis(50)),
+        result_rx.recv_timeout(PRE_TRIGGER_WAIT),
         Err(mpsc::RecvTimeoutError::Timeout)
     );
 
     tx.notify();
-    assert_eq!(result_rx.recv_timeout(Duration::from_secs(1)), Ok(Ok(())));
+    assert_eq!(result_rx.recv_timeout(RESULT_WAIT), Ok(Ok(())));
     handle.join().expect("receiver thread panicked");
 }
 
@@ -160,20 +183,20 @@ fn notification_takes_priority_over_disconnect() {
 #[test]
 fn recv_unblocks_on_disconnect() {
     let (tx, rx) = channel();
+    let (ready_tx, ready_rx) = mpsc::channel();
     let (result_tx, result_rx) = mpsc::channel();
     let handle = thread::spawn(move || {
+        ready_tx.send(()).expect("receiver readiness sent");
         result_tx.send(rx.recv()).expect("receiver result sent");
     });
 
+    assert_eq!(ready_rx.recv_timeout(RESULT_WAIT), Ok(()));
     assert_eq!(
-        result_rx.recv_timeout(Duration::from_millis(50)),
+        result_rx.recv_timeout(PRE_TRIGGER_WAIT),
         Err(mpsc::RecvTimeoutError::Timeout)
     );
 
     drop(tx);
-    assert_eq!(
-        result_rx.recv_timeout(Duration::from_secs(1)),
-        Ok(Err(Disconnected))
-    );
+    assert_eq!(result_rx.recv_timeout(RESULT_WAIT), Ok(Err(Disconnected)));
     handle.join().expect("receiver thread panicked");
 }

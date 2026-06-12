@@ -239,7 +239,7 @@ extensions: {
   "core-shell":         { enable: false },                       // disable
   "provider-builtin":    { prefix: ["ssh", "user@host"] },        // run remotely
   "custom-tool":         { command: ["./tool"], cwd: "/srv/tool" }, // run from cwd
-  "std-notifications": { config: { "agent-idle": [{ delay_seconds: 30, osc1337: { key: "user-text-notification", value: "..." } }] } }, // reconfigure
+  "std-notifications": { config: { "agent_idle": [{ delay_seconds: 30, osc1337: { key: "user-text-notification", value: "..." } }] } }, // reconfigure
 },
 ```
 
@@ -389,12 +389,12 @@ stale sockets on next use.
 
 ### `std-notifications` — idle and turn notifications
 
-Runs configurable `agent-start`, `agent-end`, and `agent-idle` notification
+Runs configurable `agent_start`, `agent_end`, `agent_idle`, and `agent_idle_all` notification
 hook arrays. Hooks can emit OSC 1337 user-vars, terminal bells, and detached
 commands with Handlebars-templated arguments. Tau's built-in configuration leaves
 notifications disabled; users can opt in to prompt-submit sounds, final-response
-sounds, idle desktop notifications after `delay_seconds` of inactivity, and idle
-summaries via `agent_summary: true`.
+sounds, per-agent or all-agents idle desktop notifications after `delay_seconds`
+of inactivity, and idle summaries via `agent_summary: true`.
 
 ### Harness-owned `agent_start` / `agent_watch` / `wait` / `message` — multi-agent workflows
 

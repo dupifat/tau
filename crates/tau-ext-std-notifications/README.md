@@ -15,13 +15,14 @@ effects into audible or visual notifications.
 ## What it does
 
 Tau's built-in configuration enables no notifications by default. When
-configured, the three hook groups map to these trigger points:
+configured, the four hook groups map to these trigger points:
 
 | Hook | Trigger | Typical OSC user-var | Typical value |
 |---|---|---|---|
-| `agent-start` | `agent.prompt_submitted` (originator: User) | `user-notification` | `protoss-probe-ack` |
-| `agent-end` | Final `provider.response_finished` (no pending tool calls, originator: User) | `user-notification` | `protoss-upgrade-complete` |
-| `agent-idle` | Idle window elapses after a final response | `user-text-notification` | JSON payload (see below) |
+| `agent_start` | `agent.prompt_submitted` (originator: User) | `user-notification` | `protoss-probe-ack` |
+| `agent_end` | Final `provider.response_finished` (no pending tool calls, originator: User) | `user-notification` | `protoss-upgrade-complete` |
+| `agent_idle` | Idle window elapses after a final response | `user-text-notification` | JSON payload (see below) |
+| `agent_idle_all` | Idle window elapses after every loaded agent in a session is idle | `user-text-notification` | JSON payload (see below) |
 
 The "final response" filter only treats responses with `tool_calls`
 empty as the end of an agent turn. Mid-turn finishes (tool-call
@@ -35,9 +36,11 @@ the sounds or perturb the idle state machine.
 ## Idle text notification
 
 After `delay_seconds` (default 60 when omitted on a configured idle hook) of
-inactivity following a final agent response, the example `agent-idle` hook fires
+inactivity following a final agent response, the example `agent_idle` hook fires
 the `user-text-notification` user-var with the static "Waiting for user
-input" body.
+input" body. `agent_idle_all` uses the same hook item schema, but arms only
+when a session transitions from at least one busy loaded agent to every loaded
+agent being idle.
 
 If an idle hook sets `agent_summary` to `true`, the extension first asks the
 agent for a one-sentence summary before firing that hook:
@@ -76,7 +79,8 @@ expects.
 ## Configuration
 
 The extension reads its config from the `extensions.<name>.config`
-field of `harness.yaml`. All fields are optional; unknown fields
+field of `harness.yaml`. Hook/configuration keys are snake_case; do not add
+kebab-case aliases for new keys. All fields are optional; unknown fields
 are rejected with a `lifecycle.config_error` so the harness can
 surface typos to the user.
 
@@ -86,13 +90,13 @@ surface typos to the user.
     "std-notifications": {
       enable: true,
       config: {
-        "agent-start": [
+        "agent_start": [
           { osc1337: { key: "user-notification", value: "protoss-probe-ack" } },
         ],
-        "agent-end": [
+        "agent_end": [
           { osc1337: { key: "user-notification", value: "protoss-upgrade-complete" } },
         ],
-        "agent-idle": [
+        "agent_idle": [
           {
             delay_seconds: 60,
             agent_summary: false,
@@ -102,6 +106,7 @@ surface typos to the user.
             },
           },
         ],
+        "agent_idle_all": [],
       },
     },
   },
@@ -129,9 +134,10 @@ strict mode. Current variables include `hook`, `agent.id`, `agent.name`
   extensions: {
     "std-notifications": {
       config: {
-        "agent-start": [],
-        "agent-end": [{ bell: true }],
-        "agent-idle": [],
+        "agent_start": [],
+        "agent_end": [{ bell: true }],
+        "agent_idle": [],
+        "agent_idle_all": [],
       },
     },
   },

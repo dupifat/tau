@@ -150,9 +150,9 @@ fn idle_osc_config(delay_seconds: u64, agent_summary: bool) -> serde_json::Value
 
 fn default_notifications_config_frame() -> HarnessOutputMessage {
     configure_frame(tau_proto::json_to_cbor(&serde_json::json!({
-        "agent-start": [{ "osc1337": { "key": SOUND_VAR_NAME, "value": VALUE_AGENT_START } }],
-        "agent-end": [{ "osc1337": { "key": SOUND_VAR_NAME, "value": VALUE_AGENT_END } }],
-        "agent-idle": [{
+        "agent_start": [{ "osc1337": { "key": SOUND_VAR_NAME, "value": VALUE_AGENT_START } }],
+        "agent_end": [{ "osc1337": { "key": SOUND_VAR_NAME, "value": VALUE_AGENT_END } }],
+        "agent_idle": [{
             "osc1337": {
                 "key": TEXT_VAR_NAME,
                 "value": default_idle_payload_template(),
@@ -163,16 +163,16 @@ fn default_notifications_config_frame() -> HarnessOutputMessage {
 
 fn immediate_idle_agent_summary_config_frame() -> HarnessOutputMessage {
     configure_frame(tau_proto::json_to_cbor(&serde_json::json!({
-        "agent-end": [{ "osc1337": { "key": SOUND_VAR_NAME, "value": VALUE_AGENT_END } }],
-        "agent-idle": [idle_osc_config(0, true)],
+        "agent_end": [{ "osc1337": { "key": SOUND_VAR_NAME, "value": VALUE_AGENT_END } }],
+        "agent_idle": [idle_osc_config(0, true)],
     })))
 }
 
 fn bell_mode_config_frame() -> HarnessOutputMessage {
     configure_frame(tau_proto::json_to_cbor(&serde_json::json!({
-        "agent-start": [],
-        "agent-end": [{ "bell": true }],
-        "agent-idle": [],
+        "agent_start": [],
+        "agent_end": [{ "bell": true }],
+        "agent_idle": [],
     })))
 }
 
@@ -181,26 +181,7 @@ fn assistant_finished_response(
     text: &str,
     originator: tau_proto::PromptOriginator,
 ) -> ProviderResponseFinished {
-    ProviderResponseFinished {
-        agent_prompt_id: agent_prompt_id.into(),
-        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-        output_items: vec![ContextItem::Message(MessageItem {
-            role: ContextRole::Assistant,
-            content: vec![ContentPart::Text {
-                text: text.to_owned(),
-            }],
-            phase: None,
-        })],
-        stop_reason: ProviderStopReason::EndTurn,
-        error: None,
-        originator,
-        usage: None,
-        compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
-        backend: None,
-        provider_response_id: None,
-        ws_pool_delta: None,
-    }
+    assistant_finished_response_for_agent("main", agent_prompt_id, text, originator)
 }
 
 fn tool_background_placeholder(
@@ -232,18 +213,72 @@ fn tool_background_result(
     }
 }
 
-fn user_prompt_submitted(
+fn user_prompt_submitted_for_agent(
+    agent_id: &str,
     text: impl Into<String>,
     originator: tau_proto::PromptOriginator,
 ) -> Event {
     Event::AgentPromptSubmitted(AgentPromptSubmitted {
-        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
         text: text.into(),
         message_class: tau_proto::PromptMessageClass::User,
         originator,
         display_name: None,
         ctx_id: None,
     })
+}
+
+fn user_prompt_submitted(
+    text: impl Into<String>,
+    originator: tau_proto::PromptOriginator,
+) -> Event {
+    user_prompt_submitted_for_agent("main", text, originator)
+}
+
+fn session_agent_loaded(session_id: &str, agent_id: &str) -> Event {
+    Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+        session_id: session_id.into(),
+        agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
+    })
+}
+fn session_agent_unloaded(session_id: &str, agent_id: &str) -> Event {
+    Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
+        session_id: session_id.into(),
+        agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
+    })
+}
+fn agent_state(agent_id: &str, state: tau_proto::AgentRuntimeState) -> Event {
+    Event::AgentState(tau_proto::AgentStateChanged {
+        agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
+        state,
+    })
+}
+fn assistant_finished_response_for_agent(
+    agent_id: &str,
+    agent_prompt_id: &str,
+    text: &str,
+    originator: tau_proto::PromptOriginator,
+) -> ProviderResponseFinished {
+    ProviderResponseFinished {
+        agent_prompt_id: agent_prompt_id.into(),
+        agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
+        output_items: vec![ContextItem::Message(MessageItem {
+            role: ContextRole::Assistant,
+            content: vec![ContentPart::Text {
+                text: text.to_owned(),
+            }],
+            phase: None,
+        })],
+        stop_reason: ProviderStopReason::EndTurn,
+        error: None,
+        originator,
+        usage: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    }
 }
 
 fn tool_call_finished_response(
@@ -284,9 +319,9 @@ fn empty_config_emits_no_notifications() {
     writer
         .write_frame(&configure_frame(tau_proto::json_to_cbor(
             &serde_json::json!({
-                "agent-start": [],
-                "agent-end": [],
-                "agent-idle": [],
+                "agent_start": [],
+                "agent_end": [],
+                "agent_idle": [],
             }),
         )))
         .expect("write config");
@@ -450,12 +485,12 @@ fn agent_start_hook_renders_multiple_configured_actions() {
     let mut writer = EventWriter::new(&mut input);
     writer
         .write_frame(&configure_frame(tau_proto::json_to_cbor(&serde_json::json!({
-            "agent-start": [
+            "agent_start": [
                 { "bell": true },
                 { "osc1337": { "key": "agent-{{agent.id}}", "value": "{{hook}}:{{agent.name}}" } },
             ],
-            "agent-end": [],
-            "agent-idle": [],
+            "agent_end": [],
+            "agent_idle": [],
         }))))
         .expect("write config");
     writer
@@ -483,7 +518,7 @@ fn agent_start_hook_renders_multiple_configured_actions() {
     match osc {
         Event::Osc1337SetUserVar(osc) => {
             assert_eq!(osc.name, "agent-main");
-            assert_eq!(osc.value, "agent-start:Friendly main");
+            assert_eq!(osc.value, "agent_start:Friendly main");
         }
         other => panic!("expected Osc1337SetUserVar, got {other:?}"),
     }
@@ -495,11 +530,11 @@ fn agent_start_hook_uses_display_name_set_with_id_fallback_for_blank_prompt_name
     writer
         .write_frame(&configure_frame(tau_proto::json_to_cbor(
             &serde_json::json!({
-                "agent-start": [
+                "agent_start": [
                     { "osc1337": { "key": "agent", "value": "{{agent.name}}" } },
                 ],
-                "agent-end": [],
-                "agent-idle": [],
+                "agent_end": [],
+                "agent_idle": [],
             }),
         )))
         .expect("write config");
@@ -801,6 +836,496 @@ fn idle_timeout_defaults_to_static_notification() {
         payload["title"],
     );
     assert_eq!(payload["body"], "Waiting for user input");
+}
+
+/// The snake_case `agent_idle` key must continue to arm the per-agent idle
+/// notification. This prevents regressions to the old kebab-case spelling or
+/// accidentally wiring per-agent idleness only through `agent_idle_all`.
+#[test]
+fn agent_idle_snake_case_fires_for_individual_agent_idle() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&configure_frame(tau_proto::json_to_cbor(
+            &serde_json::json!({
+                "agent_idle": [idle_osc_config(0, false)],
+            }),
+        )))
+        .expect("write config");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response("sp-0", "done", tau_proto::PromptOriginator::User),
+        ))
+        .expect("write response");
+    writer.flush().expect("flush");
+
+    let mut output = Vec::new();
+    run_with_idle(Cursor::new(input), &mut output, Duration::from_millis(1)).expect("run");
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    drain_lifecycle(&mut reader);
+    let idle = reader.read_event().expect("read").expect("idle event");
+    let Event::Osc1337SetUserVar(osc) = idle else {
+        panic!("expected idle OSC, got {idle:?}");
+    };
+    assert_eq!(osc.name, TEXT_VAR_NAME);
+}
+
+/// The new `agent_idle_all` hook must fire only after every loaded agent in the
+/// session has returned to idle. This catches implementations that merely copy
+/// the per-agent idle behavior and fire as soon as one agent finishes.
+#[test]
+fn agent_idle_all_fires_when_every_loaded_session_agent_is_idle() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&configure_frame(tau_proto::json_to_cbor(
+            &serde_json::json!({
+                "agent_idle_all": [{
+                    "delay_seconds": 0,
+                    "osc1337": { "key": TEXT_VAR_NAME, "value": "{{hook}}:{{agent.id}}" },
+                }],
+            }),
+        )))
+        .expect("write config");
+    writer
+        .write_event(&session_agent_loaded("s1", "main"))
+        .expect("load main");
+    writer
+        .write_event(&session_agent_loaded("s1", "other"))
+        .expect("load other");
+    writer
+        .write_event(&user_prompt_submitted_for_agent(
+            "main",
+            "work 1",
+            tau_proto::PromptOriginator::User,
+        ))
+        .expect("prompt main");
+    writer
+        .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Running))
+        .expect("main running");
+    writer
+        .write_event(&user_prompt_submitted_for_agent(
+            "other",
+            "work 2",
+            tau_proto::PromptOriginator::User,
+        ))
+        .expect("prompt other");
+    writer
+        .write_event(&agent_state("other", tau_proto::AgentRuntimeState::Running))
+        .expect("other running");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response_for_agent(
+                "main",
+                "sp-main",
+                "main done",
+                tau_proto::PromptOriginator::User,
+            ),
+        ))
+        .expect("finish main");
+    writer
+        .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Idle))
+        .expect("main idle");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response_for_agent(
+                "other",
+                "sp-other",
+                "other done",
+                tau_proto::PromptOriginator::User,
+            ),
+        ))
+        .expect("finish other");
+    writer
+        .write_event(&agent_state("other", tau_proto::AgentRuntimeState::Idle))
+        .expect("other idle");
+
+    let mut output = Vec::new();
+    run_with_idle(Cursor::new(input), &mut output, Duration::from_millis(1)).expect("run");
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    drain_lifecycle(&mut reader);
+    let all_idle = reader.read_event().expect("read").expect("all idle event");
+    let Event::Osc1337SetUserVar(osc) = all_idle else {
+        panic!("expected all-idle OSC, got {all_idle:?}");
+    };
+    assert_eq!(osc.value, "agent_idle_all:other");
+    assert!(reader.read_event().expect("read eof").is_none());
+}
+
+/// If any other agent in the same session is still busy, `agent_idle_all` must
+/// remain silent even though the finishing agent itself is idle.
+#[test]
+fn agent_idle_all_does_not_fire_while_another_session_agent_is_busy() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&configure_frame(tau_proto::json_to_cbor(
+            &serde_json::json!({
+                "agent_idle_all": [{
+                    "delay_seconds": 0,
+                    "osc1337": { "key": TEXT_VAR_NAME, "value": "all idle" },
+                }],
+            }),
+        )))
+        .expect("write config");
+    writer
+        .write_event(&session_agent_loaded("s1", "main"))
+        .expect("load main");
+    writer
+        .write_event(&session_agent_loaded("s1", "other"))
+        .expect("load other");
+    writer
+        .write_event(&user_prompt_submitted_for_agent(
+            "main",
+            "work 1",
+            tau_proto::PromptOriginator::User,
+        ))
+        .expect("prompt main");
+    writer
+        .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Running))
+        .expect("main running");
+    writer
+        .write_event(&user_prompt_submitted_for_agent(
+            "other",
+            "work 2",
+            tau_proto::PromptOriginator::User,
+        ))
+        .expect("prompt other");
+    writer
+        .write_event(&agent_state("other", tau_proto::AgentRuntimeState::Running))
+        .expect("other running");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response_for_agent(
+                "main",
+                "sp-main",
+                "main done",
+                tau_proto::PromptOriginator::User,
+            ),
+        ))
+        .expect("finish main");
+    writer
+        .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Idle))
+        .expect("main idle");
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+
+    let mut output = Vec::new();
+    run_with_idle(Cursor::new(input), &mut output, Duration::from_millis(1)).expect("run");
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    drain_lifecycle(&mut reader);
+    assert!(reader.read_event().expect("read").is_none());
+}
+
+/// Running work in one session must not clear an already armed all-idle timer
+/// for another session.
+#[test]
+fn agent_idle_all_timer_survives_running_agent_in_other_session() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&configure_frame(tau_proto::json_to_cbor(
+            &serde_json::json!({
+                "agent_idle_all": [{
+                    "delay_seconds": 0,
+                    "osc1337": { "key": TEXT_VAR_NAME, "value": "{{hook}}:{{agent.id}}" },
+                }],
+            }),
+        )))
+        .expect("write config");
+    writer
+        .write_event(&session_agent_loaded("s1", "main"))
+        .expect("load main");
+    writer
+        .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Running))
+        .expect("main running");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response_for_agent(
+                "main",
+                "sp-main",
+                "done",
+                tau_proto::PromptOriginator::User,
+            ),
+        ))
+        .expect("finish main");
+    writer
+        .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Idle))
+        .expect("main idle");
+    writer
+        .write_event(&session_agent_loaded("s2", "other"))
+        .expect("load other");
+    writer
+        .write_event(&agent_state("other", tau_proto::AgentRuntimeState::Running))
+        .expect("other running");
+    writer.flush().expect("flush");
+
+    let mut output = Vec::new();
+    run_with_idle(Cursor::new(input), &mut output, Duration::from_millis(1)).expect("run");
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    drain_lifecycle(&mut reader);
+    let all_idle = reader.read_event().expect("read").expect("all idle event");
+    let Event::Osc1337SetUserVar(osc) = all_idle else {
+        panic!("expected all-idle OSC, got {all_idle:?}");
+    };
+    assert_eq!(osc.value, "agent_idle_all:main");
+}
+
+/// A provider prompt has no session id, so it must not clear an all-idle timer
+/// already armed for another session.
+#[test]
+fn agent_idle_all_timer_survives_provider_prompt_in_other_session() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&configure_frame(tau_proto::json_to_cbor(
+            &serde_json::json!({
+                "agent_idle_all": [{
+                    "delay_seconds": 0,
+                    "osc1337": { "key": TEXT_VAR_NAME, "value": "{{hook}}:{{agent.id}}" },
+                }],
+            }),
+        )))
+        .expect("write config");
+    writer
+        .write_event(&session_agent_loaded("s1", "main"))
+        .expect("load main");
+    writer
+        .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Running))
+        .expect("main running");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response_for_agent(
+                "main",
+                "sp-main",
+                "done",
+                tau_proto::PromptOriginator::User,
+            ),
+        ))
+        .expect("finish main");
+    writer
+        .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Idle))
+        .expect("main idle");
+    writer
+        .write_event(&Event::ProviderPromptSubmitted(
+            tau_proto::ProviderPromptSubmitted {
+                agent_prompt_id: "sp-other".into(),
+                originator: tau_proto::PromptOriginator::User,
+            },
+        ))
+        .expect("provider prompt");
+    writer.flush().expect("flush");
+
+    let mut output = Vec::new();
+    run_with_idle(Cursor::new(input), &mut output, Duration::from_millis(1)).expect("run");
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    drain_lifecycle(&mut reader);
+    let all_idle = reader.read_event().expect("read").expect("all idle event");
+    let Event::Osc1337SetUserVar(osc) = all_idle else {
+        panic!("expected all-idle OSC, got {all_idle:?}");
+    };
+    assert_eq!(osc.value, "agent_idle_all:main");
+}
+
+/// An `agent_idle_all` hook with `agent_summary` spawns a side conversation.
+/// That side prompt must not clear the pending all-idle hook before the
+/// matching `StartAgentResult` arrives.
+#[test]
+fn agent_idle_all_summary_side_prompt_does_not_cancel_pending_notification() {
+    use std::os::unix::net::UnixStream;
+
+    let (test_side, ext_side) = UnixStream::pair().expect("pair");
+    let ext_reader = ext_side.try_clone().expect("clone");
+    let ext_writer = ext_side;
+    let handle = thread::spawn(move || {
+        run_with_idle_and_summary_timeout(
+            ext_reader,
+            ext_writer,
+            Duration::from_millis(1),
+            Duration::from_secs(5),
+        )
+        .expect("run");
+    });
+
+    let test_writer_stream = test_side.try_clone().expect("clone");
+    let mut writer = EventWriter::new(test_writer_stream);
+    let mut reader = EventReader::new(test_side);
+    drain_lifecycle(&mut reader);
+
+    writer
+        .write_frame(&configure_frame(tau_proto::json_to_cbor(
+            &serde_json::json!({
+                "agent_idle_all": [{
+                    "delay_seconds": 0,
+                    "agent_summary": true,
+                    "osc1337": { "key": TEXT_VAR_NAME, "value": "{{hook}}:{{turn.agent_summary}}" },
+                }],
+            }),
+        )))
+        .expect("write config");
+    writer
+        .write_event(&session_agent_loaded("s1", "main"))
+        .expect("load main");
+    writer
+        .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Running))
+        .expect("main running");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response_for_agent(
+                "main",
+                "sp-main",
+                "done",
+                tau_proto::PromptOriginator::User,
+            ),
+        ))
+        .expect("finish main");
+    writer
+        .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Idle))
+        .expect("main idle");
+    writer.flush().expect("flush");
+
+    let query = reader.read_event().expect("read").expect("summary query");
+    let Event::StartAgentRequest(query) = query else {
+        panic!("expected StartAgentRequest, got {query:?}");
+    };
+
+    writer
+        .write_event(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+            query_id: query.query_id.clone(),
+            agent_id: tau_proto::AgentId::parse("summary").expect("agent id"),
+        }))
+        .expect("accepted");
+    writer
+        .write_event(&session_agent_loaded("s1", "summary"))
+        .expect("load summary");
+    writer
+        .write_event(&agent_state(
+            "summary",
+            tau_proto::AgentRuntimeState::Running,
+        ))
+        .expect("summary running");
+    writer
+        .write_event(&user_prompt_submitted_for_agent(
+            "main",
+            "summary side prompt",
+            tau_proto::PromptOriginator::Extension {
+                name: "std-notifications".into(),
+                query_id: query.query_id.clone(),
+            },
+        ))
+        .expect("side prompt");
+    writer
+        .write_event(&Event::StartAgentResult(tau_proto::StartAgentResult {
+            query_id: query.query_id,
+            text: "all done".into(),
+            error: None,
+        }))
+        .expect("summary result");
+    writer.flush().expect("flush");
+
+    let text = reader.read_event().expect("read").expect("notification");
+    let Event::Osc1337SetUserVar(osc) = text else {
+        panic!("expected all-idle notification, got {text:?}");
+    };
+    assert_eq!(osc.value, "agent_idle_all:all done");
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+    drop(writer);
+    drop(reader);
+    handle.join().expect("ext thread");
+}
+
+/// Unloading the last busy agent in a session should remove stale busy state
+/// and allow `agent_idle_all` to fire for the now-idle remaining session.
+#[test]
+fn agent_idle_all_fires_when_busy_agent_unloads() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&configure_frame(tau_proto::json_to_cbor(
+            &serde_json::json!({
+                "agent_idle_all": [{
+                    "delay_seconds": 0,
+                    "osc1337": { "key": TEXT_VAR_NAME, "value": "{{hook}}:{{agent.id}}" },
+                }],
+            }),
+        )))
+        .expect("write config");
+    writer
+        .write_event(&session_agent_loaded("s1", "main"))
+        .expect("load main");
+    writer
+        .write_event(&session_agent_loaded("s1", "other"))
+        .expect("load other");
+    writer
+        .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Idle))
+        .expect("main idle");
+    writer
+        .write_event(&agent_state("other", tau_proto::AgentRuntimeState::Running))
+        .expect("other running");
+    writer
+        .write_event(&session_agent_unloaded("s1", "other"))
+        .expect("unload other");
+    writer.flush().expect("flush");
+
+    let mut output = Vec::new();
+    run_with_idle(Cursor::new(input), &mut output, Duration::from_millis(1)).expect("run");
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    drain_lifecycle(&mut reader);
+    let all_idle = reader.read_event().expect("read").expect("all idle event");
+    let Event::Osc1337SetUserVar(osc) = all_idle else {
+        panic!("expected all-idle OSC, got {all_idle:?}");
+    };
+    assert_eq!(osc.value, "agent_idle_all:other");
+}
+
+/// Kebab-case hook keys are intentionally rejected; notification configuration
+/// keys are snake_case. This catches accidental reintroduction of the old
+/// `agent-idle` spelling.
+#[test]
+fn kebab_case_idle_config_key_is_rejected() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&configure_frame(tau_proto::json_to_cbor(
+            &serde_json::json!({
+                "agent-idle": [idle_osc_config(0, false)],
+            }),
+        )))
+        .expect("write config");
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+
+    let mut output = Vec::new();
+    run_with_idle(Cursor::new(input), &mut output, Duration::from_millis(1)).expect("run");
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    let err_frame = loop {
+        let frame = reader
+            .read_frame()
+            .expect("read")
+            .expect("config error frame");
+        if matches!(frame, HarnessInputMessage::ConfigError(_)) {
+            break frame;
+        }
+    };
+    let HarnessInputMessage::ConfigError(e) = err_frame else {
+        unreachable!()
+    };
+    assert!(e.message.contains("agent-idle"));
 }
 
 /// When `agent_summary` is enabled, idle window elapsing must
@@ -1160,8 +1685,8 @@ fn idle_command_runs_with_rendered_template_args() {
         "{{turn.agent_response}}"
     ]);
     let cfg = tau_proto::json_to_cbor(&serde_json::json!({
-        "agent-end": [{ "osc1337": { "key": SOUND_VAR_NAME, "value": VALUE_AGENT_END } }],
-        "agent-idle": [idle_hook],
+        "agent_end": [{ "osc1337": { "key": SOUND_VAR_NAME, "value": VALUE_AGENT_END } }],
+        "agent_idle": [idle_hook],
     }));
     writer.write_frame(&configure_frame(cfg)).expect("write");
     writer
@@ -1251,7 +1776,7 @@ fn invalid_config_emits_lifecycle_config_error() {
 #[test]
 fn invalid_hook_template_emits_config_error() {
     let bad_config = tau_proto::json_to_cbor(&serde_json::json!({
-        "agent-start": [{ "osc1337": { "key": "ok", "value": "{{missing}}" } }],
+        "agent_start": [{ "osc1337": { "key": "ok", "value": "{{missing}}" } }],
     }));
 
     let mut input = Vec::new();
@@ -1299,7 +1824,7 @@ fn config_reload_clears_pending_idle_hooks() {
     writer
         .write_frame(&configure_frame(tau_proto::json_to_cbor(
             &serde_json::json!({
-                "agent-idle": [],
+                "agent_idle": [],
             }),
         )))
         .expect("write config");

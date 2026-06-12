@@ -55,7 +55,7 @@ fn builtins() -> Vec<BuiltinExtension> {
             "ext-std-notifications",
             "tool",
             true,
-            serde_json::json!({ "agent-start": [], "agent-end": [], "agent-idle": [] }),
+            serde_json::json!({ "agent_start": [], "agent_end": [], "agent_idle": [], "agent_idle_all": [] }),
         ),
         builtin(
             "std-websearch",

@@ -4926,7 +4926,6 @@ impl Harness {
         self.remove_discovered_context(connection_id);
         self.interceptors.remove_connection(connection_id);
         self.fail_pending_intercept_for_disconnect(connection_id);
-        self.maybe_complete_session_init_for_disconnect(connection_id);
         self.remove_extension_context_for_connection(connection_id);
 
         if is_extension {
@@ -4935,7 +4934,7 @@ impl Harness {
         }
 
         self.fail_pending_action_invocations_for_connection(connection_id);
-        self.fail_pending_tool_calls_for_connection(connection_id);
+        let completed_foreground_calls = self.fail_pending_tool_calls_for_connection(connection_id);
         self.pending_provider_prompts
             .retain(|_, provider_id| provider_id.as_str() != connection_id);
         self.client_writers
@@ -4947,6 +4946,11 @@ impl Harness {
         {
             self.refresh_provider_models_and_publish_state();
         }
+        self.drain_pending_tool_invocations_or_report();
+        for (call_id, cid) in completed_foreground_calls {
+            self.maybe_complete_agent_turn_for(&cid, call_id.as_str());
+        }
+        self.maybe_complete_session_init_for_disconnect(connection_id);
         self.try_advance_queue();
         let Some(meta) = self.bus.disconnect(connection_id).or(meta) else {
             return;
@@ -5063,7 +5067,10 @@ impl Harness {
         }
     }
 
-    fn fail_pending_tool_calls_for_connection(&mut self, connection_id: &str) {
+    fn fail_pending_tool_calls_for_connection(
+        &mut self,
+        connection_id: &str,
+    ) -> Vec<(ToolCallId, AgentId)> {
         let mut failed_call_ids: Vec<ToolCallId> = self
             .pending_tool_providers
             .iter()
@@ -5134,11 +5141,7 @@ impl Harness {
             self.clear_tool_call_tracking(call_id.as_str());
         }
 
-        self.drain_pending_tool_invocations_or_report();
-        for (call_id, cid) in completed_foreground_calls {
-            self.maybe_complete_agent_turn_for(&cid, call_id.as_str());
-        }
-        self.try_advance_queue();
+        completed_foreground_calls
     }
 
     fn send_action_error_to_client(
@@ -8787,6 +8790,37 @@ impl Harness {
         } = response.originator
             && (!requested_tool_calls || is_non_tool_ext_query)
         {
+            if requested_tool_calls {
+                let remaining_calls: Vec<ToolCallId> = normalized_calls
+                    .iter()
+                    .map(|(call, _)| call.id.clone())
+                    .collect();
+                for (call, _) in &normalized_calls {
+                    self.pending_tools.insert(
+                        call.id.clone(),
+                        PendingTool {
+                            name: call.name.clone(),
+                            internal_name: call.name.clone(),
+                            tool_type: call.tool_type,
+                        },
+                    );
+                }
+                self.set_agent_turn_state(&cid, AgentTurnState::ToolsRunning { remaining_calls });
+                for (call, _) in &normalized_calls {
+                    let message = invalid_tool_call_errors
+                        .remove(&call.id)
+                        .unwrap_or_else(|| {
+                            format!("refusing to execute tool call `{}`", call.name)
+                        });
+                    self.reject_agent_tool_call_before_dispatch_without_followup(
+                        &cid,
+                        call,
+                        call.name.clone(),
+                        message,
+                    );
+                }
+                self.set_agent_turn_state(&cid, AgentTurnState::Idle);
+            }
             if self.has_pending_message_received_prompt(&cid) {
                 self.fold_pending_prompts_as_steered(&cid);
                 self.dispatch_prompt_after_publish_idle(&cid);
@@ -8833,36 +8867,6 @@ impl Harness {
                          dropping",
                     query_id, name
                 ));
-            }
-            if requested_tool_calls {
-                let remaining_calls: Vec<ToolCallId> = normalized_calls
-                    .iter()
-                    .map(|(call, _)| call.id.clone())
-                    .collect();
-                for (call, _) in &normalized_calls {
-                    self.pending_tools.insert(
-                        call.id.clone(),
-                        PendingTool {
-                            name: call.name.clone(),
-                            internal_name: call.name.clone(),
-                            tool_type: call.tool_type,
-                        },
-                    );
-                }
-                self.set_agent_turn_state(&cid, AgentTurnState::ToolsRunning { remaining_calls });
-                for (call, _) in &normalized_calls {
-                    let message = invalid_tool_call_errors
-                        .remove(&call.id)
-                        .unwrap_or_else(|| {
-                            format!("refusing to execute tool call `{}`", call.name)
-                        });
-                    self.reject_agent_tool_call_before_dispatch(
-                        &cid,
-                        call,
-                        call.name.clone(),
-                        message,
-                    );
-                }
             }
             let completed_agent_id = self.agents.get(&cid).and_then(|conv| conv.agent_id.clone());
             let keep_tool_backed_conversation = self
@@ -9593,6 +9597,27 @@ impl Harness {
         tool_name: ToolName,
         message: String,
     ) {
+        self.reject_agent_tool_call_before_dispatch_inner(cid, call, tool_name, message, true);
+    }
+
+    fn reject_agent_tool_call_before_dispatch_without_followup(
+        &mut self,
+        cid: &AgentId,
+        call: &AgentToolCall,
+        tool_name: ToolName,
+        message: String,
+    ) {
+        self.reject_agent_tool_call_before_dispatch_inner(cid, call, tool_name, message, false);
+    }
+
+    fn reject_agent_tool_call_before_dispatch_inner(
+        &mut self,
+        cid: &AgentId,
+        call: &AgentToolCall,
+        tool_name: ToolName,
+        message: String,
+        complete_turn: bool,
+    ) {
         let call_id: ToolCallId = call.id.clone();
         self.tool_agents.insert(call_id.clone(), cid.clone());
         self.publish_terminal_tool_error(
@@ -9609,7 +9634,11 @@ impl Harness {
                 display: None,
             },
         );
-        self.on_tool_call_complete(call_id.as_str());
+        if complete_turn {
+            self.on_tool_call_complete(call_id.as_str());
+        } else {
+            self.finish_tool_call_runtime_state(call_id.as_str());
+        }
         self.clear_tool_call_tracking(call_id.as_str());
     }
 

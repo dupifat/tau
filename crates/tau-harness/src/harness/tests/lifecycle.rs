@@ -3158,6 +3158,53 @@ fn disconnect_unregisters_tools_before_advancing_queued_prompt() {
 }
 
 #[test]
+fn disconnect_session_init_completion_waits_until_tool_cleanup() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    connect_test_tool(&mut h, "init-ext");
+    h.registry.register(
+        "init-ext",
+        ToolSpec {
+            name: ToolName::new("init_stale_tool"),
+            model_visible_name: None,
+            description: Some("stale".to_owned()),
+            parameters: None,
+            tool_type: tau_proto::ToolType::Function,
+            format: None,
+            enabled_by_default: true,
+            background_support: None,
+        },
+    );
+    h.turn_state = TurnState::InitializingSession {
+        session_id: h.current_session_id.clone(),
+        reason: tau_proto::SessionStartReason::Initial,
+        waiting_on: HashSet::from([tau_proto::ConnectionId::from("init-ext")]),
+    };
+    let cid = ensure_test_user_agent(&mut h);
+    h.agents
+        .get_mut(&cid)
+        .expect("agent")
+        .pending_prompts
+        .push_back(PendingPrompt::user("run".to_owned()));
+
+    h.handle_disconnect("init-ext");
+
+    assert!(h.turn_state.is_idle());
+    let prompts: Vec<_> = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentPromptCreated(prompt) => Some(prompt),
+            _ => None,
+        })
+        .collect();
+    let prompt = prompts.last().expect("queued prompt dispatched");
+    assert!(!prompt_has_tool(prompt, "init_stale_tool"));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
 fn non_tool_extension_query_tool_call_gets_terminal_error_before_teardown() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
@@ -3170,7 +3217,7 @@ fn non_tool_extension_query_tool_call_gets_terminal_error_before_teardown() {
             name: "query-ext".into(),
             query_id: "query-1".into(),
         };
-        conv.source_connection = Some("query-ext".into());
+        conv.source_connection = Some(HARNESS_CONNECTION_ID.into());
         conv.parent_tool_call_id = None;
     }
     seed_agent_thinking(&mut h, &cid, "sp-query");
@@ -3208,6 +3255,82 @@ fn non_tool_extension_query_tool_call_gets_terminal_error_before_teardown() {
         &node.entry,
         AgentEntry::ToolResults { items }
             if items.iter().any(|item| item.call_id == "invalid_tool_call_sp-query_1"
+                && matches!(item.status, ToolResultStatus::Error { .. }))
+    )));
+    let events = event_log_events(&h);
+    let tool_error_pos = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::ProviderToolError(error)
+                    if error.call_id == "invalid_tool_call_sp-query_1"
+            )
+        })
+        .expect("terminal tool error event");
+    let result_pos = events
+        .iter()
+        .position(|event| matches!(event, Event::StartAgentResult(_)))
+        .expect("start agent result event");
+    assert!(tool_error_pos < result_pos);
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn non_tool_extension_query_pending_message_still_terminalizes_tool_call() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let durable_agent_id = durable_agent_id_for_conversation(&h, &cid);
+    {
+        let conv = h.agents.get_mut(&cid).expect("agent");
+        conv.originator = tau_proto::PromptOriginator::Extension {
+            name: "query-ext".into(),
+            query_id: "query-2".into(),
+        };
+        conv.source_connection = Some(HARNESS_CONNECTION_ID.into());
+        conv.parent_tool_call_id = None;
+        conv.pending_prompts
+            .push_back(PendingPrompt::agent_message_received("notice".to_owned()));
+    }
+    seed_agent_thinking(&mut h, &cid, "sp-query-pending");
+    h.prompt_agents
+        .insert("sp-query-pending".into(), cid.clone());
+
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: "sp-query-pending".into(),
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "query-pending-call".into(),
+            name: ToolName::new("not_a_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "query-ext".into(),
+            query_id: "query-2".into(),
+        },
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("pending-message branch terminalizes tool call");
+
+    let tree = h
+        .agent_store
+        .agent(durable_agent_id.as_str())
+        .expect("agent tree remains");
+    assert!(tree.nodes().iter().any(|node| matches!(
+        &node.entry,
+        AgentEntry::ToolResults { items }
+            if items.iter().any(|item| item.call_id == "invalid_tool_call_sp-query-pending_1"
                 && matches!(item.status, ToolResultStatus::Error { .. }))
     )));
 

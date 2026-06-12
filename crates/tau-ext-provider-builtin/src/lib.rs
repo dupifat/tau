@@ -1579,14 +1579,14 @@ fn finish_stream<W: Write>(
     };
     maybe_debug_write_provider_response(session_id, &finished, provider_terminal_event.as_ref());
     let diagnostic = cache_miss_diagnostic(prompt, request, &finished);
-    writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
-        finished,
-    )))?;
     if let Some(diagnostic) = diagnostic {
         writer.write_message(&HarnessInputMessage::emit(
             Event::ProviderCacheMissDiagnostic(diagnostic),
         ))?;
     }
+    writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
+        finished,
+    )))?;
     writer.flush()?;
     Ok(())
 }

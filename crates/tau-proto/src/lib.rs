@@ -49,7 +49,9 @@ pub use token_usage::*;
 /// consumed acknowledgements — and replaces the implicit seq/recorded_at
 /// replay encoding with an explicit [`EventDelivery::replay`] marker.
 /// Subscribe-time catch-up is uniform across UI clients and extensions.
-pub const PROTOCOL_VERSION: u32 = 4;
+///
+/// Version 5 adds `quota_exceeded` for extension data RPC failures.
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// UI marker text for responses, thinking blocks, and tool calls that
 /// are still in progress.

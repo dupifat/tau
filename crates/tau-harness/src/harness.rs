@@ -1061,6 +1061,10 @@ pub struct Harness {
     /// session. Suspended agents remain here so `/agent resume` and follow-up
     /// prompts can continue their conversation.
     pub(crate) agent_routes: HashMap<String, AgentId>,
+    /// Agent ids already loaded, or with a must-pass membership publish queued,
+    /// for the current session. This closes the race where interception parks
+    /// `session.agent_loaded` before the durable session store can fold it.
+    pub(crate) session_loaded_agents: HashSet<AgentId>,
     /// Harness-owned lifecycle state for current-session agents.
     pub(crate) agent_states: HashMap<String, AgentState>,
     /// Agent ids that were once known but can no longer receive messages.
@@ -1480,6 +1484,7 @@ impl Harness {
             prompt_agents: HashMap::new(),
             agents: HashMap::new(),
             agent_routes: HashMap::new(),
+            session_loaded_agents: HashSet::new(),
             agent_states: HashMap::new(),
             stopped_agent_ids: HashSet::new(),
             turn_state: TurnState::Idle,
@@ -3892,8 +3897,16 @@ impl Harness {
                     self.publish_event(Some(source_id), Event::ToolProgress(progress));
                 }
             }
+            // Keep this peer-authored event rejection in sync with
+            // `is_peer_forbidden_harness_fact` and the immutable/must-pass
+            // classifications in `harness/interception.rs`.
             Event::ProviderToolResult(_)
             | Event::ProviderToolError(_)
+            | Event::SessionStarted(_)
+            | Event::SessionShutdown(_)
+            | Event::SessionAgentLoaded(_)
+            | Event::SessionAgentUnloaded(_)
+            | Event::AgentStarted(_)
             | Event::AgentMessageSent(_)
             | Event::AgentMessageReceived(_) => {
                 return Ok(());
@@ -4027,7 +4040,22 @@ impl Harness {
                     self.handle_provider_response_finished_from(Some(source_id), response)?;
                 }
             }
+            Event::ProviderCacheMissDiagnostic(diagnostic) => {
+                if self.provider_prompt_owner_matches(
+                    source_id,
+                    &diagnostic.agent_prompt_id,
+                    tau_proto::EventName::PROVIDER_CACHE_MISS_DIAGNOSTIC,
+                ) {
+                    self.publish_event(
+                        Some(source_id),
+                        Event::ProviderCacheMissDiagnostic(diagnostic),
+                    );
+                }
+            }
             other => {
+                if !Self::is_extension_fallback_emit_allowed(&other) {
+                    return Ok(());
+                }
                 let transient = transient_override.unwrap_or_else(|| other.defaults_to_transient());
                 if self.should_stage_extension_capabilities(source_id) {
                     self.stage_extension_publish(source_id, other, transient);
@@ -4146,11 +4174,9 @@ impl Harness {
                 Ok(true)
             }
             other => {
-                if Self::requires_tool_event_intake(&other)
-                    || matches!(
-                        other,
-                        Event::AgentMessageSent(_) | Event::AgentMessageReceived(_)
-                    )
+                if !Self::is_client_fallback_emit_allowed(&other)
+                    || Self::requires_tool_event_intake(&other)
+                    || Self::is_peer_forbidden_harness_fact(&other)
                 {
                     return Ok(true);
                 }
@@ -5494,6 +5520,23 @@ impl Harness {
         }
     }
 
+    fn is_extension_fallback_emit_allowed(event: &Event) -> bool {
+        matches!(
+            event,
+            Event::ExtensionEvent(_) | Event::Osc1337SetUserVar(_) | Event::TermBell(_)
+        )
+    }
+
+    fn is_client_fallback_emit_allowed(event: &Event) -> bool {
+        matches!(
+            event,
+            Event::UiPromptDraft(_)
+                | Event::UiFocusChanged(_)
+                | Event::UiDetachRequest(_)
+                | Event::UiShellCommand(_)
+        )
+    }
+
     fn requires_tool_event_intake(event: &Event) -> bool {
         matches!(
             event,
@@ -5505,6 +5548,23 @@ impl Harness {
                 | Event::ToolCancelled(_)
                 | Event::ToolBackgroundResult(_)
                 | Event::ToolBackgroundError(_)
+        )
+    }
+
+    fn is_peer_forbidden_harness_fact(event: &Event) -> bool {
+        // Peer intake rejects the same harness-owned facts that interception
+        // treats as protected. Update this with `MUST_PASS_BY_DEFAULT` and
+        // `immutable_protected_fact_was_modified` when adding new
+        // harness-owned immutable facts.
+        matches!(
+            event,
+            Event::SessionStarted(_)
+                | Event::SessionShutdown(_)
+                | Event::SessionAgentLoaded(_)
+                | Event::SessionAgentUnloaded(_)
+                | Event::AgentStarted(_)
+                | Event::AgentMessageSent(_)
+                | Event::AgentMessageReceived(_)
         )
     }
 
@@ -5530,8 +5590,7 @@ impl Harness {
     }
 
     fn publish_lifecycle_event(&mut self, event: Event) {
-        let transient = event.defaults_to_transient();
-        self.commit_event(Some("harness"), event, transient, None);
+        self.publish_event(Some("harness"), event);
     }
 
     fn emit_extension_starting(&mut self, extension_name: &str) {
@@ -7624,24 +7683,26 @@ impl Harness {
             return;
         }
         let agent_id_proto: tau_proto::AgentId = crate::parse_agent_id(agent_id);
-        let already_loaded = match self.store.load_session(session_id.as_str()) {
-            Ok(Some(membership)) => membership.contains_agent(&agent_id_proto),
-            Ok(None) => false,
-            Err(error) => {
-                self.emit_info(&format!(
-                    "failed to load session while unloading agent `{agent_id}`: {error}"
-                ));
-                false
-            }
-        };
+        let already_loaded = self.session_loaded_agents.contains(&agent_id_proto)
+            || match self.store.load_session(session_id.as_str()) {
+                Ok(Some(membership)) => membership.contains_agent(&agent_id_proto),
+                Ok(None) => false,
+                Err(error) => {
+                    self.emit_info(&format!(
+                        "failed to load session while unloading agent `{agent_id}`: {error}"
+                    ));
+                    false
+                }
+            };
         if already_loaded {
             self.publish_event(
                 None,
                 Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
                     session_id: session_id.clone(),
-                    agent_id: agent_id_proto,
+                    agent_id: agent_id_proto.clone(),
                 }),
             );
+            self.session_loaded_agents.remove(&agent_id_proto);
         }
     }
 
@@ -7705,6 +7766,7 @@ impl Harness {
                 self.agents.insert(cid.clone(), conv);
             }
             self.agent_routes.insert(agent_id_string.clone(), cid);
+            self.session_loaded_agents.insert(agent_id.clone());
             self.agent_states
                 .insert(agent_id_string, AgentState::Active);
         }
@@ -7942,17 +8004,19 @@ impl Harness {
                 agent.prompt_index_initialized = true;
             }
         }
-        let already_loaded = match self.store.load_session(self.current_session_id.as_str()) {
-            Ok(Some(membership)) => membership.contains_agent(&agent_id_proto),
-            Ok(None) => false,
-            Err(error) => {
-                self.emit_info(&format!(
-                    "failed to load session while ensuring agent `{agent_id}`: {error}"
-                ));
-                false
-            }
-        };
+        let already_loaded = self.session_loaded_agents.contains(&agent_id_proto)
+            || match self.store.load_session(self.current_session_id.as_str()) {
+                Ok(Some(membership)) => membership.contains_agent(&agent_id_proto),
+                Ok(None) => false,
+                Err(error) => {
+                    self.emit_info(&format!(
+                        "failed to load session while ensuring agent `{agent_id}`: {error}"
+                    ));
+                    false
+                }
+            };
         if !already_loaded {
+            self.session_loaded_agents.insert(agent_id_proto.clone());
             let waiting_on = self.agent_context_provider_ids(agent_id_proto.clone());
             if !waiting_on.is_empty() {
                 self.pending_agent_context_ready
@@ -7967,14 +8031,16 @@ impl Harness {
                         .get(cid)
                         .and_then(|conv| normalize_display_name(conv.display_name.as_deref())),
                 });
-                let _ = self.agent_store.append_agent_event_at(
-                    agent_id,
+                self.enqueue_publish(
                     None,
-                    tau_core::AgentEventParent::Root,
-                    started.clone(),
-                    tau_proto::UnixMicros::now(),
+                    started,
+                    false,
+                    false,
+                    Some(ConversationHeadSync {
+                        cid: cid.clone(),
+                        agent_id: Some(agent_id_proto.clone()),
+                    }),
                 );
-                self.enqueue_publish(None, started, true, false, None);
             }
             self.publish_event(
                 None,

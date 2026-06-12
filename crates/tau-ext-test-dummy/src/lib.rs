@@ -106,7 +106,8 @@ where
     let mut writer = PeerOutputWriter::new(BufWriter::new(writer));
 
     // Subscribe only to fresh live invoke-start events. Extension
-    // subscriptions are live-only, so old invokes are not replayed.
+    // subscriptions can receive replayed durable catch-up, but `tool.started`
+    // is a runtime-only event, so old invokes are not replayed.
     tau_extension::Handshake::tool("tau-ext-test-dummy")
         .subscribe([tau_proto::EventName::TOOL_STARTED])
         .intercept(

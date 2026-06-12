@@ -1,6 +1,7 @@
 //! Harness-owned `agent_start`, `wait`, `cancel`, and `message` tools.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tau_proto::{
     AgentContextKey, AgentContextValue, AgentId, AgentMessageReceived, AgentMessageSent, CborValue,
@@ -19,6 +20,29 @@ pub(crate) const MESSAGE_TOOL_NAME: &str = "message";
 pub(crate) struct SubagentToolState {
     /// State used by the wait tool to track background completions.
     wait_tracker: WaitTracker,
+}
+
+static NEXT_AGENT_MESSAGE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+fn build_agent_message_id(
+    sender_id: &AgentId,
+    timestamp: tau_proto::UnixMicros,
+    sequence: u64,
+) -> tau_proto::AgentMessageId {
+    tau_proto::AgentMessageId::from(format!(
+        "msg-{}-{}-{}",
+        sender_id.as_str(),
+        timestamp.get(),
+        sequence
+    ))
+}
+
+fn next_agent_message_id(sender_id: &AgentId) -> tau_proto::AgentMessageId {
+    build_agent_message_id(
+        sender_id,
+        tau_proto::UnixMicros::now(),
+        NEXT_AGENT_MESSAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+    )
 }
 
 impl Harness {
@@ -239,12 +263,8 @@ impl Harness {
                 agent_id: crate::parse_agent_id(&recipient_id),
             }
         };
-        let message_id = tau_proto::AgentMessageId::from(format!(
-            "msg-{}-{}",
-            sender_id,
-            tau_proto::UnixMicros::now().get()
-        ));
         let sender_id: tau_proto::AgentId = crate::parse_agent_id(&sender_id);
+        let message_id = next_agent_message_id(&sender_id);
         if kind == tau_proto::AgentMessageKind::Message {
             self.publish_for_agent_from(
                 agent_id,

@@ -30,6 +30,9 @@
 
 - `README.md` — project overview, install, configuration, and contact info
 - `FEATURES.md` — major feature tour; update after editing any new major features
+- `SECURITY.md` — project-wide security/reliability context and trust boundaries;
+  MUST read before changing or reviewing runtime behavior, persistence,
+  extension/harness boundaries, tools, or other security/reliability-sensitive code
 - `docs/` — focused design and feature notes
 - `crates/*/README.md` — crate-specific documentation where present
 - `crates/*/AGENTS.md` — crate-specific agent instructions - MUST read these (if exists) before modifing code in a given crate

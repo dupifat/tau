@@ -97,8 +97,17 @@ An interceptor must reply exactly once with `intercept_reply`.
 The interceptor can reply with `drop`.
 
 The event is consumed and never reaches later interceptors, the event log, or
-normal subscribers. The harness may override `drop` for must-pass events (for
-example important harness notices) and publish the original event instead.
+normal subscribers. The harness overrides `drop` for must-pass events and
+publishes the original event instead. Current default must-pass events include
+user input and prompt lifecycle facts; agent response facts
+(`provider.response_finished`); terminal tool completion facts (`tool.result`,
+`tool.error`, `provider.tool_result`, `provider.tool_error`, `tool.cancelled`,
+`tool.background_result`, and `tool.background_error`); session lifecycle facts;
+durable session membership facts; `agent.started`; and harness-owned agent
+message projections. Treat
+`crates/tau-harness/src/harness/interception.rs` as the source of truth for that
+list. Individual harness call sites can also mark a publish as must-pass, as
+Important `harness.info` diagnostics do.
 
 ### Pass unchanged
 
@@ -111,10 +120,17 @@ using the original event and transient metadata.
 
 The interceptor can reply with `pass` and a replacement event.
 
-Later interceptors and final subscribers see the modified event. The replacement
-must have the same event type as the original; if it does not, the harness logs a
-warning and falls back to the original event. The original transient metadata is
-preserved.
+Later interceptors and final subscribers usually see the modified event. The
+replacement must have the same event type as the original; if it does not, the
+harness logs a warning and falls back to the original event. Some same-type
+replacements are also rejected to preserve immutable facts. For Important
+`harness.info` diagnostics, immutable prompt lifecycle facts,
+`provider.response_finished`, terminal tool completion facts, session
+lifecycle/membership facts, `agent.started`, and harness-owned agent message
+projections, the harness publishes the original event instead. For mutable
+prompt text events, replacements may edit text but cannot change routing identity
+fields such as agent id or prompt metadata. The original
+transient metadata is preserved.
 
 ## Same-priority chaining
 
@@ -147,7 +163,9 @@ replies (or disconnects).
 
 If the selected interceptor disconnects before replying, the harness treats that
 as `pass` unchanged so an extension cannot wedge the event pipeline by going
-away mid-reply.
+away mid-reply. If the harness cannot deliver an `intercept_request` to the
+selected interceptor, it logs the failure, removes/skips that interceptor
+registration, and continues the chain instead of parking the publish.
 
 ## Final emission
 

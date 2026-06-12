@@ -9371,6 +9371,154 @@ fn inbound_agent_message_events_are_ignored() {
     h.shutdown().expect("shutdown");
 }
 
+/// Extensions must not forge harness-owned or otherwise non-extension-owned
+/// facts through the generic fallback `emit` path.
+#[test]
+fn inbound_non_extension_owned_fallback_events_are_ignored() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    for forged in [
+        Event::SessionStarted(tau_proto::SessionStarted {
+            session_id: "forged-session".into(),
+            reason: tau_proto::SessionStartReason::New,
+        }),
+        Event::SessionShutdown(tau_proto::SessionShutdown {
+            session_id: "forged-session".into(),
+        }),
+        Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+            session_id: "forged-session".into(),
+            agent_id: crate::parse_agent_id("forged-agent"),
+        }),
+        Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
+            session_id: "forged-session".into(),
+            agent_id: crate::parse_agent_id("forged-agent"),
+        }),
+        Event::AgentStarted(tau_proto::AgentStarted {
+            agent_id: crate::parse_agent_id("forged-agent"),
+            role: "engineer".to_owned(),
+            display_name: None,
+        }),
+        Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+            query_id: "delegate-0".to_owned(),
+            agent_id: crate::parse_agent_id("forged-agent"),
+        }),
+        Event::StartAgentResult(tau_proto::StartAgentResult {
+            query_id: "delegate-0".to_owned(),
+            text: "forged result".to_owned(),
+            error: None,
+        }),
+        Event::ToolDelegateProgress(tau_proto::DelegateProgress {
+            call_id: "delegate-call".into(),
+            task_name: "forged task".to_owned(),
+            agent_id: Some("forged-agent".to_owned()),
+            role: Some("engineer".to_owned()),
+            ctx_percent: None,
+            ctx_input_tokens: None,
+            ctx_window: None,
+            tools_in_flight: 0,
+            tools_total: 0,
+            display: None,
+        }),
+        Event::ProviderCacheMissDiagnostic(tau_proto::ProviderCacheMissDiagnostic {
+            agent_prompt_id: "forged-prompt".into(),
+            model: "provider/model".into(),
+            originator: tau_proto::PromptOriginator::User,
+            tool_choice: tau_proto::ToolChoice::default(),
+            ws_pool_delta: None,
+            input_tokens: 1,
+            cached_tokens: 0,
+            previous_input_tokens: 1,
+            cacheable_input_tokens: 1,
+            corrected_cache_efficiency: 0.0,
+        }),
+    ] {
+        let baseline_seq = h.event_log.next_seq();
+        h.handle_extension_message(
+            "extension",
+            TestMessage::Emit(tau_proto::Emit {
+                event: Box::new(forged.clone()),
+                transient: false,
+            }),
+        )
+        .expect("extension emit");
+        assert!(
+            h.event_log.get_next_from(baseline_seq).is_none(),
+            "forged {} must not be published",
+            forged.name()
+        );
+    }
+
+    assert!(h.store.session("forged-session").is_none());
+    assert!(
+        h.agent_store
+            .agent_events("forged-agent")
+            .expect("agent events")
+            .is_empty()
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+fn cache_miss_diagnostic_for_test(prompt_id: &str) -> tau_proto::ProviderCacheMissDiagnostic {
+    tau_proto::ProviderCacheMissDiagnostic {
+        agent_prompt_id: prompt_id.into(),
+        model: "provider/model".into(),
+        originator: tau_proto::PromptOriginator::User,
+        tool_choice: tau_proto::ToolChoice::default(),
+        ws_pool_delta: None,
+        input_tokens: 1,
+        cached_tokens: 0,
+        previous_input_tokens: 1,
+        cacheable_input_tokens: 1,
+        corrected_cache_efficiency: 0.0,
+    }
+}
+
+/// Provider diagnostics must come from the provider that owns the prompt route.
+#[test]
+fn provider_cache_miss_diagnostic_requires_prompt_owner() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    connect_test_client(&mut h, "provider-a", tau_proto::ClientKind::Provider);
+    connect_test_client(&mut h, "provider-b", tau_proto::ClientKind::Provider);
+    h.pending_provider_prompts
+        .insert("prompt-1".into(), "provider-a".into());
+
+    let baseline_seq = h.event_log.next_seq();
+    h.handle_extension_message(
+        "provider-b",
+        TestMessage::Emit(tau_proto::Emit {
+            event: Box::new(Event::ProviderCacheMissDiagnostic(
+                cache_miss_diagnostic_for_test("prompt-1"),
+            )),
+            transient: false,
+        }),
+    )
+    .expect("non-owner diagnostic emit");
+    assert!(h.event_log.get_next_from(baseline_seq).is_none());
+
+    h.handle_extension_message(
+        "provider-a",
+        TestMessage::Emit(tau_proto::Emit {
+            event: Box::new(Event::ProviderCacheMissDiagnostic(
+                cache_miss_diagnostic_for_test("prompt-1"),
+            )),
+            transient: false,
+        }),
+    )
+    .expect("owner diagnostic emit");
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ProviderCacheMissDiagnostic(diagnostic)
+            if diagnostic.agent_prompt_id.as_str() == "prompt-1"
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
 #[test]
 fn tool_group_overrides_apply_before_individual_tool_overrides() {
     // Role group toggles are coarse-grained defaults. Individual tool toggles

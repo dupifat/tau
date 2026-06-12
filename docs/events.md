@@ -7,9 +7,9 @@ Every event has a dotted name `<category>.<call>` and a typed payload defined in
 component (or class of component) that emits them.
 
 Events are distinct from **messages**: messages are point-to-point protocol
-traffic (handshake, subscribe/intercept, `emit`, `deliver`, `ack`, etc.) and
-never appear on the bus or in durable semantic logs. Events are not top-level
-wire items; peers send them inside `emit` and receive them inside `deliver`. See
+traffic (handshake, subscribe/intercept, `emit`, `deliver`, etc.) and never
+appear on the bus or in durable semantic logs. Events are not top-level wire
+items; peers send them inside `emit` and receive them inside `deliver`. See
 [messages.md](messages.md) for the message-side reference.
 
 A few categories don't map to a single emitter — those are grouped by the
@@ -39,18 +39,22 @@ for control of the emit/intercept pipeline.
 Emitted by the harness's session tracker. The durable session log is a
 membership journal, not a transcript.
 
-- **`session.started`** — A session was created or switched to. Carries
-  `session_id` and a reason (`initial` startup, `new` via `/session new`,
-  `resume` of an existing session). Extensions react with per-session setup
-  and reply with `extension.context_ready`.
-- **`session.shutdown`** — The harness is leaving the current session,
-  emitted before `session.started` for the next one. Extensions flush or
-  drop per-session state.
+- **`session.started`** — Must-pass immutable runtime lifecycle fact: the
+  harness created or switched to a session. Carries `session_id` and a reason
+  (`initial` startup, `new` via `/session new`, `resume` of an existing session).
+  Extensions react with per-session setup and reply with
+  `extension.context_ready`. Interceptors cannot drop or rewrite it.
+- **`session.shutdown`** — Must-pass immutable runtime lifecycle fact: the
+  harness is leaving the current session, emitted before `session.started` for
+  the next one. Extensions flush or drop per-session state. Interceptors cannot
+  drop or rewrite it.
 - **`session.agent_loaded`** — Durable membership fact: a global agent is
   loaded into this session. The session log folds these facts to determine the
-  current loaded-agent set on resume.
+  current loaded-agent set on resume. Interceptors cannot drop or rewrite this
+  immutable membership fact.
 - **`session.agent_unloaded`** — Durable membership fact: a global agent is no
-  longer loaded into this session.
+  longer loaded into this session. Interceptors cannot drop or rewrite this
+  immutable membership fact.
 
 Historical load/unload facts are not transcript history. On reconnect/resume the
 harness announces the current loaded-agent snapshot, then replays each loaded
@@ -60,7 +64,8 @@ agent log once.
 
 Emitted mostly by the harness as it routes UI requests into concrete global
 agents. Durable transcript facts are written to the owning agent log, not the
-session log.
+session log. `agent.started` is the durable, immutable creation fact at the start
+of an agent log.
 
 - **`agent.prompt_submitted`** — A `ui.prompt_submitted` request was accepted
   into a concrete agent transcript. Carries `agent_id`, text, originator, and
@@ -110,7 +115,10 @@ Emitted by the provider backend that owns the selected model.
   terminal tool-call completions. These satisfy provider protocol state and
   fold into prompt history, but are not logical UI tool completions. The
   synthetic background placeholder uses `provider.tool_result` only.
-
+- **`provider.cache_miss_diagnostic`** — Provider-owned diagnostic for a prompt
+  with unexpectedly low cache reuse. The harness accepts it only from the
+  provider that owns the prompt, and providers emit it before the matching
+  `provider.response_finished` closes the pending provider route.
 ## Tools
 
 Tool events span three emitters: extensions register/implement tools,
@@ -206,20 +214,22 @@ harness/agent.
 - **`agent.start_result`** — The agent's final answer to an
   earlier `agent.start_request`, routed point-to-point back to the
   requesting extension. Carries the same `query_id`.
-- **`agent.message_sent`** — Sender-side projection for a short message an
-  agent sent to another agent or to the user. Carries stable `message_id`,
-  `sender_id`, recipient (`agent_id` or `user`), and `message`; it does not carry
-  a `session_id`.
-- **`agent.message_received`** — Recipient-side projection for an agent-to-agent
-  message. Carries the same stable `message_id`, the `sender_id`, the receiving
-  `recipient_id`, and `message`; user-recipient messages have no received
-  projection. User-recipient sent projections are human-visible broadcasts that
-  UIs always render fully in the currently visible transcript. UI subscribers
-  filter, summarize, or fully display agent-to-agent message projections according
-  to `/set show-messages`. Agent recipients are delivered as hidden internal
-  prompts; if a side/delegate agent is about to finish,
-  teardown waits until the message turn has been dispatched and answered. See
-  [agent-messaging.md](agent-messaging.md) for model-facing tool examples.
+- **`agent.message_sent`** — Harness-owned immutable sender-side projection for
+  a short message an agent sent to another agent or to the user. Carries stable
+  `message_id`, `sender_id`, recipient (`agent_id` or `user`), and `message`; it
+  does not carry a `session_id`.
+- **`agent.message_received`** — Harness-owned immutable recipient-side
+  projection for an agent-to-agent message. Carries the same stable
+  `message_id`, the `sender_id`, the receiving `recipient_id`, and `message`;
+  user-recipient messages have no received projection. User-recipient sent
+  projections are human-visible broadcasts that UIs always render fully in the
+  currently visible transcript. UI subscribers filter, summarize, or fully
+  display agent-to-agent message projections according to `/set show-messages`.
+  Agent recipients are delivered as hidden internal prompts; if a side/delegate
+  agent is about to finish, teardown waits until the message turn has been
+  dispatched and answered. Interceptors cannot drop or rewrite these validated
+  projections. See [agent-messaging.md](agent-messaging.md) for model-facing tool
+  examples.
 - **`extension.event`** — Custom extension-defined event with a free-form
   dotted name and CBOR payload. The harness routes it like any other
   event. It is runtime/debug-log state unless a typed semantic event is added
@@ -281,8 +291,8 @@ commands) in response to a `ui.shell_command`.
 ## Term (terminal-output side effects)
 
 Targeted at whichever UI is attached and capable of writing escape
-sequences to a real terminal. Any component may emit these; the UI is
-the only consumer. Components without a terminal silently no-op.
+sequences to a real terminal. Harness-owned code and extensions may emit these;
+the UI is the only consumer. Components without a terminal silently no-op.
 
 - **`term.osc1337_set_user_var`** — Ask the UI to write an iTerm2
   OSC 1337 `SetUserVar` escape sequence. The UI base64-encodes the

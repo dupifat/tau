@@ -1,7 +1,8 @@
 //! Event-emission interception subsystem.
 //!
 //! Owns the [`InterceptorRegistry`] (exact + prefix selectors keyed by
-//! `(priority, connection_id)`), the [`PendingIntercept`] / [`DeferredPublish`]
+//! full `(priority, component_name, connection_id)` registration order), the
+//! [`PendingIntercept`] / [`DeferredPublish`]
 //! queue state, and the methods that drive the interception chain.
 //!
 //! Flow: a publish enters via [`Harness::enqueue_publish`]. If no intercept
@@ -61,7 +62,7 @@ pub(crate) struct PendingIntercept {
     /// Cursor for the next interceptor lookup *after* this reply
     /// resolves. Set to the registration we just dispatched to, so
     /// the chain advances strictly past it.
-    pub(crate) cursor: (InterceptionPriority, String),
+    pub(crate) cursor: InterceptorCursor,
 }
 
 /// A publish that arrived while another publish was in interception
@@ -105,6 +106,20 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     EventName::AGENT_USER_MESSAGE_INJECTED,
     EventName::AGENT_PROMPT_STEERED,
     EventName::AGENT_COMPACTION_TRIGGERED,
+    // Session lifecycle facts drive extension/context-provider setup and
+    // teardown. Dropping one can wedge startup or leave stale per-session state.
+    EventName::SESSION_STARTED,
+    EventName::SESSION_SHUTDOWN,
+    // Durable session membership facts anchor resume state. Dropping one leaves
+    // live session state inconsistent with persisted membership.
+    EventName::SESSION_AGENT_LOADED,
+    EventName::SESSION_AGENT_UNLOADED,
+    // Agent creation and message projection facts are harness-validated durable
+    // transcript facts. Dropping or rewriting them after validation breaks
+    // sender/recipient correlation and resume state.
+    EventName::AGENT_STARTED,
+    EventName::AGENT_MESSAGE_SENT,
+    EventName::AGENT_MESSAGE_RECEIVED,
     // Agent request life-cycle: the agent extension consumes normal
     // `AgentPromptCreated` turns to know when to talk to the LLM. Dropping
     // one wedges the conversation.
@@ -113,11 +128,16 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     // `prompt_agents` bookkeeping and the conversation
     // would never advance.
     EventName::PROVIDER_RESPONSE_FINISHED,
-    // Tool round-trip closure: a missing `tool.result`/`tool.error`
-    // for a tool that was actually invoked leaves the agent waiting
-    // forever.
+    // Tool round-trip closure: a missing terminal completion,
+    // cancellation, provider result, or background result for a tool
+    // that was actually invoked leaves the agent waiting forever.
     EventName::TOOL_RESULT,
     EventName::TOOL_ERROR,
+    EventName::PROVIDER_TOOL_RESULT,
+    EventName::PROVIDER_TOOL_ERROR,
+    EventName::TOOL_CANCELLED,
+    EventName::TOOL_BACKGROUND_RESULT,
+    EventName::TOOL_BACKGROUND_ERROR,
 ];
 
 fn important_harness_info_was_modified(original: &Event, replacement: &Event) -> bool {
@@ -126,6 +146,84 @@ fn important_harness_info_was_modified(original: &Event, replacement: &Event) ->
         Event::HarnessInfo(info) if info.level == tau_proto::HarnessInfoLevel::Important
     ) && original != replacement
 }
+
+fn immutable_protected_fact_was_modified(original: &Event, replacement: &Event) -> bool {
+    matches!(
+        original,
+        Event::AgentStarted(_)
+            | Event::AgentMessageSent(_)
+            | Event::AgentMessageReceived(_)
+            | Event::SessionStarted(_)
+            | Event::SessionShutdown(_)
+            | Event::SessionAgentLoaded(_)
+            | Event::SessionAgentUnloaded(_)
+            | Event::AgentCompactionTriggered(_)
+            | Event::AgentPromptCreated(_)
+            | Event::ProviderResponseFinished(_)
+            | Event::ToolResult(_)
+            | Event::ToolError(_)
+            | Event::ProviderToolResult(_)
+            | Event::ProviderToolError(_)
+            | Event::ToolCancelled(_)
+            | Event::ToolBackgroundResult(_)
+            | Event::ToolBackgroundError(_)
+    ) && original != replacement
+}
+
+fn mutable_prompt_routing_identity_was_modified(original: &Event, replacement: &Event) -> bool {
+    match (original, replacement) {
+        (Event::AgentPromptSubmitted(original), Event::AgentPromptSubmitted(replacement)) => {
+            original.agent_id != replacement.agent_id
+                || original.message_class != replacement.message_class
+                || original.originator != replacement.originator
+        }
+        (
+            Event::AgentUserMessageInjected(original),
+            Event::AgentUserMessageInjected(replacement),
+        ) => {
+            original.agent_id != replacement.agent_id
+                || original.message_class != replacement.message_class
+        }
+        (Event::AgentPromptSteered(original), Event::AgentPromptSteered(replacement)) => {
+            original.agent_id != replacement.agent_id
+                || original.message_class != replacement.message_class
+        }
+        _ => false,
+    }
+}
+
+/// Cursor pointing just past the interceptor registration that last handled a
+/// parked publish.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct InterceptorCursor {
+    /// Selector set that produced the parked interceptor. Exact selectors are
+    /// exhausted before prefix selectors, so prefix chaining uses an
+    /// independent cursor after the exact set is done.
+    set: InterceptorSet,
+    /// Full registration key used for same-set continuation.
+    registration: InterceptorRegistration,
+}
+
+/// Which selector set matched an interceptor registration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InterceptorSet {
+    /// Exact event-name selector.
+    Exact,
+    /// Prefix selector.
+    Prefix,
+}
+
+/// Registry lookup result with the selector set that produced it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct InterceptorMatch {
+    /// Selector set used for cursor continuation.
+    set: InterceptorSet,
+    /// Matching registration.
+    registration: InterceptorRegistration,
+}
+
+/// Interceptor registration ordered by priority, component name, then
+/// connection id.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct InterceptorRegistration {
     priority: InterceptionPriority,
@@ -210,33 +308,43 @@ impl InterceptorRegistry {
     fn next_for(
         &self,
         event: &Event,
-        cursor: Option<(InterceptionPriority, &str)>,
-    ) -> Option<InterceptorRegistration> {
+        cursor: Option<&InterceptorCursor>,
+    ) -> Option<InterceptorMatch> {
         let name = event.name();
-        if let Some(next) = self.next_in_set(self.exact.get(&name), cursor) {
-            return Some(next);
+        if cursor.is_none_or(|cursor| cursor.set == InterceptorSet::Exact) {
+            let exact_cursor = cursor
+                .filter(|cursor| cursor.set == InterceptorSet::Exact)
+                .map(|cursor| &cursor.registration);
+            if let Some(registration) = self.next_in_set(self.exact.get(&name), exact_cursor) {
+                return Some(InterceptorMatch {
+                    set: InterceptorSet::Exact,
+                    registration,
+                });
+            }
         }
+
+        let prefix_cursor = cursor
+            .filter(|cursor| cursor.set == InterceptorSet::Prefix)
+            .map(|cursor| &cursor.registration);
         self.prefix
             .iter()
             .filter(|(prefix, _)| name.matches_prefix(prefix))
-            .filter_map(|(_, registrations)| self.next_in_set(Some(registrations), cursor))
+            .filter_map(|(_, registrations)| self.next_in_set(Some(registrations), prefix_cursor))
             .min()
+            .map(|registration| InterceptorMatch {
+                set: InterceptorSet::Prefix,
+                registration,
+            })
     }
 
     fn next_in_set(
         &self,
         registrations: Option<&BTreeSet<InterceptorRegistration>>,
-        cursor: Option<(InterceptionPriority, &str)>,
+        cursor: Option<&InterceptorRegistration>,
     ) -> Option<InterceptorRegistration> {
         registrations?
             .iter()
-            .find(|registration| {
-                cursor.is_none_or(|(priority, connection_id)| {
-                    priority < registration.priority
-                        || (priority == registration.priority
-                            && connection_id < registration.connection_id.as_str())
-                })
-            })
+            .find(|registration| cursor.is_none_or(|cursor| cursor < registration))
             .cloned()
     }
 }
@@ -337,12 +445,15 @@ impl Harness {
 
     /// One step through the interception chain for a single publish.
     ///
-    /// `cursor` is `None` on the first dispatch and `Some((priority,
-    /// connection_id))` on subsequent steps so the lookup advances
-    /// strictly past the interceptor that just replied. If a matching
-    /// interceptor is found, an [`InterceptRequest`] is sent and the
-    /// publish parks in `pending_intercept` waiting for its reply.
-    /// If no further interceptor matches, the event commits.
+    /// `cursor` is `None` on the first dispatch and `Some` on subsequent steps
+    /// so lookup advances strictly past the interceptor that just replied.
+    /// Exact registrations are considered before prefix registrations; once
+    /// exact registrations are exhausted, prefix lookup starts with an
+    /// independent full-registration cursor. If a matching interceptor is
+    /// found and the request is delivered, the publish parks in
+    /// `pending_intercept` waiting for its reply. If delivery fails, that
+    /// interceptor is removed/skipped and the chain continues. If no
+    /// further interceptor matches, the event commits.
     fn dispatch_publish_step(
         &mut self,
         source: Option<String>,
@@ -350,9 +461,15 @@ impl Harness {
         transient: bool,
         must_pass: bool,
         sync_head_for: Option<ConversationHeadSync>,
-        cursor: Option<(InterceptionPriority, &str)>,
+        mut cursor: Option<InterceptorCursor>,
     ) {
-        if let Some(interceptor) = self.interceptors.next_for(&event, cursor) {
+        loop {
+            let Some(interceptor_match) = self.interceptors.next_for(&event, cursor.as_ref())
+            else {
+                self.commit_event(source.as_deref(), event, transient, sync_head_for);
+                return;
+            };
+            let interceptor = interceptor_match.registration;
             tracing::debug!(
                 target: "tau_harness::interception",
                 event = %event.name(),
@@ -362,7 +479,7 @@ impl Harness {
                 "intercepting event emission"
             );
             let conn_id = interceptor.connection_id.as_str().to_owned();
-            let _ = self.bus.send_to(
+            let report = self.bus.send_to(
                 &conn_id,
                 None,
                 HarnessOutputMessage::InterceptRequest(InterceptRequest {
@@ -370,18 +487,37 @@ impl Harness {
                     transient,
                 }),
             );
-            self.pending_intercept = Some(PendingIntercept {
-                conn_id: conn_id.clone(),
-                event,
-                transient,
-                source,
-                must_pass,
-                sync_head_for,
-                cursor: (interceptor.priority, conn_id),
+            let delivered = report
+                .as_ref()
+                .is_ok_and(|report| report.delivered_to.iter().any(|id| id.as_str() == conn_id));
+            if delivered {
+                self.pending_intercept = Some(PendingIntercept {
+                    conn_id: conn_id.clone(),
+                    event,
+                    transient,
+                    source,
+                    must_pass,
+                    sync_head_for,
+                    cursor: InterceptorCursor {
+                        set: interceptor_match.set,
+                        registration: interceptor,
+                    },
+                });
+                return;
+            }
+            tracing::warn!(
+                target: "tau_harness::interception",
+                event = %event.name(),
+                connection_id = %conn_id,
+                error = ?report.err(),
+                "interceptor request delivery failed; skipping interceptor"
+            );
+            self.interceptors.remove_connection(&conn_id);
+            cursor = Some(InterceptorCursor {
+                set: interceptor_match.set,
+                registration: interceptor,
             });
-            return;
         }
-        self.commit_event(source.as_deref(), event, transient, sync_head_for);
     }
 
     /// Resolve a parked interception with the extension's reply.
@@ -469,6 +605,23 @@ impl Harness {
                          publishing original instead",
                     );
                     Some(original_event)
+                } else if mutable_prompt_routing_identity_was_modified(&original_event, &new_event)
+                {
+                    tracing::warn!(
+                        target: "tau_harness::interception",
+                        event = %event_name,
+                        "interceptor tried to modify protected prompt routing identity; \
+                         publishing original instead",
+                    );
+                    Some(original_event)
+                } else if immutable_protected_fact_was_modified(&original_event, &new_event) {
+                    tracing::warn!(
+                        target: "tau_harness::interception",
+                        event = %event_name,
+                        "interceptor tried to modify an immutable protected fact; \
+                         publishing original instead",
+                    );
+                    Some(original_event)
                 } else {
                     Some(new_event)
                 }
@@ -506,7 +659,7 @@ impl Harness {
             transient,
             must_pass,
             sync_head_for,
-            Some((cursor.0, cursor.1.as_str())),
+            Some(cursor),
         );
     }
 

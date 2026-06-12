@@ -4,7 +4,13 @@
 //! update rules for `ExtensionDataRequest` outside of the central harness
 //! event loop.
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
+
+/// Maximum bytes accepted for one extension-owned data file.
+const MAX_EXTENSION_DATA_FILE_BYTES: u64 = 16 * 1024 * 1024;
+/// Maximum directory entries scanned by one extension data list operation.
+const MAX_EXTENSION_DATA_LIST_ENTRIES: usize = 4096;
 
 /// Error returned while serving an extension data operation.
 #[derive(Debug)]
@@ -170,7 +176,13 @@ pub(super) fn list_extension_data_entries(
         ExtensionDataError::io(format!("failed to list `{}`", dir.display()), error)
     })?;
     let mut out = Vec::new();
-    for entry in entries {
+    for (seen_entries, entry) in entries.enumerate() {
+        if seen_entries >= MAX_EXTENSION_DATA_LIST_ENTRIES {
+            return Err(quota_exceeded(format!(
+                "directory `{}` has more than {MAX_EXTENSION_DATA_LIST_ENTRIES} entries",
+                dir.display()
+            )));
+        }
         let entry = entry
             .map_err(|error| ExtensionDataError::io("failed to read directory entry", error))?;
         let file_type = entry.file_type().map_err(|error| {
@@ -207,6 +219,30 @@ pub(super) fn list_extension_data_entries(
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(out)
+}
+
+fn quota_exceeded(message: impl Into<String>) -> ExtensionDataError {
+    ExtensionDataError::new(tau_proto::ExtensionDataErrorKind::QuotaExceeded, message)
+}
+
+fn ensure_request_contents_within_limit(contents: &[u8]) -> Result<(), ExtensionDataError> {
+    if contents.len() as u64 > MAX_EXTENSION_DATA_FILE_BYTES {
+        return Err(quota_exceeded(format!(
+            "extension data write is {} bytes; limit is {MAX_EXTENSION_DATA_FILE_BYTES} bytes",
+            contents.len()
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_file_len_within_limit(rel: &Path, len: u64) -> Result<(), ExtensionDataError> {
+    if len > MAX_EXTENSION_DATA_FILE_BYTES {
+        return Err(quota_exceeded(format!(
+            "`{}` is {len} bytes; limit is {MAX_EXTENSION_DATA_FILE_BYTES} bytes",
+            rel.display()
+        )));
+    }
+    Ok(())
 }
 
 fn create_private_dir_all(path: &Path) -> Result<(), std::io::Error> {
@@ -373,9 +409,17 @@ pub(super) fn run_extension_data_read_file(
             format!("`{}` is not a file", rel.display()),
         ));
     }
-    let contents = std::fs::read(&path).map_err(|error| {
-        ExtensionDataError::io(format!("failed to read `{}`", rel.display()), error)
+    let mut file = std::fs::File::open(&path).map_err(|error| {
+        ExtensionDataError::io(format!("failed to open `{}`", rel.display()), error)
     })?;
+    let mut contents = Vec::new();
+    file.by_ref()
+        .take(MAX_EXTENSION_DATA_FILE_BYTES + 1)
+        .read_to_end(&mut contents)
+        .map_err(|error| {
+            ExtensionDataError::io(format!("failed to read `{}`", rel.display()), error)
+        })?;
+    ensure_file_len_within_limit(&rel, contents.len() as u64)?;
     Ok(tau_proto::ExtensionDataValue::ReadFile { contents })
 }
 
@@ -384,6 +428,7 @@ pub(super) fn run_extension_data_write_file(
     path: String,
     contents: Vec<u8>,
 ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
+    ensure_request_contents_within_limit(&contents)?;
     let rel = sanitize_extension_data_path(&path, false)?;
     let path = checked_extension_data_path(root, &rel, true)?;
     if path.exists() && !path.is_file() {
@@ -403,6 +448,7 @@ pub(super) fn run_extension_data_create_file(
     path: String,
     contents: Vec<u8>,
 ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
+    ensure_request_contents_within_limit(&contents)?;
     let rel = sanitize_extension_data_path(&path, false)?;
     let path = checked_extension_data_path(root, &rel, true)?;
     if path.exists() && !path.is_file() {
@@ -422,6 +468,7 @@ pub(super) fn run_extension_data_append_file(
     path: String,
     contents: Vec<u8>,
 ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
+    ensure_request_contents_within_limit(&contents)?;
     let rel = sanitize_extension_data_path(&path, false)?;
     let path = checked_extension_data_path(root, &rel, true)?;
     if path.exists() && !path.is_file() {
@@ -429,6 +476,13 @@ pub(super) fn run_extension_data_append_file(
             tau_proto::ExtensionDataErrorKind::NotFile,
             format!("`{}` is not a file", rel.display()),
         ));
+    }
+    if path.exists() {
+        let metadata = std::fs::metadata(&path).map_err(|error| {
+            ExtensionDataError::io(format!("failed to stat `{}`", rel.display()), error)
+        })?;
+        let appended_len = metadata.len().saturating_add(contents.len() as u64);
+        ensure_file_len_within_limit(&rel, appended_len)?;
     }
     append_extension_data_file(&path, &contents).map_err(|error| {
         ExtensionDataError::io(format!("failed to append `{}`", rel.display()), error)
@@ -514,3 +568,6 @@ pub(super) fn run_extension_data_list_files(
     let entries = list_extension_data_entries(root, &dir)?;
     Ok(tau_proto::ExtensionDataValue::ListFiles { entries })
 }
+
+#[cfg(test)]
+mod tests;

@@ -42,3 +42,57 @@ fn extension_reader_waits_for_initialized_ack() {
         | HarnessEvent::Command(_) => panic!("unexpected harness event"),
     }
 }
+
+/// Test writer that fails every write to exercise supervised-child cleanup.
+struct FailingWriter;
+
+impl Write for FailingWriter {
+    fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+        Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "test writer failed",
+        ))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn process_exists(pid: u32) -> bool {
+    // SAFETY: signal 0 only checks whether the process exists and is
+    // signalable; it does not deliver a signal.
+    #[allow(unsafe_code)]
+    unsafe {
+        libc::kill(pid as libc::pid_t, 0) == 0
+    }
+}
+
+/// Ensures supervised extension writer failures still run child cleanup so
+/// broken pipes do not leave duplicate extension processes behind.
+#[test]
+fn writer_failure_still_reaps_supervised_child() {
+    let child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("sleep 30")
+        .spawn()
+        .expect("spawn child");
+    let pid = child.id();
+    let tx = spawn_writer_thread(FailingWriter, WriterShutdown::KillChild(child));
+
+    tx.send(tau_proto::HarnessOutputMessage::Disconnect(
+        tau_proto::Disconnect { reason: None },
+    ))
+    .expect("queue output");
+    drop(tx);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if !process_exists(pid) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    panic!("supervised child was not reaped after writer failure");
+}

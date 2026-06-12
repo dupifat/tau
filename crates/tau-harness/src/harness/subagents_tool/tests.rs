@@ -670,3 +670,17 @@ fn exact_wait_after_background_cancel_returns_cancel_error_once() {
     let (message, _) = reply_error(reply);
     assert_eq!(message, "result for tool call `bg-cancel` already consumed");
 }
+
+/// Ensures sent/received agent-message events can be correlated uniquely even
+/// when one sender emits multiple messages with the same timestamp.
+#[test]
+fn generated_agent_message_ids_are_unique_for_same_sender_and_timestamp() {
+    let mut seen = std::collections::HashSet::new();
+    let sender_id = crate::parse_agent_id("agent-test");
+    let timestamp = tau_proto::UnixMicros::new(42);
+
+    for sequence in 1..=1000 {
+        let id = build_agent_message_id(&sender_id, timestamp, sequence);
+        assert!(seen.insert(id), "message id must be unique");
+    }
+}

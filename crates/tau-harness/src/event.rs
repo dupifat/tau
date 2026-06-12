@@ -127,27 +127,30 @@ pub(crate) fn spawn_writer_thread(
     let (tx, rx) = mpsc::channel::<HarnessOutputMessage>();
     thread::spawn(move || {
         let mut w = HarnessOutputWriter::new(BufWriter::new(writer));
-        // Drain output messages until the channel closes.
+        // Drain output messages until the channel closes. Write failures still
+        // fall through to the shutdown sequence so supervised children are
+        // reaped instead of being abandoned after stdin breaks.
+        let mut can_write_disconnect = true;
         while let Ok(message) = rx.recv() {
-            if w.write_message(&message).is_err() {
-                return;
-            }
-            if w.flush().is_err() {
-                return;
+            if w.write_message(&message).is_err() || w.flush().is_err() {
+                can_write_disconnect = false;
+                break;
             }
         }
 
-        // Channel closed — run shutdown sequence.
+        // Channel closed or writer failed — run shutdown sequence.
         match shutdown {
             WriterShutdown::CloseStream => {
                 // Drop the writer → closes the stream.
             }
             WriterShutdown::KillChild(child) => {
-                // Best-effort disconnect message.
-                let _ = w.write_message(&HarnessOutputMessage::Disconnect(Disconnect {
-                    reason: Some("shutdown".to_owned()),
-                }));
-                let _ = w.flush();
+                if can_write_disconnect {
+                    // Best-effort disconnect message.
+                    let _ = w.write_message(&HarnessOutputMessage::Disconnect(Disconnect {
+                        reason: Some("shutdown".to_owned()),
+                    }));
+                    let _ = w.flush();
+                }
                 // Drop the writer → closes stdin → extension sees EOF.
                 drop(w);
 

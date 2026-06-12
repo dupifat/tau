@@ -76,7 +76,7 @@ broken by component name. This is how things like the policy gate or the
 delegate progress tracker plug in without modifying the harness core.
 
 See [`docs/interceptors.md`](docs/interceptors.md) and
-`crates/tau-harness/src/interception.rs`.
+`crates/tau-harness/src/harness/interception.rs`.
 
 ### Rhai scripting extension
 
@@ -248,7 +248,8 @@ files for a newly started harness, for example
 `tau --harness-config=extensions.core-shell.config.working_directory=/srv/project`.
 Values are parsed as YAML, so quote string values that look like booleans,
 numbers, `null`, arrays, or maps when you need literal strings. The flag is
-rejected for attach-only commands because a running harness cannot
+rejected for attach-only commands because a running harness cannot apply startup
+config overrides after it has already been spawned.
 
 ### `core-shell` — shell and filesystem tools
 

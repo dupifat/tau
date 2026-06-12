@@ -35,10 +35,10 @@ pub struct Hello {
 
 /// Subscription request describing which events a participant wants.
 ///
-/// Selectors describe event interest, not replay intent. UI socket
-/// clients currently receive selected late-join replay from the
-/// harness, while extension subscriptions are live-only. This payload
-/// has no past-event opt-in field.
+/// Selectors describe event interest, not replay intent. The harness may send
+/// selected durable catch-up to any peer, including extensions, with
+/// [`EventDelivery::replay`] set to `true`. Side-effecting subscribers must
+/// ignore replayed deliveries. This payload has no past-event opt-in field.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Subscribe {
     pub selectors: Vec<EventSelector>,
@@ -459,26 +459,32 @@ pub struct ExtensionDataRequest {
 }
 
 /// File operation requested by an extension data RPC.
+///
+/// The harness may reject operations with
+/// [`ExtensionDataErrorKind::QuotaExceeded`] when file contents or directory
+/// listings exceed harness-owned resource limits.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ExtensionDataRequestOp {
-    /// Read one whole file at a sanitized relative path.
+    /// Read one whole file at a sanitized relative path, subject to the
+    /// harness file-size quota.
     ReadFile { path: String },
     /// Write one whole file at a sanitized relative path, atomically replacing
-    /// any old content.
+    /// any old content and subject to the harness file-size quota.
     WriteFile { path: String, contents: Vec<u8> },
     /// Create one whole file at a sanitized relative path, failing when the
-    /// file already exists.
+    /// file already exists and subject to the harness file-size quota.
     CreateFile { path: String, contents: Vec<u8> },
     /// Append bytes to one file at a sanitized relative path, creating it when
-    /// missing.
+    /// missing and subject to the harness file-size quota.
     AppendFile { path: String, contents: Vec<u8> },
     /// Delete one file at a sanitized relative path. Missing files succeed.
     DeleteFile { path: String },
     /// Rename one file at sanitized relative paths. The destination must not
     /// already exist.
     RenameFile { from: String, to: String },
-    /// List direct children of a sanitized relative directory path.
+    /// List direct children of a sanitized relative directory path, subject to
+    /// the harness directory-entry quota.
     ListFiles { path: String },
 }
 /// Harness response to an [`ExtensionDataRequest`].
@@ -542,6 +548,8 @@ pub enum ExtensionDataErrorKind {
     NotDir,
     /// Permission denied by the operating system.
     Permission,
+    /// Operation exceeded a harness-enforced resource quota.
+    QuotaExceeded,
     /// Any other I/O or harness-side error.
     Io,
 }

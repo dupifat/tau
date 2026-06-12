@@ -446,6 +446,28 @@ fn built_in_extensions_yaml_parses() {
     let _ = built_in_extension_defs();
 }
 
+/// Ensures the real embedded built-in extension config keeps the full
+/// std-notifications default shape rather than only the duplicated test
+/// fixture.
+#[test]
+fn built_in_extensions_json5_contains_std_notifications_idle_all_config() {
+    let defs = built_in_extension_defs();
+    let extension = defs
+        .iter()
+        .find(|def| def.name == "std-notifications")
+        .expect("std-notifications built-in extension");
+
+    assert_eq!(
+        extension.config,
+        serde_json::json!({
+            "agent_start": [],
+            "agent_end": [],
+            "agent_idle": [],
+            "agent_idle_all": [],
+        })
+    );
+}
+
 #[test]
 fn built_in_extensions_json5_contains_disabled_std_pim_and_email_alias() {
     // Guard the real embedded JSON5, not the local test fixture, so the

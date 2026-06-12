@@ -13,6 +13,47 @@ fn prompt_created_count(h: &Harness) -> u64 {
     count
 }
 
+/// Sink that rejects intercepted frames to exercise failed-delivery recovery.
+struct FailingInterceptSink;
+
+impl ConnectionSink for FailingInterceptSink {
+    fn send(&mut self, _event: RoutedFrame) -> Result<(), ConnectionSendError> {
+        Err(ConnectionSendError::new("test sink closed"))
+    }
+}
+
+fn connect_named_test_tool(
+    h: &mut Harness,
+    connection_id: &str,
+    component_name: &str,
+) -> Arc<Mutex<Vec<RoutedFrame>>> {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    h.bus.connect(Connection::new(
+        ConnectionMetadata {
+            id: connection_id.into(),
+            name: component_name.to_owned(),
+            kind: tau_proto::ClientKind::Tool,
+            origin: ConnectionOrigin::InMemory,
+        },
+        Box::new(TestSink {
+            events: Arc::clone(&events),
+        }),
+    ));
+    events
+}
+
+fn connect_failing_test_tool(h: &mut Harness, name: &str) {
+    h.bus.connect(Connection::new(
+        ConnectionMetadata {
+            id: name.into(),
+            name: name.to_owned(),
+            kind: tau_proto::ClientKind::Tool,
+            origin: ConnectionOrigin::InMemory,
+        },
+        Box::new(FailingInterceptSink),
+    ));
+}
+
 #[test]
 fn interception_exact_selector_intercepts_before_log() {
     let tmp = TempDir::new().expect("tempdir");
@@ -339,6 +380,56 @@ fn interception_pass_advances_past_responding_interceptor() {
     );
 }
 
+/// Ensures same-priority cursor advancement uses full registration order rather
+/// than connection-id order alone.
+#[test]
+fn interception_cursor_uses_full_registration_order() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let first = connect_named_test_tool(&mut h, "z-conn", "alpha-component");
+    let second = connect_named_test_tool(&mut h, "a-conn", "beta-component");
+
+    for connection_id in ["z-conn", "a-conn"] {
+        h.handle_extension_event(
+            connection_id,
+            TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+                priority: InterceptionPriority::new(0),
+            })),
+        )
+        .expect("intercept registration");
+    }
+
+    h.publish_event(None, draft_event("ordered"));
+    h.handle_extension_event(
+        "z-conn",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("first pass reply");
+
+    assert_eq!(
+        first
+            .lock()
+            .expect("first events")
+            .iter()
+            .filter(|event| matches!(event.frame, HarnessOutputMessage::InterceptRequest(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        second
+            .lock()
+            .expect("second events")
+            .iter()
+            .filter(|event| matches!(event.frame, HarnessOutputMessage::InterceptRequest(_)))
+            .count(),
+        1,
+        "same-priority cursor must follow component-name ordering, not connection-id ordering"
+    );
+}
+
 #[test]
 fn interception_defers_subsequent_publishes_until_reply() {
     // Regression for the "Ready" loop: while one publish is parked
@@ -548,6 +639,504 @@ fn interception_drop_of_must_pass_event_is_overridden() {
         .get_next_from(baseline_seq)
         .expect("must-pass event still committed despite Drop");
     assert_eq!(entry.event, prompt);
+}
+
+fn agent_started_event(role: &str) -> Event {
+    Event::AgentStarted(tau_proto::AgentStarted {
+        agent_id: tau_proto::AgentId::parse("agent-started-test").expect("agent id"),
+        role: role.to_owned(),
+        display_name: Some("Started Test".to_owned()),
+    })
+}
+
+fn persisted_agent_started_events(h: &Harness) -> Vec<Event> {
+    h.agent_store
+        .agent_events("agent-started-test")
+        .expect("agent.started durable log")
+        .into_iter()
+        .map(|entry| entry.event)
+        .collect()
+}
+
+/// Ensures interceptors cannot drop agent creation facts now that
+/// AgentStarted flows through the central publish/interception pipeline.
+#[test]
+fn interception_drop_of_agent_started_is_overridden() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::AGENT_STARTED)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+    let baseline_seq = h.event_log.next_seq();
+
+    let started = agent_started_event("engineer");
+    h.publish_event(None, started.clone());
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Drop,
+        })),
+    )
+    .expect("drop reply");
+
+    let entry = h
+        .event_log
+        .get_next_from(baseline_seq)
+        .expect("agent.started still committed despite Drop");
+    assert_eq!(entry.event, started);
+    assert_eq!(persisted_agent_started_events(&h), vec![started]);
+}
+
+/// Ensures interceptors cannot rewrite immutable agent creation facts such as
+/// the role attached to an AgentStarted event.
+#[test]
+fn interception_replacement_of_agent_started_publishes_original() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::AGENT_STARTED)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+    let baseline_seq = h.event_log.next_seq();
+
+    let started = agent_started_event("engineer");
+    h.publish_event(None, started.clone());
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(agent_started_event("reviewer")))),
+        })),
+    )
+    .expect("replacement reply");
+
+    let entry = h
+        .event_log
+        .get_next_from(baseline_seq)
+        .expect("agent.started committed");
+    assert_eq!(entry.event, started);
+    assert_eq!(persisted_agent_started_events(&h), vec![started]);
+}
+
+fn session_agent_loaded_event(agent_id: &str) -> Event {
+    Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+        session_id: "session-intercept".into(),
+        agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
+    })
+}
+
+fn session_agent_unloaded_event(agent_id: &str) -> Event {
+    Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
+        session_id: "session-intercept".into(),
+        agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
+    })
+}
+
+/// Ensures interceptors cannot drop durable session membership load facts,
+/// because resume state depends on the committed membership log matching live
+/// delivery.
+#[test]
+fn interception_drop_of_session_agent_loaded_is_overridden() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::SESSION_AGENT_LOADED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+    let baseline_seq = h.event_log.next_seq();
+
+    let loaded = session_agent_loaded_event("agent-loaded-original");
+    h.publish_event(None, loaded.clone());
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Drop,
+        })),
+    )
+    .expect("drop reply");
+
+    let entry = h
+        .event_log
+        .get_next_from(baseline_seq)
+        .expect("session.agent_loaded still committed despite Drop");
+    assert_eq!(entry.event, loaded);
+    let membership = h
+        .store
+        .session("session-intercept")
+        .expect("session membership");
+    assert!(
+        membership
+            .contains_agent(&tau_proto::AgentId::parse("agent-loaded-original").expect("agent id"))
+    );
+}
+
+/// Ensures interceptors cannot rewrite durable session membership unload facts,
+/// preventing one agent's unload from being persisted as another agent's
+/// unload.
+#[test]
+fn interception_replacement_of_session_agent_unloaded_publishes_original() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::SESSION_AGENT_UNLOADED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+    let baseline_seq = h.event_log.next_seq();
+
+    let unloaded = session_agent_unloaded_event("agent-unloaded-original");
+    h.publish_event(None, unloaded.clone());
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(session_agent_unloaded_event(
+                "agent-unloaded-replacement",
+            )))),
+        })),
+    )
+    .expect("replacement reply");
+
+    let entry = h
+        .event_log
+        .get_next_from(baseline_seq)
+        .expect("session.agent_unloaded committed");
+    assert_eq!(entry.event, unloaded);
+    let events = h
+        .store
+        .session_events("session-intercept")
+        .expect("session events")
+        .into_iter()
+        .map(|entry| entry.event)
+        .collect::<Vec<_>>();
+    assert_eq!(events, vec![unloaded]);
+}
+
+fn session_started_event(session_id: &str) -> Event {
+    Event::SessionStarted(tau_proto::SessionStarted {
+        session_id: session_id.into(),
+        reason: tau_proto::SessionStartReason::New,
+    })
+}
+
+fn session_shutdown_event(session_id: &str) -> Event {
+    Event::SessionShutdown(tau_proto::SessionShutdown {
+        session_id: session_id.into(),
+    })
+}
+
+fn agent_message_sent_event(message: &str) -> Event {
+    Event::AgentMessageSent(tau_proto::AgentMessageSent {
+        message_id: tau_proto::AgentMessageId::from("msg-intercept"),
+        sender_id: tau_proto::AgentId::parse("agent-message-sender").expect("agent id"),
+        recipient: tau_proto::AgentMessageRecipient::Agent {
+            agent_id: tau_proto::AgentId::parse("agent-message-recipient").expect("agent id"),
+        },
+        kind: tau_proto::AgentMessageKind::Message,
+        message: message.to_owned(),
+    })
+}
+
+fn agent_message_received_event(recipient_id: &str) -> Event {
+    Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+        message_id: tau_proto::AgentMessageId::from("msg-intercept"),
+        sender_id: tau_proto::AgentId::parse("agent-message-sender").expect("agent id"),
+        recipient_id: tau_proto::AgentId::parse(recipient_id).expect("agent id"),
+        kind: tau_proto::AgentMessageKind::Message,
+        message: "hello".to_owned(),
+    })
+}
+
+/// Ensures interceptors cannot drop session lifecycle facts required by
+/// extensions and context providers for per-session setup.
+#[test]
+fn interception_drop_of_session_started_is_overridden() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::SESSION_STARTED)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+    let baseline_seq = h.event_log.next_seq();
+
+    let started = session_started_event("session-lifecycle-original");
+    h.publish_event(None, started.clone());
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Drop,
+        })),
+    )
+    .expect("drop reply");
+
+    let entry = h
+        .event_log
+        .get_next_from(baseline_seq)
+        .expect("session.started still committed despite Drop");
+    assert_eq!(entry.event, started);
+}
+
+/// Ensures interceptors cannot rewrite session shutdown facts used to flush or
+/// drop extension-owned per-session state.
+#[test]
+fn interception_replacement_of_session_shutdown_publishes_original() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::SESSION_SHUTDOWN)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+    let baseline_seq = h.event_log.next_seq();
+
+    let shutdown = session_shutdown_event("session-lifecycle-original");
+    h.publish_event(None, shutdown.clone());
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(session_shutdown_event(
+                "session-lifecycle-replacement",
+            )))),
+        })),
+    )
+    .expect("replacement reply");
+
+    let entry = h
+        .event_log
+        .get_next_from(baseline_seq)
+        .expect("session.shutdown committed");
+    assert_eq!(entry.event, shutdown);
+}
+
+/// Ensures interceptors cannot drop harness-validated sender-side message
+/// projections after recipient validation has already succeeded.
+#[test]
+fn interception_drop_of_agent_message_sent_is_overridden() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_MESSAGE_SENT,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+    let baseline_seq = h.event_log.next_seq();
+
+    let sent = agent_message_sent_event("hello");
+    h.publish_event(None, sent.clone());
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Drop,
+        })),
+    )
+    .expect("drop reply");
+
+    let entry = h
+        .event_log
+        .get_next_from(baseline_seq)
+        .expect("agent.message_sent still committed despite Drop");
+    assert_eq!(entry.event, sent);
+}
+
+/// Ensures interceptors cannot rewrite harness-validated recipient-side message
+/// projections, including attempts to route the projection to another agent.
+#[test]
+fn interception_replacement_of_agent_message_received_publishes_original() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_MESSAGE_RECEIVED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+    let baseline_seq = h.event_log.next_seq();
+
+    let received = agent_message_received_event("agent-message-recipient");
+    h.publish_event(None, received.clone());
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(agent_message_received_event(
+                "agent-message-other-recipient",
+            )))),
+        })),
+    )
+    .expect("replacement reply");
+
+    let entry = h
+        .event_log
+        .get_next_from(baseline_seq)
+        .expect("agent.message_received committed");
+    assert_eq!(entry.event, received);
+}
+
+fn tool_result_event(call_id: &str, text: &str) -> Event {
+    Event::ToolResult(ToolResult {
+        call_id: call_id.into(),
+        tool_name: ToolName::new("test_tool"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text(text.to_owned()),
+        kind: tau_proto::ToolResultKind::Final,
+        originator: tau_proto::PromptOriginator::User,
+        display: None,
+    })
+}
+
+fn tool_cancelled_event(call_id: &str) -> Event {
+    Event::ToolCancelled(tau_proto::ToolCancelled {
+        call_id: call_id.into(),
+        tool_name: ToolName::new("test_tool"),
+        tool_type: tau_proto::ToolType::Function,
+    })
+}
+
+/// Ensures interceptors cannot rewrite terminal tool transcript facts, because
+/// changing the call id would detach the completion from the requested tool
+/// use.
+#[test]
+fn interception_replacement_of_tool_result_publishes_original() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::TOOL_RESULT)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+    let baseline_seq = h.event_log.next_seq();
+
+    let result = tool_result_event("call-original", "ok");
+    h.publish_event(None, result.clone());
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(tool_result_event(
+                "call-rewritten",
+                "rewritten",
+            )))),
+        })),
+    )
+    .expect("replacement reply");
+
+    let entry = h
+        .event_log
+        .get_next_from(baseline_seq)
+        .expect("tool.result committed");
+    assert_eq!(entry.event, result);
+}
+
+/// Ensures interceptors cannot drop cancellation facts for terminal tool calls.
+#[test]
+fn interception_drop_of_tool_cancelled_is_overridden() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::TOOL_CANCELLED)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+    let baseline_seq = h.event_log.next_seq();
+
+    let cancelled = tool_cancelled_event("call-cancelled");
+    h.publish_event(None, cancelled.clone());
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Drop,
+        })),
+    )
+    .expect("drop reply");
+
+    let entry = h
+        .event_log
+        .get_next_from(baseline_seq)
+        .expect("tool.cancelled still committed despite Drop");
+    assert_eq!(entry.event, cancelled);
+}
+
+/// Ensures a failed intercept-request delivery does not park the publish
+/// pipeline forever and subsequent publishes still commit.
+#[test]
+fn failed_intercept_request_delivery_skips_interceptor_and_drains_publishes() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    connect_failing_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+    let baseline_seq = h.event_log.next_seq();
+
+    let first = draft_event("first");
+    let second = draft_event("second");
+    h.publish_event(None, first.clone());
+    h.publish_event(None, second.clone());
+
+    assert!(h.pending_intercept.is_none());
+    let first_entry = h
+        .event_log
+        .get_next_from(baseline_seq)
+        .expect("first draft committed");
+    assert_eq!(first_entry.event, first);
+    let second_entry = h
+        .event_log
+        .get_next_from(first_entry.seq.next())
+        .expect("second draft committed");
+    assert_eq!(second_entry.event, second);
 }
 
 #[test]

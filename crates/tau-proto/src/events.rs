@@ -2669,9 +2669,10 @@ pub struct WsPoolDelta {
 }
 
 /// Diagnostic emitted when a prompt with a previous provider response reports
-/// unexpectedly low provider cache reuse. The harness derives it from the
-/// original [`AgentPromptCreated`] plus final [`ProviderResponseFinished`]
-/// token usage so offline analysis can spot suspicious cache misses and then
+/// unexpectedly low provider cache reuse. Provider extensions derive it from
+/// the original [`AgentPromptCreated`] plus final [`ProviderResponseFinished`]
+/// token usage and the harness accepts it only from the provider that owns the
+/// prompt. Offline analysis can use it to spot suspicious cache misses and then
 /// inspect the dumped provider request JSON for exact wire details.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProviderCacheMissDiagnostic {

@@ -79,21 +79,51 @@ metadata, not the fact subscribers ultimately observe.
   `intercept_request`: `pass` unchanged, `pass` with a replacement event, or
   `drop`.
 
-## Transport (event delivery and acknowledgement)
+## Transport (event delivery)
 
-The harness wraps every event it sends to a peer in `deliver`. Receivers ack
-only committed runtime deliveries; direct snapshots and replay deliveries are
-unsequenced and must not be acked. The harness does not retain the runtime event
-stream in memory; late UI catch-up is reconstructed from session/agent stores
-and current harness snapshots, and extension subscriptions remain live-only
-unless a future explicit replay mode is added.
+The harness wraps every event it sends to a peer in `deliver`. Deliveries carry
+`EventDelivery { event, replay, recorded_at }`. `replay: false` announces a live
+occurrence or direct snapshot; `replay: true` re-sends a durable historical fact
+to a late subscriber.
 
-- **`deliver`** *(harness → peer)* — Harness-owned event delivery envelope:
-  `EventDelivery { event, seq, recorded_at }`. `seq: Some(_)` means an ackable
-  committed runtime delivery. `seq: None` means a direct, replay, or otherwise
-  unsequenced delivery. `recorded_at` is present when a runtime or historical
-  timestamp is meaningful.
-- **`ack`** *(peer → harness)* — Cumulative acknowledgement that the receiver has
-  processed all ackable deliveries with sequence `<= up_to`. Newer acks
-  supersede older ones; duplicate or out-of-order acks are ignored by the
-  harness.
+The protocol no longer has an `ack` input message. The harness does not retain
+the runtime event stream in memory; late catch-up for any subscribed peer is
+rebuilt from durable session/agent stores and current harness snapshots. Peers
+that perform side effects must ignore `deliver` frames with `replay: true`. Some
+runtime events, such as `tool.started`, are not durable and are therefore not
+replayed.
+
+- **`deliver`** *(harness → peer)* — Harness-owned event delivery envelope.
+  `recorded_at` is present for committed runtime deliveries and durable replay
+  entries when a timestamp is meaningful. It is absent for synthetic direct
+  snapshots.
+
+## Extension data RPC
+
+Extensions use `extension_data_request` to ask the harness to read or mutate
+extension-owned persistent data inside harness-managed state roots. The matching
+`extension_data_result` echoes the request id and returns either an operation
+value or an error kind/message. Type definitions live in
+[`crates/tau-proto/src/messages.rs`](../crates/tau-proto/src/messages.rs); quota
+constants currently live in
+[`crates/tau-harness/src/harness/extension_data.rs`](../crates/tau-harness/src/harness/extension_data.rs).
+
+Requests choose a storage scope and an operation:
+
+- `session` scope stores data under the extension's current-session root.
+- `user` scope stores persistent data under the harness state directory for that
+  extension.
+- `cache` scope stores cache data under the user cache directory for that
+  extension.
+- File paths are sanitized relative paths. Absolute paths, `.`/`..`, symlink
+  leaves, and symlink ancestors are rejected by the harness.
+- Supported operations are whole-file read/write/create/append/delete/rename and
+  direct-child directory listing.
+
+The harness enforces per-file and per-directory-list quotas. A request that
+exceeds those limits fails with `quota_exceeded`. Current limits are 16 MiB per
+file for read/write/create/append operations and 4096 scanned directory entries
+for one list operation. These quotas bound individual harness operations; they do
+not bound aggregate disk use across many files. See
+[SECURITY.md](../SECURITY.md#harness-and-extension-boundaries) for the trust
+boundary and hardening assumptions.

@@ -8,6 +8,8 @@ fn wait_for_socket(sock: &Path) {
     }
 }
 
+/// Ensures embedded mode returns provider output and persists the resulting
+/// history/debug events.
 #[test]
 fn embedded_mode_returns_provider_response_and_persists_history() {
     let td = TempDir::new().expect("tempdir");
@@ -19,7 +21,7 @@ fn embedded_mode_returns_provider_response_and_persists_history() {
     let sessions_dir = tau_config::settings::sessions_dir_of(&sp);
     let branch = persisted_agent_branch(&sp, "s1");
     assert!(
-        branch.len() >= 2,
+        2 <= branch.len(),
         "should have user msg + agent response, got {}",
         branch.len()
     );
@@ -47,15 +49,17 @@ fn embedded_mode_returns_provider_response_and_persists_history() {
         .filter(|e| e["type"] == "published" && e["event_name"] == "provider.response_finished")
         .count();
     assert!(
-        from_connection_finished >= 1,
+        1 <= from_connection_finished,
         "expected ≥1 inbound provider.response_finished line, got {from_connection_finished}",
     );
     assert!(
-        published_finished >= 1,
+        1 <= published_finished,
         "expected ≥1 published provider.response_finished line, got {published_finished}",
     );
 }
 
+/// Ensures daemon mode accepts multiple later socket clients and persists both
+/// cycles.
 #[test]
 fn daemon_mode_accepts_later_clients() {
     let td = TempDir::new().expect("tempdir");
@@ -119,6 +123,8 @@ fn daemon_mode_accepts_later_clients() {
     );
 }
 
+/// Ensures daemon debug prompt rendering uses the requested role over the
+/// socket path.
 #[test]
 fn daemon_mode_renders_system_prompt_for_requested_role() {
     // `tau dev print-prompt` asks the daemon for the same rendered prompt the
@@ -155,6 +161,8 @@ fn daemon_mode_renders_system_prompt_for_requested_role() {
     server.join().expect("join").expect("daemon clean exit");
 }
 
+/// Ensures daemon debug tool rendering uses the requested role over the socket
+/// path.
 #[test]
 fn daemon_mode_renders_tool_definitions_for_requested_role() {
     // `tau dev print-tools` asks the daemon for the same tool definitions the
@@ -197,6 +205,8 @@ fn daemon_mode_renders_tool_definitions_for_requested_role() {
     server.join().expect("join").expect("daemon clean exit");
 }
 
+/// Ensures daemon tool rendering reports unknown roles instead of using
+/// fallback data.
 #[test]
 fn daemon_mode_reports_unknown_role_for_rendered_tool_definitions_request() {
     // Tool diagnostics should fail in-band for role typos, matching prompt
@@ -229,6 +239,8 @@ fn daemon_mode_reports_unknown_role_for_rendered_tool_definitions_request() {
     server.join().expect("join").expect("daemon clean exit");
 }
 
+/// Ensures daemon prompt rendering reports unknown roles instead of using
+/// fallback data.
 #[test]
 fn daemon_mode_reports_unknown_role_for_rendered_system_prompt_request() {
     // The debug prompt endpoint must fail in-band with a participant error for
@@ -261,6 +273,7 @@ fn daemon_mode_reports_unknown_role_for_rendered_system_prompt_request() {
     server.join().expect("join").expect("daemon clean exit");
 }
 
+/// Ensures embedded mode can execute the read tool against a real file fixture.
 #[test]
 fn embedded_mode_can_read_files() {
     let td = TempDir::new().expect("tempdir");
@@ -274,6 +287,7 @@ fn embedded_mode_can_read_files() {
     assert!(r.contains("hello from disk"));
 }
 
+/// Ensures embedded mode can execute shell commands through the echo harness.
 #[test]
 fn embedded_mode_can_run_shell_commands() {
     let td = TempDir::new().expect("tempdir");
@@ -284,8 +298,10 @@ fn embedded_mode_can_run_shell_commands() {
     assert!(!r.is_empty(), "shell response should not be empty");
 }
 
+/// Ensures traced embedded shell runs still return final output when transient
+/// progress is missed.
 #[test]
-fn traced_embedded_reports_shell_progress() {
+fn traced_embedded_returns_shell_output_when_progress_is_missed() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let o = run_embedded_message_with_echo(&sp, "s1", "shell printf hi").expect("ok");
@@ -295,8 +311,10 @@ fn traced_embedded_reports_shell_progress() {
     assert!(!o.response.is_empty(), "shell response should not be empty");
 }
 
+/// Ensures daemon-mode shell interactions report lifecycle events and clean up
+/// their owned socket path after the daemon exits.
 #[test]
-fn traced_daemon_reports_shell_progress() {
+fn traced_daemon_reports_lifecycle_and_cleans_up_socket_for_shell_run() {
     let td = TempDir::new().expect("tempdir");
     let sock = td.path().join("daemon.sock");
     let sp = td.path().join("state");
@@ -331,8 +349,10 @@ fn traced_daemon_reports_shell_progress() {
     // completes before the writer drains the transient event.
     assert!(!o.response.is_empty(), "shell response should not be empty");
     server.join().expect("join").expect("clean exit");
+    assert!(!sock.exists(), "daemon socket should be cleaned up");
 }
 
+/// Ensures traced embedded runs report provider lifecycle messages.
 #[test]
 fn traced_embedded_reports_lifecycle() {
     let td = TempDir::new().expect("tempdir");
@@ -355,6 +375,8 @@ fn traced_embedded_reports_lifecycle() {
     );
 }
 
+/// Ensures daemon helpers surface an in-band socket disconnect reason as a
+/// participant error.
 #[test]
 fn daemon_disconnect_reason_is_reported() {
     let td = TempDir::new().expect("tempdir");
@@ -362,19 +384,15 @@ fn daemon_disconnect_reason_is_reported() {
     let listener = bind_listener(&sock).expect("bind");
 
     let server = thread::spawn(move || {
-        let (stream, _) = listener.accept().expect("accept");
-        let read_stream = stream.try_clone().expect("clone");
-        let mut reader = tau_proto::HarnessInputReader::new(BufReader::new(read_stream));
-        let mut writer = tau_proto::HarnessOutputWriter::new(BufWriter::new(stream));
-        let _ = reader.read_message(); // hello
-        let _ = reader.read_message(); // subscribe
-        let _ = reader.read_message(); // message
-        writer
-            .write_message(&HarnessOutputMessage::Disconnect(Disconnect {
+        let mut accepted = listener.accept().expect("accept");
+        let _ = accepted.recv(); // hello
+        let _ = accepted.recv(); // subscribe
+        let _ = accepted.recv(); // message
+        accepted
+            .send(&HarnessOutputMessage::Disconnect(Disconnect {
                 reason: Some("test disconnect".to_owned()),
             }))
             .expect("write");
-        writer.flush().expect("flush");
     });
 
     let err =
@@ -383,6 +401,8 @@ fn daemon_disconnect_reason_is_reported() {
     server.join().expect("join");
 }
 
+/// Ensures harness startup eagerly initializes the configured session before
+/// use.
 #[test]
 fn harness_startup_eagerly_initializes_eager_session() {
     // Guards against the recurring "this looks like redundant work"
@@ -406,6 +426,7 @@ fn harness_startup_eagerly_initializes_eager_session() {
     );
 }
 
+/// Ensures resumed startup publishes a resume-flavored SessionStarted event.
 #[test]
 fn resumed_startup_publishes_resume_session_started() {
     // Restored daemons get only the eager startup `SessionStarted` to tell

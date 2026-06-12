@@ -5,6 +5,7 @@ use std::io::{self, Read as _, Write as _};
 use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -12,7 +13,7 @@ use tau_proto::{
     ClientKind, Disconnect, Event, EventSelector, HarnessInputMessage, HarnessOutputMessage, Hello,
     PROTOCOL_VERSION, Subscribe, UiCreateAgent,
 };
-use tau_socket::SocketPeer;
+use tau_socket::{SocketListener, SocketPeer, SocketReceive};
 
 use crate::error::HarnessError;
 use crate::event::HarnessEvent;
@@ -108,19 +109,85 @@ pub struct EmbeddedOptions {
     pub dirs: Option<tau_config::settings::TauDirs>,
 }
 
-pub(crate) fn bind_listener(path: &Path) -> Result<UnixListener, HarnessError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    if path.exists() {
-        std::fs::remove_file(path)?;
-    }
-    UnixListener::bind(path).map_err(HarnessError::from)
+/// Binds a daemon-owned listener using tau-socket safe stale-path handling.
+///
+/// The returned listener owns identity-checked drop-time cleanup for the socket
+/// path and must outlive any cloned raw listener used by the accept forwarder.
+///
+/// # Errors
+///
+/// Returns an error when parent directory creation, stale socket handling,
+/// active socket detection, binding, or metadata inspection fails.
+pub(crate) fn bind_listener(path: &Path) -> Result<SocketListener, HarnessError> {
+    SocketListener::bind(path).map_err(HarnessError::from)
 }
 
-struct ListenerHandle {
+enum ListenerHandle {
+    // Externally supplied by socket activation; the daemon must not unlink its path.
+    SocketActivated(UnixListener),
+    // Bound by this daemon; `SocketListener` owns identity-checked path cleanup.
+    Bound(SocketListener),
+}
+
+impl ListenerHandle {
+    fn spawn_forwarder(
+        &self,
+        tx: mpsc::Sender<HarnessEvent>,
+    ) -> Result<ListenerForwarder, HarnessError> {
+        let listener = match self {
+            Self::SocketActivated(listener) => listener.try_clone().map_err(HarnessError::Io)?,
+            Self::Bound(listener) => listener.try_clone_raw_listener()?,
+        };
+        spawn_listener_forwarder(listener, tx)
+    }
+}
+
+struct ListenerForwarder {
+    // Stop signal sent before joining the accept-loop thread.
+    stop_tx: mpsc::Sender<()>,
+    // Accept-loop thread joined during `ListenerForwarder` drop.
+    join: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for ListenerForwarder {
+    fn drop(&mut self) {
+        let _ = self.stop_tx.send(());
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+fn spawn_listener_forwarder(
     listener: UnixListener,
-    cleanup_socket_path: bool,
+    tx: mpsc::Sender<HarnessEvent>,
+) -> Result<ListenerForwarder, HarnessError> {
+    listener.set_nonblocking(true).map_err(HarnessError::Io)?;
+    let (stop_tx, stop_rx) = mpsc::channel();
+    let join = thread::spawn(move || {
+        loop {
+            if stop_rx.try_recv().is_ok() {
+                return;
+            }
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    if tx.send(HarnessEvent::NewClient(stream)).is_err() {
+                        return;
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if stop_rx.recv_timeout(Duration::from_millis(20)).is_ok() {
+                        return;
+                    }
+                }
+                Err(_) => return,
+            }
+        }
+    });
+    Ok(ListenerForwarder {
+        stop_tx,
+        join: Some(join),
+    })
 }
 
 fn open_listener(path: &Path) -> Result<ListenerHandle, HarnessError> {
@@ -148,16 +215,10 @@ fn open_listener(path: &Path) -> Result<ListenerHandle, HarnessError> {
                 path.display()
             )));
         }
-        return Ok(ListenerHandle {
-            listener,
-            cleanup_socket_path: false,
-        });
+        return Ok(ListenerHandle::SocketActivated(listener));
     }
 
-    Ok(ListenerHandle {
-        listener: bind_listener(path)?,
-        cleanup_socket_path: true,
-    })
+    Ok(ListenerHandle::Bound(bind_listener(path)?))
 }
 
 /// Runs one embedded interaction and returns progress plus the final
@@ -298,8 +359,6 @@ pub fn run_daemon(
     let socket_path = socket_path.into();
     let state_dir = state_dir.into();
     let listener_handle = open_listener(&socket_path)?;
-    let cleanup_socket_path = listener_handle.cleanup_socket_path;
-    let listener = listener_handle.listener;
     let (config, dirs) = match options.dirs.clone() {
         Some(dirs) => {
             let config = resolve_config_in(&dirs)
@@ -325,19 +384,12 @@ pub fn run_daemon(
     )?;
 
     let tx = harness.tx.clone();
-    thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            if tx.send(HarnessEvent::NewClient(stream)).is_err() {
-                return;
-            }
-        }
-    });
+    let forwarder = listener_handle.spawn_forwarder(tx)?;
 
     let result = harness.run_event_loop(options.max_clients, options.exit_on_disconnect);
     let _ = harness.shutdown();
-    if cleanup_socket_path {
-        let _ = std::fs::remove_file(&socket_path);
-    }
+    drop(forwarder);
+    drop(listener_handle);
     result
 }
 
@@ -357,8 +409,6 @@ pub fn run_daemon_with_echo(
     let socket_path = socket_path.into();
     let state_dir = state_dir.into();
     let listener_handle = open_listener(&socket_path)?;
-    let cleanup_socket_path = listener_handle.cleanup_socket_path;
-    let listener = listener_handle.listener;
     let dirs = options
         .dirs
         .clone()
@@ -378,19 +428,12 @@ pub fn run_daemon_with_echo(
     harness.enable_echo_tool_for_tests();
 
     let tx = harness.tx.clone();
-    thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            if tx.send(HarnessEvent::NewClient(stream)).is_err() {
-                return;
-            }
-        }
-    });
+    let forwarder = listener_handle.spawn_forwarder(tx)?;
 
     let result = harness.run_event_loop(options.max_clients, options.exit_on_disconnect);
     let _ = harness.shutdown();
-    if cleanup_socket_path {
-        let _ = std::fs::remove_file(&socket_path);
-    }
+    drop(forwarder);
+    drop(listener_handle);
     result
 }
 
@@ -405,8 +448,6 @@ pub fn run_daemon_with_config(
     let socket_path = socket_path.into();
     let state_dir = state_dir.into();
     let listener_handle = open_listener(&socket_path)?;
-    let cleanup_socket_path = listener_handle.cleanup_socket_path;
-    let listener = listener_handle.listener;
     let dirs = options.dirs.clone().unwrap_or_default();
     let mut harness = Harness::from_config(
         config,
@@ -417,19 +458,12 @@ pub fn run_daemon_with_config(
     )?;
 
     let tx = harness.tx.clone();
-    thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            if tx.send(HarnessEvent::NewClient(stream)).is_err() {
-                return;
-            }
-        }
-    });
+    let forwarder = listener_handle.spawn_forwarder(tx)?;
 
     let result = harness.run_event_loop(options.max_clients, options.exit_on_disconnect);
     let _ = harness.shutdown();
-    if cleanup_socket_path {
-        let _ = std::fs::remove_file(&socket_path);
-    }
+    drop(forwarder);
+    drop(listener_handle);
     result
 }
 
@@ -493,14 +527,17 @@ pub fn send_daemon_message_with_trace(
     let mut progress_messages = Vec::new();
     // Counter parsed out of the `AgentPromptCreated` whose `ctx_id`
     // matches our submit. The terminal `ProviderResponseFinished` has a
-    // spid counter `>= our_spid_counter` (equal when no tool calls,
-    // higher when tool-result follow-ups bump the counter).
+    // spid counter where `our_spid_counter <= terminal_counter` (equal when no tool
+    // calls, higher when tool-result follow-ups bump the counter).
     let mut our_spid_counter: Option<u64> = None;
     loop {
         if SEND_DAEMON_MESSAGE_TIMEOUT <= started_at.elapsed() {
             return Err(HarnessError::ResponseTimeout);
         }
-        if let Some(message) = peer.recv_timeout(SEND_DAEMON_MESSAGE_TIMEOUT)? {
+        if let Some(message) = recv_daemon_message(
+            &mut peer,
+            SEND_DAEMON_MESSAGE_TIMEOUT.saturating_sub(started_at.elapsed()),
+        )? {
             match message {
                 HarnessOutputMessage::Deliver(delivery) => match delivery.into_event() {
                     Event::ToolProgress(p) => progress_messages.push(format_tool_progress(&p)),
@@ -596,7 +633,10 @@ pub fn get_daemon_rendered_system_prompt(
             }));
             return Err(HarnessError::ResponseTimeout);
         }
-        if let Some(message) = peer.recv_timeout(SEND_DAEMON_MESSAGE_TIMEOUT)? {
+        if let Some(message) = recv_daemon_message(
+            &mut peer,
+            SEND_DAEMON_MESSAGE_TIMEOUT.saturating_sub(started_at.elapsed()),
+        )? {
             match message {
                 HarnessOutputMessage::RenderedSystemPromptResult(result)
                     if result.request_id == request_id =>
@@ -647,7 +687,10 @@ pub fn get_daemon_rendered_tool_definitions(
             }));
             return Err(HarnessError::ResponseTimeout);
         }
-        if let Some(message) = peer.recv_timeout(SEND_DAEMON_MESSAGE_TIMEOUT)? {
+        if let Some(message) = recv_daemon_message(
+            &mut peer,
+            SEND_DAEMON_MESSAGE_TIMEOUT.saturating_sub(started_at.elapsed()),
+        )? {
             match message {
                 HarnessOutputMessage::RenderedToolDefinitionsResult(result)
                     if result.request_id == request_id =>
@@ -686,6 +729,19 @@ fn connect_daemon_helper(
         client_kind: ClientKind::Ui,
     }))?;
     Ok(peer)
+}
+
+fn recv_daemon_message(
+    peer: &mut SocketPeer,
+    timeout: Duration,
+) -> Result<Option<HarnessOutputMessage>, HarnessError> {
+    match peer.recv_timeout(timeout)? {
+        SocketReceive::Message { message } => Ok(Some(message)),
+        SocketReceive::Timeout => Ok(None),
+        SocketReceive::Closed => Err(HarnessError::Participant(
+            "daemon socket closed before response".to_owned(),
+        )),
+    }
 }
 
 fn next_render_request_id(prefix: &str) -> String {
@@ -768,16 +824,13 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
     tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "daemon ready markers written");
 
     let tx = harness.tx.clone();
-    thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            if tx.send(HarnessEvent::NewClient(stream)).is_err() {
-                return;
-            }
-        }
-    });
+    let listener_handle = ListenerHandle::Bound(listener);
+    let forwarder = listener_handle.spawn_forwarder(tx)?;
 
     let result = harness.run_event_loop(options.max_clients, options.exit_on_disconnect);
     let _ = harness.shutdown();
+    drop(forwarder);
+    drop(listener_handle);
     daemon_dir.cleanup();
     result
 }

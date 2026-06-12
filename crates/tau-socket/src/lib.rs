@@ -4,28 +4,91 @@
 //! same self-delimiting CBOR event codec as stdio transports.
 
 use std::io::{self, BufReader, BufWriter};
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::time::Duration;
 use std::{fmt, fs, thread};
 
 use tau_proto::{
-    DecodeError, HarnessInputMessage, HarnessOutputMessage, PeerInputReader, PeerOutputWriter,
+    DecodeError, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage,
+    HarnessOutputWriter, PeerInputReader, PeerOutputWriter,
 };
 
 /// Errors returned by the Unix socket transport.
 #[derive(Debug)]
 pub enum SocketTransportError {
-    CreateParentDirectory { path: PathBuf, source: io::Error },
-    RemoveStaleSocket { path: PathBuf, source: io::Error },
-    Bind { path: PathBuf, source: io::Error },
-    Accept(io::Error),
-    Connect { path: PathBuf, source: io::Error },
-    Clone(io::Error),
-    Encode(tau_proto::EncodeError),
-    Flush(io::Error),
-    Decode(DecodeError),
+    /// Creating the parent directory for a socket path failed.
+    CreateParentDirectory {
+        /// Directory that could not be created.
+        path: PathBuf,
+        /// Underlying filesystem error.
+        source: io::Error,
+    },
+    /// A pre-existing non-socket path blocked binding the listener.
+    RefuseNonSocketPath {
+        /// Path that already existed but was not a Unix socket.
+        path: PathBuf,
+    },
+    /// A pre-existing Unix socket accepted connections and was treated as live.
+    ActiveSocketExists {
+        /// Socket path that appears to already have a listener.
+        path: PathBuf,
+    },
+    /// Removing an inactive stale Unix socket path failed.
+    RemoveStaleSocket {
+        /// Stale socket path that could not be removed.
+        path: PathBuf,
+        /// Underlying filesystem error.
+        source: io::Error,
+    },
+    /// Binding the Unix listener failed.
+    Bind {
+        /// Socket path that could not be bound.
+        path: PathBuf,
+        /// Underlying bind error.
+        source: io::Error,
+    },
+    /// Reading metadata for the bound socket path failed.
+    BoundSocketMetadata {
+        /// Socket path whose metadata could not be read after bind.
+        path: PathBuf,
+        /// Underlying filesystem error.
+        source: io::Error,
+    },
+    /// Accepting an attached Unix socket client failed.
+    Accept {
+        /// Underlying accept error.
+        source: io::Error,
+    },
+    /// Connecting to a listener failed.
+    Connect {
+        /// Socket path that could not be connected.
+        path: PathBuf,
+        /// Underlying connect error.
+        source: io::Error,
+    },
+    /// Cloning a Unix stream failed.
+    Clone {
+        /// Underlying stream clone error.
+        source: io::Error,
+    },
+    /// Encoding a protocol message failed.
+    Encode {
+        /// Underlying protocol encode error.
+        source: tau_proto::EncodeError,
+    },
+    /// Flushing a protocol message failed.
+    Flush {
+        /// Underlying writer flush error.
+        source: io::Error,
+    },
+    /// Decoding a protocol message failed.
+    Decode {
+        /// Underlying protocol decode error.
+        source: DecodeError,
+    },
 }
 
 impl fmt::Display for SocketTransportError {
@@ -36,6 +99,16 @@ impl fmt::Display for SocketTransportError {
                 "failed to create socket parent directory {}: {source}",
                 path.display()
             ),
+            Self::RefuseNonSocketPath { path } => {
+                write!(f, "refusing to replace non-socket path {}", path.display())
+            }
+            Self::ActiveSocketExists { path } => {
+                write!(
+                    f,
+                    "refusing to replace active Unix socket {}",
+                    path.display()
+                )
+            }
             Self::RemoveStaleSocket { path, source } => write!(
                 f,
                 "failed to remove stale socket {}: {source}",
@@ -44,7 +117,12 @@ impl fmt::Display for SocketTransportError {
             Self::Bind { path, source } => {
                 write!(f, "failed to bind Unix socket {}: {source}", path.display())
             }
-            Self::Accept(source) => write!(f, "failed to accept Unix socket client: {source}"),
+            Self::BoundSocketMetadata { path, source } => write!(
+                f,
+                "failed to inspect bound Unix socket {}: {source}",
+                path.display()
+            ),
+            Self::Accept { source } => write!(f, "failed to accept Unix socket client: {source}"),
             Self::Connect { path, source } => {
                 write!(
                     f,
@@ -52,10 +130,10 @@ impl fmt::Display for SocketTransportError {
                     path.display()
                 )
             }
-            Self::Clone(source) => write!(f, "failed to clone Unix socket stream: {source}"),
-            Self::Encode(source) => write!(f, "failed to encode socket event: {source}"),
-            Self::Flush(source) => write!(f, "failed to flush socket stream: {source}"),
-            Self::Decode(source) => write!(f, "failed to decode socket event: {source}"),
+            Self::Clone { source } => write!(f, "failed to clone Unix socket stream: {source}"),
+            Self::Encode { source } => write!(f, "failed to encode socket event: {source}"),
+            Self::Flush { source } => write!(f, "failed to flush socket stream: {source}"),
+            Self::Decode { source } => write!(f, "failed to decode socket event: {source}"),
         }
     }
 }
@@ -64,26 +142,63 @@ impl std::error::Error for SocketTransportError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::CreateParentDirectory { source, .. } => Some(source),
+            Self::RefuseNonSocketPath { .. } | Self::ActiveSocketExists { .. } => None,
             Self::RemoveStaleSocket { source, .. } => Some(source),
             Self::Bind { source, .. } => Some(source),
-            Self::Accept(source) => Some(source),
+            Self::BoundSocketMetadata { source, .. } => Some(source),
+            Self::Accept { source } => Some(source),
             Self::Connect { source, .. } => Some(source),
-            Self::Clone(source) => Some(source),
-            Self::Encode(source) => Some(source),
-            Self::Flush(source) => Some(source),
-            Self::Decode(source) => Some(source),
+            Self::Clone { source } => Some(source),
+            Self::Encode { source } => Some(source),
+            Self::Flush { source } => Some(source),
+            Self::Decode { source } => Some(source),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SocketIdentity {
+    // Device number from the bound socket metadata.
+    dev: u64,
+    // Inode number from the bound socket metadata.
+    ino: u64,
+}
+
+impl SocketIdentity {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
         }
     }
 }
 
 /// Unix socket listener for later-attached protocol clients.
+///
+/// When dropped, a listener removes only the socket path it created and only if
+/// that path still refers to the same device/inode recorded after binding.
 pub struct SocketListener {
+    /// Filesystem path occupied by the listener socket.
     path: PathBuf,
+    /// Bound Unix listener accepting client streams.
     listener: UnixListener,
+    /// Device/inode pair of the socket created by this listener.
+    socket_identity: SocketIdentity,
 }
 
 impl SocketListener {
     /// Binds a Unix socket listener at the given path.
+    ///
+    /// Parent directories are created if needed. An inactive stale Unix socket
+    /// may be removed, but non-socket paths and active listeners are refused.
+    /// Active-listener detection opens a short-lived connection that can be
+    /// observed by an already-running daemon.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when directory creation, stale socket cleanup, binding,
+    /// post-bind socket metadata inspection, non-socket refusal, or
+    /// active-socket refusal fails or applies.
     pub fn bind(path: impl Into<PathBuf>) -> Result<Self, SocketTransportError> {
         let path = path.into();
         if let Some(parent) = path.parent() {
@@ -94,18 +209,23 @@ impl SocketListener {
                 }
             })?;
         }
-        if path.exists() {
-            fs::remove_file(&path).map_err(|source| SocketTransportError::RemoveStaleSocket {
-                path: path.clone(),
-                source,
-            })?;
-        }
+        remove_inactive_stale_socket(&path)?;
 
         let listener = UnixListener::bind(&path).map_err(|source| SocketTransportError::Bind {
             path: path.clone(),
             source,
         })?;
-        Ok(Self { path, listener })
+        let metadata = fs::symlink_metadata(&path).map_err(|source| {
+            SocketTransportError::BoundSocketMetadata {
+                path: path.clone(),
+                source,
+            }
+        })?;
+        Ok(Self {
+            path,
+            listener,
+            socket_identity: SocketIdentity::from_metadata(&metadata),
+        })
     }
 
     /// Returns the filesystem path of the listener socket.
@@ -114,29 +234,138 @@ impl SocketListener {
         &self.path
     }
 
-    /// Accepts one attached client.
-    pub fn accept(&self) -> Result<SocketPeer, SocketTransportError> {
+    /// Clones the raw Unix listener for daemon/internal stream handoff loops.
+    ///
+    /// This is an escape hatch for callers that need to pass accepted raw
+    /// streams to higher-level server code instead of using [`Self::accept`].
+    /// The `SocketListener` still owns identity-checked path cleanup; callers
+    /// must ensure cloned listeners are shut down before dropping it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying listener cannot be cloned.
+    pub fn try_clone_raw_listener(&self) -> Result<UnixListener, SocketTransportError> {
+        self.listener
+            .try_clone()
+            .map_err(|source| SocketTransportError::Clone { source })
+    }
+
+    /// Accepts one attached client for harness/server-side protocol handling.
+    ///
+    /// The returned client reads [`HarnessInputMessage`] values from the peer
+    /// and writes [`HarnessOutputMessage`] values back to it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when accepting the Unix stream or cloning it for split
+    /// reader/writer ownership fails.
+    pub fn accept(&self) -> Result<SocketAcceptedClient, SocketTransportError> {
         let (stream, _) = self
             .listener
             .accept()
-            .map_err(SocketTransportError::Accept)?;
-        SocketPeer::new(stream)
+            .map_err(|source| SocketTransportError::Accept { source })?;
+        SocketAcceptedClient::new(stream)
     }
 }
 
 impl Drop for SocketListener {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        let Ok(metadata) = fs::symlink_metadata(&self.path) else {
+            return;
+        };
+        if !metadata.file_type().is_socket() {
+            return;
+        }
+        if SocketIdentity::from_metadata(&metadata) == self.socket_identity {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 
-/// One connected Unix socket peer speaking the protocol.
-pub struct SocketPeer {
-    writer: PeerOutputWriter<BufWriter<UnixStream>>,
-    reader_frames: Receiver<Result<HarnessOutputMessage, DecodeError>>,
+/// One server-side accepted Unix socket client speaking the protocol.
+pub struct SocketAcceptedClient {
+    /// Reader for peer/client-to-harness input messages.
+    reader: HarnessInputReader<BufReader<UnixStream>>,
+    /// Writer for harness-to-peer/client output messages.
+    writer: HarnessOutputWriter<BufWriter<UnixStream>>,
 }
+
+impl SocketAcceptedClient {
+    fn new(stream: UnixStream) -> Result<Self, SocketTransportError> {
+        let writer_stream = stream
+            .try_clone()
+            .map_err(|source| SocketTransportError::Clone { source })?;
+        Ok(Self {
+            reader: HarnessInputReader::new(BufReader::new(stream)),
+            writer: HarnessOutputWriter::new(BufWriter::new(writer_stream)),
+        })
+    }
+
+    /// Reads one peer → harness protocol message from the accepted client.
+    ///
+    /// Returns `Ok(None)` only when the client closes cleanly at a message
+    /// boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns a decode error for malformed or truncated protocol input.
+    pub fn recv(&mut self) -> Result<Option<HarnessInputMessage>, SocketTransportError> {
+        self.reader
+            .read_message()
+            .map_err(|source| SocketTransportError::Decode { source })
+    }
+
+    /// Sends one harness → peer protocol message to the accepted client.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when encoding or flushing the message fails.
+    pub fn send(&mut self, message: &HarnessOutputMessage) -> Result<(), SocketTransportError> {
+        self.writer
+            .write_message(message)
+            .map_err(|source| SocketTransportError::Encode { source })?;
+        self.writer
+            .flush()
+            .map_err(|source| SocketTransportError::Flush { source })
+    }
+}
+
+/// Result of attempting to receive a harness → peer message from a socket.
+#[derive(Debug, PartialEq)]
+pub enum SocketReceive {
+    /// A protocol message was received.
+    Message {
+        /// Decoded harness → peer output message.
+        message: HarnessOutputMessage,
+    },
+    /// No message arrived before the requested timeout elapsed.
+    Timeout,
+    /// The socket closed cleanly at a message boundary.
+    Closed,
+}
+
+/// One connected Unix socket peer speaking the protocol.
+///
+/// Each peer owns a bounded background reader thread. Dropping the peer shuts
+/// down the stream, drops the receive queue, and joins that reader thread.
+pub struct SocketPeer {
+    /// Writer for peer/client-to-harness input messages.
+    writer: PeerOutputWriter<BufWriter<UnixStream>>,
+    /// Bounded queue of decoded harness-to-peer/client output messages.
+    reader_frames: Option<Receiver<Result<HarnessOutputMessage, DecodeError>>>,
+    /// Stream clone used to wake the reader thread during peer drop.
+    shutdown_stream: UnixStream,
+    /// Background reader thread that owns the read side of the socket.
+    reader_thread: Option<thread::JoinHandle<()>>,
+}
+
 impl SocketPeer {
     /// Connects to an existing Unix socket listener.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Unix socket cannot be connected or cloned for
+    /// independent reader/writer ownership.
     pub fn connect(path: impl Into<PathBuf>) -> Result<Self, SocketTransportError> {
         let path = path.into();
         let stream = UnixStream::connect(&path)
@@ -145,65 +374,115 @@ impl SocketPeer {
     }
 
     fn new(stream: UnixStream) -> Result<Self, SocketTransportError> {
-        let writer_stream = stream.try_clone().map_err(SocketTransportError::Clone)?;
-        let reader_frames = spawn_reader(stream);
+        let writer_stream = stream
+            .try_clone()
+            .map_err(|source| SocketTransportError::Clone { source })?;
+        let shutdown_stream = stream
+            .try_clone()
+            .map_err(|source| SocketTransportError::Clone { source })?;
+        let (reader_frames, reader_thread) = spawn_reader(stream);
         Ok(Self {
             writer: PeerOutputWriter::new(BufWriter::new(writer_stream)),
-            reader_frames,
+            reader_frames: Some(reader_frames),
+            shutdown_stream,
+            reader_thread: Some(reader_thread),
         })
     }
 
     /// Sends one peer → harness protocol message over the Unix socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when encoding or flushing the message fails.
     pub fn send(&mut self, message: &HarnessInputMessage) -> Result<(), SocketTransportError> {
         self.writer
             .write_message(message)
-            .map_err(SocketTransportError::Encode)?;
-        self.writer.flush().map_err(SocketTransportError::Flush)
+            .map_err(|source| SocketTransportError::Encode { source })?;
+        self.writer
+            .flush()
+            .map_err(|source| SocketTransportError::Flush { source })
     }
 
-    /// Reads one harness → peer protocol message, or returns `Ok(None)` on
-    /// timeout or clean EOF.
+    /// Reads one harness → peer protocol message or an explicit timeout/close
+    /// outcome.
+    ///
+    /// # Errors
+    ///
+    /// Returns a decode error for malformed or truncated protocol output.
     pub fn recv_timeout(
         &mut self,
         timeout: Duration,
-    ) -> Result<Option<HarnessOutputMessage>, SocketTransportError> {
-        match self.reader_frames.recv_timeout(timeout) {
-            Ok(Ok(frame)) => Ok(Some(frame)),
-            Ok(Err(error)) if is_unexpected_eof(&error) => Ok(None),
-            Ok(Err(error)) => Err(SocketTransportError::Decode(error)),
-            Err(RecvTimeoutError::Timeout) => Ok(None),
-            Err(RecvTimeoutError::Disconnected) => Ok(None),
+    ) -> Result<SocketReceive, SocketTransportError> {
+        let reader_frames = self
+            .reader_frames
+            .as_ref()
+            .expect("socket peer reader missing before drop");
+        match reader_frames.recv_timeout(timeout) {
+            Ok(Ok(frame)) => Ok(SocketReceive::Message { message: frame }),
+            Ok(Err(error)) => Err(SocketTransportError::Decode { source: error }),
+            Err(RecvTimeoutError::Timeout) => Ok(SocketReceive::Timeout),
+            Err(RecvTimeoutError::Disconnected) => Ok(SocketReceive::Closed),
         }
     }
 }
 
-fn spawn_reader(stream: UnixStream) -> Receiver<Result<HarnessOutputMessage, DecodeError>> {
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        let mut reader = PeerInputReader::new(BufReader::new(stream));
-        loop {
-            match reader.read_message() {
-                Ok(Some(frame)) => {
-                    if sender.send(Ok(frame)).is_err() {
-                        return;
-                    }
-                }
-                Ok(None) => return,
-                Err(error) => {
-                    let _ = sender.send(Err(error));
+impl Drop for SocketPeer {
+    fn drop(&mut self) {
+        self.reader_frames.take();
+        let _ = self.shutdown_stream.shutdown(std::net::Shutdown::Both);
+        if let Some(reader_thread) = self.reader_thread.take() {
+            let _ = reader_thread.join();
+        }
+    }
+}
+
+fn spawn_reader(
+    stream: UnixStream,
+) -> (
+    Receiver<Result<HarnessOutputMessage, DecodeError>>,
+    thread::JoinHandle<()>,
+) {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let reader_thread = thread::spawn(move || read_frames(stream, sender));
+    (receiver, reader_thread)
+}
+
+fn read_frames(stream: UnixStream, sender: SyncSender<Result<HarnessOutputMessage, DecodeError>>) {
+    let mut reader = PeerInputReader::new(BufReader::new(stream));
+    loop {
+        match reader.read_message() {
+            Ok(Some(frame)) => {
+                if sender.send(Ok(frame)).is_err() {
                     return;
                 }
             }
+            Ok(None) => return,
+            Err(error) => {
+                let _ = sender.send(Err(error));
+                return;
+            }
         }
-    });
-    receiver
+    }
 }
 
-fn is_unexpected_eof(error: &DecodeError) -> bool {
-    match error {
-        DecodeError::Io(source) => source.kind() == io::ErrorKind::UnexpectedEof,
-        _ => false,
+fn remove_inactive_stale_socket(path: &Path) -> Result<(), SocketTransportError> {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+    if !metadata.file_type().is_socket() {
+        return Err(SocketTransportError::RefuseNonSocketPath {
+            path: path.to_path_buf(),
+        });
     }
+    if UnixStream::connect(path).is_ok() {
+        return Err(SocketTransportError::ActiveSocketExists {
+            path: path.to_path_buf(),
+        });
+    }
+    fs::remove_file(path).map_err(|source| SocketTransportError::RemoveStaleSocket {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 #[cfg(test)]

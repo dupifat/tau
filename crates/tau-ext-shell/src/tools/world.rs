@@ -12,6 +12,8 @@ use tau_proto::{CborValue, ToolUseState};
 
 use crate::display::ToolFailure;
 
+pub(crate) const MAX_SAFE_FILE_READ_BYTES: usize = 10 * 1024 * 1024;
+
 const CASSETTE_VERSION: u32 = 1;
 
 pub(crate) struct ShellWorld {
@@ -178,40 +180,6 @@ impl ShellWorld {
         }
     }
 
-    pub(crate) fn read_file(&mut self, path: &Path) -> io::Result<Vec<u8>> {
-        match &mut self.mode {
-            WorldMode::Real => std::fs::read(path),
-            WorldMode::Recording { cassette, .. } => {
-                let result = std::fs::read(path);
-                cassette.ops.push(WorldOp::ReadFile {
-                    path: cassette_path(path),
-                    result: OpResult::from_io_result_ref(&result)
-                        .map_ok(tau_vcr::EscapedBytes::new),
-                });
-                result
-            }
-            WorldMode::Replay {
-                key,
-                cassette,
-                next_op,
-            } => {
-                let op = next_replay_op(key, cassette, next_op, "read_file", path)?;
-                let WorldOp::ReadFile {
-                    path: expected_path,
-                    result,
-                } = op
-                else {
-                    return Err(unexpected_replay_op(key, "read_file", path));
-                };
-                check_replay_path(key, "read_file", expected_path, path)?;
-                result
-                    .clone()
-                    .map_ok(|bytes| bytes.into_vec())
-                    .into_io_result()
-            }
-        }
-    }
-
     pub(crate) fn read_file_limited(
         &mut self,
         path: &Path,
@@ -362,8 +330,12 @@ impl ShellWorld {
         }
     }
 
-    pub(crate) fn read_to_string(&mut self, path: &Path) -> io::Result<String> {
-        String::from_utf8(self.read_file(path)?)
+    pub(crate) fn read_to_string_limited(
+        &mut self,
+        path: &Path,
+        max_bytes: usize,
+    ) -> io::Result<String> {
+        String::from_utf8(self.read_file_limited(path, max_bytes)?)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
 
@@ -430,6 +402,22 @@ impl ShellWorld {
 }
 
 fn read_file_limited_real(path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
+    let metadata = std::fs::metadata(path)?;
+    if metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::IsADirectory,
+            format!("{}: Is a directory", path.display()),
+        ));
+    }
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+    if max_bytes < metadata.len() as usize {
+        return Err(file_too_large_error(max_bytes));
+    }
     let file = std::fs::File::open(path)?;
     let mut limited = file.take((max_bytes as u64).saturating_add(1));
     let mut bytes = Vec::new();
@@ -836,6 +824,26 @@ mod tests {
             CborValue::Text("path".to_owned()),
             CborValue::Text(path.display().to_string()),
         )])
+    }
+
+    /// Protects bounded mutation/read paths from blocking indefinitely on Unix
+    /// special files such as FIFOs.
+    #[cfg(unix)]
+    #[test]
+    fn read_file_limited_rejects_fifo_without_opening() {
+        let tempdir = tempfile::TempDir::new().expect("tempdir");
+        let fifo_path = tempdir.path().join("pipe");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo_path)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo failed");
+
+        let error = read_file_limited_real(&fifo_path, MAX_SAFE_FILE_READ_BYTES)
+            .expect_err("fifo should be rejected before opening");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("not a regular file"));
     }
 
     /// Protects real-world writes against truncate-in-place updates by checking

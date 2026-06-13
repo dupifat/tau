@@ -6,7 +6,7 @@ use tau_proto::{CborValue, ToolUsePayload};
 
 use crate::diff::compute_diff;
 use crate::display::{ToolFailure, ToolOutput};
-use crate::tools::world::ShellWorld;
+use crate::tools::world::{MAX_SAFE_FILE_READ_BYTES, ShellWorld};
 
 const SUMMARY_HEADER: &str = "Success. Updated the following files:";
 
@@ -198,12 +198,14 @@ fn apply_hunks(
                         &changes,
                     ));
                 }
-                let old_content = world.read_to_string(&abs).map_err(|_| {
-                    ApplyPatchFailure::new(
-                        format!("Failed to delete file {}", abs.display()),
-                        &changes,
-                    )
-                })?;
+                let old_content = world
+                    .read_to_string_limited(&abs, MAX_SAFE_FILE_READ_BYTES)
+                    .map_err(|_| {
+                        ApplyPatchFailure::new(
+                            format!("Failed to delete file {}", abs.display()),
+                            &changes,
+                        )
+                    })?;
                 world.remove_file(&abs).map_err(|_| {
                     ApplyPatchFailure::new(
                         format!("Failed to delete file {}", abs.display()),
@@ -224,12 +226,14 @@ fn apply_hunks(
                 chunks,
             } => {
                 let abs = resolve_path(&cwd, path);
-                let old_content = world.read_to_string(&abs).map_err(|error| {
-                    ApplyPatchFailure::new(
-                        format!("Failed to read file to update {}: {error}", abs.display()),
-                        &changes,
-                    )
-                })?;
+                let old_content = world
+                    .read_to_string_limited(&abs, MAX_SAFE_FILE_READ_BYTES)
+                    .map_err(|error| {
+                        ApplyPatchFailure::new(
+                            format!("Failed to read file to update {}: {error}", abs.display()),
+                            &changes,
+                        )
+                    })?;
                 let new_content = derive_new_contents_from_chunks(&abs, &old_content, chunks)
                     .map_err(|message| ApplyPatchFailure::new(message, &changes))?;
 
@@ -386,7 +390,7 @@ fn format_summary(changes: &[AppliedChange]) -> String {
 }
 
 fn read_optional_file(path: &Path, world: &mut ShellWorld) -> Result<Option<String>, String> {
-    match world.read_to_string(path) {
+    match world.read_to_string_limited(path, MAX_SAFE_FILE_READ_BYTES) {
         Ok(content) => Ok(Some(content)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.to_string()),

@@ -8,7 +8,7 @@ use crate::argument::{argument_array, argument_text, cbor_map_int, cbor_map_text
 use crate::diff::compute_diff;
 use crate::display::{ToolFailure, ToolOutput, text_stats};
 use crate::tools::read::{ReadLineRange, slice_line_ranges};
-use crate::tools::world::ShellWorld;
+use crate::tools::world::{MAX_SAFE_FILE_READ_BYTES, ShellWorld};
 use crate::truncate::truncate_line_oriented;
 
 const MAX_EDITS_PER_CALL: usize = 100;
@@ -412,7 +412,7 @@ fn read_original_or_empty(
     display_args: &str,
     world: &mut ShellWorld,
 ) -> Result<(Vec<u8>, bool), ToolFailure> {
-    match world.read_file(path) {
+    match world.read_file_limited(path, MAX_SAFE_FILE_READ_BYTES) {
         Ok(bytes) => Ok((bytes, false)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((Vec::new(), true)),
         Err(error) => Err(with_display_args(

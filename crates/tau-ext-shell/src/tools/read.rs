@@ -6,11 +6,11 @@ use tau_proto::CborValue;
 
 use crate::argument::{argument_text, optional_argument_int_strict};
 use crate::display::{ToolFailure, ToolOutput, ok_display, text_stats};
-use crate::tools::world::ShellWorld;
+use crate::tools::world::{MAX_SAFE_FILE_READ_BYTES, ShellWorld};
 use crate::truncate::{MAX_OUTPUT_BYTES, truncate_line_oriented};
 
 const MAX_READ_RANGES_PER_CALL: usize = 100;
-const MAX_READ_FILE_BYTES: usize = 10 * 1024 * 1024;
+const MAX_READ_FILE_BYTES: usize = MAX_SAFE_FILE_READ_BYTES;
 const MAX_READ_RANGE_RENDERED_BYTES: usize = MAX_OUTPUT_BYTES * 40;
 
 pub(crate) fn read_file(

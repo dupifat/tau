@@ -33,6 +33,8 @@ use crate::truncate::{
     MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, mark_line, truncate_head, truncate_tail,
 };
 
+const TEST_SAFE_FILE_READ_LIMIT: u64 = 10 * 1024 * 1024;
+
 fn read_file(
     arguments: &CborValue,
 ) -> Result<crate::display::ToolOutput, crate::display::ToolFailure> {
@@ -2133,6 +2135,45 @@ fn extension_edit_creates_file() {
 }
 
 #[test]
+fn extension_edit_rejects_oversized_existing_file_before_mutation() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("large.txt");
+    let file = fs::File::create(&file_path).expect("create large file");
+    file.set_len(TEST_SAFE_FILE_READ_LIMIT + 1)
+        .expect("make sparse large file");
+
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+
+    writer
+        .write_event(&Event::ToolStarted(ToolStarted {
+            call_id: "call-oversized-edit".into(),
+            tool_name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
+            arguments: edit_arguments(&file_path, vec![context_half_open_edit(1, 1, "x", "")]),
+            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+            originator: tau_proto::PromptOriginator::User,
+        }))
+        .expect("invoke");
+    writer.flush().expect("flush");
+
+    let error = reader.read_event().expect("read").expect("error");
+    let Event::ToolError(error) = error else {
+        panic!("expected tool error");
+    };
+    assert_eq!(error.tool_name, EDIT_TOOL_NAME);
+    assert!(error.message.contains("file is too large to read safely"));
+    assert_eq!(
+        fs::metadata(&file_path).expect("metadata").len(),
+        TEST_SAFE_FILE_READ_LIMIT + 1
+    );
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+#[test]
 fn extension_edit_missing_parent_reports_short_error() {
     let tempdir = TempDir::new().expect("tempdir");
     let missing_parent = tempdir.path().join("missing-parent");
@@ -2586,6 +2627,49 @@ fn extension_apply_patch_failure_after_partial_success_leaves_changes() {
         "hello\n"
     );
     assert!(!missing_path.exists());
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+#[test]
+fn extension_apply_patch_rejects_oversized_update_before_mutation() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("large.txt");
+    let file = fs::File::create(&file_path).expect("create large file");
+    file.set_len(TEST_SAFE_FILE_READ_LIMIT + 1)
+        .expect("make sparse large file");
+
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+
+    let patch = format!(
+        "*** Begin Patch\n*** Update File: {}\n@@\n-old\n+new\n*** End Patch",
+        file_path.display(),
+    );
+    writer
+        .write_event(&Event::ToolStarted(ToolStarted {
+            call_id: "call-oversized-patch".into(),
+            tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
+            arguments: CborValue::Text(patch),
+            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+            originator: tau_proto::PromptOriginator::User,
+        }))
+        .expect("invoke");
+    writer.flush().expect("flush");
+
+    let error = reader.read_event().expect("read").expect("error");
+    let Event::ToolError(error) = error else {
+        panic!("expected tool error");
+    };
+    assert_eq!(error.tool_name, APPLY_PATCH_TOOL_NAME);
+    assert!(error.message.contains("file is too large to read safely"));
+    assert_eq!(
+        fs::metadata(&file_path).expect("metadata").len(),
+        TEST_SAFE_FILE_READ_LIMIT + 1
+    );
 
     writer
         .write_frame(&disconnect_frame(None))

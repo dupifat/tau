@@ -669,7 +669,7 @@ where
                         // User-initiated `!`/`!!` — run on a worker thread and
                         // stream chunks out via the same tx writer.
                         let Some(permit) = sem.try_acquire() else {
-                            debug!("dropping UI shell command because shell workers are saturated");
+                            send_ui_shell_saturated_failure(cmd, &tx);
                             continue;
                         };
                         let tx = tx.clone();
@@ -898,6 +898,24 @@ fn dispatch_locked_tool_invoke(
         enforce_ro_mode,
     );
     drop(guard);
+}
+
+fn send_ui_shell_saturated_failure(
+    cmd: tau_proto::UiShellCommand,
+    tx: &mpsc::Sender<HarnessInputMessage>,
+) {
+    let _ = tx.send(HarnessInputMessage::emit(Event::ShellCommandFinished(
+        tau_proto::ShellCommandFinished {
+            command_id: cmd.command_id,
+            session_id: cmd.session_id,
+            command: cmd.command,
+            include_in_context: cmd.include_in_context,
+            target_agent_id: cmd.target_agent_id,
+            output: "too many concurrent shell commands; try again later".to_owned(),
+            exit_code: None,
+            cancelled: false,
+        },
+    )));
 }
 
 fn send_worker_saturated_failure(

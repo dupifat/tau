@@ -1402,49 +1402,85 @@ fn normalize_alias_key(
     map: &mut serde_json::Map<String, serde_json::Value>,
     alias: &str,
     canonical: &str,
-) {
+    source: &str,
+    path: &str,
+) -> Result<(), SettingsError> {
+    if map.contains_key(alias) && map.contains_key(canonical) {
+        return Err(SettingsError::Config(config::ConfigError::Message(
+            format!(
+                "{source}: both legacy key `{path}.{alias}` and canonical key `{path}.{canonical}` are set"
+            ),
+        )));
+    }
     if let Some(value) = map.remove(alias) {
         map.entry(canonical.to_owned()).or_insert(value);
     }
+    Ok(())
 }
 
-fn normalize_role_config_keys(value: &mut serde_json::Value) {
+fn normalize_role_config_keys(
+    value: &mut serde_json::Value,
+    source: &str,
+    path: &str,
+) -> Result<(), SettingsError> {
     let serde_json::Value::Object(map) = value else {
-        return;
+        return Ok(());
     };
-    normalize_alias_key(map, "thinkingSummary", "thinking_summary");
-    normalize_alias_key(map, "serviceTier", "service_tier");
-    normalize_alias_key(map, "promptFragments", "prompt_fragments");
-    normalize_alias_key(map, "promptOverride", "prompt_override");
-    normalize_alias_key(map, "enableToolGroups", "enable_tool_groups");
-    normalize_alias_key(map, "disableToolGroups", "disable_tool_groups");
-    normalize_alias_key(map, "enableTools", "enable_tools");
-    normalize_alias_key(map, "disableTools", "disable_tools");
+    normalize_alias_key(map, "thinkingSummary", "thinking_summary", source, path)?;
+    normalize_alias_key(map, "serviceTier", "service_tier", source, path)?;
+    normalize_alias_key(map, "promptFragments", "prompt_fragments", source, path)?;
+    normalize_alias_key(map, "promptOverride", "prompt_override", source, path)?;
+    normalize_alias_key(map, "enableToolGroups", "enable_tool_groups", source, path)?;
+    normalize_alias_key(
+        map,
+        "disableToolGroups",
+        "disable_tool_groups",
+        source,
+        path,
+    )?;
+    normalize_alias_key(map, "enableTools", "enable_tools", source, path)?;
+    normalize_alias_key(map, "disableTools", "disable_tools", source, path)?;
+    Ok(())
 }
 
-fn normalize_harness_config_value(value: &mut serde_json::Value) {
+fn normalize_harness_config_value(
+    value: &mut serde_json::Value,
+    source: &str,
+) -> Result<(), SettingsError> {
     let serde_json::Value::Object(map) = value else {
-        return;
+        return Ok(());
     };
-    normalize_alias_key(map, "defaultRole", "default_role");
-    normalize_alias_key(map, "roleGroups", "role_groups");
-    normalize_alias_key(map, "promptFragments", "prompt_fragments");
+    normalize_alias_key(map, "defaultRole", "default_role", source, "root")?;
+    normalize_alias_key(map, "roleGroups", "role_groups", source, "root")?;
+    normalize_alias_key(map, "promptFragments", "prompt_fragments", source, "root")?;
     if let Some(serde_json::Value::Object(agents)) = map.get_mut("agents") {
-        normalize_alias_key(agents, "idTemplate", "id_template");
-        normalize_alias_key(agents, "displayNameTemplate", "display_name_template");
+        normalize_alias_key(agents, "idTemplate", "id_template", source, "agents")?;
+        normalize_alias_key(
+            agents,
+            "displayNameTemplate",
+            "display_name_template",
+            source,
+            "agents",
+        )?;
     }
     if let Some(serde_json::Value::Object(role_groups)) = map.get_mut("role_groups") {
-        for group in role_groups.values_mut() {
-            normalize_role_config_keys(group);
+        for (group_name, group) in role_groups {
+            let group_path = format!("role_groups.{group_name}");
+            normalize_role_config_keys(group, source, &group_path)?;
             if let serde_json::Value::Object(group_map) = group
                 && let Some(serde_json::Value::Object(roles)) = group_map.get_mut("roles")
             {
-                for role in roles.values_mut() {
-                    normalize_role_config_keys(role);
+                for (role_name, role) in roles {
+                    normalize_role_config_keys(
+                        role,
+                        source,
+                        &format!("{group_path}.roles.{role_name}"),
+                    )?;
                 }
             }
         }
     }
+    Ok(())
 }
 
 fn load_yaml_layered_with_builtin_and_harness_overrides<T: for<'de> Deserialize<'de>>(
@@ -1490,7 +1526,7 @@ fn normalized_harness_yaml_source(
     if value.is_null() {
         value = serde_json::Value::Object(serde_json::Map::new());
     }
-    normalize_harness_config_value(&mut value);
+    normalize_harness_config_value(&mut value, description)?;
     let normalized = serde_yaml_ng::to_string(&value).map_err(|err| {
         SettingsError::Config(config::ConfigError::Message(format!(
             "failed to normalize {description}: {err}"

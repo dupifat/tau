@@ -263,6 +263,46 @@ fn harness_canonical_cli_override_wins_over_legacy_alias() {
     assert_eq!(settings.default_role.as_deref(), Some("cli"));
 }
 
+#[test]
+fn harness_rejects_same_layer_top_level_alias_conflict() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        "defaultRole: legacy\ndefault_role: canonical\n",
+    )
+    .expect("write");
+
+    let error = load_harness_settings_in(&dirs_with_config(dir)).expect_err("conflicting aliases");
+
+    assert!(
+        error.to_string().contains("defaultRole") && error.to_string().contains("default_role"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn harness_rejects_same_layer_nested_alias_conflict() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"
+        agents:
+          idTemplate: legacy-{{random_alphanumeric 4}}
+          id_template: canonical-{{random_alphanumeric 4}}
+        "#,
+    )
+    .expect("write");
+
+    let error = load_harness_settings_in(&dirs_with_config(dir)).expect_err("conflicting aliases");
+
+    assert!(
+        error.to_string().contains("idTemplate") && error.to_string().contains("id_template"),
+        "unexpected error: {error}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn unreadable_drop_in_directory_is_reported() {

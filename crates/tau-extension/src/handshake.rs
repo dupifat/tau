@@ -24,6 +24,13 @@
 //!     .run(&mut writer)?;
 //! ```
 //!
+//! `Handshake` only writes peer-to-harness startup frames. It does not read or
+//! apply harness-to-extension [`tau_proto::HarnessOutputMessage::Configure`]
+//! messages. Extensions that accept configuration must parse and apply
+//! `Configure.config` themselves (for example with [`crate::parse_config`]) and
+//! send [`tau_proto::HarnessInputMessage::ConfigError`] for parse or apply
+//! failures.
+//!
 //! `client_kind` defaults to [`ClientKind::Tool`] and
 //! `protocol_version` to [`PROTOCOL_VERSION`] — every extension in
 //! this workspace uses both, and they belong on the handshake, not

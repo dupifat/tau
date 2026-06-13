@@ -15,6 +15,10 @@
 //! three, or none. The crate exists only to hold pieces that more
 //! than one extension would otherwise copy-paste.
 //!
+//! `Handshake` is only the peer-to-harness startup prelude. Extensions that
+//! receive `HarnessOutputMessage::Configure` must still parse and apply
+//! `Configure.config` themselves and send `HarnessInputMessage::ConfigError` if
+//! parsing or applying configuration fails.
 //! ## Per-extension log targets
 //!
 //! Each extension is expected to declare a short target string and

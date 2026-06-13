@@ -11,11 +11,11 @@ use tau_supervisor::{
     ExtensionCommand, ReceiveOutcome, StderrPolicy, SupervisedChild, SupervisionError,
 };
 
-fn test_command(args: Vec<String>) -> ExtensionCommand {
+fn test_command(args: &[&str]) -> ExtensionCommand {
     ExtensionCommand {
         name: "test-child".into(),
         program: PathBuf::from(env!("CARGO_BIN_EXE_tau-supervisor-test-child")),
-        args,
+        args: args.iter().map(|arg| (*arg).to_owned()).collect(),
         working_dir: None,
         stderr: StderrPolicy::Inherit,
     }
@@ -84,7 +84,7 @@ fn disconnect_child(child: &mut SupervisedChild, reason: &str) {
 /// disconnected.
 #[test]
 fn recv_timeout_reports_timeout_without_conflating_disconnect() {
-    let mut child = SupervisedChild::spawn(test_command(Vec::new())).expect("child should spawn");
+    let mut child = SupervisedChild::spawn(test_command(&[])).expect("child should spawn");
     let _register = expect_child_startup(&mut child);
 
     assert_eq!(
@@ -104,8 +104,8 @@ fn recv_timeout_reports_timeout_without_conflating_disconnect() {
 /// failure.
 #[test]
 fn recv_timeout_reports_clean_stdout_close() {
-    let mut child = SupervisedChild::spawn(test_command(vec!["--exit-immediately".to_owned()]))
-        .expect("child should spawn");
+    let mut child =
+        SupervisedChild::spawn(test_command(&["--exit-immediately"])).expect("child should spawn");
 
     assert_eq!(
         child
@@ -123,8 +123,8 @@ fn recv_timeout_reports_clean_stdout_close() {
 /// close.
 #[test]
 fn recv_timeout_reports_partial_frame_as_decode_error() {
-    let mut child = SupervisedChild::spawn(test_command(vec!["--partial-frame".to_owned()]))
-        .expect("child should spawn");
+    let mut child =
+        SupervisedChild::spawn(test_command(&["--partial-frame"])).expect("child should spawn");
 
     let error = child
         .recv_timeout(Duration::from_secs(1))
@@ -138,8 +138,7 @@ fn recv_timeout_reports_partial_frame_as_decode_error() {
 /// Ensures the stdout reader can drain a burst of child messages without loss.
 #[test]
 fn stdout_reader_handles_message_burst_without_loss() {
-    let mut child = SupervisedChild::spawn(test_command(vec!["--flood".to_owned()]))
-        .expect("child should spawn");
+    let mut child = SupervisedChild::spawn(test_command(&["--flood"])).expect("child should spawn");
 
     for index in 0..128 {
         assert_eq!(
@@ -170,7 +169,7 @@ fn spawn_uses_configured_working_dir() {
         std::env::temp_dir().join(format!("tau-supervisor-cwd-{}", std::process::id()));
     fs::create_dir_all(&working_dir).expect("working dir should be created");
 
-    let mut command = test_command(vec!["--report-cwd".to_owned()]);
+    let mut command = test_command(&["--report-cwd"]);
     command.working_dir = Some(working_dir.clone());
     let mut child = SupervisedChild::spawn(command).expect("child should spawn");
 
@@ -193,8 +192,7 @@ fn spawn_uses_configured_working_dir() {
 /// shutdown.
 #[test]
 fn terminate_kills_long_running_child() {
-    let mut child = SupervisedChild::spawn(test_command(vec!["--sleep".to_owned()]))
-        .expect("child should spawn");
+    let mut child = SupervisedChild::spawn(test_command(&["--sleep"])).expect("child should spawn");
 
     let exit = child
         .terminate(Duration::from_secs(2))
@@ -206,7 +204,7 @@ fn terminate_kills_long_running_child() {
 #[test]
 fn stderr_policy_null_discards_child_stderr() {
     if std::env::var_os("TAU_SUPERVISOR_STDERR_POLICY_SUBPROCESS").is_some() {
-        let mut command = test_command(vec!["--stderr-marker".to_owned()]);
+        let mut command = test_command(&["--stderr-marker"]);
         command.stderr = StderrPolicy::Null;
         let mut child = SupervisedChild::spawn(command).expect("child should spawn");
         assert_eq!(
@@ -239,9 +237,8 @@ fn stderr_policy_null_discards_child_stderr() {
 #[test]
 fn spawned_child_does_not_inherit_tau_secret_env() {
     if std::env::var_os("TAU_SUPERVISOR_SECRET_ENV_SUBPROCESS").is_some() {
-        let mut child =
-            SupervisedChild::spawn(test_command(vec!["--report-secret-env".to_owned()]))
-                .expect("child should spawn");
+        let mut child = SupervisedChild::spawn(test_command(&["--report-secret-env"]))
+            .expect("child should spawn");
         assert_eq!(
             child
                 .recv_timeout(Duration::from_secs(1))
@@ -270,7 +267,7 @@ fn spawned_child_does_not_inherit_tau_secret_env() {
 /// Ensures the supervisor exchanges lifecycle and tool events over child stdio.
 #[test]
 fn supervised_child_exchanges_protocol_events_over_stdio() {
-    let command = test_command(Vec::new());
+    let command = test_command(&[]);
     let mut child = SupervisedChild::spawn(command.clone()).expect("child should spawn");
 
     assert_eq!(child.command(), &command);
@@ -356,7 +353,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
 /// exit.
 #[test]
 fn restarted_child_can_reregister_after_exit() {
-    let command = test_command(Vec::new());
+    let command = test_command(&[]);
 
     for _ in 0..2 {
         let mut child = SupervisedChild::spawn(command.clone()).expect("child should spawn");

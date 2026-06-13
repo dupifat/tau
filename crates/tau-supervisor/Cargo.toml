@@ -15,5 +15,4 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-tau-core.workspace = true
 tau-proto.workspace = true

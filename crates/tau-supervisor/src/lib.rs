@@ -12,10 +12,9 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 use std::{fmt, thread};
 
-use tau_core::ToolRegistry;
 use tau_proto::{
     DecodeError, Event, ExtensionExited, ExtensionName, ExtensionReady, ExtensionStarting,
-    HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter, ToolName,
+    HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter,
 };
 
 /// One configured supervised extension command.
@@ -65,13 +64,6 @@ impl ChildExit {
             signal: exit_signal(status),
         }
     }
-}
-
-/// Cleanup result returned after a supervised child disconnects.
-#[derive(Clone, Debug, PartialEq)]
-pub struct DisconnectCleanup {
-    pub removed_tools: Vec<ToolName>,
-    pub lifecycle_event: Event,
 }
 
 /// Errors produced by the supervised stdio transport.
@@ -235,21 +227,6 @@ impl SupervisedChild {
             exit_code: exit.exit_code,
             signal: exit.signal,
         })
-    }
-
-    /// Removes tools owned by the disconnected child and emits an exit event.
-    pub fn cleanup_disconnect(
-        &self,
-        instance_id: tau_proto::ExtensionInstanceId,
-        pid: Option<u32>,
-        registry: &mut ToolRegistry,
-        connection_id: &str,
-        exit: &ChildExit,
-    ) -> DisconnectCleanup {
-        DisconnectCleanup {
-            removed_tools: registry.unregister_connection(connection_id),
-            lifecycle_event: self.exited_event(instance_id, pid, exit),
-        }
     }
 }
 

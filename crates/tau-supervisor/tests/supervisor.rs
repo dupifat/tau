@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use tau_core::ToolRegistry;
 use tau_proto::{
     CborValue, ClientKind, Disconnect, Event, HarnessInputMessage, HarnessOutputMessage, Hello,
     PROTOCOL_VERSION, Ready, Subscribe, ToolRegister, ToolStarted,
@@ -163,66 +162,22 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
 }
 
 #[test]
-fn disconnect_cleanup_removes_registered_tools_after_child_exit() {
+fn restarted_child_can_reregister_after_exit() {
     let command = ExtensionCommand {
         name: "test-child".into(),
         program: test_child_path(),
         args: Vec::new(),
     };
-    let mut child = SupervisedChild::spawn(command).expect("child should spawn");
-    let connection_id = "conn-child";
-    let mut registry = ToolRegistry::new();
 
-    let register = expect_child_startup(&mut child);
-    registry.register(connection_id, register.tool);
-
-    disconnect_child(&mut child, "shutdown");
-    let exit = child
-        .wait_for_exit(Duration::from_secs(2))
-        .expect("child should exit");
-    let cleanup = child.cleanup_disconnect(0.into(), None, &mut registry, connection_id, &exit);
-
-    assert_eq!(
-        cleanup.removed_tools,
-        vec![tau_proto::ToolName::new("echo")]
-    );
-    assert!(registry.providers_for("echo").is_empty());
-    assert_eq!(
-        cleanup.lifecycle_event,
-        Event::ExtensionExited(tau_proto::ExtensionExited {
-            instance_id: 0.into(),
-            extension_name: "test-child".into(),
-            pid: None,
-            exit_code: Some(0),
-            signal: None,
-        })
-    );
-}
-
-#[test]
-fn restarted_child_can_reregister_after_disconnect_cleanup() {
-    let command = ExtensionCommand {
-        name: "test-child".into(),
-        program: test_child_path(),
-        args: Vec::new(),
-    };
-    let mut registry = ToolRegistry::new();
-
-    for connection_id in ["conn-child-1", "conn-child-2"] {
+    for _ in 0..2 {
         let mut child = SupervisedChild::spawn(command.clone()).expect("child should spawn");
         let register = expect_child_startup(&mut child);
-        registry.register(connection_id, register.tool);
-        assert_eq!(registry.providers_for("echo").len(), 1);
+        assert_eq!(register.tool.name, tau_proto::ToolName::new("echo"));
 
         disconnect_child(&mut child, "restart");
         let exit = child
             .wait_for_exit(Duration::from_secs(2))
             .expect("child should exit");
-        let cleanup = child.cleanup_disconnect(0.into(), None, &mut registry, connection_id, &exit);
-        assert_eq!(
-            cleanup.removed_tools,
-            vec![tau_proto::ToolName::new("echo")]
-        );
-        assert!(registry.providers_for("echo").is_empty());
+        assert_eq!(exit.exit_code, Some(0));
     }
 }

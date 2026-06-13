@@ -3004,7 +3004,6 @@ dependencies = [
 name = "tau-supervisor"
 version = "0.1.0"
 dependencies = [
- "tau-core",
  "tau-proto",
 ]
 

@@ -581,6 +581,60 @@ fn harness_config_cli_overrides_reject_bad_key_value() {
 }
 
 #[test]
+fn harness_config_cli_overrides_normalize_legacy_role_aliases() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    let overrides = [HarnessConfigCliOverride::from_str(
+        "role_groups.engineer.roles.senior-engineer.enabled=false",
+    )
+    .expect("override")];
+
+    let settings =
+        load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &overrides)
+            .expect("load");
+
+    assert!(!settings.roles.contains_key("senior-engineer"));
+}
+
+#[test]
+fn harness_config_cli_overrides_normalize_legacy_top_level_aliases() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    let overrides = [HarnessConfigCliOverride::from_str(
+        "roleGroups.engineer.roles.senior-engineer.effort=low",
+    )
+    .expect("override")];
+
+    let settings =
+        load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &overrides)
+            .expect("load");
+
+    assert_eq!(
+        settings.roles["senior-engineer"].effort,
+        Some(tau_proto::Effort::Low)
+    );
+}
+
+#[test]
+fn harness_config_cli_overrides_reject_alias_conflicts() {
+    let td = TempDir::new().expect("tempdir");
+    let overrides = [
+        HarnessConfigCliOverride::from_str("defaultRole=manager").expect("legacy override"),
+        HarnessConfigCliOverride::from_str("default_role=senior-engineer")
+            .expect("canonical override"),
+    ];
+
+    let error =
+        load_harness_settings_with_cli_overrides_in(&dirs_with_config(td.path()), &[], &overrides)
+            .expect_err("conflicting overrides");
+
+    assert!(
+        error.to_string().contains("defaultRole") && error.to_string().contains("default_role"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn harness_settings_load_role_tool_lists() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();

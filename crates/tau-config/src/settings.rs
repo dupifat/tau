@@ -1515,7 +1515,8 @@ fn load_yaml_layered_with_builtin_and_harness_overrides<T: for<'de> Deserialize<
             &format!("harness config {}", path.display()),
         )?);
     }
-    for override_ in overrides {
+    let normalized_overrides = normalized_harness_config_overrides(overrides)?;
+    for override_ in &normalized_overrides {
         builder = builder.add_source(harness_config_override_source(override_)?);
     }
     let config = builder.build()?;
@@ -1548,8 +1549,9 @@ fn normalized_harness_yaml_source(
 fn harness_role_cli_override_layers(
     overrides: &[HarnessConfigCliOverride],
 ) -> Result<Vec<HarnessRoleOverrides>, SettingsError> {
+    let normalized_overrides = normalized_harness_config_overrides(overrides)?;
     let mut layers = Vec::new();
-    for override_ in overrides {
+    for override_ in &normalized_overrides {
         let layer: HarnessRoleOverrides = config::Config::builder()
             .add_source(harness_config_override_source(override_)?)
             .build()?
@@ -1574,6 +1576,85 @@ fn harness_config_override_source(
         key: override_.key.clone(),
         value,
     })
+}
+
+fn normalized_harness_config_overrides(
+    overrides: &[HarnessConfigCliOverride],
+) -> Result<Vec<HarnessConfigCliOverride>, SettingsError> {
+    let mut normalized = Vec::with_capacity(overrides.len());
+    let mut seen = HashMap::<String, String>::new();
+    for override_ in overrides {
+        let key = normalize_harness_config_override_key(&override_.key);
+        if let Some(previous) = seen.get(&key)
+            && previous != &override_.key
+        {
+            return Err(SettingsError::InvalidHarnessConfigCliOverride(format!(
+                "conflicting CLI override keys `{previous}` and `{}` both normalize to `{key}`",
+                override_.key
+            )));
+        }
+        seen.entry(key.clone())
+            .or_insert_with(|| override_.key.clone());
+        normalized.push(HarnessConfigCliOverride {
+            key,
+            raw_value: override_.raw_value.clone(),
+        });
+    }
+    Ok(normalized)
+}
+
+fn normalize_harness_config_override_key(key: &str) -> String {
+    let mut parts: Vec<&str> = key.split('.').collect();
+    if parts.is_empty() {
+        return key.to_owned();
+    }
+
+    parts[0] = canonical_top_level_key(parts[0]);
+    if parts[0] == "agents" && parts.len() > 1 {
+        parts[1] = canonical_agents_key(parts[1]);
+    }
+    if parts[0] == "role_groups" && parts.len() > 2 {
+        if parts[2] == "roles" {
+            if parts.len() > 4 {
+                parts[4] = canonical_role_key(parts[4]);
+            }
+        } else {
+            parts[2] = canonical_role_key(parts[2]);
+        }
+    }
+    parts.join(".")
+}
+
+fn canonical_top_level_key(key: &str) -> &str {
+    match key {
+        "defaultRole" => "default_role",
+        "roleGroups" => "role_groups",
+        "promptFragments" => "prompt_fragments",
+        _ => key,
+    }
+}
+
+fn canonical_agents_key(key: &str) -> &str {
+    match key {
+        "idTemplate" => "id_template",
+        "displayNameTemplate" => "display_name_template",
+        _ => key,
+    }
+}
+
+fn canonical_role_key(key: &str) -> &str {
+    match key {
+        "enabled" => "enable",
+        "thinkingSummary" => "thinking_summary",
+        "serviceTier" => "service_tier",
+        "promptFragments" => "prompt_fragments",
+        "promptOverride" => "prompt_override",
+        "enableToolGroups" => "enable_tool_groups",
+        "disableToolGroups" => "disable_tool_groups",
+        "enableTools" => "enable_tools",
+        "disableTools" => "disable_tools",
+        _ => key,
+    }
 }
 
 fn config_value_from_yaml(value: serde_yaml_ng::Value) -> Result<config::Value, SettingsError> {

@@ -634,6 +634,11 @@ struct RawRoleGroup {
     roles: IndexMap<String, AgentRolePatch>,
 }
 
+// Role patches must distinguish three scalar states during layered merges:
+// absent means inherit the lower-precedence value, `null` means clear it, and a
+// concrete value replaces it. Replacement lists use `Option<Vec<_>>` so an
+// absent field inherits while an explicit `[]` clears the list; prompt
+// fragments are the exception and remain additive when present.
 fn present_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,

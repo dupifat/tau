@@ -627,8 +627,11 @@ fn harness_role_drop_in_can_clear_inherited_scalar_and_tool_lists() {
           custom:
             roles:
               reviewer:
+                enable: false
                 description: Base description
                 model: openai/gpt-5
+                compaction: disabled
+                prompt_override: built-in
                 tools: [read]
                 enable_tools: [grep]
                 disable_tools: [shell]
@@ -643,8 +646,11 @@ fn harness_role_drop_in_can_clear_inherited_scalar_and_tool_lists() {
           custom:
             roles:
               reviewer:
+                enable: null
                 description: null
                 model: null
+                compaction: null
+                prompt_override: null
                 tools: null
                 enable_tools: []
                 disable_tools: []
@@ -655,11 +661,49 @@ fn harness_role_drop_in_can_clear_inherited_scalar_and_tool_lists() {
     let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
     let reviewer = settings.roles.get("reviewer").expect("reviewer role");
 
+    assert_eq!(reviewer.enable, None);
     assert_eq!(reviewer.description, None);
     assert_eq!(reviewer.model, None);
+    assert_eq!(reviewer.compaction, None);
+    assert_eq!(reviewer.prompt_override, None);
     assert_eq!(reviewer.tools, None);
     assert!(reviewer.enable_tools.is_empty());
     assert!(reviewer.disable_tools.is_empty());
+}
+
+#[test]
+fn harness_role_group_defaults_can_clear_existing_role_fields() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"
+        role_groups:
+          custom:
+            roles:
+              reviewer:
+                description: Base description
+                prompt_override: built-in
+        "#,
+    )
+    .expect("write base");
+    std::fs::create_dir_all(dir.join("harness.d")).expect("mkdir dropins");
+    std::fs::write(
+        dir.join("harness.d/10-group-clear.yaml"),
+        r#"
+        role_groups:
+          custom:
+            description: null
+            prompt_override: null
+        "#,
+    )
+    .expect("write dropin");
+
+    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+    let reviewer = settings.roles.get("reviewer").expect("reviewer role");
+
+    assert_eq!(reviewer.description, None);
+    assert_eq!(reviewer.prompt_override, None);
 }
 
 #[test]

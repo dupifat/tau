@@ -304,6 +304,154 @@ fn harness_rejects_same_layer_nested_alias_conflict() {
 }
 
 #[test]
+fn harness_file_alias_table_normalizes_all_legacy_keys() {
+    let mut value = serde_json::json!({
+        "defaultRole": "manager",
+        "promptFragments": [],
+        "agents": {
+            "idTemplate": "agent-{{random_alphanumeric 4}}",
+            "displayNameTemplate": "Agent {{n}}",
+        },
+        "roleGroups": {
+            "engineer": {
+                "enabled": true,
+                "thinkingSummary": "auto",
+                "serviceTier": "default",
+                "promptFragments": [],
+                "promptOverride": "built-in",
+                "enableToolGroups": [],
+                "disableToolGroups": [],
+                "enableTools": [],
+                "disableTools": [],
+                "roles": {
+                    "senior-engineer": {
+                        "enabled": true,
+                        "thinkingSummary": "auto",
+                        "serviceTier": "default",
+                        "promptFragments": [],
+                        "promptOverride": "built-in",
+                        "enableToolGroups": [],
+                        "disableToolGroups": [],
+                        "enableTools": [],
+                        "disableTools": [],
+                    }
+                }
+            }
+        }
+    });
+
+    normalize_harness_config_value(&mut value, "test").expect("normalize");
+
+    assert!(value.get("default_role").is_some());
+    assert!(value.get("prompt_fragments").is_some());
+    assert!(value.pointer("/agents/id_template").is_some());
+    assert!(value.pointer("/agents/display_name_template").is_some());
+    let group = value.pointer("/role_groups/engineer").expect("group");
+    for key in [
+        "enable",
+        "thinking_summary",
+        "service_tier",
+        "prompt_fragments",
+        "prompt_override",
+        "enable_tool_groups",
+        "disable_tool_groups",
+        "enable_tools",
+        "disable_tools",
+    ] {
+        assert!(group.get(key).is_some(), "missing group key {key}");
+        assert!(
+            group
+                .pointer(&format!("/roles/senior-engineer/{key}"))
+                .is_some(),
+            "missing role key {key}"
+        );
+    }
+}
+
+#[test]
+fn harness_cli_alias_table_normalizes_all_legacy_keys() {
+    let cases = [
+        ("defaultRole", "default_role"),
+        ("promptFragments", "prompt_fragments"),
+        ("agents.idTemplate", "agents.id_template"),
+        ("agents.displayNameTemplate", "agents.display_name_template"),
+        ("roleGroups.engineer.enabled", "role_groups.engineer.enable"),
+        (
+            "roleGroups.engineer.thinkingSummary",
+            "role_groups.engineer.thinking_summary",
+        ),
+        (
+            "roleGroups.engineer.serviceTier",
+            "role_groups.engineer.service_tier",
+        ),
+        (
+            "roleGroups.engineer.promptFragments",
+            "role_groups.engineer.prompt_fragments",
+        ),
+        (
+            "roleGroups.engineer.promptOverride",
+            "role_groups.engineer.prompt_override",
+        ),
+        (
+            "roleGroups.engineer.enableToolGroups",
+            "role_groups.engineer.enable_tool_groups",
+        ),
+        (
+            "roleGroups.engineer.disableToolGroups",
+            "role_groups.engineer.disable_tool_groups",
+        ),
+        (
+            "roleGroups.engineer.enableTools",
+            "role_groups.engineer.enable_tools",
+        ),
+        (
+            "roleGroups.engineer.disableTools",
+            "role_groups.engineer.disable_tools",
+        ),
+        (
+            "roleGroups.engineer.roles.senior-engineer.enabled",
+            "role_groups.engineer.roles.senior-engineer.enable",
+        ),
+        (
+            "roleGroups.engineer.roles.senior-engineer.thinkingSummary",
+            "role_groups.engineer.roles.senior-engineer.thinking_summary",
+        ),
+        (
+            "roleGroups.engineer.roles.senior-engineer.serviceTier",
+            "role_groups.engineer.roles.senior-engineer.service_tier",
+        ),
+        (
+            "roleGroups.engineer.roles.senior-engineer.promptFragments",
+            "role_groups.engineer.roles.senior-engineer.prompt_fragments",
+        ),
+        (
+            "roleGroups.engineer.roles.senior-engineer.promptOverride",
+            "role_groups.engineer.roles.senior-engineer.prompt_override",
+        ),
+        (
+            "roleGroups.engineer.roles.senior-engineer.enableToolGroups",
+            "role_groups.engineer.roles.senior-engineer.enable_tool_groups",
+        ),
+        (
+            "roleGroups.engineer.roles.senior-engineer.disableToolGroups",
+            "role_groups.engineer.roles.senior-engineer.disable_tool_groups",
+        ),
+        (
+            "roleGroups.engineer.roles.senior-engineer.enableTools",
+            "role_groups.engineer.roles.senior-engineer.enable_tools",
+        ),
+        (
+            "roleGroups.engineer.roles.senior-engineer.disableTools",
+            "role_groups.engineer.roles.senior-engineer.disable_tools",
+        ),
+    ];
+
+    for (legacy, canonical) in cases {
+        assert_eq!(normalize_harness_config_override_key(legacy), canonical);
+    }
+}
+
+#[test]
 fn harness_rejects_same_layer_role_alias_conflict() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();

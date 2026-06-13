@@ -1365,6 +1365,11 @@ pub fn load_harness_settings_with_cli_overrides_in(
     Ok(settings)
 }
 
+// Legacy harness aliases are accepted for user compatibility, but every alias
+// must be handled in all three places that can see user-authored keys:
+// serde aliases on patch structs, JSON layer normalization below, and dotted
+// `--harness-config` key canonicalization. Keep the regression tests for the
+// file-layer and CLI alias tables in sync when adding or renaming fields.
 fn normalize_alias_key(
     map: &mut serde_json::Map<String, serde_json::Value>,
     alias: &str,

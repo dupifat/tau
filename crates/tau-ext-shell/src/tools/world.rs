@@ -402,7 +402,8 @@ impl ShellWorld {
 }
 
 fn read_file_limited_real(path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
-    let metadata = std::fs::metadata(path)?;
+    let file = open_for_limited_read(path)?;
+    let metadata = file.metadata()?;
     if metadata.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::IsADirectory,
@@ -418,7 +419,6 @@ fn read_file_limited_real(path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> 
     if max_bytes < metadata.len() as usize {
         return Err(file_too_large_error(max_bytes));
     }
-    let file = std::fs::File::open(path)?;
     let mut limited = file.take((max_bytes as u64).saturating_add(1));
     let mut bytes = Vec::new();
     limited.read_to_end(&mut bytes)?;
@@ -426,6 +426,21 @@ fn read_file_limited_real(path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> 
         return Err(file_too_large_error(max_bytes));
     }
     Ok(bytes)
+}
+
+#[cfg(unix)]
+fn open_for_limited_read(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_for_limited_read(path: &Path) -> io::Result<std::fs::File> {
+    std::fs::File::open(path)
 }
 
 fn file_too_large_error(max_bytes: usize) -> io::Error {
@@ -830,7 +845,7 @@ mod tests {
     /// special files such as FIFOs.
     #[cfg(unix)]
     #[test]
-    fn read_file_limited_rejects_fifo_without_opening() {
+    fn read_file_limited_rejects_fifo_without_blocking() {
         let tempdir = tempfile::TempDir::new().expect("tempdir");
         let fifo_path = tempdir.path().join("pipe");
         let status = std::process::Command::new("mkfifo")
@@ -840,7 +855,7 @@ mod tests {
         assert!(status.success(), "mkfifo failed");
 
         let error = read_file_limited_real(&fifo_path, MAX_SAFE_FILE_READ_BYTES)
-            .expect_err("fifo should be rejected before opening");
+            .expect_err("fifo should be rejected without blocking");
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("not a regular file"));

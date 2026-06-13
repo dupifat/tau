@@ -10,6 +10,19 @@
 //! next call. Dropping the receiver is not observable by senders; later
 //! notifications still set the coalesced bit and return normally.
 //!
+//! # Example
+//!
+//! ```rust
+//! let (tx, rx) = tau_blocking_notify_channel::channel();
+//!
+//! tx.notify();
+//! assert_eq!(rx.recv(), Ok(()));
+//! assert_eq!(rx.try_recv(), Ok(false));
+//!
+//! drop(tx);
+//! assert!(rx.recv().is_err());
+//! ```
+//!
 //! # Why a custom primitive
 //!
 //! `std::sync::mpsc::channel::<()>()` would require the receiver to drain the

@@ -350,9 +350,10 @@ pub(crate) fn dispatch_user_shell_command(
         command_id: tau_proto::ShellCommandId,
         target_agent_id: Option<tau_proto::AgentId>,
         tx: mpsc::Sender<HarnessInputMessage>,
-    ) -> std::thread::JoinHandle<String> {
+    ) -> std::thread::JoinHandle<(String, bool)> {
         std::thread::spawn(move || {
             let mut captured = String::new();
+            let mut clipped = false;
             let mut buf = [0u8; 4096];
             loop {
                 match pipe.read(&mut buf) {
@@ -366,6 +367,9 @@ pub(crate) fn dispatch_user_shell_command(
                                 end -= 1;
                             }
                             captured.push_str(&chunk[..end]);
+                            clipped |= end < chunk.len();
+                        } else {
+                            clipped = true;
                         }
                         let _ = tx.send(HarnessInputMessage::emit(Event::ShellCommandProgress(
                             tau_proto::ShellCommandProgress {
@@ -378,7 +382,7 @@ pub(crate) fn dispatch_user_shell_command(
                     }
                 }
             }
-            captured
+            (captured, clipped)
         })
     }
 
@@ -452,10 +456,10 @@ pub(crate) fn dispatch_user_shell_command(
         }
     };
 
-    let stdout = stdout_handle
+    let (stdout, stdout_clipped) = stdout_handle
         .map(|h| h.join().unwrap_or_default())
         .unwrap_or_default();
-    let stderr = stderr_handle
+    let (stderr, stderr_clipped) = stderr_handle
         .map(|h| h.join().unwrap_or_default())
         .unwrap_or_default();
 
@@ -468,6 +472,12 @@ pub(crate) fn dispatch_user_shell_command(
         }
         merged.push_str("[stderr]\n");
         merged.push_str(&stderr);
+    }
+    if stdout_clipped || stderr_clipped {
+        if !merged.is_empty() {
+            merged.push('\n');
+        }
+        merged.push_str("[output truncated]");
     }
     if let Some(note) = status_note {
         if !merged.is_empty() {

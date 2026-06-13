@@ -125,6 +125,8 @@ fn handshake_writes_full_prelude_in_order() {
             .ready_message("ready"),
     );
 
+    assert_eq!(messages.len(), 6);
+
     assert_eq!(
         messages[0],
         HarnessInputMessage::Hello(Hello {
@@ -168,7 +170,6 @@ fn handshake_writes_full_prelude_in_order() {
             message: Some("ready".to_owned()),
         })
     );
-    assert_eq!(messages.len(), 6);
 }
 
 /// Ensures empty subscriptions are omitted and ready messages are preserved.

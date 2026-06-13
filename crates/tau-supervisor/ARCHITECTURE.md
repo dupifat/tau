@@ -20,4 +20,4 @@ Receive outcomes distinguish decoded messages, timeout, and clean stdout closure
 
 ## Child environment
 
-Children inherit the supervisor environment except variables with names starting `TAU_SECRET_`; those are stripped before launch. Command configuration also controls argv, optional working directory, and stderr policy.
+Children inherit the supervisor environment except variables with names starting `TAU_SECRET_`; those are stripped before launch. Command configuration also controls argv, optional working directory, and stderr policy. When `working_dir` is set, `program` must be absolute; relative program paths are rejected so executable resolution does not depend on platform-specific `Command` semantics.

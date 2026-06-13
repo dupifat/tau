@@ -920,6 +920,7 @@ pub struct ExtensionEntry {
 
     /// Current working directory used when starting the extension process. When
     /// absent, the child inherits the harness process working directory.
+    #[serde(default, deserialize_with = "present_option")]
     pub cwd: Option<Option<PathBuf>>,
 
     /// argv suffix appended after `command`. Symmetric to `prefix`.

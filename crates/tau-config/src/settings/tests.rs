@@ -1894,6 +1894,60 @@ fn harness_config_cli_overrides_reject_invalid_extension_names() {
 }
 
 #[test]
+fn harness_extension_drop_in_can_clear_inherited_cwd() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"
+extensions:
+  local-tool:
+    command: [tool]
+    cwd: /tmp/lower
+"#,
+    )
+    .expect("write base");
+    std::fs::create_dir_all(dir.join("harness.d")).expect("mkdir dropins");
+    std::fs::write(
+        dir.join("harness.d/10-clear.yaml"),
+        r#"
+extensions:
+  local-tool:
+    cwd: null
+"#,
+    )
+    .expect("write dropin");
+
+    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+
+    assert_eq!(settings.extensions["local-tool"].cwd, Some(None));
+}
+
+#[test]
+fn harness_config_cli_overrides_can_clear_extension_cwd() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"
+extensions:
+  local-tool:
+    command: [tool]
+    cwd: /tmp/lower
+"#,
+    )
+    .expect("write base");
+    let overrides =
+        [HarnessConfigCliOverride::from_str("extensions.local-tool.cwd=null").expect("override")];
+
+    let settings =
+        load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &overrides)
+            .expect("load");
+
+    assert_eq!(settings.extensions["local-tool"].cwd, Some(None));
+}
+
+#[test]
 fn harness_extension_secrets_parse_with_required_default() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();

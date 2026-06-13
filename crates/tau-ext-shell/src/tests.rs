@@ -3909,9 +3909,24 @@ fn shell_working_directory_cannot_change_after_startup() {
         ..Default::default()
     };
 
-    apply_working_directory(&current, &same).expect("same cwd is idempotent");
-    let err = apply_working_directory(&current, &changed).expect_err("cwd change rejected");
+    apply_working_directory(&current, &same, false).expect("same cwd is idempotent");
+    let err = apply_working_directory(&current, &changed, false).expect_err("cwd change rejected");
     assert!(err.contains("cannot be changed after startup"));
+}
+
+#[test]
+fn shell_working_directory_cannot_be_set_after_runtime_events() {
+    // A late None -> Some transition would mutate process-global cwd while
+    // workers may already be resolving relative paths, so it must be rejected.
+    let current = ExtConfig::default();
+    let next = ExtConfig {
+        working_directory: Some(PathBuf::from("/srv/late")),
+        ..Default::default()
+    };
+
+    let err = apply_working_directory(&current, &next, true).expect_err("late cwd set rejected");
+
+    assert!(err.contains("cannot be set after runtime events"));
 }
 
 #[test]

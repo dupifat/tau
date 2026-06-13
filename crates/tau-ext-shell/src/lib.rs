@@ -514,6 +514,7 @@ where
     // ToolStarted is a subscribed committed delivery, so it carries an ack
     // sequence that must be acknowledged after processing like other subscribed
     // events.
+    let mut runtime_started = false;
     while let Some(message) = reader.read_message()? {
         match message {
             HarnessOutputMessage::Configure(msg) => {
@@ -522,7 +523,9 @@ where
                         if cfg.working_directory.is_none() {
                             cfg.working_directory = config.working_directory.clone();
                         }
-                        if let Err(message) = apply_working_directory(&config, &cfg) {
+                        if let Err(message) =
+                            apply_working_directory(&config, &cfg, runtime_started)
+                        {
                             tx.send(HarnessInputMessage::ConfigError(ConfigError { message }))?;
                             continue;
                         }
@@ -547,6 +550,7 @@ where
                 }
             }
             HarnessOutputMessage::Deliver(delivery) => {
+                runtime_started = true;
                 // Replay-marked frames re-send historical facts to late
                 // subscribers. Everything this extension reacts to is either
                 // an execution trigger (tool calls, shell commands — acting
@@ -703,8 +707,16 @@ where
     Ok(())
 }
 
-fn apply_working_directory(current: &ExtConfig, next: &ExtConfig) -> Result<(), String> {
+fn apply_working_directory(
+    current: &ExtConfig,
+    next: &ExtConfig,
+    runtime_started: bool,
+) -> Result<(), String> {
     match (&current.working_directory, &next.working_directory) {
+        (None, Some(_)) if runtime_started => Err(
+            "ext-shell working_directory cannot be set after runtime events have started"
+                .to_owned(),
+        ),
         (None, Some(working_directory)) => set_process_working_directory(working_directory),
         (Some(current), Some(next)) if current == next => Ok(()),
         (Some(current), Some(next)) => Err(format!(

@@ -29,6 +29,9 @@ pub enum StderrPolicy {
 }
 
 /// One configured supervised extension command.
+///
+/// Spawned children inherit the supervisor process environment except variables
+/// whose names start with `TAU_SECRET_`; those are removed before launch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExtensionCommand {
     /// Stable extension identity used in lifecycle events.

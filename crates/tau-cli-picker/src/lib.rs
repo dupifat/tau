@@ -30,6 +30,9 @@ use crate::raw_mode::RawModeGuard;
 
 /// Prompts the user to pick one of `items`, rendering to `stderr`.
 ///
+/// Returns the original index of the selected item. Disabled items are rendered
+/// but skipped by navigation and cannot be selected.
+///
 /// Enables terminal raw mode for the duration of the call. The picker
 /// must therefore not be invoked while another component already owns
 /// raw mode — the inner [`Drop`] would silently restore cooked mode and
@@ -38,6 +41,14 @@ use crate::raw_mode::RawModeGuard;
 ///
 /// The picker frame is written to `stderr` (fd 2) so that the typical
 /// `cli | tool` pipe shape leaves `stdout` untouched.
+///
+/// # Errors
+///
+/// Returns [`PickerError::Empty`] when no items are supplied,
+/// [`PickerError::NoEnabledItems`] when every item is disabled,
+/// [`PickerError::Cancelled`] when the user cancels, and
+/// [`PickerError::Io`] for terminal raw-mode, input, rendering, or cleanup
+/// failures.
 pub fn pick(prompt: &str, items: &[PickerItem]) -> Result<usize, PickerError> {
     let _raw = RawModeGuard::enable()?;
     pick_with_event_reader(
@@ -51,8 +62,16 @@ pub fn pick(prompt: &str, items: &[PickerItem]) -> Result<usize, PickerError> {
 
 /// Like [`pick`], but writes the picker frame to `writer`.
 ///
+/// Returns the original index of the selected item. Disabled items are rendered
+/// but skipped by navigation and cannot be selected.
+///
 /// Enables terminal raw mode for the duration of the call; the same
 /// caveat as [`pick`] applies.
+///
+/// # Errors
+///
+/// Returns the same errors as [`pick`], including raw-mode setup failures and
+/// writer I/O failures.
 pub fn pick_with_writer(
     prompt: &str,
     items: &[PickerItem],
@@ -64,9 +83,23 @@ pub fn pick_with_writer(
 
 /// Drives the picker against caller-provided byte-stream IO.
 ///
+/// Returns the original index of the selected item. Disabled items are rendered
+/// but skipped by navigation and cannot be selected.
+///
 /// Does **not** toggle terminal raw mode. Intended for tests and simple
 /// byte-stream hosts. Embedded crossterm/TUI hosts still need a public API that
 /// accepts host-provided events, resize notifications, and size samples.
+///
+/// EOF, bare Escape, Ctrl-C, Ctrl-D, and `q` cancel the picker. The byte-stream
+/// reader decodes Enter, Tab, BackTab, `j`/`k`, and simple CSI Up/Down arrow
+/// sequences; other printable keys are ignored, and Space is reserved.
+///
+/// # Errors
+///
+/// Returns [`PickerError::Empty`] when no items are supplied,
+/// [`PickerError::NoEnabledItems`] when every item is disabled,
+/// [`PickerError::Cancelled`] when the input stream cancels or reaches EOF, and
+/// [`PickerError::Io`] for reader, writer, rendering, or cleanup failures.
 pub fn pick_with_io(
     prompt: &str,
     items: &[PickerItem],

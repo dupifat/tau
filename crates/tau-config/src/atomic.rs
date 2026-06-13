@@ -32,7 +32,7 @@ pub fn atomic_write_following_symlink(
         .or(default_permissions);
 
     let mut temp_path = destination.clone();
-    loop {
+    let mut temp_file = loop {
         let suffix: u64 = rand::random();
         let file_name = destination
             .file_name()
@@ -46,26 +46,48 @@ pub fn atomic_write_following_symlink(
             .open(&temp_path)
         {
             Ok(mut file) => {
+                let temp_file = PendingTempFile::new(temp_path.clone());
                 if let Some(permissions) = permissions.clone() {
                     file.set_permissions(permissions)?;
                 }
                 file.write_all(contents)?;
                 file.sync_all()?;
-                break;
+                break temp_file;
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error),
         }
-    }
+    };
 
-    if let Err(error) = fs::rename(&temp_path, &destination) {
-        let _ = fs::remove_file(&temp_path);
-        return Err(error);
-    }
+    fs::rename(&temp_file.path, &destination)?;
+    temp_file.disarm();
 
     sync_parent_dir(&destination)?;
 
     Ok(())
+}
+
+struct PendingTempFile {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl PendingTempFile {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingTempFile {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
 }
 
 fn sync_parent_dir(path: &Path) -> io::Result<()> {

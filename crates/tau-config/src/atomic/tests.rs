@@ -1,6 +1,30 @@
 use super::*;
 
 #[test]
+fn pending_temp_file_removes_armed_file_on_drop() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let temp_path = temp_dir.path().join("partial.tmp");
+    std::fs::write(&temp_path, b"partial secret").expect("write temp");
+
+    drop(PendingTempFile::new(temp_path.clone()));
+
+    assert!(!temp_path.exists(), "armed temp file should be removed");
+}
+
+#[test]
+fn pending_temp_file_disarm_preserves_file_on_drop() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let temp_path = temp_dir.path().join("complete.tmp");
+    std::fs::write(&temp_path, b"complete").expect("write temp");
+    let mut pending = PendingTempFile::new(temp_path.clone());
+
+    pending.disarm();
+    drop(pending);
+
+    assert!(temp_path.exists(), "disarmed temp file should remain");
+}
+
+#[test]
 #[cfg(unix)]
 fn replaces_symlink_target_and_preserves_permissions() {
     use std::os::unix::fs::PermissionsExt;

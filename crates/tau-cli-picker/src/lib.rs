@@ -51,11 +51,11 @@ use crate::raw_mode::RawModeGuard;
 /// selection cleanup failures. Cleanup after cancellation or input errors is
 /// best-effort and does not replace the original error.
 pub fn pick(prompt: &str, items: &[PickerItem]) -> Result<usize, PickerError> {
-    let _raw = RawModeGuard::enable()?;
-    pick_with_event_reader(
+    pick_with_raw_mode(
         prompt,
         items,
         io::stderr(),
+        RawModeGuard::enable,
         read_terminal_event,
         terminal_size,
     )
@@ -78,8 +78,14 @@ pub fn pick_with_writer(
     items: &[PickerItem],
     writer: impl io::Write,
 ) -> Result<usize, PickerError> {
-    let _raw = RawModeGuard::enable()?;
-    pick_with_event_reader(prompt, items, writer, read_terminal_event, terminal_size)
+    pick_with_raw_mode(
+        prompt,
+        items,
+        writer,
+        RawModeGuard::enable,
+        read_terminal_event,
+        terminal_size,
+    )
 }
 
 /// Drives the picker against caller-provided byte-stream IO.
@@ -118,6 +124,29 @@ pub fn pick_with_io(
     )
 }
 
+fn pick_with_raw_mode<G>(
+    prompt: &str,
+    items: &[PickerItem],
+    writer: impl io::Write,
+    enable_raw_mode: impl FnOnce() -> io::Result<G>,
+    read_event: impl FnMut() -> io::Result<PickerEvent>,
+    current_size: impl FnMut() -> (usize, usize),
+) -> Result<usize, PickerError> {
+    validate_items(items)?;
+    let _raw = enable_raw_mode()?;
+    pick_with_event_reader(prompt, items, writer, read_event, current_size)
+}
+
+fn validate_items(items: &[PickerItem]) -> Result<usize, PickerError> {
+    if items.is_empty() {
+        return Err(PickerError::Empty);
+    }
+    items
+        .iter()
+        .position(PickerItem::is_enabled)
+        .ok_or(PickerError::NoEnabledItems)
+}
+
 fn pick_with_event_reader(
     prompt: &str,
     items: &[PickerItem],
@@ -125,13 +154,7 @@ fn pick_with_event_reader(
     mut read_event: impl FnMut() -> io::Result<PickerEvent>,
     mut current_size: impl FnMut() -> (usize, usize),
 ) -> Result<usize, PickerError> {
-    if items.is_empty() {
-        return Err(PickerError::Empty);
-    }
-    let mut selected = items
-        .iter()
-        .position(PickerItem::is_enabled)
-        .ok_or(PickerError::NoEnabledItems)?;
+    let mut selected = validate_items(items)?;
     let (mut width, mut height) = current_size();
     let mut screen = Screen::new(width);
 

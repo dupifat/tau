@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::key::{PickerEvent, PickerKey, read_byte_key};
 use crate::{
-    PickerError, PickerItem, pick_with_event_reader, pick_with_io, picker_lines, resize_dimension,
+    PickerError, PickerItem, pick_with_event_reader, pick_with_io, pick_with_raw_mode,
+    picker_lines, resize_dimension,
 };
 
 fn items(labels: &[&str]) -> Vec<PickerItem> {
@@ -109,6 +110,44 @@ fn empty_items_errors() {
 fn all_disabled_errors() {
     let it = vec![PickerItem::disabled("a"), PickerItem::disabled("b")];
     assert!(matches!(run(b"\n", &it), Err(PickerError::NoEnabledItems)));
+}
+
+/// Ensures public raw-mode wrappers can validate invalid item lists before
+/// touching terminal state, preserving deterministic validation errors.
+#[test]
+fn raw_mode_picker_validates_items_before_enabling_raw_mode() {
+    let mut raw_enabled = false;
+    let result = pick_with_raw_mode(
+        "pick",
+        &[],
+        Vec::<u8>::new(),
+        || {
+            raw_enabled = true;
+            Ok(())
+        },
+        || panic!("invalid items should not read input"),
+        || panic!("invalid items should not sample terminal size"),
+    );
+
+    assert!(matches!(result, Err(PickerError::Empty)));
+    assert!(!raw_enabled, "raw mode should not be enabled");
+
+    let mut raw_enabled = false;
+    let disabled = vec![PickerItem::disabled("a")];
+    let result = pick_with_raw_mode(
+        "pick",
+        &disabled,
+        Vec::<u8>::new(),
+        || {
+            raw_enabled = true;
+            Ok(())
+        },
+        || panic!("invalid items should not read input"),
+        || panic!("invalid items should not sample terminal size"),
+    );
+
+    assert!(matches!(result, Err(PickerError::NoEnabledItems)));
+    assert!(!raw_enabled, "raw mode should not be enabled");
 }
 
 #[test]

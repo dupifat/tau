@@ -161,9 +161,16 @@ fn apply_hunks(
         match hunk {
             Hunk::Add { path, contents } => {
                 let abs = resolve_path(&cwd, path);
-                let old_content = read_optional_file(&abs, world)
+                if read_optional_file(&abs, world)
                     .map_err(|message| ApplyPatchFailure::new(message, &changes))?
-                    .unwrap_or_default();
+                    .is_some()
+                {
+                    return Err(ApplyPatchFailure::new(
+                        format!("Add File target already exists: {}", abs.display()),
+                        &changes,
+                    ));
+                }
+                let old_content = String::new();
                 write_file_creating_parent(&abs, contents, world).map_err(|error| {
                     ApplyPatchFailure::new(
                         format!("Failed to write file {}: {error}", abs.display()),

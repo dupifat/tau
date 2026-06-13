@@ -2503,8 +2503,10 @@ fn extension_apply_patch_requires_existing_file_for_update() {
     writer.flush().expect("flush");
 }
 
+/// Ensures apply_patch Add File rejects existing files instead of silently
+/// overwriting content that required an explicit Update File hunk.
 #[test]
-fn extension_apply_patch_add_overwrites_existing_file() {
+fn extension_apply_patch_add_rejects_existing_file() {
     let tempdir = TempDir::new().expect("tempdir");
     let path = tempdir.path().join("duplicate.txt");
     fs::write(&path, "old content\n").expect("write");
@@ -2527,11 +2529,18 @@ fn extension_apply_patch_add_overwrites_existing_file() {
         .expect("invoke");
     writer.flush().expect("flush");
 
-    let result = reader.read_event().expect("read").expect("result");
-    assert!(matches!(result, Event::ToolResult(_)));
+    let error = reader.read_event().expect("read").expect("error");
+    let Event::ToolError(error) = error else {
+        panic!("expected tool error");
+    };
+    assert!(
+        error.message.contains("Add File target already exists"),
+        "unexpected error: {}",
+        error.message
+    );
     assert_eq!(
         fs::read_to_string(&path).expect("read back"),
-        "new content\n"
+        "old content\n"
     );
 
     writer

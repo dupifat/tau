@@ -65,3 +65,32 @@ fn format_single_file_diff_payload() {
         Some(ToolUsePayload::Diff(_))
     ));
 }
+
+/// Ensures `*** Add File` cannot silently clobber an existing path; callers
+/// must use an update hunk when they intend to overwrite content.
+#[test]
+fn add_file_rejects_existing_target() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("exists.txt");
+    std::fs::write(&path, "original\n").expect("write original");
+
+    let mut world = ShellWorld::real();
+    let err = apply_hunks(
+        &[Hunk::Add {
+            path: path.clone(),
+            contents: "replacement\n".to_owned(),
+        }],
+        &mut world,
+    )
+    .expect_err("add file should reject existing target");
+
+    assert!(
+        err.message.contains("Add File target already exists"),
+        "unexpected error: {}",
+        err.message
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read original"),
+        "original\n"
+    );
+}

@@ -111,7 +111,7 @@ pub(crate) fn read_byte_key(reader: &mut impl io::Read) -> io::Result<PickerKey>
         b'\n' | b'\r' => LogicalKey::Enter,
         b'\t' => LogicalKey::Tab,
         0x1b => read_escape_sequence(reader)?,
-        byte if byte.is_ascii() && !byte.is_ascii_control() => LogicalKey::Char(byte as char),
+        byte if byte.is_ascii() && !byte.is_ascii_control() => LogicalKey::Char(char::from(byte)),
         _ => LogicalKey::Unknown,
     };
     Ok(logical_to_action(logical))

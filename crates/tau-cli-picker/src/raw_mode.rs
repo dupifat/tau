@@ -8,6 +8,7 @@ use std::io;
 pub(crate) struct RawModeGuard;
 
 impl RawModeGuard {
+    /// Enables terminal raw mode and returns a guard that restores cooked mode.
     pub(crate) fn enable() -> io::Result<Self> {
         crossterm::terminal::enable_raw_mode()?;
         Ok(Self)

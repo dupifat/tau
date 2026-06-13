@@ -14,6 +14,9 @@ mod item;
 mod key;
 mod raw_mode;
 
+pub use crate::error::PickerError;
+pub use crate::item::PickerItem;
+
 #[cfg(test)]
 mod tests;
 
@@ -23,8 +26,6 @@ use tau_term_screen::screen::Screen;
 use tau_term_screen::style::StyledText;
 use tau_term_screen::truncate_to_width;
 
-pub use crate::error::PickerError;
-pub use crate::item::PickerItem;
 use crate::key::{PickerEvent, PickerKey, read_byte_key, read_terminal_event};
 use crate::raw_mode::RawModeGuard;
 
@@ -241,7 +242,7 @@ fn visible_window(total: usize, selected: usize, visible: usize) -> (usize, usiz
     }
     let half = visible / 2;
     let mut start = selected.saturating_sub(half);
-    if start + visible > total {
+    if total < start + visible {
         start = total - visible;
     }
     (start, start + visible)
@@ -269,8 +270,12 @@ fn resize_dimension(reported: u16, current: usize) -> usize {
     }
 }
 
+const DEFAULT_TERMINAL_WIDTH: usize = 80;
+const DEFAULT_TERMINAL_HEIGHT: usize = 24;
+
 fn terminal_size() -> (usize, usize) {
-    crossterm::terminal::size().map_or((80, 24), |(w, h)| {
-        (usize::from(w).max(1), usize::from(h).max(1))
-    })
+    crossterm::terminal::size().map_or(
+        (DEFAULT_TERMINAL_WIDTH, DEFAULT_TERMINAL_HEIGHT),
+        |(w, h)| (usize::from(w).max(1), usize::from(h).max(1)),
+    )
 }

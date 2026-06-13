@@ -173,6 +173,11 @@ pub struct SupervisedChild {
 }
 impl SupervisedChild {
     /// Spawns one supervised child process with piped stdin/stdout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the process cannot be spawned, required pipe handles
+    /// are missing, or the stdout reader thread cannot be started.
     pub fn spawn(command: ExtensionCommand) -> Result<Self, SupervisionError> {
         let mut child_command = Command::new(&command.program);
         child_command
@@ -235,6 +240,11 @@ impl SupervisedChild {
     }
 
     /// Sends one harness → extension protocol message to the child over stdin.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the message cannot be encoded or child stdin cannot
+    /// be flushed.
     pub fn send(&mut self, message: &HarnessOutputMessage) -> Result<(), SupervisionError> {
         self.stdin
             .write_message(message)
@@ -247,6 +257,11 @@ impl SupervisedChild {
     /// Timeouts, clean stdout closure, and decoded messages are returned as
     /// distinct outcomes. Truncated or corrupt frames are reported as decode
     /// errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the stdout reader observes corrupt or truncated
+    /// protocol data.
     pub fn recv_timeout(&mut self, timeout: Duration) -> Result<ReceiveOutcome, SupervisionError> {
         match self.stdout_frames.recv_timeout(timeout) {
             Ok(Ok(StdoutFrame::Message(frame))) => Ok(ReceiveOutcome::Message(frame)),
@@ -258,6 +273,10 @@ impl SupervisedChild {
     }
 
     /// Checks whether the child has already exited.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operating system status check fails.
     pub fn try_wait(&mut self) -> Result<Option<ChildExit>, SupervisionError> {
         self.child
             .try_wait()
@@ -266,6 +285,11 @@ impl SupervisedChild {
     }
 
     /// Waits until the child exits or the timeout elapses.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if checking child status fails or the timeout elapses
+    /// before the child exits.
     pub fn wait_for_exit(&mut self, timeout: Duration) -> Result<ChildExit, SupervisionError> {
         let started_at = Instant::now();
         loop {
@@ -299,6 +323,11 @@ impl SupervisedChild {
     ///
     /// This is the explicit hard-shutdown API for callers that decide graceful
     /// protocol shutdown is no longer possible or no longer desired.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if checking child status fails, killing the process
+    /// fails, or the child does not exit before the timeout.
     pub fn terminate(&mut self, timeout: Duration) -> Result<ChildExit, SupervisionError> {
         if let Some(exit) = self.try_wait()? {
             return Ok(exit);

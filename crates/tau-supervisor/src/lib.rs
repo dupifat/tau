@@ -342,8 +342,8 @@ impl SupervisedChild {
 }
 
 impl Drop for SupervisedChild {
-    /// Performs last-resort cleanup for children that callers did not shut
-    /// down.
+    // Performs last-resort cleanup for children that callers did not shut
+    // down.
     fn drop(&mut self) {
         match self.child.try_wait() {
             Ok(Some(_)) => {}

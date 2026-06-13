@@ -335,3 +335,25 @@ fn cancel_cleanup_failure_does_not_replace_cancel_error() {
 
     assert!(matches!(err, PickerError::Cancelled));
 }
+
+/// Ensures input errors preserve their original source even when best-effort
+/// cleanup fails, so diagnostics are not replaced by cleanup noise.
+#[test]
+fn input_cleanup_failure_does_not_replace_input_error() {
+    let it = items(&["one", "two"]);
+    let err = pick_with_event_reader(
+        "pick",
+        &it,
+        FailsAfterFirstFlush {
+            flushed_once: false,
+        },
+        || Err(io::Error::other("synthetic input error")),
+        || (40, 5),
+    )
+    .expect_err("input error should remain visible");
+
+    match err {
+        PickerError::Io(source) => assert_eq!(source.to_string(), "synthetic input error"),
+        other => panic!("expected input IO error, got {other:?}"),
+    }
+}

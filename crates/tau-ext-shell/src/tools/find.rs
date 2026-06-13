@@ -115,10 +115,7 @@ pub(crate) fn run_find(arguments: &CborValue) -> Result<ToolOutput, ToolFailure>
 
     let mut notices = Vec::new();
     if limit_reached {
-        notices.push(format!(
-            "{limit} results limit reached. Use limit={} for more, or refine pattern.",
-            limit * 2
-        ));
+        notices.push(limit_reached_notice(limit));
     }
     if truncated.was_truncated {
         notices.push("50KB/2000 line output limit reached.".to_owned());
@@ -148,6 +145,17 @@ pub(crate) fn run_find(arguments: &CborValue) -> Result<ToolOutput, ToolFailure>
         result: CborValue::Map(result_entries),
         display,
     })
+}
+
+fn limit_reached_notice(limit: usize) -> String {
+    if limit >= MAX_FIND_LIMIT {
+        format!("{limit} results limit reached. Maximum limit reached; refine pattern/path.")
+    } else {
+        format!(
+            "{limit} results limit reached. Use limit={} for more, or refine pattern.",
+            (limit * 2).min(MAX_FIND_LIMIT)
+        )
+    }
 }
 
 fn append_notices_within_cap(mut output_text: String, notices: &[String]) -> String {
@@ -325,6 +333,16 @@ mod tests {
         .expect_err("limit over cap");
 
         assert_eq!(err.message, format!("limit must be <= {MAX_FIND_LIMIT}"));
+    }
+
+    /// Ensures max-limit notices do not suggest limits that argument parsing
+    /// rejects.
+    #[test]
+    fn find_max_limit_notice_asks_to_refine() {
+        let notice = limit_reached_notice(MAX_FIND_LIMIT);
+
+        assert!(notice.contains("Maximum limit reached"));
+        assert!(!notice.contains(&format!("limit={}", MAX_FIND_LIMIT * 2)));
     }
 
     /// Protects find output from path line injection by escaping control

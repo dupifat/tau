@@ -178,10 +178,7 @@ pub(crate) fn run_grep(arguments: &CborValue) -> Result<ToolOutput, ToolFailure>
     // Build notices.
     let mut notices = Vec::new();
     if match_limit_reached {
-        notices.push(format!(
-            "{limit} matches limit reached. Use limit={} for more, or refine pattern.",
-            limit * 2
-        ));
+        notices.push(limit_reached_notice(limit));
     }
     if byte_truncated.was_truncated {
         notices.push("50KB output limit reached.".to_owned());
@@ -201,6 +198,17 @@ pub(crate) fn run_grep(arguments: &CborValue) -> Result<ToolOutput, ToolFailure>
         result: grep_result_map(status, match_count, output_text),
         display,
     })
+}
+
+fn limit_reached_notice(limit: usize) -> String {
+    if limit >= MAX_GREP_LIMIT {
+        format!("{limit} matches limit reached. Maximum limit reached; refine pattern.")
+    } else {
+        format!(
+            "{limit} matches limit reached. Use limit={} for more, or refine pattern.",
+            (limit * 2).min(MAX_GREP_LIMIT)
+        )
+    }
 }
 
 fn read_limited_bytes(mut reader: impl Read, limit: usize) -> Vec<u8> {
@@ -560,6 +568,15 @@ mod tests {
         .expect_err("limit over cap");
 
         assert_eq!(err.message, format!("limit must be <= {MAX_GREP_LIMIT}"));
+    }
+
+    /// Ensures max-limit notices do not recommend rejected larger limits.
+    #[test]
+    fn grep_max_limit_notice_asks_to_refine() {
+        let notice = limit_reached_notice(MAX_GREP_LIMIT);
+
+        assert!(notice.contains("Maximum limit reached"));
+        assert!(!notice.contains(&format!("limit={}", MAX_GREP_LIMIT * 2)));
     }
 
     /// Ensures large context requests cannot multiply each match into an

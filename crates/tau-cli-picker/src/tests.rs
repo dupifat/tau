@@ -112,6 +112,16 @@ fn all_disabled_errors() {
     assert!(matches!(run(b"\n", &it), Err(PickerError::NoEnabledItems)));
 }
 
+/// Ensures generic error reporters can recover the underlying I/O cause from
+/// picker I/O failures instead of losing source-chain context.
+#[test]
+fn io_error_exposes_source() {
+    let err = PickerError::Io(io::Error::other("synthetic io error"));
+    let source = std::error::Error::source(&err).expect("io source should be exposed");
+
+    assert_eq!(source.to_string(), "synthetic io error");
+}
+
 /// Ensures public raw-mode wrappers can validate invalid item lists before
 /// touching terminal state, preserving deterministic validation errors.
 #[test]

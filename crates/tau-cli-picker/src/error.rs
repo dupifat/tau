@@ -24,8 +24,14 @@ impl fmt::Display for PickerError {
         }
     }
 }
-
-impl std::error::Error for PickerError {}
+impl std::error::Error for PickerError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(source) => Some(source),
+            Self::Empty | Self::NoEnabledItems | Self::Cancelled => None,
+        }
+    }
+}
 
 impl From<io::Error> for PickerError {
     fn from(source: io::Error) -> Self {

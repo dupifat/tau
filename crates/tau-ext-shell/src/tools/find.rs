@@ -77,7 +77,6 @@ pub(crate) fn run_find(arguments: &CborValue) -> Result<ToolOutput, ToolFailure>
         }
     }
     matches.sort_by_key(|entry| entry.to_lowercase());
-    matches.sort_by_key(|entry| entry.to_lowercase());
 
     if matches.is_empty() {
         let mut display = crate::display::ok_display(display_args.clone());
@@ -97,9 +96,9 @@ pub(crate) fn run_find(arguments: &CborValue) -> Result<ToolOutput, ToolFailure>
         });
     }
 
-    let total_matches = matches.len();
+    let observed_matches = matches.len();
     let displayed: Vec<String> = matches.into_iter().take(limit).collect();
-    let limit_reached = total_matches > displayed.len();
+    let limit_reached = observed_matches > displayed.len();
     let mut output_text = displayed.join("\n");
     let truncated = truncate_line_oriented(&output_text);
     if truncated.was_truncated {
@@ -121,17 +120,24 @@ pub(crate) fn run_find(arguments: &CborValue) -> Result<ToolOutput, ToolFailure>
 
     let mut display = crate::display::ok_display(display_args);
     display.stats = text_stats(&output_text);
+    let mut result_entries = vec![
+        (
+            CborValue::Text("matches".to_owned()),
+            CborValue::Integer((displayed.len() as i64).into()),
+        ),
+        (
+            CborValue::Text("output".to_owned()),
+            CborValue::Text(output_text),
+        ),
+    ];
+    if limit_reached {
+        result_entries.push((
+            CborValue::Text("limit_reached".to_owned()),
+            CborValue::Bool(true),
+        ));
+    }
     Ok(ToolOutput {
-        result: CborValue::Map(vec![
-            (
-                CborValue::Text("matches".to_owned()),
-                CborValue::Integer((total_matches as i64).into()),
-            ),
-            (
-                CborValue::Text("output".to_owned()),
-                CborValue::Text(output_text),
-            ),
-        ]),
+        result: CborValue::Map(result_entries),
         display,
     })
 }
@@ -239,11 +245,28 @@ mod tests {
                 _ => None,
             })
             .expect("output");
+        let matches: i64 = entries
+            .iter()
+            .find_map(|(key, value)| match (key, value) {
+                (CborValue::Text(key), CborValue::Integer(value)) if key == "matches" => {
+                    i128::from(*value).try_into().ok()
+                }
+                _ => None,
+            })
+            .expect("matches");
+        let limit_reached = entries.iter().any(|(key, value)| {
+            matches!(
+                (key, value),
+                (CborValue::Text(key), CborValue::Bool(true)) if key == "limit_reached"
+            )
+        });
 
         assert_eq!(
             output.lines().take_while(|line| !line.is_empty()).count(),
             1
         );
+        assert_eq!(matches, 1);
+        assert!(limit_reached);
         assert!(output.contains("1 results limit reached"));
     }
     /// Ensures find notices are included without exceeding the documented 50KB

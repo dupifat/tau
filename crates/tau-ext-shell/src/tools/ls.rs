@@ -69,22 +69,22 @@ pub(crate) fn run_ls(
             display,
         });
     }
-    let total_entries = entries.len();
+    let observed_entries = entries.len();
     let rendered_lines = entries
         .iter()
         .enumerate()
         .map(|(index, entry)| entry.render_line(index + 1))
         .collect::<Vec<_>>();
-    let total_bytes = line_oriented_len(rendered_lines.iter().map(String::as_str));
     let limited_lines = rendered_lines
         .iter()
         .take(limit)
         .map(String::as_str)
         .collect::<Vec<_>>();
+    let displayed_line_count = limited_lines.len();
     let displayed_bytes = line_oriented_len(limited_lines.iter().copied());
-    let limit_reached = total_entries > limited_lines.len();
+    let limit_reached = observed_entries > displayed_line_count;
     let truncated =
-        truncate_line_oriented_lines(limited_lines, total_entries.min(limit), displayed_bytes);
+        truncate_line_oriented_lines(limited_lines, displayed_line_count, displayed_bytes);
     let output_text = truncated.content;
     let was_truncated = limit_reached || truncated.was_truncated;
 
@@ -93,7 +93,7 @@ pub(crate) fn run_ls(
     let mut result_entries = vec![
         (
             CborValue::Text("entries".to_owned()),
-            CborValue::Integer((total_entries as i64).into()),
+            CborValue::Integer((displayed_line_count as i64).into()),
         ),
         (
             CborValue::Text("output".to_owned()),
@@ -105,14 +105,21 @@ pub(crate) fn run_ls(
             CborValue::Text("truncated".to_owned()),
             CborValue::Bool(true),
         ));
-        result_entries.push((
-            CborValue::Text("total_lines".to_owned()),
-            CborValue::Integer((total_entries as i64).into()),
-        ));
-        result_entries.push((
-            CborValue::Text("total_bytes".to_owned()),
-            CborValue::Integer((total_bytes as i64).into()),
-        ));
+        if limit_reached {
+            result_entries.push((
+                CborValue::Text("limit_reached".to_owned()),
+                CborValue::Bool(true),
+            ));
+        } else {
+            result_entries.push((
+                CborValue::Text("total_lines".to_owned()),
+                CborValue::Integer((displayed_line_count as i64).into()),
+            ));
+            result_entries.push((
+                CborValue::Text("total_bytes".to_owned()),
+                CborValue::Integer((displayed_bytes as i64).into()),
+            ));
+        }
     }
     Ok(ToolOutput {
         result: CborValue::Map(result_entries),

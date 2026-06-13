@@ -145,8 +145,10 @@ fn ls_rejects_non_positive_limit() {
     assert_eq!(failure.message, "limit must be >= 1");
 }
 
+/// Ensures limit truncation reports an explicit lower-bound marker instead of
+/// presenting capped entry counts as exact total line/byte metadata.
 #[test]
-fn ls_limit_truncation_reports_standard_total_headers() {
+fn ls_limit_truncation_reports_limit_reached_without_exact_totals() {
     let tempdir = tempfile::TempDir::new().expect("tempdir");
     std::fs::write(tempdir.path().join("alpha"), "a").expect("write alpha");
     std::fs::write(tempdir.path().join("beta"), "b").expect("write beta");
@@ -166,12 +168,11 @@ fn ls_limit_truncation_reports_standard_total_headers() {
     let text = cbor_map_text(&output.result, "output").expect("output");
 
     assert_eq!(text, "1 alpha");
+    assert_eq!(cbor_map_int(&output.result, "entries"), Some(1));
     assert_eq!(cbor_map_bool(&output.result, "truncated"), Some(true));
-    assert_eq!(cbor_map_int(&output.result, "total_lines"), Some(2));
-    assert_eq!(
-        cbor_map_int(&output.result, "total_bytes"),
-        Some("1 alpha\n2 beta".len() as i64)
-    );
+    assert_eq!(cbor_map_bool(&output.result, "limit_reached"), Some(true));
+    assert_eq!(cbor_map_int(&output.result, "total_lines"), None);
+    assert_eq!(cbor_map_int(&output.result, "total_bytes"), None);
 }
 
 /// Ensures ls only asks the world for one entry past the requested limit, which
@@ -199,8 +200,10 @@ fn ls_limit_bounds_world_directory_collection() {
     let text = cbor_map_text(&output.result, "output").expect("output");
 
     assert_eq!(text.lines().count(), 1);
+    assert_eq!(cbor_map_int(&output.result, "entries"), Some(1));
     assert_eq!(cbor_map_bool(&output.result, "truncated"), Some(true));
-    assert_eq!(cbor_map_int(&output.result, "total_lines"), Some(2));
+    assert_eq!(cbor_map_bool(&output.result, "limit_reached"), Some(true));
+    assert_eq!(cbor_map_int(&output.result, "total_lines"), None);
 }
 
 #[test]

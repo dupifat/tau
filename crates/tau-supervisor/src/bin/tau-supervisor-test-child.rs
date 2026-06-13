@@ -11,6 +11,7 @@ const EXIT_IMMEDIATELY_ARG: &str = "--exit-immediately";
 const PARTIAL_FRAME_ARG: &str = "--partial-frame";
 const FLOOD_ARG: &str = "--flood";
 const REPORT_SECRET_ENV_ARG: &str = "--report-secret-env";
+const SLEEP_ARG: &str = "--sleep";
 
 fn main() -> Result<(), Box<dyn Error>> {
     match std::env::args().nth(1).as_deref() {
@@ -39,6 +40,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 message: Some(if secret_visible { "present" } else { "absent" }.to_owned()),
             }))?;
             writer.flush()?;
+            return Ok(());
+        }
+        Some(SLEEP_ARG) => {
+            std::thread::sleep(std::time::Duration::from_secs(60));
             return Ok(());
         }
         _ => {}

@@ -88,6 +88,7 @@ pub enum SupervisionError {
     Encode(tau_proto::EncodeError),
     Flush(io::Error),
     Decode(DecodeError),
+    Kill(io::Error),
     Wait(io::Error),
     Timeout { duration: Duration },
 }
@@ -101,6 +102,7 @@ impl fmt::Display for SupervisionError {
             Self::Encode(source) => write!(f, "failed to encode event for child stdin: {source}"),
             Self::Flush(source) => write!(f, "failed to flush child stdin: {source}"),
             Self::Decode(source) => write!(f, "failed to decode event from child stdout: {source}"),
+            Self::Kill(source) => write!(f, "failed to kill child process: {source}"),
             Self::Wait(source) => write!(f, "failed to wait for child process: {source}"),
             Self::Timeout { duration } => {
                 write!(f, "timed out waiting for child exit after {duration:?}")
@@ -118,6 +120,7 @@ impl std::error::Error for SupervisionError {
             Self::Encode(source) => Some(source),
             Self::Flush(source) => Some(source),
             Self::Decode(source) => Some(source),
+            Self::Kill(source) => Some(source),
             Self::Wait(source) => Some(source),
             Self::Timeout { .. } => None,
         }
@@ -243,9 +246,23 @@ impl SupervisedChild {
             signal: exit.signal,
         })
     }
+
+    /// Forcibly terminates the child process and waits for its exit.
+    ///
+    /// This is the explicit hard-shutdown API for callers that decide graceful
+    /// protocol shutdown is no longer possible or no longer desired.
+    pub fn terminate(&mut self, timeout: Duration) -> Result<ChildExit, SupervisionError> {
+        if let Some(exit) = self.try_wait()? {
+            return Ok(exit);
+        }
+        self.child.kill().map_err(SupervisionError::Kill)?;
+        self.wait_for_exit(timeout)
+    }
 }
 
 impl Drop for SupervisedChild {
+    /// Performs last-resort cleanup for children that callers did not shut
+    /// down.
     fn drop(&mut self) {
         match self.child.try_wait() {
             Ok(Some(_)) => {}

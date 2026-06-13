@@ -156,6 +156,17 @@ fn stdout_reader_handles_flood_without_unbounded_queueing() {
 }
 
 #[test]
+fn terminate_kills_long_running_child() {
+    let mut child = SupervisedChild::spawn(test_command(vec!["--sleep".to_owned()]))
+        .expect("child should spawn");
+
+    let exit = child
+        .terminate(Duration::from_secs(2))
+        .expect("child should terminate");
+    assert!(exit.exit_code.is_none() || exit.exit_code != Some(0));
+}
+
+#[test]
 fn spawned_child_does_not_inherit_tau_secret_env() {
     if std::env::var_os("TAU_SUPERVISOR_SECRET_ENV_SUBPROCESS").is_some() {
         let mut child =

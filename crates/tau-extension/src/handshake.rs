@@ -198,8 +198,6 @@ impl Handshake {
     /// `Intercept`, startup event `Emit`s, `Ready`) and flush. Subscribe is
     /// omitted when no selectors have been added — sending an empty
     /// subscription would still be valid but adds noise on the wire.
-    /// selectors have been added — sending an empty subscription would still be
-    /// valid but adds noise on the wire.
     ///
     /// For extensions, `Subscribe` starts live delivery and may also send
     /// replay-marked catch-up frames; side-effecting extensions must check

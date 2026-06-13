@@ -17,6 +17,8 @@ use tau_proto::{
     HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter,
 };
 
+const STDOUT_FRAME_BUFFER: usize = 64;
+
 /// One configured supervised extension command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExtensionCommand {
@@ -262,7 +264,7 @@ enum StdoutFrame {
 fn spawn_stdout_reader(
     stdout: std::process::ChildStdout,
 ) -> Receiver<Result<StdoutFrame, DecodeError>> {
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = mpsc::sync_channel(STDOUT_FRAME_BUFFER);
     thread::spawn(move || {
         let mut reader = HarnessInputReader::new(BufReader::new(stdout));
         loop {

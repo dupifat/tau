@@ -126,6 +126,33 @@ fn recv_timeout_reports_partial_frame_as_decode_error() {
         .wait_for_exit(Duration::from_secs(2))
         .expect("child should exit");
 }
+
+#[test]
+fn stdout_reader_handles_flood_without_unbounded_queueing() {
+    let mut child = SupervisedChild::spawn(test_command(vec!["--flood".to_owned()]))
+        .expect("child should spawn");
+
+    for index in 0..128 {
+        assert_eq!(
+            child
+                .recv_timeout(Duration::from_secs(1))
+                .expect("flood message should decode"),
+            ReceiveOutcome::Message(HarnessInputMessage::Ready(Ready {
+                message: Some(index.to_string()),
+            }))
+        );
+    }
+    assert_eq!(
+        child
+            .recv_timeout(Duration::from_secs(1))
+            .expect("clean close should decode"),
+        ReceiveOutcome::Closed
+    );
+    let exit = child
+        .wait_for_exit(Duration::from_secs(2))
+        .expect("child should exit");
+    assert_eq!(exit.exit_code, Some(0));
+}
 #[test]
 fn supervised_child_exchanges_protocol_events_over_stdio() {
     let command = ExtensionCommand {

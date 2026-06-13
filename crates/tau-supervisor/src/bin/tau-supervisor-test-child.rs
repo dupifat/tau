@@ -9,12 +9,24 @@ use tau_proto::{
 
 const EXIT_IMMEDIATELY_ARG: &str = "--exit-immediately";
 const PARTIAL_FRAME_ARG: &str = "--partial-frame";
+const FLOOD_ARG: &str = "--flood";
 
 fn main() -> Result<(), Box<dyn Error>> {
     match std::env::args().nth(1).as_deref() {
         Some(EXIT_IMMEDIATELY_ARG) => return Ok(()),
         Some(PARTIAL_FRAME_ARG) => {
             std::io::stdout().write_all(&[0x81])?;
+            return Ok(());
+        }
+        Some(FLOOD_ARG) => {
+            let stdout = std::io::stdout();
+            let mut writer = PeerOutputWriter::new(BufWriter::new(stdout.lock()));
+            for index in 0..128 {
+                writer.write_message(&HarnessInputMessage::Ready(Ready {
+                    message: Some(index.to_string()),
+                }))?;
+            }
+            writer.flush()?;
             return Ok(());
         }
         _ => {}

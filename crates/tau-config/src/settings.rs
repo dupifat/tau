@@ -191,6 +191,10 @@ pub struct CliState {
     /// Controlled by `/set show-status <all|minimal>`.
     pub show_status: ShowStatus,
 }
+/// CLI color theme selection.
+///
+/// Serialized names are `auto`, `dark`, `light`, or an arbitrary non-empty
+/// named theme resolved by the CLI.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum CliTheme {
     /// Choose a built-in theme from terminal background hints when available.
@@ -256,22 +260,29 @@ impl Serialize for CliTheme {
     }
 }
 
+/// How tool calls are rendered in the CLI transcript.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub enum ShowTools {
+    /// Do not render tool calls.
     #[serde(rename = "off")]
     Off,
+    /// Summarize tool calls once per agent turn.
     #[serde(rename = "summarize-turn")]
     SummarizeTurn,
+    /// Summarize tool calls once per submitted prompt.
     #[serde(rename = "summarize-prompt")]
     SummarizePrompt,
+    /// Render compact per-call chips.
     #[serde(rename = "compact")]
     Compact,
+    /// Render full tool call input/output. Also accepts legacy `on`.
     #[serde(rename = "full", alias = "on")]
     #[default]
     Full,
 }
 
 impl ShowTools {
+    /// Returns the canonical config/state string for this mode.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -283,6 +294,8 @@ impl ShowTools {
         }
     }
 
+    /// Parses a config/state string. Accepts legacy `on` as
+    /// [`ShowTools::Full`].
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value {
@@ -296,22 +309,29 @@ impl ShowTools {
     }
 }
 
+/// Which inter-agent/user-agent messages are shown in the CLI transcript.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub enum ShowMessages {
+    /// Hide these messages.
     #[serde(rename = "none")]
     None,
+    /// Show summaries for messages involving this agent.
     #[serde(rename = "self-summary")]
     SelfSummary,
+    /// Show full messages involving this agent.
     #[serde(rename = "self-full")]
     SelfFull,
+    /// Show summaries for all such messages.
     #[serde(rename = "all-summary")]
     AllSummary,
+    /// Show full text for all such messages.
     #[serde(rename = "all-full")]
     #[default]
     AllFull,
 }
 
 impl ShowMessages {
+    /// Returns the canonical config/state string for this mode.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -323,6 +343,7 @@ impl ShowMessages {
         }
     }
 
+    /// Parses a config/state string into a message display mode.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value {
@@ -336,8 +357,8 @@ impl ShowMessages {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 /// Visibility mode for routine CLI lifecycle and status messages.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub enum ShowStatus {
     /// Show all routine startup lifecycle and status messages.
     #[serde(rename = "all")]
@@ -350,6 +371,7 @@ pub enum ShowStatus {
 }
 
 impl ShowStatus {
+    /// Returns the canonical config/state string for this mode.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -358,6 +380,7 @@ impl ShowStatus {
         }
     }
 
+    /// Parses a config/state string into a status display mode.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value {
@@ -843,6 +866,10 @@ impl HarnessSettings {
         }
     }
 
+    /// Returns the configured session retention duration.
+    ///
+    /// A value of `0` disables time-based cleanup and returns `None`; otherwise
+    /// the configured day count is converted to a saturating [`Duration`].
     #[must_use]
     pub fn session_retention(&self) -> Option<Duration> {
         if self.session_retention_days == 0 {
@@ -1117,13 +1144,21 @@ pub struct RolePromptFragment {
 /// Errors from settings loading.
 #[derive(Debug)]
 pub enum SettingsError {
+    /// Error reported by the layered `config` crate or serde conversion.
     Config(config::ConfigError),
+    /// A role name appeared in more than one role group.
     DuplicateGroupedRole {
+        /// Duplicated role name.
         role: String,
+        /// First group that contained the role.
         first_group: String,
+        /// Later group that attempted to contain the same role.
         second_group: String,
     },
+    /// A command-line role override named a role absent from effective config.
     UnknownRoleCliOverride(String),
+    /// A `--harness-config KEY=VALUE` override had invalid syntax, YAML, or
+    /// conflicting legacy/canonical key spellings.
     InvalidHarnessConfigCliOverride(String),
 }
 impl fmt::Display for SettingsError {

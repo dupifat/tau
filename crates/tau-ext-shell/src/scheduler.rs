@@ -12,6 +12,9 @@ use tau_proto::{
     AgentId, Event, HarnessInputMessage, ToolCallId, ToolCancelled, ToolName, ToolType,
 };
 
+/// Default aggregate cap for approximated queued argument bytes.
+pub(crate) const DEFAULT_QUEUED_BYTES_LIMIT: usize = 1024 * 1024;
+
 /// Queue lane used to pick the next runnable ext-shell work item.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WorkPriority {
@@ -72,7 +75,7 @@ impl Default for SchedulerConfig {
             user_limit: 16,
             cheap_limit: 32,
             bulk_limit: 32,
-            queued_bytes_limit: 1024 * 1024,
+            queued_bytes_limit: DEFAULT_QUEUED_BYTES_LIMIT,
             control_workers: 1,
             user_workers: 2,
             cheap_workers: 3,

@@ -39,7 +39,7 @@ mod tests;
 use crate::agents::{ancestor_dirs, discover_session_agents_files};
 use crate::config::{ExtConfig, ShellConfig};
 use crate::dir_lock::{DIR_LOCK_TOOL_NAME, DirLockManager};
-use crate::scheduler::{WorkMeta, WorkPriority, WorkScheduler};
+use crate::scheduler::{DEFAULT_QUEUED_BYTES_LIMIT, WorkMeta, WorkPriority, WorkScheduler};
 #[cfg(any(test, feature = "echo-agent"))]
 use crate::tools::ECHO_TOOL_NAME;
 use crate::tools::{
@@ -886,10 +886,59 @@ fn priority_for_tool(invoke: &tau_proto::ToolStarted, config: &ExtConfig) -> Wor
 }
 
 fn approximate_tool_bytes(invoke: &tau_proto::ToolStarted) -> usize {
-    invoke.call_id.as_str().len()
-        + invoke.tool_name.as_str().len()
-        + invoke.agent_id.as_str().len()
-        + format!("{:?}", invoke.arguments).len()
+    let cap = DEFAULT_QUEUED_BYTES_LIMIT.saturating_add(1);
+    let base = invoke
+        .call_id
+        .as_str()
+        .len()
+        .saturating_add(invoke.tool_name.as_str().len())
+        .saturating_add(invoke.agent_id.as_str().len());
+    saturating_add_capped(base, estimate_cbor_bytes(&invoke.arguments, cap), cap)
+}
+
+fn estimate_cbor_bytes(value: &CborValue, cap: usize) -> usize {
+    if cap == 0 {
+        return 0;
+    }
+    match value {
+        CborValue::Integer(_) | CborValue::Float(_) | CborValue::Bool(_) | CborValue::Null => {
+            8.min(cap)
+        }
+        CborValue::Bytes(bytes) => bytes.len().min(cap),
+        CborValue::Text(text) => text.len().min(cap),
+        CborValue::Tag(_, inner) => saturating_add_capped(8, estimate_cbor_bytes(inner, cap), cap),
+        CborValue::Array(values) => estimate_cbor_sequence(values.iter(), cap),
+        CborValue::Map(entries) => {
+            let mut total = 1usize;
+            for (key, value) in entries {
+                total = saturating_add_capped(total, estimate_cbor_bytes(key, cap - total), cap);
+                if cap <= total {
+                    return cap;
+                }
+                total = saturating_add_capped(total, estimate_cbor_bytes(value, cap - total), cap);
+                if cap <= total {
+                    return cap;
+                }
+            }
+            total
+        }
+        _ => 8.min(cap),
+    }
+}
+
+fn estimate_cbor_sequence<'a>(values: impl Iterator<Item = &'a CborValue>, cap: usize) -> usize {
+    let mut total = 1usize;
+    for value in values {
+        total = saturating_add_capped(total, estimate_cbor_bytes(value, cap - total), cap);
+        if cap <= total {
+            return cap;
+        }
+    }
+    total
+}
+
+fn saturating_add_capped(lhs: usize, rhs: usize, cap: usize) -> usize {
+    lhs.saturating_add(rhs).min(cap)
 }
 
 fn dispatch_locked_tool_invoke(

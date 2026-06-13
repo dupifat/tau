@@ -5155,6 +5155,25 @@ fn optional_argument_text_rejects_present_non_string_values() {
     assert_eq!(err, "argument `path` must be a string");
 }
 
+/// Protects the scheduler admission path from allocating/debug-formatting huge
+/// CBOR arguments before applying the queued-byte budget.
+#[test]
+fn approximate_tool_bytes_caps_large_cbor_without_debug_rendering() {
+    let Event::ToolStarted(invoke) = tool_started(
+        "large-args",
+        SHELL_TOOL_NAME,
+        CborValue::Bytes(vec![0; DEFAULT_QUEUED_BYTES_LIMIT + 1024]),
+        "agent-a",
+    ) else {
+        panic!("expected tool started");
+    };
+
+    assert_eq!(
+        approximate_tool_bytes(&invoke),
+        DEFAULT_QUEUED_BYTES_LIMIT + 1
+    );
+}
+
 fn grep_args(pattern: &str, path: &str, extra: Vec<(CborValue, CborValue)>) -> CborValue {
     let mut entries = vec![
         (

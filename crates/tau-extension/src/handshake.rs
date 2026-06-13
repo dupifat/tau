@@ -44,7 +44,7 @@ pub struct Handshake {
     client_name: ExtensionName,
     client_kind: ClientKind,
     selectors: Vec<EventSelector>,
-    intercepts: Vec<Intercept>,
+    intercept: Option<Intercept>,
     tools: Vec<ToolRegister>,
     events: Vec<Event>,
     ready_message: Option<String>,
@@ -64,7 +64,7 @@ impl Handshake {
             client_name: client_name.into(),
             client_kind,
             selectors: Vec::new(),
-            intercepts: Vec::new(),
+            intercept: None,
             tools: Vec::new(),
             events: Vec::new(),
             ready_message: None,
@@ -91,11 +91,29 @@ impl Handshake {
     }
 
     /// Intercept events matching `selector` at the given priority.
+    ///
+    /// Repeated calls accumulate selectors into one wire `Intercept` message.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a later call uses a different priority, because the harness
+    /// stores a single interceptor registration per extension connection.
     pub fn intercept(mut self, selector: EventSelector, priority: InterceptionPriority) -> Self {
-        self.intercepts.push(Intercept {
-            selectors: vec![selector],
-            priority,
-        });
+        match &mut self.intercept {
+            Some(intercept) => {
+                assert_eq!(
+                    intercept.priority, priority,
+                    "one extension handshake cannot register mixed interception priorities"
+                );
+                intercept.selectors.push(selector);
+            }
+            None => {
+                self.intercept = Some(Intercept {
+                    selectors: vec![selector],
+                    priority,
+                });
+            }
+        }
         self
     }
 
@@ -193,7 +211,7 @@ impl Handshake {
                 selectors: self.selectors,
             }))?;
         }
-        for intercept in self.intercepts {
+        if let Some(intercept) = self.intercept {
             writer.write_message(&HarnessInputMessage::Intercept(intercept))?;
         }
         for tool in self.tools {

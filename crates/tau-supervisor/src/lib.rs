@@ -94,6 +94,14 @@ pub enum ReceiveOutcome {
 /// Errors produced by the supervised stdio transport.
 #[derive(Debug)]
 pub enum SupervisionError {
+    /// The command used a relative program path with an explicit working
+    /// directory.
+    RelativeProgramWithWorkingDir {
+        /// Relative program path that would have platform-specific resolution.
+        program: PathBuf,
+        /// Requested child working directory.
+        working_dir: PathBuf,
+    },
     /// The child process could not be spawned.
     Spawn(io::Error),
     /// The spawned child did not provide a piped stdin handle.
@@ -122,6 +130,15 @@ pub enum SupervisionError {
 impl fmt::Display for SupervisionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::RelativeProgramWithWorkingDir {
+                program,
+                working_dir,
+            } => write!(
+                f,
+                "relative child program path `{}` cannot be combined with working directory `{}`",
+                program.display(),
+                working_dir.display()
+            ),
             Self::Spawn(source) => write!(f, "failed to spawn child process: {source}"),
             Self::MissingStdin => f.write_str("spawned child process did not expose stdin"),
             Self::MissingStdout => f.write_str("spawned child process did not expose stdout"),
@@ -143,6 +160,7 @@ impl fmt::Display for SupervisionError {
 impl std::error::Error for SupervisionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::RelativeProgramWithWorkingDir { .. } => None,
             Self::Spawn(source) => Some(source),
             Self::MissingStdin => None,
             Self::MissingStdout => None,
@@ -177,7 +195,8 @@ impl SupervisedChild {
     /// # Errors
     ///
     /// Returns an error if the process cannot be spawned, required pipe handles
-    /// are missing, or the stdout reader thread cannot be started.
+    /// are missing, the stdout reader thread cannot be started, or a relative
+    /// program path is combined with an explicit working directory.
     pub fn spawn(command: ExtensionCommand) -> Result<Self, SupervisionError> {
         let mut child_command = Command::new(&command.program);
         child_command
@@ -189,6 +208,12 @@ impl SupervisedChild {
                 StderrPolicy::Null => Stdio::null(),
             });
         if let Some(working_dir) = &command.working_dir {
+            if command.program.is_relative() {
+                return Err(SupervisionError::RelativeProgramWithWorkingDir {
+                    program: command.program.clone(),
+                    working_dir: working_dir.clone(),
+                });
+            }
             child_command.current_dir(working_dir);
         }
         remove_secret_env(&mut child_command);

@@ -188,6 +188,30 @@ fn spawn_uses_configured_working_dir() {
     fs::remove_dir_all(working_dir).expect("working dir should be removed");
 }
 
+/// Ensures relative program paths are rejected when a working directory is set.
+#[test]
+fn spawn_rejects_relative_program_with_working_dir() {
+    let working_dir = std::env::temp_dir().join(format!(
+        "tau-supervisor-relative-program-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&working_dir).expect("working dir should be created");
+
+    let mut command = test_command(&[]);
+    command.program = PathBuf::from("tau-supervisor-test-child");
+    command.working_dir = Some(working_dir.clone());
+
+    let error = match SupervisedChild::spawn(command) {
+        Ok(_) => panic!("relative program with working dir should be rejected"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        SupervisionError::RelativeProgramWithWorkingDir { .. }
+    ));
+    fs::remove_dir_all(working_dir).expect("working dir should be removed");
+}
+
 /// Ensures explicit hard termination can clean up a child that ignores protocol
 /// shutdown.
 #[test]

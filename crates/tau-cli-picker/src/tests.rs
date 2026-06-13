@@ -275,3 +275,25 @@ fn picker_clears_frame_on_input_error() {
     let text = String::from_utf8_lossy(&bytes);
     assert!(text.contains("[J"), "cleanup should clear frame: {text:?}");
 }
+
+#[test]
+fn picker_clears_frame_on_user_cancel() {
+    // Cancellation exits through a different path than input errors; keep
+    // cleanup covered so aborted prompts do not leave picker rows on screen.
+    let it = items(&["one", "two"]);
+    let writer = SharedWriter::default();
+    let output = writer.clone();
+    let err = pick_with_event_reader(
+        "pick",
+        &it,
+        writer,
+        || Ok(PickerEvent::Key(PickerKey::Cancelled)),
+        || (40, 5),
+    )
+    .expect_err("user cancellation should propagate");
+
+    assert!(matches!(err, PickerError::Cancelled));
+    let bytes = output.bytes();
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("[J"), "cleanup should clear frame: {text:?}");
+}

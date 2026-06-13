@@ -21,7 +21,7 @@ fn dirs_with_config_and_state(
     }
 }
 
-/// Regression coverage for `zero_session_retention_disables_cleanup`.
+/// Ensures `session_retention_days: 0` disables cleanup by returning `None`.
 #[test]
 fn zero_session_retention_disables_cleanup() {
     let settings = HarnessSettings {
@@ -32,8 +32,7 @@ fn zero_session_retention_disables_cleanup() {
     assert_eq!(settings.session_retention(), None);
 }
 
-/// Regression coverage for
-/// `cli_settings_user_scalar_override_wins_over_built_in`.
+/// Ensures user CLI scalar settings override the built-in defaults.
 #[test]
 fn cli_settings_user_scalar_override_wins_over_built_in() {
     let td = TempDir::new().expect("tempdir");
@@ -53,7 +52,7 @@ fn cli_settings_user_scalar_override_wins_over_built_in() {
     assert_eq!(s.theme, CliTheme::Auto);
 }
 
-/// Regression coverage for `cli_settings_theme_override`.
+/// Ensures cli.yaml can select a built-in theme by name.
 #[test]
 fn cli_settings_theme_override() {
     let td = TempDir::new().expect("tempdir");
@@ -64,7 +63,7 @@ fn cli_settings_theme_override() {
     assert_eq!(s.theme, CliTheme::Light);
 }
 
-/// Regression coverage for `cli_settings_reject_unknown_top_level_fields`.
+/// Ensures typos in top-level cli.yaml keys fail instead of being ignored.
 #[test]
 fn cli_settings_reject_unknown_top_level_fields() {
     let td = TempDir::new().expect("tempdir");
@@ -79,7 +78,8 @@ fn cli_settings_reject_unknown_top_level_fields() {
     );
 }
 
-/// Regression coverage for `cli_theme_parse_name_rejects_empty_names`.
+/// Ensures direct theme parsing rejects empty names while accepting built-in
+/// and custom names.
 #[test]
 fn cli_theme_parse_name_rejects_empty_names() {
     assert_eq!(CliTheme::parse_name("  "), None);
@@ -102,7 +102,8 @@ fn cli_settings_external_theme_name_override() {
     assert_eq!(s.theme, CliTheme::Named("solarized".to_owned()));
 }
 
-/// Regression coverage for `cli_settings_user_binding_keeps_built_in_chords`.
+/// Ensures user key binding additions preserve built-in chords from
+/// lower-precedence config.
 #[test]
 fn cli_settings_user_binding_keeps_built_in_chords() {
     let td = TempDir::new().expect("tempdir");
@@ -148,8 +149,8 @@ fn cli_settings_user_binding_keeps_built_in_chords() {
     assert_eq!(s.bind.get("C-p").expect("C-p").action, "prompt-previous");
     assert_eq!(s.bind.get("C-n").expect("C-n").action, "prompt-next");
 }
-/// Regression coverage for
-/// `cli_settings_user_completion_keeps_built_in_prefixes`.
+/// Ensures user completion additions preserve built-in slash-command prefixes
+/// from lower-precedence config.
 #[test]
 fn cli_settings_user_completion_keeps_built_in_prefixes() {
     let td = TempDir::new().expect("tempdir");
@@ -178,7 +179,7 @@ fn cli_settings_user_completion_keeps_built_in_prefixes() {
         Some("complete_path")
     );
 }
-/// Regression coverage for `cli_state_load_returns_default_when_file_missing`.
+/// Ensures missing optional cli.yaml files load defaults instead of failing.
 #[test]
 fn cli_state_load_returns_default_when_file_missing() {
     let td = TempDir::new().expect("tempdir");
@@ -189,7 +190,8 @@ fn cli_state_load_returns_default_when_file_missing() {
     assert_eq!(CliState::load(&dirs), CliState::default());
 }
 
-/// Regression coverage for `cli_state_round_trip_through_save_and_load`.
+/// Ensures saved CLI settings can be loaded back without losing configured
+/// fields.
 #[test]
 fn cli_state_round_trip_through_save_and_load() {
     let td = TempDir::new().expect("tempdir");
@@ -213,8 +215,8 @@ fn cli_state_round_trip_through_save_and_load() {
     assert_eq!(reloaded, original);
 }
 
-/// Regression coverage for
-/// `cli_state_defaults_missing_show_messages_to_all_full`.
+/// Ensures omitted message/tool display settings fall back to the expected
+/// visible defaults.
 #[test]
 fn cli_state_defaults_missing_show_messages_to_all_full() {
     let td = TempDir::new().expect("tempdir");
@@ -228,7 +230,8 @@ fn cli_state_defaults_missing_show_messages_to_all_full() {
     assert_eq!(loaded.show_messages, crate::settings::ShowMessages::AllFull);
 }
 
-/// Regression coverage for `cli_state_loads_legacy_show_tools_on_as_full`.
+/// Ensures legacy `show_tools: on` config remains accepted as the full display
+/// mode.
 #[test]
 fn cli_state_loads_legacy_show_tools_on_as_full() {
     let td = TempDir::new().expect("tempdir");
@@ -277,8 +280,8 @@ fn harness_canonical_cli_override_wins_over_legacy_alias() {
     assert_eq!(settings.default_role.as_deref(), Some("cli"));
 }
 
-/// Regression coverage for
-/// `harness_rejects_same_layer_top_level_alias_conflict`.
+/// Ensures a single source cannot specify both top-level legacy and canonical
+/// keys.
 #[test]
 fn harness_rejects_same_layer_top_level_alias_conflict() {
     let td = TempDir::new().expect("tempdir");
@@ -297,7 +300,8 @@ fn harness_rejects_same_layer_top_level_alias_conflict() {
     );
 }
 
-/// Regression coverage for `harness_rejects_same_layer_nested_alias_conflict`.
+/// Ensures nested alias/canonical conflicts in one source produce explicit
+/// config errors.
 #[test]
 fn harness_rejects_same_layer_nested_alias_conflict() {
     let td = TempDir::new().expect("tempdir");
@@ -320,8 +324,8 @@ fn harness_rejects_same_layer_nested_alias_conflict() {
     );
 }
 
-/// Regression coverage for
-/// `harness_file_alias_table_normalizes_all_legacy_keys`.
+/// Ensures every maintained file-layer legacy alias normalizes to its canonical
+/// key.
 #[test]
 fn harness_file_alias_table_normalizes_all_legacy_keys() {
     let mut value = serde_json::json!({
@@ -387,8 +391,8 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
     }
 }
 
-/// Regression coverage for
-/// `harness_cli_alias_table_normalizes_all_legacy_keys`.
+/// Ensures every maintained CLI override legacy alias normalizes to its
+/// canonical path.
 #[test]
 fn harness_cli_alias_table_normalizes_all_legacy_keys() {
     let cases = [
@@ -472,7 +476,8 @@ fn harness_cli_alias_table_normalizes_all_legacy_keys() {
     }
 }
 
-/// Regression coverage for `harness_rejects_same_layer_role_alias_conflict`.
+/// Ensures role-level `enabled`/`enable` conflicts are rejected with path
+/// context.
 #[test]
 fn harness_rejects_same_layer_role_alias_conflict() {
     let td = TempDir::new().expect("tempdir");
@@ -501,7 +506,8 @@ fn harness_rejects_same_layer_role_alias_conflict() {
 }
 
 #[cfg(unix)]
-/// Regression coverage for `unreadable_drop_in_directory_is_reported`.
+/// Ensures unreadable drop-in directory discovery errors are reported instead
+/// of skipped.
 #[test]
 fn unreadable_drop_in_directory_is_reported() {
     use std::os::unix::fs::PermissionsExt;
@@ -524,7 +530,8 @@ fn unreadable_drop_in_directory_is_reported() {
     );
 }
 
-/// Regression coverage for `cli_drop_in_path_must_be_a_directory`.
+/// Ensures an existing drop-in path must be a directory, not a file or symlink
+/// target.
 #[test]
 fn cli_drop_in_path_must_be_a_directory() {
     let td = TempDir::new().expect("tempdir");
@@ -540,7 +547,8 @@ fn cli_drop_in_path_must_be_a_directory() {
     );
 }
 
-/// Regression coverage for `harness_drop_in_path_must_be_a_directory`.
+/// Ensures an existing drop-in path must be a directory, not a file or symlink
+/// target.
 #[test]
 fn harness_drop_in_path_must_be_a_directory() {
     let td = TempDir::new().expect("tempdir");
@@ -557,8 +565,8 @@ fn harness_drop_in_path_must_be_a_directory() {
     );
 }
 
-/// Regression coverage for
-/// `cli_state_defaults_to_cli_config_when_state_file_is_missing`.
+/// Ensures the state loader falls back to CLI config defaults when no state
+/// file exists.
 #[test]
 fn cli_state_defaults_to_cli_config_when_state_file_is_missing() {
     let td = TempDir::new().expect("tempdir");
@@ -591,7 +599,8 @@ fn cli_state_defaults_to_cli_config_when_state_file_is_missing() {
     );
 }
 
-/// Regression coverage for `cli_state_file_overrides_cli_config_defaults`.
+/// Ensures persisted state values override CLI config defaults where state is
+/// authoritative.
 #[test]
 fn cli_state_file_overrides_cli_config_defaults() {
     let td = TempDir::new().expect("tempdir");
@@ -609,7 +618,7 @@ fn cli_state_file_overrides_cli_config_defaults() {
     assert!(state.show_thinking);
 }
 
-/// Regression coverage for `harness_settings_user_override_wins_over_built_in`.
+/// Ensures user harness.yaml values override the built-in baseline config.
 #[test]
 fn harness_settings_user_override_wins_over_built_in() {
     let td = TempDir::new().expect("tempdir");
@@ -630,8 +639,7 @@ fn harness_settings_user_override_wins_over_built_in() {
     );
 }
 
-/// Regression coverage for
-/// `harness_settings_accept_agent_id_template_in_user_config`.
+/// Ensures user config can override the agent id template field.
 #[test]
 fn harness_settings_accept_agent_id_template_in_user_config() {
     // The role-override merge pass rereads harness.yaml with a narrower wire
@@ -661,8 +669,8 @@ fn harness_settings_accept_agent_id_template_in_user_config() {
     );
 }
 
-/// Regression coverage for
-/// `harness_settings_accept_legacy_camel_case_overrides_over_snake_case_builtins`.
+/// Ensures legacy camelCase keys in higher-precedence config override built-in
+/// snake_case keys.
 #[test]
 fn harness_settings_accept_legacy_camel_case_overrides_over_snake_case_builtins() {
     // Built-in defaults now use snake_case. Legacy user layers still need to
@@ -716,8 +724,7 @@ fn harness_settings_accept_legacy_camel_case_overrides_over_snake_case_builtins(
     );
 }
 
-/// Regression coverage for
-/// `harness_config_cli_overrides_are_applied_last_and_typed`.
+/// Ensures CLI config overrides parse as YAML and layer after config files.
 #[test]
 fn harness_config_cli_overrides_are_applied_last_and_typed() {
     let td = TempDir::new().expect("tempdir");
@@ -766,7 +773,8 @@ fn harness_config_cli_overrides_are_applied_last_and_typed() {
     assert_eq!(s.extensions["std-websearch"].enable, Some(false));
 }
 
-/// Regression coverage for `harness_config_cli_overrides_can_update_roles`.
+/// Ensures `--harness-config` can update nested role settings at highest
+/// precedence.
 #[test]
 fn harness_config_cli_overrides_can_update_roles() {
     let td = TempDir::new().expect("tempdir");
@@ -785,15 +793,15 @@ fn harness_config_cli_overrides_can_update_roles() {
     );
 }
 
-/// Regression coverage for `harness_config_cli_overrides_reject_bad_key_value`.
+/// Ensures malformed CLI config overrides fail explicitly at parse time.
 #[test]
 fn harness_config_cli_overrides_reject_bad_key_value() {
     assert!(HarnessConfigCliOverride::from_str("missing-equals").is_err());
     assert!(HarnessConfigCliOverride::from_str("=value").is_err());
 }
 
-/// Regression coverage for
-/// `harness_config_cli_overrides_normalize_legacy_role_aliases`.
+/// Ensures CLI overrides using legacy role aliases still target canonical role
+/// fields.
 #[test]
 fn harness_config_cli_overrides_normalize_legacy_role_aliases() {
     let td = TempDir::new().expect("tempdir");
@@ -810,8 +818,8 @@ fn harness_config_cli_overrides_normalize_legacy_role_aliases() {
     assert!(!settings.roles.contains_key("senior-engineer"));
 }
 
-/// Regression coverage for
-/// `harness_config_cli_overrides_normalize_legacy_top_level_aliases`.
+/// Ensures CLI overrides using legacy top-level aliases still target canonical
+/// settings.
 #[test]
 fn harness_config_cli_overrides_normalize_legacy_top_level_aliases() {
     let td = TempDir::new().expect("tempdir");
@@ -831,8 +839,8 @@ fn harness_config_cli_overrides_normalize_legacy_top_level_aliases() {
     );
 }
 
-/// Regression coverage for
-/// `harness_config_cli_overrides_reject_alias_conflicts`.
+/// Ensures CLI overrides reject alias/canonical conflicts within the same
+/// synthetic layer.
 #[test]
 fn harness_config_cli_overrides_reject_alias_conflicts() {
     let td = TempDir::new().expect("tempdir");
@@ -852,8 +860,8 @@ fn harness_config_cli_overrides_reject_alias_conflicts() {
     );
 }
 
-/// Regression coverage for
-/// `harness_config_cli_overrides_normalize_map_value_aliases`.
+/// Ensures YAML map-valued CLI overrides normalize aliases inside the supplied
+/// value.
 #[test]
 fn harness_config_cli_overrides_normalize_map_value_aliases() {
     let td = TempDir::new().expect("tempdir");
@@ -870,8 +878,8 @@ fn harness_config_cli_overrides_normalize_map_value_aliases() {
     assert!(!settings.roles.contains_key("senior-engineer"));
 }
 
-/// Regression coverage for
-/// `harness_config_cli_overrides_reject_map_value_alias_conflicts`.
+/// Ensures YAML map-valued CLI overrides reject alias/canonical conflicts
+/// inside the value.
 #[test]
 fn harness_config_cli_overrides_reject_map_value_alias_conflicts() {
     let td = TempDir::new().expect("tempdir");
@@ -893,7 +901,7 @@ fn harness_config_cli_overrides_reject_map_value_alias_conflicts() {
     );
 }
 
-/// Regression coverage for `harness_settings_load_role_tool_lists`.
+/// Ensures role tool allow/deny lists load into effective role settings.
 #[test]
 fn harness_settings_load_role_tool_lists() {
     let td = TempDir::new().expect("tempdir");
@@ -930,8 +938,8 @@ fn harness_settings_load_role_tool_lists() {
     );
 }
 
-/// Regression coverage for
-/// `harness_role_drop_in_can_clear_inherited_scalar_and_tool_lists`.
+/// Ensures higher-precedence role drop-ins can clear inherited scalar fields
+/// and tool lists.
 #[test]
 fn harness_role_drop_in_can_clear_inherited_scalar_and_tool_lists() {
     let td = TempDir::new().expect("tempdir");
@@ -987,8 +995,8 @@ fn harness_role_drop_in_can_clear_inherited_scalar_and_tool_lists() {
     assert!(reviewer.disable_tools.is_empty());
 }
 
-/// Regression coverage for
-/// `harness_role_group_defaults_can_clear_existing_role_fields`.
+/// Ensures group defaults can clear fields on roles inherited from lower
+/// layers.
 #[test]
 fn harness_role_group_defaults_can_clear_existing_role_fields() {
     let td = TempDir::new().expect("tempdir");
@@ -1024,8 +1032,8 @@ fn harness_role_group_defaults_can_clear_existing_role_fields() {
     assert_eq!(reviewer.prompt_override, None);
 }
 
-/// Regression coverage for
-/// `harness_role_group_defaults_apply_to_existing_roles_when_adding_role`.
+/// Ensures group defaults apply to inherited group members even when the layer
+/// also adds a role.
 #[test]
 fn harness_role_group_defaults_apply_to_existing_roles_when_adding_role() {
     let td = TempDir::new().expect("tempdir");
@@ -1054,7 +1062,7 @@ fn harness_role_group_defaults_apply_to_existing_roles_when_adding_role() {
     );
 }
 
-/// Regression coverage for `harness_settings_load_role_compaction`.
+/// Ensures role-specific compaction settings load and merge correctly.
 #[test]
 fn harness_settings_load_role_compaction() {
     let td = TempDir::new().expect("tempdir");
@@ -1091,8 +1099,8 @@ fn harness_settings_load_role_compaction() {
     );
 }
 
-/// Regression coverage for
-/// `harness_settings_load_role_group_default_tool_overrides_without_relisting_roles`.
+/// Ensures group-level tool defaults update inherited roles without relisting
+/// each role.
 #[test]
 fn harness_settings_load_role_group_default_tool_overrides_without_relisting_roles() {
     let td = TempDir::new().expect("tempdir");
@@ -1120,7 +1128,7 @@ fn harness_settings_load_role_group_default_tool_overrides_without_relisting_rol
     }
 }
 
-/// Regression coverage for `harness_settings_allow_new_role_group`.
+/// Ensures user config may define a new role group with its own roles.
 #[test]
 fn harness_settings_allow_new_role_group() {
     let td = TempDir::new().expect("tempdir");
@@ -1148,7 +1156,8 @@ fn harness_settings_allow_new_role_group() {
     );
 }
 
-/// Regression coverage for `harness_settings_rejects_role_in_multiple_groups`.
+/// Ensures a role name cannot appear in multiple groups, avoiding ambiguous
+/// defaults.
 #[test]
 fn harness_settings_rejects_role_in_multiple_groups() {
     let td = TempDir::new().expect("tempdir");
@@ -1177,7 +1186,7 @@ fn harness_settings_rejects_role_in_multiple_groups() {
     );
 }
 
-/// Regression coverage for `harness_settings_rejects_unknown_top_level_fields`.
+/// Ensures unknown top-level harness.yaml fields fail instead of being ignored.
 #[test]
 fn harness_settings_rejects_unknown_top_level_fields() {
     // Unknown harness.yaml keys used to be silently ignored. That hides stale
@@ -1194,7 +1203,7 @@ fn harness_settings_rejects_unknown_top_level_fields() {
     );
 }
 
-/// Regression coverage for `harness_settings_rejects_unknown_role_fields`.
+/// Ensures unknown role fields fail so role-setting typos are visible.
 #[test]
 fn harness_settings_rejects_unknown_role_fields() {
     // Role entries are nested under arbitrary group and role names, so strict
@@ -1223,8 +1232,8 @@ fn harness_settings_rejects_unknown_role_fields() {
     );
 }
 
-/// Regression coverage for
-/// `harness_settings_rejects_unknown_prompt_fragment_fields`.
+/// Ensures unknown prompt-fragment fields fail so prompt config typos are
+/// visible.
 #[test]
 fn harness_settings_rejects_unknown_prompt_fragment_fields() {
     // Prompt fragments are user-authored config too; typos there must not be
@@ -1249,8 +1258,8 @@ fn harness_settings_rejects_unknown_prompt_fragment_fields() {
     );
 }
 
-/// Regression coverage for
-/// `harness_settings_role_cli_overrides_apply_in_order_after_config`.
+/// Ensures role CLI overrides are applied after config files and later
+/// overrides win.
 #[test]
 fn harness_settings_role_cli_overrides_apply_in_order_after_config() {
     let td = TempDir::new().expect("tempdir");
@@ -1284,8 +1293,8 @@ fn harness_settings_role_cli_overrides_apply_in_order_after_config() {
     assert_eq!(s.role_groups[0].roles, vec!["manager"]);
 }
 
-/// Regression coverage for
-/// `harness_settings_role_cli_overrides_later_disable_wins`.
+/// Ensures later CLI role overrides can disable a role set by earlier
+/// overrides.
 #[test]
 fn harness_settings_role_cli_overrides_later_disable_wins() {
     let td = TempDir::new().expect("tempdir");
@@ -1303,8 +1312,8 @@ fn harness_settings_role_cli_overrides_later_disable_wins() {
     assert!(!s.roles.contains_key("manager"));
 }
 
-/// Regression coverage for
-/// `harness_settings_role_cli_disable_all_leaves_no_effective_roles`.
+/// Ensures CLI overrides can disable every role and produce an empty effective
+/// role set.
 #[test]
 fn harness_settings_role_cli_disable_all_leaves_no_effective_roles() {
     // `--disable-roles-all` must not be undone by default-role fallback. The
@@ -1323,7 +1332,8 @@ fn harness_settings_role_cli_disable_all_leaves_no_effective_roles() {
     assert_eq!(s.default_role.as_deref(), Some("senior-engineer"));
 }
 
-/// Regression coverage for `harness_settings_role_cli_unknown_role_errors`.
+/// Ensures CLI overrides for unknown role paths fail with explicit config
+/// errors.
 #[test]
 fn harness_settings_role_cli_unknown_role_errors() {
     // CLI role typos must fail startup instead of silently leaving the effective
@@ -1343,7 +1353,7 @@ fn harness_settings_role_cli_unknown_role_errors() {
     ));
 }
 
-/// Regression coverage for `cli_settings_drop_in_layers_on_top_of_base`.
+/// Ensures harness.d drop-ins layer on top of the base harness.yaml file.
 #[test]
 fn cli_settings_drop_in_layers_on_top_of_base() {
     let td = TempDir::new().expect("tempdir");
@@ -1360,8 +1370,8 @@ fn cli_settings_drop_in_layers_on_top_of_base() {
     assert!(!s.greeting);
 }
 
-/// Regression coverage for
-/// `harness_drop_in_layers_merge_through_domain_overrides`.
+/// Ensures domain-specific drop-in layers merge with the same precedence rules
+/// as base config.
 #[test]
 fn harness_drop_in_layers_merge_through_domain_overrides() {
     // Harness files are applied as sparse overrides one layer at a time. This
@@ -1465,8 +1475,7 @@ fn harness_drop_in_layers_merge_through_domain_overrides() {
     );
 }
 
-/// Regression coverage for
-/// `harness_global_prompt_fragments_apply_to_all_roles`.
+/// Ensures global prompt fragments are appended to every effective role prompt.
 #[test]
 fn harness_global_prompt_fragments_apply_to_all_roles() {
     // Top-level prompt fragments are role-independent style/context hooks. They
@@ -1522,7 +1531,8 @@ fn harness_global_prompt_fragments_apply_to_all_roles() {
     }
 }
 
-/// Regression coverage for `harness_roles_merge_with_built_ins`.
+/// Ensures user role definitions merge with the built-in role catalog rather
+/// than replacing it wholesale.
 #[test]
 fn harness_roles_merge_with_built_ins() {
     // Roles are harness-owned now. This keeps the old merge behavior while
@@ -1593,8 +1603,7 @@ fn harness_roles_merge_with_built_ins() {
     );
 }
 
-/// Regression coverage for
-/// `harness_manager_partial_override_keeps_built_in_prompt_fragments`.
+/// Ensures partial manager role overrides preserve built-in prompt fragments.
 #[test]
 fn harness_manager_partial_override_keeps_built_in_prompt_fragments() {
     // Built-in manager prompt fragments are stored in the built-in harness
@@ -1630,8 +1639,8 @@ fn harness_manager_partial_override_keeps_built_in_prompt_fragments() {
     );
 }
 
-/// Regression coverage for
-/// `harness_manager_prompt_fragments_extend_built_in_prompt_fragments`.
+/// Ensures manager role prompt fragments append to, rather than replace,
+/// built-in fragments.
 #[test]
 fn harness_manager_prompt_fragments_extend_built_in_prompt_fragments() {
     // User-provided role prompt fragments are added to the built-in role
@@ -1669,7 +1678,7 @@ fn harness_manager_prompt_fragments_extend_built_in_prompt_fragments() {
     );
 }
 
-/// Regression coverage for `harness_role_group_fields_apply_as_role_defaults`.
+/// Ensures role group fields act as defaults for roles in that group.
 #[test]
 fn harness_role_group_fields_apply_as_role_defaults() {
     // Group-level role fields keep shared role policy in one place. Individual
@@ -1728,8 +1737,7 @@ fn harness_role_group_fields_apply_as_role_defaults() {
     );
 }
 
-/// Regression coverage for
-/// `harness_role_prompt_fragments_parse_as_plain_strings`.
+/// Ensures role prompt fragments may be specified as plain string entries.
 #[test]
 fn harness_role_prompt_fragments_parse_as_plain_strings() {
     // Role prompt customization must keep harness.yaml ergonomic: users write
@@ -1771,8 +1779,8 @@ fn harness_role_prompt_fragments_parse_as_plain_strings() {
     );
 }
 
-/// Regression coverage for
-/// `harness_built_in_roles_load_from_json_with_manager_prompt`.
+/// Ensures the embedded built-in roles load with the expected manager prompt
+/// content.
 #[test]
 fn harness_built_in_roles_load_from_json_with_manager_prompt() {
     // Built-in role defaults live in built-in.harness.yaml. Manager has a
@@ -1832,7 +1840,7 @@ fn harness_built_in_roles_load_from_json_with_manager_prompt() {
     assert!(prompt.contains("available sub-task roles list"));
 }
 
-/// Regression coverage for `harness_role_groups_load_custom_roles`.
+/// Ensures user-defined role groups can load custom role definitions.
 #[test]
 fn harness_role_groups_load_custom_roles() {
     // Role groups are the user-facing role configuration shape.
@@ -1876,7 +1884,7 @@ fn harness_role_groups_load_custom_roles() {
     );
 }
 
-/// Regression coverage for `harness_role_groups_reject_duplicate_role_names`.
+/// Ensures duplicate role names across role groups are rejected explicitly.
 #[test]
 fn harness_role_groups_reject_duplicate_role_names() {
     // Role names are runtime identities, so grouping is only navigation; the
@@ -1898,7 +1906,7 @@ fn harness_role_groups_reject_duplicate_role_names() {
     assert!(err.to_string().contains("appears in multiple role_groups"));
 }
 
-/// Regression coverage for `missing_user_files_load_the_built_in_baseline`.
+/// Ensures absent user config files still load the built-in harness baseline.
 #[test]
 fn missing_user_files_load_the_built_in_baseline() {
     // With no user files present, the loader still returns fully populated
@@ -1923,8 +1931,8 @@ fn missing_user_files_load_the_built_in_baseline() {
     assert!(!harness.roles.contains_key("foreman"));
 }
 
-/// Regression coverage for
-/// `harness_role_enable_false_filters_built_in_roles_after_merging`.
+/// Ensures `enable: false` removes lower-layer roles only after all role layers
+/// merge.
 #[test]
 fn harness_role_enable_false_filters_built_in_roles_after_merging() {
     // `enable: false` is the merge-friendly way to remove a role supplied by a
@@ -1964,7 +1972,8 @@ fn harness_role_enable_false_filters_built_in_roles_after_merging() {
     );
 }
 
-/// Regression coverage for `harness_role_enabled_alias_is_kept_for_old_config`.
+/// Ensures legacy `enabled` role fields continue to disable roles in old config
+/// files.
 #[test]
 fn harness_role_enabled_alias_is_kept_for_old_config() {
     // `enabled` was a mistaken old spelling. Keep accepting it as a little
@@ -2225,8 +2234,8 @@ extensions:
     assert!(secrets["optional_token"].optional);
 }
 
-/// Regression coverage for
-/// `harness_extension_secret_entries_deny_unknown_fields`.
+/// Ensures extension secret entries reject unknown fields so typos are not
+/// ignored.
 #[test]
 fn harness_extension_secret_entries_deny_unknown_fields() {
     let td = TempDir::new().expect("tempdir");

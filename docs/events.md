@@ -204,6 +204,11 @@ harness/agent.
 - **`extension.context_ready`** — The extension finished publishing
   refreshed prompt context for one session (the reply to
   `session.started`).
+- **`extension.prompt_submit_request`** — An extension request to submit a
+  normal user-style prompt to an already loaded agent. The harness validates the
+  target agent and, when accepted, publishes the normal durable
+  `agent.prompt_submitted` fact; extensions must not forge transcript prompt
+  facts directly.
 - **`agent.start_request`** — An extension or harness-owned tool asks
   the harness to start a side/sub-agent conversation: instruction text,
   correlation `query_id`, optional requested `role`, optional tool-call

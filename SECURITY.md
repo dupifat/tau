@@ -21,6 +21,18 @@ usage across many files, sandbox arbitrary extension code, or prevent protocol
 payloads from being deserialized before the harness validates an operation. Run
 only extensions you trust to execute on your machine.
 
+## Telegram extension
+
+`std-telegram` / `tau-ext-telegram` is disabled by default because it bridges
+untrusted external Telegram text into Tau prompts. When enabled, it requires an
+explicit bot-token secret and non-empty allowlist of Telegram user ids. The model
+cannot provide arbitrary chat ids: outgoing messages use only the configured
+chat or an allowlisted user's linked private chat. Unconfigured group/supergroup
+chats are refused, and configured groups should be treated as shared output
+channels visible to everyone in that chat. Runtime registrations, selected
+agents, learned chat id, and update offsets are in-memory only. Avoid logs that
+include bot tokens, Bot API URLs, or unexpected private Telegram content.
+
 ## Rhai scripting extension
 
 `std-rhai` / `tau-ext-rhai` scripts are trusted local code. A Rhai script can

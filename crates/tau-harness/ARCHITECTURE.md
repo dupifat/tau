@@ -56,6 +56,13 @@ corresponding must-pass `session.agent_loaded` publish commits. That keeps
 idempotency stable while an interceptor parks publication and prevents duplicate
 membership/start facts from being queued for the same live agent.
 
+Extensions that need to turn external user input into a normal agent prompt use
+`extension.prompt_submit_request`. The harness accepts this request only on the
+extension path, validates the target loaded agent, and then submits a normal
+user prompt through the same machinery as UI prompt intake. The durable
+transcript fact remains the harness-owned `agent.prompt_submitted`; extensions
+may not forge prompt or message transcript facts directly.
+
 ## Extension data
 
 Extension-data RPCs confine paths to per-extension state roots, reject traversal

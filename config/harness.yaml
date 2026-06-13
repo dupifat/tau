@@ -57,6 +57,15 @@
 #     enable: false
 #   test-dummy:
 #     enable: true
+#   std-telegram:
+#     enable: true
+#     secrets:
+#       telegram_bot_token: {}
+#     config:
+#       bot_token_secret: telegram_bot_token
+#       allowed_user_ids: [123456789]
+#       # Optional for a private chat; if omitted, send /start to link it.
+#       chat_id: 123456789
 #   std-pim:
 #     enable: true
 #     # Secret names may contain ASCII letters, digits, '.', '_' and '-'.

@@ -39,6 +39,13 @@
         config: { "agent_start": [], "agent_end": [], "agent_idle": [], "agent_idle_all": [] },
     },
     {
+        name: "std-telegram",
+        suffix: ["ext", "ext-telegram"],
+        role: "tool",
+        enable: false,
+        config: {},
+    },
+    {
         name: "std-websearch",
         suffix: ["ext", "ext-websearch"],
         role: "tool",

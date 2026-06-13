@@ -9598,3 +9598,136 @@ fn tool_group_overrides_apply_before_individual_tool_overrides() {
         .count();
     assert_eq!(pim_group_prompts, 1, "group prompt renders once");
 }
+
+/// Extension prompt submission is the sanctioned intake path for side-effect
+/// bridges like Telegram. It must produce the same durable user prompt fact as
+/// a UI prompt instead of accepting forged `agent.prompt_submitted` events.
+#[test]
+fn extension_prompt_submit_request_routes_to_loaded_agent() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("harness");
+    h.selected_model = Some("test/model".into());
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+
+    h.handle_extension_event(
+        "telegram-ext",
+        TestProtocolItem::Event(Event::ExtPromptSubmitRequest(
+            tau_proto::ExtPromptSubmitRequest {
+                agent_id: agent_id.clone(),
+                text: "[telegram from alice] hello".to_owned(),
+                ctx_id: Some("telegram-1".to_owned()),
+            },
+        )),
+    )
+    .expect("submit prompt request");
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSubmitted(prompt)
+            if prompt.agent_id == agent_id
+                && prompt.text == "[telegram from alice] hello"
+                && prompt.message_class == tau_proto::PromptMessageClass::User
+                && prompt.originator.is_user()
+    )));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptCreated(created)
+            if created.agent_id == agent_id && created.ctx_id.as_deref() == Some("telegram-1")
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Bad extension prompt targets must be rejected with user-visible harness info
+/// and must not create durable prompt facts for arbitrary agent ids.
+#[test]
+fn extension_prompt_submit_request_rejects_unknown_agent() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("harness");
+
+    h.handle_extension_event(
+        "telegram-ext",
+        TestProtocolItem::Event(Event::ExtPromptSubmitRequest(
+            tau_proto::ExtPromptSubmitRequest {
+                agent_id: tau_proto::AgentId::parse("missing-agent").expect("agent id"),
+                text: "hello".to_owned(),
+                ctx_id: None,
+            },
+        )),
+    )
+    .expect("reject prompt request");
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::HarnessInfo(info) if info.message.contains("unknown or unloaded agent")
+    )));
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSubmitted(prompt) if prompt.text == "hello"
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Queued extension prompt-submit requests must keep their own ctx_id values;
+/// a single per-agent scratch slot would make later queued prompts overwrite
+/// earlier request correlation ids.
+#[test]
+fn queued_extension_prompt_submit_requests_preserve_individual_ctx_ids() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.set_agent_turn_state(
+        &cid,
+        AgentTurnState::AgentThinking {
+            agent_prompt_id: "busy-prompt".into(),
+        },
+    );
+
+    for (text, ctx_id) in [("first", "ctx-1"), ("second", "ctx-2")] {
+        h.handle_extension_event(
+            "telegram-ext",
+            TestProtocolItem::Event(Event::ExtPromptSubmitRequest(
+                tau_proto::ExtPromptSubmitRequest {
+                    agent_id: agent_id.clone(),
+                    text: text.to_owned(),
+                    ctx_id: Some(ctx_id.to_owned()),
+                },
+            )),
+        )
+        .expect("queue prompt request");
+    }
+
+    let queued_ctx_ids: Vec<_> = h.agents[&cid]
+        .pending_prompts
+        .iter()
+        .map(|prompt| prompt.ctx_id.as_deref())
+        .collect();
+    assert_eq!(queued_ctx_ids, vec![Some("ctx-1"), Some("ctx-2")]);
+
+    h.set_agent_turn_state(&cid, AgentTurnState::Idle);
+    h.try_advance_queue();
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptCreated(created)
+            if created.agent_id == agent_id && created.ctx_id.as_deref() == Some("ctx-1")
+    )));
+
+    if let Some(agent) = h.agents.get_mut(&cid) {
+        agent.in_flight_prompt = None;
+    }
+    h.set_agent_turn_state(&cid, AgentTurnState::Idle);
+    h.try_advance_queue();
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptCreated(created)
+            if created.agent_id == agent_id && created.ctx_id.as_deref() == Some("ctx-2")
+    )));
+
+    h.shutdown().expect("shutdown");
+}

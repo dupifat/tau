@@ -2596,6 +2596,7 @@ dependencies = [
  "tau-ext-rhai",
  "tau-ext-shell",
  "tau-ext-std-notifications",
+ "tau-ext-telegram",
  "tau-ext-test-dummy",
  "tau-ext-websearch",
 ]
@@ -2817,6 +2818,18 @@ dependencies = [
  "tempfile",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "tau-ext-telegram"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tau-extension",
+ "tau-proto",
+ "tracing",
+ "ureq",
 ]
 
 [[package]]

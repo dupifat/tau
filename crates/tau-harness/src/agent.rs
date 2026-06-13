@@ -95,9 +95,9 @@ pub(crate) struct Agent {
     pub(crate) prompt_index_initialized: bool,
     /// Correlation tag carried in by a [`tau_proto::UiPromptSubmitted`]
     /// and copied onto the next [`tau_proto::AgentPromptCreated`] this
-    /// conversation emits. Cleared once consumed. Currently only set
-    /// for the synchronous dispatch path; queued prompts drop the tag,
-    /// since the queue stores text only.
+    /// conversation emits. Cleared once consumed. Queued prompt submissions
+    /// should carry their own [`PendingPrompt::ctx_id`] and copy it here only
+    /// when that exact prompt is dispatched.
     pub(crate) next_ctx_id: Option<String>,
     pub(crate) turn_state: AgentTurnState,
     /// For side agents spawned by a tool-implementing extension
@@ -175,6 +175,8 @@ pub(crate) struct PendingPrompt {
     /// Source marker for lifecycle decisions that must not confuse internal
     /// prompts.
     pub(crate) source: PendingPromptSource,
+    /// Optional caller correlation id carried with this exact prompt.
+    pub(crate) ctx_id: Option<String>,
 }
 
 impl From<String> for PendingPrompt {
@@ -202,6 +204,7 @@ impl PendingPrompt {
             text,
             message_class: PromptMessageClass::User,
             source: PendingPromptSource::General,
+            ctx_id: None,
         }
     }
 
@@ -211,6 +214,7 @@ impl PendingPrompt {
             text,
             message_class: PromptMessageClass::Internal,
             source: PendingPromptSource::General,
+            ctx_id: None,
         }
     }
 
@@ -220,7 +224,14 @@ impl PendingPrompt {
             text,
             message_class: PromptMessageClass::Internal,
             source: PendingPromptSource::AgentMessageReceived,
+            ctx_id: None,
         }
+    }
+
+    /// Attach a caller correlation id to this exact queued prompt.
+    pub(crate) fn with_ctx_id(mut self, ctx_id: Option<String>) -> Self {
+        self.ctx_id = ctx_id;
+        self
     }
 
     /// Whether this prompt should be hidden from user-facing UI and metadata.

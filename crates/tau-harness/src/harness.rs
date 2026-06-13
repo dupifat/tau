@@ -4101,6 +4101,9 @@ impl Harness {
                     self.publish_extension_prompt_fragment(source_id, publish);
                 }
             }
+            Event::ExtPromptSubmitRequest(request) => {
+                self.handle_extension_prompt_submit_request(request)?;
+            }
             Event::StartAgentRequest(query) => {
                 if self.should_stage_extension_capabilities(source_id) {
                     self.stage_start_agent_request(source_id, query);
@@ -4442,6 +4445,34 @@ impl Harness {
         Ok(false)
     }
 
+    fn handle_extension_prompt_submit_request(
+        &mut self,
+        request: tau_proto::ExtPromptSubmitRequest,
+    ) -> Result<(), HarnessError> {
+        let agent_id = request.agent_id.to_string();
+        let Some(cid) = self.agent_routes.get(&agent_id).cloned() else {
+            self.emit_info(&format!(
+                "extension prompt submit rejected: unknown or unloaded agent `{agent_id}`"
+            ));
+            return Ok(());
+        };
+        let Some(session_id) = self.agents.get(&cid).map(|agent| agent.session_id.clone()) else {
+            self.emit_info(&format!(
+                "extension prompt submit rejected: unloaded agent `{agent_id}`"
+            ));
+            return Ok(());
+        };
+        let prompt = PendingPrompt::user(request.text).with_ctx_id(request.ctx_id);
+        let submission = self.submit_prompt_to_agent(session_id, &agent_id, prompt)?;
+        if !matches!(submission, PromptSubmission::Rejected { .. }) {
+            let _ = self.agent_store.record_agent_user_interaction(&agent_id);
+        }
+        if matches!(submission, PromptSubmission::Queued) {
+            self.interrupt_active_waits();
+        }
+        Ok(())
+    }
+
     fn handle_ui_prompt_submitted(
         &mut self,
         prompt: tau_proto::UiPromptSubmitted,
@@ -4451,7 +4482,8 @@ impl Harness {
             PendingPrompt::internal(prompt.text.clone())
         } else {
             PendingPrompt::user(prompt.text.clone())
-        };
+        }
+        .with_ctx_id(prompt.ctx_id.clone());
         let is_user_interaction =
             prompt.originator.is_user() && !prompt.message_class.is_internal();
         let submission = self.submit_prompt_to_agent(prompt.session_id, &agent_id, pending)?;
@@ -4539,7 +4571,8 @@ impl Harness {
                 PendingPrompt::internal(initial_prompt)
             } else {
                 PendingPrompt::user(initial_prompt)
-            };
+            }
+            .with_ctx_id(req.ctx_id.clone());
             if self.dispatch_blocked_for(&cid) || !self.session_initialized(&req.session_id) {
                 if let Some(conv) = self.agents.get_mut(&cid) {
                     conv.pending_prompts.push_back(prompt.clone());

@@ -443,6 +443,15 @@ sub-agent needs into the `prompt`. Live progress (turns, current tool) is shown
 in the parent UI alongside the delegate's task name and role. See
 [`docs/agent-messaging.md`](docs/agent-messaging.md) for messaging examples.
 
+### `std-telegram` — personal Telegram text bridge
+
+Disabled by default, `std-telegram` lets allowlisted Telegram users send text to
+explicitly registered Tau agents and lets those agents reply with
+`telegram_send`. It requires a bot-token secret and non-empty `allowed_user_ids`;
+outgoing messages use only a configured or linked chat id, never a model-chosen
+destination. Runtime registrations and Telegram update offsets are in-memory,
+and unconfigured group chats are refused.
+
 ### Web search extensions
 
 `std-websearch` proxies web search/fetch tools from one built-in extension. The

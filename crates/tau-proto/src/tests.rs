@@ -693,6 +693,22 @@ fn event_wire_form_uses_dotted_event_tag() {
     assert!(json.get("payload").is_some());
 }
 
+/// Extension prompt submit requests are a request/intake event, not a durable
+/// transcript fact. This locks in the explicit `extension.*` wire name.
+#[test]
+fn extension_prompt_submit_request_wire_form() {
+    let event = Event::ExtPromptSubmitRequest(ExtPromptSubmitRequest {
+        agent_id: agent_id("agent-1"),
+        text: "[telegram from alice] hello".to_owned(),
+        ctx_id: Some("ctx-1".to_owned()),
+    });
+    let json = serde_json::to_value(&event).expect("serialize");
+    assert_eq!(json["event"], "extension.prompt_submit_request");
+    assert_eq!(json["payload"]["agent_id"], "agent-1");
+    assert_eq!(json["payload"]["ctx_id"], "ctx-1");
+    assert_eq!(event.name(), EventName::EXTENSION_PROMPT_SUBMIT_REQUEST);
+}
+
 #[test]
 fn model_id_parses_provider_and_slashy_model_name() {
     // OpenRouter and similar providers use native model ids such as

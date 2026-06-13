@@ -1536,6 +1536,21 @@ pub struct ExtPromptFragmentPublish {
     pub fragment: PromptFragment,
 }
 
+/// Request from an extension to submit a normal user prompt to a loaded agent.
+///
+/// The harness owns validation and transcript publication for this request;
+/// extensions must not publish `agent.prompt_submitted` directly.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExtPromptSubmitRequest {
+    /// Loaded durable agent that should receive the prompt.
+    pub agent_id: AgentId,
+    /// User-style prompt text to submit.
+    pub text: String,
+    /// Optional submitter correlation id copied to the created prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctx_id: Option<String>,
+}
+
 /// Recipient of a global agent-to-agent or agent-to-user message.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -2819,6 +2834,8 @@ pub enum Event {
     ExtAgentContextPublish(ExtAgentContextPublish),
     #[serde(rename = "extension.prompt_fragment_publish")]
     ExtPromptFragmentPublish(ExtPromptFragmentPublish),
+    #[serde(rename = "extension.prompt_submit_request")]
+    ExtPromptSubmitRequest(ExtPromptSubmitRequest),
     #[serde(rename = "agent.start_request")]
     StartAgentRequest(StartAgentRequest),
     #[serde(rename = "agent.start_accepted")]
@@ -2991,6 +3008,7 @@ impl Event {
             Self::ExtensionContextReady(_) => EventName::EXTENSION_CONTEXT_READY,
             Self::ExtAgentContextPublish(_) => EventName::EXTENSION_AGENT_CONTEXT_PUBLISH,
             Self::ExtPromptFragmentPublish(_) => EventName::EXTENSION_PROMPT_FRAGMENT_PUBLISH,
+            Self::ExtPromptSubmitRequest(_) => EventName::EXTENSION_PROMPT_SUBMIT_REQUEST,
             Self::StartAgentRequest(_) => EventName::AGENT_START_REQUEST,
             Self::StartAgentAccepted(_) => EventName::AGENT_START_ACCEPTED,
             Self::StartAgentResult(_) => EventName::AGENT_START_RESULT,

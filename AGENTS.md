@@ -9,6 +9,7 @@
 - `crates/tau-config` — user and project configuration loading
 - `crates/tau-core` — event bus, routing, state, sessions, policy, and tool registry
 - `crates/tau-ext-std-notifications` — built-in notification extension
+- `crates/tau-ext-telegram` — disabled-by-default Telegram text bridge extension
 - `crates/tau-ext-shell` — shell- and filesystem-oriented extension
 - `crates/tau-ext-rhai` — disabled-by-default trusted local Rhai scripting extension for event hooks, tool registration, and direct shell automation
 - `crates/tau-ext-test-dummy` — test-only dummy extension

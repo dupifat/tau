@@ -74,6 +74,11 @@ impl Harness {
                     "publish_pending_prompt_for_agent: unknown agent `{agent_id}`"
                 ))
             })?;
+        if prompt.ctx_id.is_some()
+            && let Some(agent) = self.agents.get_mut(agent_id)
+        {
+            agent.next_ctx_id = prompt.ctx_id.clone();
+        }
         self.publish_for_agent(
             agent_id,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
@@ -82,7 +87,7 @@ impl Harness {
                 message_class: prompt.message_class,
                 originator,
                 display_name: self.agent_display_name_for_cid(agent_id),
-                ctx_id: None,
+                ctx_id: prompt.ctx_id,
             }),
         );
         Ok(())

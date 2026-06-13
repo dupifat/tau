@@ -1,0 +1,49 @@
+# tau-ext-telegram
+
+First-party personal Telegram text bridge for Tau. The built-in extension is
+named `std-telegram` and is disabled by default.
+
+## Configuration
+
+Create a Telegram bot with BotFather, store its token as a Tau secret, and enable
+the extension:
+
+```yaml
+extensions:
+  std-telegram:
+    enable: true
+    secrets:
+      telegram_bot_token: {}
+    config:
+      bot_token_secret: telegram_bot_token
+      allowed_user_ids: [123456789]
+      # Optional for a private chat; if omitted, send /start to link it.
+      chat_id: 123456789
+```
+
+`allowed_user_ids` is mandatory and must not be empty. `chat_id` is optional for
+private chats because `/start` can link the chat at runtime. Group/supergroup
+chats are refused unless their `chat_id` is explicitly configured.
+
+## Usage
+
+Ask an agent to call `telegram_register` with `enabled: true`. Allowed Telegram
+users can then use:
+
+- `/start` — link a private chat when no `chat_id` is configured and show help;
+- `/agents` — list registered Tau agents;
+- `/select <agent-id-or-prefix>` — select a target for later plain text;
+- `/to <agent-id-or-prefix> <message>` — send one prompt to an agent;
+- plain text — route to the selected agent, or to the only registered agent.
+
+Agents should reply to Telegram-originated prompts with `telegram_send`. The
+model cannot choose a destination chat; `telegram_send` uses only the configured
+or linked chat.
+
+## Limitations
+
+The MVP is text-only. Attachments are acknowledged as unsupported. Registrations,
+selected agents, learned chat id, and Telegram update offsets are in memory only.
+On lazy startup the extension drains Telegram's existing backlog without routing
+it; after restart, Telegram may still redeliver newer updates that were not
+acknowledged before shutdown.

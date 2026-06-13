@@ -4,7 +4,7 @@
 //! results, so tool parsing, formatting, truncation, and validation still run
 //! during replay.
 
-use std::io;
+use std::io::{self, Read};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -226,6 +226,48 @@ impl ShellWorld {
         }
     }
 
+    pub(crate) fn read_file_limited(
+        &mut self,
+        path: &Path,
+        max_bytes: usize,
+    ) -> io::Result<Vec<u8>> {
+        match &mut self.mode {
+            WorldMode::Real => read_file_limited_real(path, max_bytes),
+            WorldMode::Recording { cassette, .. } => {
+                let result = read_file_limited_real(path, max_bytes);
+                cassette.ops.push(WorldOp::ReadFile {
+                    path: cassette_path(path),
+                    result: OpResult::from_io_result_ref(&result)
+                        .map_ok(tau_vcr::EscapedBytes::new),
+                });
+                result
+            }
+            WorldMode::Replay {
+                key,
+                cassette,
+                next_op,
+            } => {
+                let op = next_replay_op(key, cassette, next_op, "read_file", path)?;
+                let WorldOp::ReadFile {
+                    path: expected_path,
+                    result,
+                } = op
+                else {
+                    return Err(unexpected_replay_op(key, "read_file", path));
+                };
+                check_replay_path(key, "read_file", expected_path, path)?;
+                let bytes = result
+                    .clone()
+                    .map_ok(|bytes| bytes.into_vec())
+                    .into_io_result()?;
+                if max_bytes < bytes.len() {
+                    return Err(file_too_large_error(max_bytes));
+                }
+                Ok(bytes)
+            }
+        }
+    }
+
     pub(crate) fn write_file(&mut self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         match &mut self.mode {
             WorldMode::Real => std::fs::write(path, bytes),
@@ -399,6 +441,24 @@ impl ShellWorld {
             cassette.ops.push(WorldOp::Shell { outcome });
         }
     }
+}
+
+fn read_file_limited_real(path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
+    let file = std::fs::File::open(path)?;
+    let mut limited = file.take((max_bytes as u64).saturating_add(1));
+    let mut bytes = Vec::new();
+    limited.read_to_end(&mut bytes)?;
+    if max_bytes < bytes.len() {
+        return Err(file_too_large_error(max_bytes));
+    }
+    Ok(bytes)
+}
+
+fn file_too_large_error(max_bytes: usize) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("file is too large to read safely (limit: {max_bytes} bytes)"),
+    )
 }
 
 #[derive(Clone, Debug)]

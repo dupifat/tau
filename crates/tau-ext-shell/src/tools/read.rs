@@ -10,6 +10,7 @@ use crate::tools::world::ShellWorld;
 use crate::truncate::truncate_line_oriented;
 
 const MAX_READ_RANGES_PER_CALL: usize = 100;
+const MAX_READ_FILE_BYTES: usize = 10 * 1024 * 1024;
 
 pub(crate) fn read_file(
     arguments: &CborValue,
@@ -22,7 +23,7 @@ pub(crate) fn read_file(
     let display_args = format!("{} {}", display_path, request.display_ranges.join(","));
 
     let bytes = world
-        .read_file(&path_buf)
+        .read_file_limited(&path_buf, MAX_READ_FILE_BYTES)
         .map_err(|error| ToolFailure::from(error.to_string()).with_args(display_args.clone()))?;
     let file_bytes = bytes.len();
     let sliced = slice_line_ranges(&bytes, &request.ranges);
@@ -478,5 +479,26 @@ mod tests {
         .expect_err("string range start_line should be rejected");
 
         assert_eq!(err.message, "argument `start_line` must be an integer");
+    }
+    /// Ensures the read tool refuses inputs above its safety cap before loading
+    /// the whole file into memory.
+    #[test]
+    fn read_rejects_files_over_input_cap() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("huge.txt");
+        std::fs::write(&path, vec![b'x'; MAX_READ_FILE_BYTES + 1]).expect("write huge file");
+        let mut world = ShellWorld::real();
+
+        let err = read_file(
+            &map(vec![("path", CborValue::Text(path.display().to_string()))]),
+            &mut world,
+        )
+        .expect_err("huge file should be rejected");
+
+        assert!(
+            err.message.contains("file is too large to read safely"),
+            "unexpected error: {}",
+            err.message
+        );
     }
 }

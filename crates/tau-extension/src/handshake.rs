@@ -92,6 +92,10 @@ impl Handshake {
     }
 
     /// Append a pre-built `EventSelector` (e.g. `Prefix`).
+    ///
+    /// Like [`Handshake::subscribe`], this requests subscribe-time catch-up:
+    /// the harness may send replay-marked frames before live delivery. Check
+    /// [`tau_proto::EventDelivery::is_replay`] before performing side effects.
     pub fn subscribe_selector(mut self, selector: EventSelector) -> Self {
         self.selectors.push(selector);
         self

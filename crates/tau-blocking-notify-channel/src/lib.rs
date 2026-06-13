@@ -33,6 +33,9 @@
 //! observable disconnect — is small enough that a direct `Mutex` + `Condvar`
 //! implementation is the simplest fit.
 
+#[cfg(test)]
+mod tests;
+
 use std::cell::Cell;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -236,6 +239,3 @@ impl Receiver {
         Ok(false)
     }
 }
-
-#[cfg(test)]
-mod tests;

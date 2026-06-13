@@ -2,6 +2,10 @@
 //!
 //! The initial implementation focuses on one supervised child process connected
 //! over stdin/stdout using the shared CBOR event protocol.
+//!
+//! This crate is not currently wired into the production harness extension
+//! supervisor path. Treat its tests as prototype coverage until the harness
+//! integrates this crate or duplicates the same contracts.
 
 use std::io::{self, BufReader, BufWriter};
 #[cfg(unix)]

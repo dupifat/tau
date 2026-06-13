@@ -39,7 +39,7 @@ mod tests;
 use crate::agents::{ancestor_dirs, discover_session_agents_files};
 use crate::config::{ExtConfig, ShellConfig};
 use crate::dir_lock::{DIR_LOCK_TOOL_NAME, DirLockManager};
-use crate::semaphore::Semaphore;
+use crate::semaphore::{OwnedPermit, Semaphore};
 #[cfg(any(test, feature = "echo-agent"))]
 use crate::tools::ECHO_TOOL_NAME;
 use crate::tools::{
@@ -576,8 +576,11 @@ where
                         } else if config.dir_lock.enable
                             && is_dir_lock_update_tool(invoke.tool_name.as_str())
                         {
+                            let Some(permit) = sem.try_acquire() else {
+                                send_worker_saturated_failure(invoke, &tx);
+                                continue;
+                            };
                             let lock_manager = lock_manager.clone();
-                            let sem = Arc::clone(&sem);
                             std::thread::spawn(move || {
                                 dispatch_locked_tool_invoke(
                                     invoke,
@@ -585,16 +588,15 @@ where
                                     &tx,
                                     &running_shells,
                                     &lock_manager,
-                                    &sem,
+                                    permit,
                                     enforce_ro_mode,
                                 );
                             });
                         } else {
-                            // Block here until a permit is free. This bounds the
-                            // total number of in-flight worker threads — without
-                            // it, a burst of ToolStarted events would spawn unbounded
-                            // native threads that then serialize on the semaphore.
-                            let permit = sem.acquire();
+                            let Some(permit) = sem.try_acquire() else {
+                                send_worker_saturated_failure(invoke, &tx);
+                                continue;
+                            };
                             std::thread::spawn(move || {
                                 let _permit = permit;
                                 dispatch_tool_invoke(
@@ -656,7 +658,10 @@ where
                     Event::UiShellCommand(cmd) => {
                         // User-initiated `!`/`!!` — run on a worker thread and
                         // stream chunks out via the same tx writer.
-                        let permit = sem.acquire();
+                        let Some(permit) = sem.try_acquire() else {
+                            debug!("dropping UI shell command because shell workers are saturated");
+                            continue;
+                        };
                         let tx = tx.clone();
                         let shell_config = config.shell.clone();
                         std::thread::spawn(move || {
@@ -814,7 +819,7 @@ fn dispatch_locked_tool_invoke(
     tx: &mpsc::Sender<HarnessInputMessage>,
     running_shells: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
     lock_manager: &DirLockManager,
-    sem: &Arc<Semaphore>,
+    permit: OwnedPermit,
     enforce_ro_mode: bool,
 ) {
     let dirs = match crate::dir_lock::automatic_lock_dirs_for_tool(
@@ -823,7 +828,7 @@ fn dispatch_locked_tool_invoke(
     ) {
         Ok(Some(dirs)) => crate::dir_lock::normalize_lock_dirs(dirs),
         Ok(None) => {
-            let _permit = sem.acquire();
+            let _permit = permit;
             dispatch_tool_invoke(
                 invoke,
                 shell_config,
@@ -873,7 +878,7 @@ fn dispatch_locked_tool_invoke(
 
     let lock_wait_duration_seconds =
         reported_lock_wait_duration_seconds(lock_wait_started.elapsed());
-    let _permit = sem.acquire();
+    let _permit = permit;
     dispatch_tool_invoke(
         invoke,
         shell_config,
@@ -883,6 +888,17 @@ fn dispatch_locked_tool_invoke(
         enforce_ro_mode,
     );
     drop(guard);
+}
+
+fn send_worker_saturated_failure(
+    invoke: tau_proto::ToolStarted,
+    tx: &mpsc::Sender<HarnessInputMessage>,
+) {
+    send_tool_failure(
+        invoke,
+        crate::display::ToolFailure::new("too many concurrent shell tool calls; try again later"),
+        tx,
+    );
 }
 
 fn send_tool_failure(

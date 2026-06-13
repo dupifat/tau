@@ -23,14 +23,14 @@ impl Semaphore {
         }
     }
 
-    /// Block until a permit is available, then take it.
-    pub(crate) fn acquire(self: &Arc<Self>) -> OwnedPermit {
+    /// Try to take a permit without blocking the caller.
+    pub(crate) fn try_acquire(self: &Arc<Self>) -> Option<OwnedPermit> {
         let mut count = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        while *count == 0 {
-            count = self.cond.wait(count).unwrap_or_else(|e| e.into_inner());
+        if *count == 0 {
+            return None;
         }
         *count -= 1;
-        OwnedPermit(Arc::clone(self))
+        Some(OwnedPermit(Arc::clone(self)))
     }
 }
 
@@ -39,5 +39,20 @@ impl Drop for OwnedPermit {
         let mut count = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         *count += 1;
         self.0.cond.notify_one();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ensures callers can reject excess work without blocking the protocol
+    /// reader when all worker permits are already held.
+    #[test]
+    fn try_acquire_returns_none_when_saturated() {
+        let sem = Arc::new(Semaphore::new(1));
+        let _permit = sem.try_acquire().expect("initial permit");
+
+        assert!(sem.try_acquire().is_none());
     }
 }

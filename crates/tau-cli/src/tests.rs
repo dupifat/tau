@@ -67,6 +67,44 @@ fn startup_role_flag_is_parsed_for_default_run() {
     assert_eq!(cli.harness.role.as_deref(), Some("manager"));
 }
 
+/// Tool starts carry the owning agent id, so hidden-agent tools must be routed
+/// away from the visible transcript even before provider output maps the call.
+#[test]
+fn renderer_learns_agent_from_tool_started_event() {
+    let (_term, handle, _vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle,
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+    let event = Event::ToolStarted(tau_proto::ToolStarted {
+        call_id: "hidden-tool".into(),
+        tool_name: tau_proto::ToolName::new("read"),
+        arguments: CborValue::Null,
+        agent_id: agent_id("agent-b"),
+        originator: tau_proto::PromptOriginator::User,
+    });
+
+    assert_eq!(
+        renderer.agent_id_for_event_for_test(&event).as_deref(),
+        Some("agent-b")
+    );
+
+    renderer.handle(&event);
+
+    assert_eq!(
+        renderer.tool_agent_for_test("hidden-tool").as_deref(),
+        Some("agent-b")
+    );
+    assert!(
+        renderer
+            .known_agents()
+            .lock()
+            .expect("known agents")
+            .contains(&"agent-b".to_owned())
+    );
+}
+
 #[test]
 fn prompt_stdin_flag_is_parsed_for_default_run() {
     // `--prompt-stdin` keeps the normal harness/session args but replaces the

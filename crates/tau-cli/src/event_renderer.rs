@@ -1122,6 +1122,16 @@ impl EventRenderer {
         self.current_agent_state.clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn tool_agent_for_test(&self, call_id: &str) -> Option<String> {
+        self.tool_agents.get(call_id).cloned()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn agent_id_for_event_for_test(&self, event: &Event) -> Option<String> {
+        self.agent_id_for_event(event)
+    }
+
     pub(crate) fn switch_agent(&mut self, agent_id: String) {
         self.awaiting_new_agent_selection = false;
         self.remember_agent(agent_id.clone());
@@ -2740,6 +2750,13 @@ impl EventRenderer {
                         .insert(call.call_id.to_string(), agent_id.clone());
                 }
             }
+            Event::ToolStarted(started) => {
+                let agent_id = started.agent_id.to_string();
+                self.remember_agent(agent_id.clone());
+                self.tool_agents
+                    .entry(started.call_id.to_string())
+                    .or_insert(agent_id);
+            }
             Event::AgentPromptTerminated(terminated) => {
                 let agent_id = terminated.agent_id.to_string();
                 if terminated.originator.is_user() {
@@ -2771,7 +2788,11 @@ impl EventRenderer {
     fn agent_id_for_event(&self, event: &Event) -> Option<String> {
         match event {
             Event::ToolRequest(request) => self.tool_agents.get(request.call_id.as_str()).cloned(),
-            Event::ToolStarted(started) => self.tool_agents.get(started.call_id.as_str()).cloned(),
+            Event::ToolStarted(started) => self
+                .tool_agents
+                .get(started.call_id.as_str())
+                .cloned()
+                .or_else(|| Some(started.agent_id.to_string())),
             Event::ToolProgress(progress) => {
                 self.tool_agents.get(progress.call_id.as_str()).cloned()
             }
@@ -3736,6 +3757,9 @@ impl EventRenderer {
 
     fn handle_tool_started(&mut self, started: &tau_proto::ToolStarted, recorded_at: UnixMicros) {
         let call_id = started.call_id.to_string();
+        self.tool_agents
+            .entry(call_id.clone())
+            .or_insert_with(|| started.agent_id.to_string());
         if self
             .tool_calls
             .get(call_id.as_str())

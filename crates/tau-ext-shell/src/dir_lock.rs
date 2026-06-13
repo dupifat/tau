@@ -866,34 +866,15 @@ pub(crate) fn display_dirs(dirs: &[PathBuf]) -> String {
         .join(", ")
 }
 
-/// Canonical write-target lock directory, following a final symlink when the
-/// destination path is already a symlink. Missing parents lock the deepest
-/// existing ancestor so `edit` can keep creating parent directories safely.
+/// Canonical write-target lock directory, following the final symlink chain
+/// when the destination path is already a symlink. Missing parents lock the
+/// deepest existing ancestor so `edit` can keep creating parent directories
+/// safely.
 pub(crate) fn canonical_write_lock_dir(path: &Path) -> Result<PathBuf, ToolFailure> {
-    let lock_path = match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            let target = std::fs::read_link(path).map_err(|error| {
-                ToolFailure::from(format!(
-                    "failed to read symlink {}: {error}",
-                    path.display()
-                ))
-                .with_args(path.display().to_string())
-            })?;
-            let resolved = if target.is_absolute() {
-                target
-            } else {
-                path.parent().unwrap_or_else(|| Path::new(".")).join(target)
-            };
-            absolute_path(&resolved).map_err(|error| {
-                ToolFailure::from(format!("failed to resolve {}: {error}", resolved.display()))
-                    .with_args(path.display().to_string())
-            })?
-        }
-        _ => absolute_path(path).map_err(|error| {
-            ToolFailure::from(format!("failed to resolve {}: {error}", path.display()))
-                .with_args(path.display().to_string())
-        })?,
-    };
+    let lock_path = crate::tools::world::final_write_path(path).map_err(|error| {
+        ToolFailure::from(format!("failed to resolve {}: {error}", path.display()))
+            .with_args(path.display().to_string())
+    })?;
     let parent = lock_path.parent().ok_or_else(|| {
         ToolFailure::from(format!(
             "path {} has no parent directory",

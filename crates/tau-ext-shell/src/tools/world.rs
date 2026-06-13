@@ -522,7 +522,7 @@ fn atomic_write_file_to_temp(target: &Path, temp_path: &Path, bytes: &[u8]) -> i
 
 const MAX_FINAL_SYMLINK_HOPS: usize = 40;
 
-fn final_write_path(path: &Path) -> io::Result<std::path::PathBuf> {
+pub(crate) fn final_write_path(path: &Path) -> io::Result<std::path::PathBuf> {
     let mut current = path.to_owned();
     let mut seen = std::collections::HashSet::new();
     for _ in 0..MAX_FINAL_SYMLINK_HOPS {
@@ -545,7 +545,14 @@ fn final_write_path(path: &Path) -> io::Result<std::path::PathBuf> {
                 };
             }
             Ok(_) => return Ok(current),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(current),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(current);
+            }
             Err(error) => return Err(error),
         }
     }

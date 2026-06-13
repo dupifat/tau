@@ -203,6 +203,27 @@ fn manual_lock_rejects_same_owner_overlapping_lock_but_allows_auto_reentry() {
     drop(first_guard);
 }
 
+#[cfg(unix)]
+#[test]
+fn canonical_write_lock_dir_follows_chained_final_symlink() {
+    // Automatic writer locks must target the same final file directory that
+    // atomic writes will update through chained symlinks.
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let a = tempdir.path().join("a");
+    let b = tempdir.path().join("b");
+    let c = tempdir.path().join("c");
+    std::fs::create_dir_all(&a).expect("mkdir a");
+    std::fs::create_dir_all(&b).expect("mkdir b");
+    std::fs::create_dir_all(&c).expect("mkdir c");
+    std::fs::write(c.join("target.txt"), "old\n").expect("write target");
+    std::os::unix::fs::symlink("../b/link2", a.join("link1")).expect("link1");
+    std::os::unix::fs::symlink("../c/target.txt", b.join("link2")).expect("link2");
+
+    let lock_dir = canonical_write_lock_dir(&a.join("link1")).expect("lock dir");
+
+    assert_eq!(lock_dir, c.canonicalize().expect("canonical c"));
+}
+
 #[test]
 fn disable_releases_manual_locks_and_cancels_waiters() {
     // Disabling dir_lock through config must not strand queued tools behind

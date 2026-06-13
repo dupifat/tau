@@ -19,6 +19,15 @@ use tau_proto::{
 
 const STDOUT_FRAME_BUFFER: usize = 64;
 
+/// Child stderr handling policy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StderrPolicy {
+    /// Inherit the supervisor process stderr handle.
+    Inherit,
+    /// Discard child stderr output.
+    Null,
+}
+
 /// One configured supervised extension command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExtensionCommand {
@@ -28,6 +37,10 @@ pub struct ExtensionCommand {
     pub program: PathBuf,
     /// Command-line arguments passed to the child after `program`.
     pub args: Vec<String>,
+    /// Optional working directory for the child process.
+    pub working_dir: Option<PathBuf>,
+    /// Policy for child stderr output.
+    pub stderr: StderrPolicy,
 }
 
 impl ExtensionCommand {
@@ -162,7 +175,13 @@ impl SupervisedChild {
             .args(&command.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stderr(match command.stderr {
+                StderrPolicy::Inherit => Stdio::inherit(),
+                StderrPolicy::Null => Stdio::null(),
+            });
+        if let Some(working_dir) = &command.working_dir {
+            child_command.current_dir(working_dir);
+        }
         remove_secret_env(&mut child_command);
 
         let mut child = child_command.spawn().map_err(SupervisionError::Spawn)?;

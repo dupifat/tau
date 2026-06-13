@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command as StdCommand;
 use std::time::Duration;
@@ -6,13 +7,17 @@ use tau_proto::{
     CborValue, ClientKind, Disconnect, Event, HarnessInputMessage, HarnessOutputMessage, Hello,
     PROTOCOL_VERSION, Ready, Subscribe, ToolRegister, ToolStarted,
 };
-use tau_supervisor::{ExtensionCommand, ReceiveOutcome, SupervisedChild, SupervisionError};
+use tau_supervisor::{
+    ExtensionCommand, ReceiveOutcome, StderrPolicy, SupervisedChild, SupervisionError,
+};
 
 fn test_command(args: Vec<String>) -> ExtensionCommand {
     ExtensionCommand {
         name: "test-child".into(),
         program: PathBuf::from(env!("CARGO_BIN_EXE_tau-supervisor-test-child")),
         args,
+        working_dir: None,
+        stderr: StderrPolicy::Inherit,
     }
 }
 
@@ -163,6 +168,32 @@ fn stdout_reader_handles_flood_without_unbounded_queueing() {
     assert_eq!(exit.exit_code, Some(0));
 }
 
+/// Ensures the spawn policy applies the configured child working directory.
+#[test]
+fn spawn_uses_configured_working_dir() {
+    let working_dir =
+        std::env::temp_dir().join(format!("tau-supervisor-cwd-{}", std::process::id()));
+    fs::create_dir_all(&working_dir).expect("working dir should be created");
+
+    let mut command = test_command(vec!["--report-cwd".to_owned()]);
+    command.working_dir = Some(working_dir.clone());
+    let mut child = SupervisedChild::spawn(command).expect("child should spawn");
+
+    assert_eq!(
+        child
+            .recv_timeout(Duration::from_secs(1))
+            .expect("cwd report should decode"),
+        ReceiveOutcome::Message(HarnessInputMessage::Ready(Ready {
+            message: Some(working_dir.display().to_string()),
+        }))
+    );
+    let exit = child
+        .wait_for_exit(Duration::from_secs(2))
+        .expect("child should exit");
+    assert_eq!(exit.exit_code, Some(0));
+    fs::remove_dir_all(working_dir).expect("working dir should be removed");
+}
+
 /// Ensures explicit hard termination can clean up a child that ignores protocol
 /// shutdown.
 #[test]
@@ -214,6 +245,8 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
         name: "test-child".into(),
         program: test_child_path(),
         args: Vec::new(),
+        working_dir: None,
+        stderr: StderrPolicy::Inherit,
     };
     let mut child = SupervisedChild::spawn(command.clone()).expect("child should spawn");
 
@@ -304,6 +337,8 @@ fn restarted_child_can_reregister_after_exit() {
         name: "test-child".into(),
         program: test_child_path(),
         args: Vec::new(),
+        working_dir: None,
+        stderr: StderrPolicy::Inherit,
     };
 
     for _ in 0..2 {

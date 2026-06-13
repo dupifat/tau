@@ -12,6 +12,7 @@ const PARTIAL_FRAME_ARG: &str = "--partial-frame";
 const FLOOD_ARG: &str = "--flood";
 const REPORT_SECRET_ENV_ARG: &str = "--report-secret-env";
 const SLEEP_ARG: &str = "--sleep";
+const REPORT_CWD_ARG: &str = "--report-cwd";
 
 fn main() -> Result<(), Box<dyn Error>> {
     match std::env::args().nth(1).as_deref() {
@@ -44,6 +45,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         Some(SLEEP_ARG) => {
             std::thread::sleep(std::time::Duration::from_secs(60));
+            return Ok(());
+        }
+        Some(REPORT_CWD_ARG) => {
+            let stdout = std::io::stdout();
+            let mut writer = PeerOutputWriter::new(BufWriter::new(stdout.lock()));
+            writer.write_message(&HarnessInputMessage::Ready(Ready {
+                message: Some(std::env::current_dir()?.display().to_string()),
+            }))?;
+            writer.flush()?;
             return Ok(());
         }
         _ => {}

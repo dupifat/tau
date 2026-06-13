@@ -118,47 +118,6 @@ impl CliSettings {
     }
 }
 
-/// Shell command configured for a CLI key binding.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(untagged)]
-pub enum CliShellCommand {
-    Command(String),
-    Options { command: String, trim: bool },
-}
-
-impl CliShellCommand {
-    #[must_use]
-    pub fn new(command: impl Into<String>) -> Self {
-        Self::Options {
-            command: command.into(),
-            trim: false,
-        }
-    }
-
-    #[must_use]
-    pub fn new_trimmed(command: impl Into<String>) -> Self {
-        Self::Options {
-            command: command.into(),
-            trim: true,
-        }
-    }
-
-    #[must_use]
-    pub fn command(&self) -> &str {
-        match self {
-            Self::Command(command) | Self::Options { command, .. } => command,
-        }
-    }
-
-    #[must_use]
-    pub fn trim(&self) -> bool {
-        match self {
-            Self::Command(_) => false,
-            Self::Options { trim, .. } => *trim,
-        }
-    }
-}
-
 /// CLI key binding action.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]

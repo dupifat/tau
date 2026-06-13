@@ -21,6 +21,16 @@ facts directly.
 
 ## Routing
 
-Allowed users can use `/agents`, `/select <agent>`, `/to <agent> <message>`, or
-plain text when exactly one agent is registered or a selected agent exists.
-Ambiguous plain text receives a Telegram reply and is not routed.
+Allowed users can use these commands:
+
+- `/agents`
+- `/select <agent-id-or-prefix>`
+- `/to <agent-id-or-prefix> <message>`
+
+Plain text routes when exactly one agent is registered or a selected agent exists.
+Command designators always put the stable `agent_id` first, with display name
+only as context in listings and selection confirmations (`agent_id (display
+name)`). `/select` and `/to` resolve by full `agent_id` or unambiguous `agent_id`
+prefix, not by display name. Agent replies sent with `telegram_send` are prefixed
+with `[agent_id]` only. Ambiguous plain text receives a Telegram reply and is not
+routed.

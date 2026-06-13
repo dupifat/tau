@@ -264,7 +264,7 @@ impl Extension {
         if message.trim().is_empty() {
             return tool_error(invoke, "`message` must not be empty".to_owned());
         }
-        let (cfg, chat_id, label) = {
+        let (cfg, chat_id) = {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if !state.registered_agents.contains(&invoke.agent_id) {
                 return tool_error(
@@ -282,10 +282,9 @@ impl Extension {
                         .to_owned(),
                 );
             };
-            let label = agent_label(&state, &invoke.agent_id);
-            (cfg, chat_id, label)
+            (cfg, chat_id)
         };
-        let text = format!("[{label}] {message}");
+        let text = format!("[{}] {message}", invoke.agent_id.as_ref());
         match self.client.send_message(&cfg, chat_id, &text) {
             Ok(()) => tool_result(invoke, "sent Telegram message"),
             Err(message) => tool_error(invoke, message),
@@ -361,7 +360,7 @@ impl Extension {
                         state
                             .selected_agent_by_chat
                             .insert(message.chat_id, agent_id.clone());
-                        format!("Selected {}", agent_label(&state, &agent_id))
+                        format!("Selected {}", agent_designator(&state, &agent_id))
                     }
                     Err(reply) => reply,
                 }
@@ -408,7 +407,7 @@ impl Extension {
                 Err("No Tau agents are registered. Ask an agent to call telegram_register(enabled: true).".to_owned())
             } else {
                 Err(
-                    "Multiple Tau agents are registered. Use /agents then /select <agent>."
+                    "Multiple Tau agents are registered. Use /agents then /select <agent-id-or-prefix>."
                         .to_owned(),
                 )
             }
@@ -739,14 +738,22 @@ fn tool_error(invoke: ToolStarted, message: String) -> Event {
     })
 }
 
-fn agent_label(state: &State, agent_id: &AgentId) -> String {
+fn agent_display_name<'a>(state: &'a State, agent_id: &AgentId) -> Option<&'a str> {
     state
         .agent_labels
         .get(agent_id)
         .map(String::as_str)
-        .filter(|label| !label.trim().is_empty())
-        .unwrap_or_else(|| agent_id.as_ref())
-        .to_owned()
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .filter(|label| *label != agent_id.as_ref())
+}
+
+fn agent_designator(state: &State, agent_id: &AgentId) -> String {
+    let id = agent_id.as_ref();
+    match agent_display_name(state, agent_id) {
+        Some(display_name) => format!("{id} ({display_name})"),
+        None => id.to_owned(),
+    }
 }
 
 fn agents_text(state: &State) -> String {
@@ -754,8 +761,10 @@ fn agents_text(state: &State) -> String {
         return "No Tau agents are registered.".to_owned();
     }
     let mut lines = vec!["Registered Tau agents:".to_owned()];
-    for agent_id in &state.registered_agents {
-        lines.push(format!("- {} ({})", agent_label(state, agent_id), agent_id));
+    let mut agents = state.registered_agents.iter().collect::<Vec<_>>();
+    agents.sort();
+    for agent_id in agents {
+        lines.push(format!("- {}", agent_designator(state, agent_id)));
     }
     lines.join("\n")
 }
@@ -783,7 +792,7 @@ fn split_first(s: &str) -> (&str, &str) {
 }
 
 fn help_text() -> &'static str {
-    "Tau Telegram bridge linked. Commands: /agents, /select <agent>, /to <agent> <message>. Plain text goes to the selected agent, or to the only registered agent."
+    "Tau Telegram bridge linked. Commands: /agents, /select <agent-id-or-prefix>, /to <agent-id-or-prefix> <message>. Plain text goes to the selected agent, or to the only registered agent."
 }
 
 struct HttpTelegramClient {

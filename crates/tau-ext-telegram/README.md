@@ -36,6 +36,12 @@ users can then use:
 - `/to <agent-id-or-prefix> <message>` — send one prompt to an agent;
 - plain text — route to the selected agent, or to the only registered agent.
 
+Bot-facing command designators are stable `agent_id` values, optionally followed
+by `(display name)` for context in listings and selection confirmations. `/select`
+and `/to` resolve only a full `agent_id` or an unambiguous `agent_id` prefix, not
+display names. Agent replies sent with `telegram_send` are prefixed with
+`[agent_id]`.
+
 Agents should reply to Telegram-originated prompts with `telegram_send`. The
 model cannot choose a destination chat; `telegram_send` uses only the configured
 or linked chat.

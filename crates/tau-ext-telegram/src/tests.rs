@@ -233,6 +233,88 @@ fn multiple_agents_without_selection_do_not_route() {
     assert!(client.sent.lock().expect("lock")[0].1.contains("Multiple"));
 }
 
+/// Bot-facing command replies must make `agent_id` the primary designator so
+/// users copy stable ids into `/select` and `/to`, with display names only as
+/// parenthetical context.
+#[test]
+fn bot_commands_show_agent_id_before_display_name() {
+    let (ext, _rx, client) = extension();
+    {
+        let mut state = ext.state.lock().expect("lock");
+        state.registered_agents.insert(agent_id("agent-1"));
+        state.registered_agents.insert(agent_id("agent-2"));
+        state
+            .agent_labels
+            .insert(agent_id("agent-1"), "Alpha".to_owned());
+        state
+            .agent_labels
+            .insert(agent_id("agent-2"), "Beta".to_owned());
+    }
+
+    ext.process_update(TgUpdate {
+        update_id: 1,
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: None,
+            user_id: 123,
+            from_name: None,
+            text: Some("/agents".to_owned()),
+        }),
+    });
+    ext.process_update(TgUpdate {
+        update_id: 2,
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: None,
+            user_id: 123,
+            from_name: None,
+            text: Some("/select agent-2".to_owned()),
+        }),
+    });
+
+    let sent = client.sent.lock().expect("lock");
+    assert_eq!(
+        sent[0].1,
+        "Registered Tau agents:\n- agent-1 (Alpha)\n- agent-2 (Beta)"
+    );
+    assert_eq!(sent[1].1, "Selected agent-2 (Beta)");
+}
+
+/// Agent ids should stand alone in `/agents` output when a display name is
+/// missing, blank, or identical to the id, avoiding noisy duplicate context.
+#[test]
+fn agents_list_omits_empty_or_duplicate_display_names() {
+    let (ext, _rx, client) = extension();
+    {
+        let mut state = ext.state.lock().expect("lock");
+        state.registered_agents.insert(agent_id("agent-1"));
+        state.registered_agents.insert(agent_id("agent-2"));
+        state.registered_agents.insert(agent_id("agent-3"));
+        state
+            .agent_labels
+            .insert(agent_id("agent-2"), "   ".to_owned());
+        state
+            .agent_labels
+            .insert(agent_id("agent-3"), "agent-3".to_owned());
+    }
+
+    ext.process_update(TgUpdate {
+        update_id: 1,
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: None,
+            user_id: 123,
+            from_name: None,
+            text: Some("/agents".to_owned()),
+        }),
+    });
+
+    assert_eq!(
+        client.sent.lock().expect("lock")[0].1,
+        "Registered Tau agents:\n- agent-1\n- agent-2\n- agent-3"
+    );
+}
+
 /// `/select` stores a chat-local target so later plain text can be routed even
 /// while multiple agents are registered.
 #[test]
@@ -273,15 +355,17 @@ fn select_then_plain_text_routes_to_selected_agent() {
 }
 
 /// The model can pass only `message`; even if extra arguments appear, outgoing
-/// delivery must use the configured/linked chat id and never a model-chosen id.
+/// delivery must use the configured/linked chat id and an agent-id-only prefix.
 #[test]
 fn telegram_send_uses_configured_chat_not_argument_chat_id() {
     let (ext, rx, client) = extension();
-    ext.state
-        .lock()
-        .expect("lock")
-        .registered_agents
-        .insert(agent_id("agent-1"));
+    {
+        let mut state = ext.state.lock().expect("lock");
+        state.registered_agents.insert(agent_id("agent-1"));
+        state
+            .agent_labels
+            .insert(agent_id("agent-1"), "Helper".to_owned());
+    }
     let args = CborValue::Map(vec![
         (
             CborValue::Text("message".to_owned()),
@@ -297,7 +381,7 @@ fn telegram_send_uses_configured_chat_not_argument_chat_id() {
     let _result = rx.recv().expect("result");
     let sent = client.sent.lock().expect("lock");
     assert_eq!(sent[0].0, 123);
-    assert!(sent[0].1.contains("hello"));
+    assert_eq!(sent[0].1, "[agent-1] hello");
 }
 
 /// Group chats are refused unless the user explicitly configured that chat id;

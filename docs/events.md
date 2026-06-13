@@ -80,7 +80,7 @@ of an agent log.
   agent tree like a real user prompt.
 - **`agent.prompt_created`** — The harness assembled a provider prompt and
   assigned it an `agent_prompt_id`; payload carries `agent_id`,
-  `system_prompt`, materialized `context_items`, tools or `tools_ref`, model,
+  `system_prompt`, materialized `context`, tools or `tools_ref`, model,
   model params, tool choice, originator, and previous-response hint. This is
   operational delivery state for the provider; transcript truth is still the
   accepted prompt, provider response, terminal tool results, and compaction
@@ -89,19 +89,16 @@ of an agent log.
   `provider.response_finished` (stale or canceled). Runtime lifecycle state.
 - **`agent.prompt_prewarm_requested`** — Best-effort provider cache prewarm for
   the next prompt prefix. Runtime/provider optimization state.
-- **`agent.compaction_started`** / **`agent.compaction_finished`** — Runtime
-  lifecycle around provider-side compaction.
-- **`agent.compaction_requested`** — Provider-facing compaction request using
-  the same materialized prompt shape as `agent.prompt_created`.
-- **`agent.compacted`** — Durable compaction fact for an agent transcript. Prompt
-  assembly treats this as a history reset point for that agent branch.
+- **`agent.compaction_triggered`** — Durable manual compaction trigger inserted
+  into an agent transcript. Prompt assembly folds it into provider-side
+  compaction input; it is not a separate compaction lifecycle event.
 
 ## Provider execution
 
 Emitted by the provider backend that owns the selected model.
 
 - **`provider.prompt_submitted`** — The provider accepted an `agent.prompt_created`
-  or `agent.compaction_requested` and started processing it. Echoes the
+  and started processing it. Echoes the originator. Transient.
   originator. Transient.
 - **`provider.response_updated`** — Replace-style ordered item streaming
   snapshot. Consumers render `items` in order; each entry is either a completed
@@ -162,7 +159,7 @@ the agent requests calls, and the harness orchestrates dispatch.
   Providers should usually emit an initial `tool.progress` immediately after
   receiving `tool.started`, before expensive work, to replace the UI's generic
   pending line with provider-owned formatting.
-- **`tool.cancel`** *(harness)* — The harness asks an extension to cancel an
+- **`tool.cancel_request`** *(harness)* — The harness asks an extension to cancel an
   in-flight call.
 - **`tool.cancelled`** *(extension)* — The extension acknowledges that a
   call has been cancelled. Operational only; transient.
@@ -267,7 +264,7 @@ intent.
   `include_in_context` flag.
 - **`ui.switch_session`** — User wants to switch to a different session
   in the same daemon, with `new`/`resume` reason.
-- **`ui.new_agent`** — User typed `/agent new`: keep the current session
+- **`ui.create_agent`** — User typed `/agent new`: keep the current session
   but rotate the harness default conversation so the next untargeted prompt
   starts a fresh agent. The invoking UI clears its own current-agent
   selection locally; this request is not replayed to synchronize other UIs.

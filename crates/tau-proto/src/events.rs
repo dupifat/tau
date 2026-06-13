@@ -2817,6 +2817,10 @@ pub enum ProviderBackendTransport {
 // ---------------------------------------------------------------------------
 
 /// Top-level event envelope used on the wire.
+///
+/// When adding, renaming, or changing default durability for an event, update
+/// `docs/events.md` in the same change so extension authors do not learn a
+/// stale wire contract.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", content = "payload")]
 pub enum Event {

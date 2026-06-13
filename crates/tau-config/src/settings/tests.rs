@@ -60,6 +60,20 @@ fn cli_settings_theme_override() {
     assert_eq!(s.theme, CliTheme::Light);
 }
 
+#[test]
+fn cli_settings_reject_unknown_top_level_fields() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(dir.join("cli.yaml"), "show_thnking: true\n").expect("write");
+
+    let error = load_cli_settings_in(&dirs_with_config(dir)).expect_err("unknown key should fail");
+
+    assert!(
+        error.to_string().contains("show_thnking"),
+        "unexpected error: {error}"
+    );
+}
+
 /// Ensures arbitrary non-empty theme names survive config parsing so the CLI
 /// can resolve them to external files under the user's `themes` directory.
 #[test]

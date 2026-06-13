@@ -48,6 +48,7 @@ fn parse_built_in_yaml<T: for<'de> Deserialize<'de>>(name: &str, text: &str) -> 
 /// [`CliSettings::built_in`] when you need a fresh, populated value
 /// in a test or fallback.
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CliSettings {
     /// Show a greeting message on startup.
     pub greeting: bool,

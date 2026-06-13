@@ -18,8 +18,8 @@ Model-visible tools:
 - `apply_patch` — applies patch-style file edits and also sends structured UI-only diffs for changed UTF-8 files. It is registered but disabled by default.
 - `shell` — runs `sh -c`-style commands with `mode: "ro"` or `mode: "rw"`, optional `cwd`, timeout, stdout/stderr capture, Unicode replacement for invalid output bytes plus `invalid-utf8` flags, truncation, and tool cancellation support.
 - `gpt_shell` — shell-like execution surface advertised as model-visible `shell_command` for GPT-style tool compatibility. It is registered but disabled by default.
-- `grep` — ripgrep-backed literal or regex search with context, glob filtering, and truncation.
-- `find` — ignore-aware glob file search.
+- `grep` — ripgrep-backed literal or regex search with context, glob filtering, truncation, escaped control characters in paths, and invalid-UTF-8 path markers for byte paths.
+- `find` — ignore-aware glob file search with escaped control characters in paths and invalid-UTF-8 path markers.
 - `ls` — sorted directory listing with 1-based entry prefixes, escaped control characters/backslashes, Unicode replacement for invalid filename bytes plus `invalid-utf8` flags, and standard truncation metadata. When `limit_reached` is true, entries are a bounded filesystem-order sample sorted for display rather than a complete alphabetic prefix.
 - `dir_lock` — manual directory update lock/unlock for coordinating mutating agents.
 
@@ -69,4 +69,4 @@ extensions: {
 }
 ```
 
-`working_directory` changes the extension process cwd after startup config. `shell.command` is invoked as `<command> -c <user command>` after `shell.prefix`. `shell.extra_env` is applied to shell-tool and user `!`/`!!` child processes after the inherited environment. `user_command_timeout_secs` affects UI-initiated shell commands; agent tool calls use their own `timeout` argument.
+`working_directory` changes the extension process cwd only during startup config; late changes after runtime events are rejected. `shell.command` is invoked as `<command> -c <user command>` after `shell.prefix`. `shell.extra_env` is applied to shell-tool and user `!`/`!!` child processes after the inherited environment; empty values remove variables from the child environment. `user_command_timeout_secs` affects UI-initiated shell commands; agent tool calls use their own `timeout` argument.

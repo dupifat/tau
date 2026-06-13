@@ -853,7 +853,15 @@ pub fn decode_message_from_slice<M>(bytes: &[u8]) -> Result<M, DecodeError>
 where
     M: DeserializeOwned,
 {
-    decode_message(Cursor::new(bytes))
+    let mut cursor = Cursor::new(bytes);
+    let message = decode_message(&mut cursor)?;
+    if cursor.position() != bytes.len() as u64 {
+        return Err(DecodeError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "trailing bytes after protocol message",
+        )));
+    }
+    Ok(message)
 }
 
 /// Encodes one harness input message into an owned byte buffer.

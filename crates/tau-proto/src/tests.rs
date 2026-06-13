@@ -531,6 +531,22 @@ fn representative_directional_messages_round_trip_through_cbor() {
     }
 }
 
+/// Ensures single-slice decoders reject extra bytes instead of accepting a
+/// valid message prefix and ignoring trailing garbage.
+#[test]
+fn decode_message_from_slice_rejects_trailing_bytes() {
+    let message = HarnessInputMessage::Ready(Ready { message: None });
+    let mut encoded = encode_harness_input_to_vec(&message).expect("message should encode");
+    encoded.extend_from_slice(&[0xff, 0x00]);
+
+    let error = decode_harness_input_from_slice(&encoded).expect_err("trailing bytes should fail");
+
+    assert!(
+        error.to_string().contains("trailing bytes"),
+        "unexpected error: {error}"
+    );
+}
+
 #[test]
 fn multiple_directional_messages_can_share_one_stream() {
     let messages = representative_output_messages();

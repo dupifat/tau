@@ -49,7 +49,9 @@
 #       old-role:
 #         enable: false  # hide a lower-layer or built-in role
 
-# Optional built-in extension overrides.
+# Optional built-in extension overrides. Extension names may contain only ASCII
+# letters, digits, `_`, and `-` so they are safe for state paths and dotted
+# --harness-config overrides.
 # extensions:
 #   core-shell:
 #     enable: false

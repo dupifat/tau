@@ -252,7 +252,10 @@ Most built-in integrations are regular extensions under `crates/tau-ext-*/`.
 They are configured under `extensions.<name>` in `harness.yaml` and can be
 disabled with `enable: false`, started from a configured `cwd:`, swapped via
 `command:` / `prefix:`, or given free-form `config:` payload that arrives at
-startup as a `LifecycleConfigure` message. Some core tools, such as `agent_start`,
+startup as a `LifecycleConfigure` message. Extension names must contain only
+ASCII letters, digits, `_`, and `-` so they are safe as state-directory path
+components and unambiguous in dotted `--harness-config` paths. Some core tools,
+such as `agent_start`,
 `wait`, and `skill`, are harness-owned instead of extension processes.
 
 ```json5

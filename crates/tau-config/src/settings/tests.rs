@@ -1987,10 +1987,12 @@ fn extension_state_dir_rejects_unsafe_extension_names() {
     // injected state directory confined under state/ext/<extension> and avoids
     // ambiguity in dotted harness config override paths.
     let state_dir = std::path::Path::new("/tmp/tau-state");
-    assert_eq!(
-        extension_state_dir_of(state_dir, "std-email").expect("safe extension name"),
-        state_dir.join("ext").join("std-email")
-    );
+    for name in ["a", "a_b", "x9", "std-email"] {
+        assert_eq!(
+            extension_state_dir_of(state_dir, name).expect("safe extension name"),
+            state_dir.join("ext").join(name)
+        );
+    }
 
     for name in ["", "../x", "a/b", "/tmp/x", ".", "..", "foo.bar"] {
         assert!(

@@ -284,7 +284,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
 
     assert_eq!(child.command(), &command);
     assert_eq!(
-        child.command().starting_event(42.into(), Some(child.pid())),
+        child.starting_event(42.into()),
         Event::ExtensionStarting(tau_proto::ExtensionStarting {
             instance_id: 42.into(),
             extension_name: "test-child".into(),

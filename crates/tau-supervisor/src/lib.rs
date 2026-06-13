@@ -51,17 +51,13 @@ pub struct ExtensionCommand {
 }
 
 impl ExtensionCommand {
-    /// Creates the lifecycle event emitted before the child starts.
+    /// Creates a pre-spawn lifecycle event when no child pid is available yet.
     #[must_use]
-    pub fn starting_event(
-        &self,
-        instance_id: tau_proto::ExtensionInstanceId,
-        pid: Option<u32>,
-    ) -> Event {
+    pub fn pre_spawn_starting_event(&self, instance_id: tau_proto::ExtensionInstanceId) -> Event {
         Event::ExtensionStarting(ExtensionStarting {
             instance_id,
             extension_name: self.name.clone(),
-            pid,
+            pid: None,
         })
     }
 }
@@ -231,6 +227,16 @@ impl SupervisedChild {
     #[must_use]
     pub fn pid(&self) -> u32 {
         self.child.id()
+    }
+
+    /// Creates the lifecycle event emitted after the child process has started.
+    #[must_use]
+    pub fn starting_event(&self, instance_id: tau_proto::ExtensionInstanceId) -> Event {
+        Event::ExtensionStarting(ExtensionStarting {
+            instance_id,
+            extension_name: self.command.name.clone(),
+            pid: Some(self.pid()),
+        })
     }
 
     /// Creates the lifecycle event emitted when the child becomes connected.

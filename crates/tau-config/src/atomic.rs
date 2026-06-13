@@ -40,11 +40,16 @@ pub fn atomic_write_following_symlink(
             .unwrap_or("file");
         temp_path.set_file_name(format!(".{file_name}.{suffix:016x}.tmp"));
 
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)
-        {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if let Some(permissions) = &permissions {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+            options.mode(permissions.mode() & 0o777);
+        }
+
+        match options.open(&temp_path) {
             Ok(mut file) => {
                 let temp_file = PendingTempFile::new(temp_path.clone());
                 if let Some(permissions) = permissions.clone() {

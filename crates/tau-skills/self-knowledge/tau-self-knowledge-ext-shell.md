@@ -18,9 +18,9 @@ Model-visible tools:
 - `apply_patch` — applies patch-style file edits and also sends structured UI-only diffs for changed UTF-8 files. It is registered but disabled by default.
 - `shell` — runs `sh -c`-style commands with `mode: "ro"` or `mode: "rw"`, optional `cwd`, timeout, stdout/stderr capture, Unicode replacement for invalid output bytes plus `invalid-utf8` flags, truncation, and tool cancellation support.
 - `gpt_shell` — shell-like execution surface advertised as model-visible `shell_command` for GPT-style tool compatibility. It is registered but disabled by default.
-- `grep` — ripgrep-backed literal or regex search with context, glob filtering, truncation, escaped control characters in paths, and invalid-UTF-8 path markers for byte paths.
-- `find` — ignore-aware glob file search with escaped control characters in paths and invalid-UTF-8 path markers.
-- `ls` — sorted directory listing with 1-based entry prefixes, escaped control characters/backslashes, Unicode replacement for invalid filename bytes plus `invalid-utf8` flags, and standard truncation metadata. When `limit_reached` is true, entries are a bounded filesystem-order sample sorted for display rather than a complete alphabetic prefix.
+- `grep` — ripgrep-backed literal or regex search with context, glob filtering, truncation, escaped control characters in paths, invalid-UTF-8 path markers for byte paths, `limit` capped at 2000 matches, and `context` capped at 20 lines.
+- `find` — ignore-aware glob file search with escaped control characters in paths, invalid-UTF-8 path markers, and `limit` capped at 2000 results.
+- `ls` — sorted directory listing with 1-based entry prefixes, escaped control characters/backslashes, Unicode replacement for invalid filename bytes plus `invalid-utf8` flags, `limit` capped at 2001 entries, and standard truncation metadata. When `limit_reached` is true, entries are a bounded filesystem-order sample sorted for display rather than a complete alphabetic prefix.
 - `dir_lock` — manual directory update lock/unlock for coordinating mutating agents.
 
 Test builds or the `echo-agent` cargo feature also register `echo` for harness tests.

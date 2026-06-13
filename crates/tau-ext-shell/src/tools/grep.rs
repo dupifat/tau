@@ -12,10 +12,12 @@ use crate::argument::{
 use crate::display::{ToolFailure, ToolOutput, text_stats};
 use crate::isolation::apply_command_isolation;
 use crate::tools::find::{escape_path_text, render_path_bytes};
-use crate::truncate::{MAX_OUTPUT_BYTES, truncate_head};
+use crate::truncate::{MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, truncate_head};
 
 pub(crate) const DEFAULT_GREP_LIMIT: usize = 100;
 pub(crate) const GREP_MAX_LINE_LENGTH: usize = 500;
+const MAX_GREP_LIMIT: usize = MAX_OUTPUT_LINES;
+const MAX_GREP_CONTEXT: usize = 20;
 
 pub(crate) fn run_grep(arguments: &CborValue) -> Result<ToolOutput, ToolFailure> {
     let pattern = argument_text(arguments, "pattern")?;
@@ -36,14 +38,28 @@ pub(crate) fn run_grep(arguments: &CborValue) -> Result<ToolOutput, ToolFailure>
         match optional_argument_int_strict(arguments, "context").map_err(ToolFailure::from)? {
             Some(value) if value < 0 => return Err(ToolFailure::new("context must be >= 0")),
             Some(value) => {
-                Some(usize::try_from(value).map_err(|_| ToolFailure::new("context is too large"))?)
+                let context =
+                    usize::try_from(value).map_err(|_| ToolFailure::new("context is too large"))?;
+                if MAX_GREP_CONTEXT < context {
+                    return Err(ToolFailure::new(format!(
+                        "context must be <= {MAX_GREP_CONTEXT}"
+                    )));
+                }
+                Some(context)
             }
             None => None,
         };
     let limit = match optional_argument_int_strict(arguments, "limit").map_err(ToolFailure::from)? {
         Some(value) if value < 1 => return Err(ToolFailure::new("limit must be >= 1")),
         Some(value) => {
-            usize::try_from(value).map_err(|_| ToolFailure::new("limit is too large"))?
+            let limit =
+                usize::try_from(value).map_err(|_| ToolFailure::new("limit is too large"))?;
+            if MAX_GREP_LIMIT < limit {
+                return Err(ToolFailure::new(format!(
+                    "limit must be <= {MAX_GREP_LIMIT}"
+                )));
+            }
+            limit
         }
         None => DEFAULT_GREP_LIMIT,
     };
@@ -63,6 +79,9 @@ pub(crate) fn run_grep(arguments: &CborValue) -> Result<ToolOutput, ToolFailure>
         "--json".to_owned(),
         "--hidden".to_owned(),
         "--with-filename".to_owned(),
+        "--max-columns".to_owned(),
+        GREP_MAX_LINE_LENGTH.to_string(),
+        "--max-columns-preview".to_owned(),
     ];
     if ignore_case {
         args.push("--ignore-case".to_owned());
@@ -528,6 +547,35 @@ mod tests {
             .expect_err("zero limit should be rejected");
 
         assert_eq!(err.message, "limit must be >= 1");
+    }
+
+    /// Ensures large caller limits cannot force large pre-truncation result
+    /// vectors beyond the documented display capacity.
+    #[test]
+    fn grep_rejects_limit_above_output_cap() {
+        let err = run_grep(&args((
+            "limit",
+            CborValue::Integer((MAX_GREP_LIMIT as i64 + 1).into()),
+        )))
+        .expect_err("limit over cap");
+
+        assert_eq!(err.message, format!("limit must be <= {MAX_GREP_LIMIT}"));
+    }
+
+    /// Ensures large context requests cannot multiply each match into an
+    /// unbounded number of rendered JSON records before final truncation.
+    #[test]
+    fn grep_rejects_context_above_cap() {
+        let err = run_grep(&args((
+            "context",
+            CborValue::Integer((MAX_GREP_CONTEXT as i64 + 1).into()),
+        )))
+        .expect_err("context over cap");
+
+        assert_eq!(
+            err.message,
+            format!("context must be <= {MAX_GREP_CONTEXT}")
+        );
     }
     /// Protects the stderr drain used while grep reads stdout. The capture must
     /// stay bounded so a noisy ripgrep cannot trade pipe backpressure for

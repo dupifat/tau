@@ -276,11 +276,11 @@ where
                     },
                     "context": {
                         "type": "integer",
-                        "description": "Number of lines to show before and after each match (default: 0)"
+                        "description": "Number of lines to show before and after each match (default: 0, max: 20)"
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum number of matches to return (default: 100)"
+                        "description": "Maximum number of matches to return (default: 100, max: 2000)"
                     }
                 },
                 "required": ["pattern"],
@@ -314,7 +314,7 @@ where
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum number of results to return (default: 1000)"
+                        "description": "Maximum number of results to return (default: 1000, max: 2000)"
                     }
                 },
                 "required": ["pattern"],
@@ -347,7 +347,7 @@ where
                     "limit": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": "Maximum number of entries to return (default: 500)"
+                        "description": "Maximum number of entries to return (default: 500, max: 2001)"
                     }
                 },
                 "additionalProperties": false

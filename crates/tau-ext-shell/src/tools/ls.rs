@@ -7,9 +7,10 @@ use tau_proto::{CborValue, ToolUseStats};
 use crate::argument::{optional_argument_int_strict, optional_argument_text};
 use crate::display::{ToolFailure, ToolOutput, ok_display, text_stats};
 use crate::tools::world::ShellWorld;
-use crate::truncate::truncate_line_oriented_lines;
+use crate::truncate::{MAX_OUTPUT_LINES, truncate_line_oriented_lines};
 
 pub(crate) const DEFAULT_LS_LIMIT: usize = 500;
+const MAX_LS_LIMIT: usize = MAX_OUTPUT_LINES + 1;
 
 pub(crate) fn run_ls(
     arguments: &CborValue,
@@ -131,7 +132,14 @@ fn parse_limit(arguments: &CborValue) -> Result<usize, ToolFailure> {
     match optional_argument_int_strict(arguments, "limit").map_err(ToolFailure::from)? {
         None => Ok(DEFAULT_LS_LIMIT),
         Some(value) if value < 1 => Err(ToolFailure::new("limit must be >= 1")),
-        Some(value) => usize::try_from(value).map_err(|_| ToolFailure::new("limit is too large")),
+        Some(value) => {
+            let limit =
+                usize::try_from(value).map_err(|_| ToolFailure::new("limit is too large"))?;
+            if MAX_LS_LIMIT < limit {
+                return Err(ToolFailure::new(format!("limit must be <= {MAX_LS_LIMIT}")));
+            }
+            Ok(limit)
+        }
     }
 }
 

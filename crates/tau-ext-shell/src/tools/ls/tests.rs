@@ -145,6 +145,26 @@ fn ls_rejects_non_positive_limit() {
     assert_eq!(failure.message, "limit must be >= 1");
 }
 
+#[test]
+fn ls_rejects_limit_above_output_cap() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("path".to_owned()),
+            CborValue::Text(tempdir.path().display().to_string()),
+        ),
+        (
+            CborValue::Text("limit".to_owned()),
+            CborValue::Integer((MAX_LS_LIMIT as i64 + 1).into()),
+        ),
+    ]);
+
+    let mut world = crate::tools::world::ShellWorld::real();
+    let failure = run_ls(&args, &mut world).expect_err("limit should fail");
+
+    assert_eq!(failure.message, format!("limit must be <= {MAX_LS_LIMIT}"));
+}
+
 /// Ensures limit truncation reports an explicit lower-bound marker instead of
 /// presenting capped entry counts as exact total line/byte metadata.
 #[test]
@@ -247,7 +267,7 @@ fn ls_line_count_truncation_keeps_head_tail_separator_and_totals() {
         ),
         (
             CborValue::Text("limit".to_owned()),
-            CborValue::Integer(3000.into()),
+            CborValue::Integer(MAX_LS_LIMIT.into()),
         ),
     ]);
 

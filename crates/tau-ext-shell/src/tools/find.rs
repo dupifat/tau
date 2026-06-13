@@ -9,9 +9,10 @@ use tau_proto::CborValue;
 
 use crate::argument::{argument_text, optional_argument_int_strict, optional_argument_text};
 use crate::display::{ToolFailure, ToolOutput, text_stats};
-use crate::truncate::{MAX_OUTPUT_BYTES, truncate_line_oriented};
+use crate::truncate::{MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, truncate_line_oriented};
 
 pub(crate) const DEFAULT_FIND_LIMIT: usize = 1000;
+const MAX_FIND_LIMIT: usize = MAX_OUTPUT_LINES;
 
 pub(crate) fn run_find(arguments: &CborValue) -> Result<ToolOutput, ToolFailure> {
     let pattern = argument_text(arguments, "pattern").map_err(ToolFailure::from)?;
@@ -19,7 +20,14 @@ pub(crate) fn run_find(arguments: &CborValue) -> Result<ToolOutput, ToolFailure>
     let limit = match optional_argument_int_strict(arguments, "limit").map_err(ToolFailure::from)? {
         Some(value) if value < 1 => return Err(ToolFailure::new("limit must be >= 1")),
         Some(value) => {
-            usize::try_from(value).map_err(|_| ToolFailure::new("limit is too large"))?
+            let limit =
+                usize::try_from(value).map_err(|_| ToolFailure::new("limit is too large"))?;
+            if MAX_FIND_LIMIT < limit {
+                return Err(ToolFailure::new(format!(
+                    "limit must be <= {MAX_FIND_LIMIT}"
+                )));
+            }
+            limit
         }
         None => DEFAULT_FIND_LIMIT,
     };
@@ -305,6 +313,18 @@ mod tests {
         assert_eq!(matches, 1);
         assert!(limit_reached);
         assert!(output.contains("1 results limit reached"));
+    }
+
+    /// Ensures large caller limits cannot force collection far beyond the
+    /// documented display cap before final output truncation.
+    #[test]
+    fn find_rejects_limit_above_output_cap() {
+        let err = run_find(&args(CborValue::Integer(
+            (MAX_FIND_LIMIT as i64 + 1).into(),
+        )))
+        .expect_err("limit over cap");
+
+        assert_eq!(err.message, format!("limit must be <= {MAX_FIND_LIMIT}"));
     }
 
     /// Protects find output from path line injection by escaping control

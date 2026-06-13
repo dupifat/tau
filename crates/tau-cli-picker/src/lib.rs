@@ -127,7 +127,7 @@ fn pick_with_event_reader(
     }
     let mut selected = items
         .iter()
-        .position(|item| item.enabled)
+        .position(PickerItem::is_enabled)
         .ok_or(PickerError::NoEnabledItems)?;
     let (mut width, mut height) = current_size();
     let mut screen = Screen::new(width);
@@ -209,8 +209,8 @@ fn picker_lines(
 ) -> (Vec<Vec<tau_term_screen::style::Cell>>, usize) {
     if terminal_height <= 1 {
         let item = &items[selected];
-        let marker = if item.enabled { '>' } else { 'X' };
-        let line = truncate_to_width(&format!("{marker} {} — ? {prompt}", item.label), width);
+        let marker = if item.is_enabled() { '>' } else { 'X' };
+        let line = truncate_to_width(&format!("{marker} {} — ? {prompt}", item.label()), width);
         return (vec![StyledText::from(line).to_cells()], 0);
     }
 
@@ -220,14 +220,14 @@ fn picker_lines(
     let mut lines = Vec::with_capacity(end - start + 1);
     lines.push(StyledText::from(truncate_to_width(&format!("? {prompt}"), width)).to_cells());
     for (idx, item) in items.iter().enumerate().take(end).skip(start) {
-        let marker = if !item.enabled {
+        let marker = if !item.is_enabled() {
             'X'
         } else if idx == selected {
             '>'
         } else {
             ' '
         };
-        let line = truncate_to_width(&format!("{marker} {}", item.label), width);
+        let line = truncate_to_width(&format!("{marker} {}", item.label()), width);
         lines.push(StyledText::from(line).to_cells());
     }
     (lines, selected - start + 1)
@@ -254,7 +254,7 @@ fn adjacent_enabled_item(items: &[PickerItem], selected: usize, forward: bool) -
         } else {
             (selected + items.len() - offset) % items.len()
         };
-        if items[idx].enabled {
+        if items[idx].is_enabled() {
             return idx;
         }
     }

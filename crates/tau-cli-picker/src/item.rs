@@ -2,9 +2,9 @@
 #[derive(Clone, Debug)]
 pub struct PickerItem {
     /// Text rendered for this row.
-    pub label: String,
+    label: String,
     /// Whether the cursor can land on and select this row.
-    pub enabled: bool,
+    enabled: bool,
 }
 
 impl PickerItem {
@@ -22,5 +22,15 @@ impl PickerItem {
             label: label.into(),
             enabled: false,
         }
+    }
+
+    /// Returns the text rendered for this row.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Returns whether the cursor can land on and select this row.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 }

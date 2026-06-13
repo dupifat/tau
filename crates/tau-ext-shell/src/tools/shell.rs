@@ -975,6 +975,7 @@ enum OutputContent {
     Truncated {
         invalid_utf8: bool,
         ending: Option<LineEndingKind>,
+        original_text_bytes: usize,
     },
 }
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -992,6 +993,7 @@ struct CapturedOutput {
     tail_lines: Vec<OutputLine>,
     total_lines: usize,
     total_bytes: usize,
+    saw_truncated_line: bool,
 }
 
 impl CapturedOutput {
@@ -1008,6 +1010,9 @@ impl CapturedOutput {
     fn push_line(&mut self, stream: OutputStream, content: OutputContent) {
         let separator_bytes = usize::from(self.total_lines != 0);
         self.total_bytes += separator_bytes + formatted_output_line_len(stream, &content);
+        if matches!(content, OutputContent::Truncated { .. }) {
+            self.saw_truncated_line = true;
+        }
         let line = OutputLine { stream, content };
         if self.total_lines < MAX_OUTPUT_LINES / 2 {
             self.head_lines.push(line);
@@ -1051,7 +1056,11 @@ impl CapturedOutput {
         truncate_line_oriented_lines(
             rendered_refs.iter().copied(),
             self.total_lines,
-            self.total_bytes,
+            if self.saw_truncated_line {
+                self.total_bytes.max(MAX_OUTPUT_BYTES + 1)
+            } else {
+                self.total_bytes
+            },
         )
     }
 }
@@ -1060,6 +1069,7 @@ impl CapturedOutput {
 struct StreamDecoder {
     pending_utf8: Vec<u8>,
     pending_line: String,
+    pending_line_original_bytes: usize,
     pending_line_invalid: bool,
     pending_line_truncated: bool,
     pending_cr: bool,
@@ -1135,10 +1145,13 @@ impl StreamDecoder {
     }
 
     fn push_char(&mut self, ch: char) {
+        let next_len = self
+            .pending_line_original_bytes
+            .saturating_add(ch.len_utf8());
+        self.pending_line_original_bytes = next_len;
         if self.pending_line_truncated {
             return;
         }
-        let next_len = self.pending_line.len().saturating_add(ch.len_utf8());
         if MAX_CAPTURED_LINE_BYTES < next_len {
             self.pending_line.clear();
             self.pending_line_truncated = true;
@@ -1146,7 +1159,6 @@ impl StreamDecoder {
         }
         self.pending_line.push(ch);
     }
-
     fn finish(&mut self) -> Vec<OutputContent> {
         let mut lines = Vec::new();
         if !self.pending_utf8.is_empty() {
@@ -1174,12 +1186,14 @@ impl StreamDecoder {
     }
 
     fn take_pending_line(&mut self, ending: Option<LineEndingKind>) -> OutputContent {
+        let original_text_bytes = std::mem::take(&mut self.pending_line_original_bytes);
         if std::mem::take(&mut self.pending_line_truncated) {
             let invalid_utf8 = std::mem::take(&mut self.pending_line_invalid);
             self.pending_line.clear();
             return OutputContent::Truncated {
                 invalid_utf8,
                 ending,
+                original_text_bytes,
             };
         }
         if std::mem::take(&mut self.pending_line_invalid) {
@@ -1212,6 +1226,7 @@ fn render_output_line(line: &OutputLine) -> String {
         OutputContent::Truncated {
             invalid_utf8,
             ending,
+            ..
         } => {
             let mut markers = Vec::new();
             if *invalid_utf8 {
@@ -1243,6 +1258,13 @@ fn format_output_line(prefix: &str, marker: Option<&str>, content: &str) -> Stri
 }
 
 fn formatted_output_line_len(stream: OutputStream, content: &OutputContent) -> usize {
+    if let OutputContent::Truncated {
+        original_text_bytes,
+        ..
+    } = content
+    {
+        return stream.prefix().len() + 1 + original_text_bytes;
+    }
     render_output_line(&OutputLine {
         stream,
         content: content.clone(),
@@ -1678,7 +1700,9 @@ mod tests {
         );
         output.finish();
 
-        let rendered = output.truncate().content;
-        assert_eq!(rendered, "out(no_nl,truncated) ");
+        let truncated = output.truncate();
+        assert_eq!(truncated.content, "out(no_nl,truncated) ");
+        assert!(truncated.was_truncated);
+        assert!(MAX_OUTPUT_BYTES < truncated.total_bytes);
     }
 }

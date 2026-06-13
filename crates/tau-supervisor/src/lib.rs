@@ -169,7 +169,8 @@ impl std::error::Error for SupervisionError {
 /// One supervised child process connected over stdin/stdout.
 ///
 /// The child is owned by this value. Callers should prefer explicit graceful
-/// protocol shutdown or `terminate`; `Drop` only performs best-effort cleanup.
+/// protocol shutdown or `terminate`; `Drop` only hard-kills live children,
+/// waits best-effort, and ignores cleanup errors.
 /// Child stdout is handed through a bounded buffer, so callers supervising a
 /// child that can emit during shutdown must continue calling `recv_timeout` or
 /// otherwise drain stdout before waiting indefinitely for exit.

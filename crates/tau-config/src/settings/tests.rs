@@ -204,6 +204,41 @@ fn cli_state_loads_legacy_show_tools_on_as_full() {
     assert_eq!(loaded.show_tools, crate::settings::ShowTools::Full);
 }
 
+/// Ensures canonical keys from higher-precedence drop-ins are not overwritten
+/// by lower-precedence legacy aliases during alias normalization.
+#[test]
+fn harness_canonical_drop_in_wins_over_legacy_alias() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(dir.join("harness.yaml"), "defaultRole: legacy\n").expect("write base");
+    std::fs::create_dir_all(dir.join("harness.d")).expect("mkdir dropins");
+    std::fs::write(
+        dir.join("harness.d").join("10-role.yaml"),
+        "default_role: canonical\n",
+    )
+    .expect("write dropin");
+
+    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+
+    assert_eq!(settings.default_role.as_deref(), Some("canonical"));
+}
+
+/// Ensures canonical CLI overrides are not overwritten by lower-precedence
+/// legacy aliases during alias normalization.
+#[test]
+fn harness_canonical_cli_override_wins_over_legacy_alias() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(dir.join("harness.yaml"), "defaultRole: legacy\n").expect("write base");
+    let override_ = HarnessConfigCliOverride::from_str("default_role=cli").expect("override");
+
+    let settings =
+        load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &[override_])
+            .expect("load");
+
+    assert_eq!(settings.default_role.as_deref(), Some("cli"));
+}
+
 #[test]
 fn cli_state_defaults_to_cli_config_when_state_file_is_missing() {
     let td = TempDir::new().expect("tempdir");

@@ -1349,7 +1349,7 @@ fn normalize_alias_key(
     canonical: &str,
 ) {
     if let Some(value) = map.remove(alias) {
-        map.insert(canonical.to_owned(), value);
+        map.entry(canonical.to_owned()).or_insert(value);
     }
 }
 
@@ -1398,17 +1398,50 @@ fn load_yaml_layered_with_builtin_and_harness_overrides<T: for<'de> Deserialize<
     name: &str,
     overrides: &[HarnessConfigCliOverride],
 ) -> Result<T, SettingsError> {
-    let mut builder = config::Config::builder()
-        .add_source(config::File::from_str(built_in_text, config::FileFormat::Yaml).required(true));
-    builder = add_yaml_file_sources(builder, dir, name);
+    let mut builder = config::Config::builder().add_source(normalized_harness_yaml_source(
+        built_in_text,
+        "built-in harness config",
+    )?);
+    for path in yaml_layer_paths(dir, name) {
+        let text = std::fs::read_to_string(&path).map_err(|err| {
+            SettingsError::Config(config::ConfigError::Message(format!(
+                "failed to read {}: {err}",
+                path.display()
+            )))
+        })?;
+        builder = builder.add_source(normalized_harness_yaml_source(
+            &text,
+            &format!("harness config {}", path.display()),
+        )?);
+    }
     for override_ in overrides {
         builder = builder.add_source(harness_config_override_source(override_)?);
     }
     let config = builder.build()?;
-    let mut value: serde_json::Value = config.try_deserialize()?;
-    normalize_harness_config_value(&mut value);
+    let value: serde_json::Value = config.try_deserialize()?;
     serde_json::from_value(value)
         .map_err(|error| SettingsError::Config(config::ConfigError::Message(error.to_string())))
+}
+
+fn normalized_harness_yaml_source(
+    text: &str,
+    description: &str,
+) -> Result<config::File<config::FileSourceString, config::FileFormat>, SettingsError> {
+    let mut value: serde_json::Value = serde_yaml_ng::from_str(text).map_err(|err| {
+        SettingsError::Config(config::ConfigError::Message(format!(
+            "failed to parse {description}: {err}"
+        )))
+    })?;
+    if value.is_null() {
+        value = serde_json::Value::Object(serde_json::Map::new());
+    }
+    normalize_harness_config_value(&mut value);
+    let normalized = serde_yaml_ng::to_string(&value).map_err(|err| {
+        SettingsError::Config(config::ConfigError::Message(format!(
+            "failed to normalize {description}: {err}"
+        )))
+    })?;
+    Ok(config::File::from_str(&normalized, config::FileFormat::Yaml).required(true))
 }
 
 fn harness_role_cli_override_layers(

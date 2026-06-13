@@ -248,6 +248,10 @@ pub enum CliTheme {
 
 impl CliTheme {
     /// Parses a user-authored theme name from `cli.yaml` or `TAU_THEME`.
+    ///
+    /// Leading and trailing whitespace is ignored. Built-in names are matched
+    /// case-insensitively after trimming, arbitrary non-empty names become
+    /// [`CliTheme::Named`], and empty or whitespace-only input returns `None`.
     #[must_use]
     pub fn parse_name(value: &str) -> Option<Self> {
         let trimmed = value.trim();

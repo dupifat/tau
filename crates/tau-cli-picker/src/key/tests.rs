@@ -1,6 +1,34 @@
+use std::collections::VecDeque;
+use std::io;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::{LogicalKey, PickerKey, logical_to_action, terminal_key_to_logical};
+use super::{LogicalKey, PickerKey, logical_to_action, read_byte_key, terminal_key_to_logical};
+
+struct ScriptedReader {
+    steps: VecDeque<io::Result<Option<u8>>>,
+}
+
+impl ScriptedReader {
+    fn new(steps: impl IntoIterator<Item = io::Result<Option<u8>>>) -> Self {
+        Self {
+            steps: steps.into_iter().collect(),
+        }
+    }
+}
+
+impl io::Read for ScriptedReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self.steps.pop_front() {
+            Some(Ok(Some(byte))) => {
+                buf[0] = byte;
+                Ok(1)
+            }
+            Some(Ok(None)) | None => Ok(0),
+            Some(Err(err)) => Err(err),
+        }
+    }
+}
 
 /// Verifies the central logical-key mapping so terminal and byte-stream readers
 /// continue to share the same controls.
@@ -45,4 +73,23 @@ fn terminal_modified_character_shortcuts_are_ignored() {
         assert_eq!(terminal_key_to_logical(ctrl_key), LogicalKey::Unknown);
         assert_eq!(terminal_key_to_logical(alt_key), LogicalKey::Unknown);
     }
+}
+
+/// Ensures transient read interruptions inside an escape sequence are retried
+/// instead of turning a valid arrow-key sequence into a picker I/O failure.
+#[test]
+fn byte_reader_retries_interrupted_escape_sequence_reads() {
+    let interrupted = io::Error::from(io::ErrorKind::Interrupted);
+    let mut reader = ScriptedReader::new([
+        Ok(Some(0x1b)),
+        Err(interrupted),
+        Ok(Some(b'[')),
+        Err(io::Error::from(io::ErrorKind::Interrupted)),
+        Ok(Some(b'B')),
+    ]);
+
+    assert_eq!(
+        read_byte_key(&mut reader).expect("down arrow"),
+        PickerKey::Down
+    );
 }

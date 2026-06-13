@@ -110,12 +110,10 @@ fn terminal_key_to_logical(key: crossterm::event::KeyEvent) -> LogicalKey {
 /// `io::Read` has no timeout. Production code uses
 /// [`read_terminal_event`] via `crossterm`, which handles the ambiguity.
 pub(crate) fn read_byte_key(reader: &mut impl io::Read) -> io::Result<PickerKey> {
-    let mut b = [0_u8; 1];
-    let n = reader.read(&mut b)?;
-    if n == 0 {
+    let Some(byte) = read_one_byte(reader)? else {
         return Ok(PickerKey::Cancelled);
-    }
-    let logical = match b[0] {
+    };
+    let logical = match byte {
         0x03 => LogicalKey::CtrlC,
         0x04 => LogicalKey::CtrlD,
         b'\n' | b'\r' => LogicalKey::Enter,
@@ -128,20 +126,29 @@ pub(crate) fn read_byte_key(reader: &mut impl io::Read) -> io::Result<PickerKey>
 }
 
 fn read_escape_sequence(reader: &mut impl io::Read) -> io::Result<LogicalKey> {
-    let mut b = [0_u8; 1];
-    let n = reader.read(&mut b)?;
-    if n == 0 || b[0] != b'[' {
+    if read_one_byte(reader)? != Some(b'[') {
         // Bare ESC, or ESC followed by an unrelated key — treat as cancel.
         return Ok(LogicalKey::Esc);
     }
-    let n = reader.read(&mut b)?;
-    if n == 0 {
+    let Some(byte) = read_one_byte(reader)? else {
         return Ok(LogicalKey::Unknown);
-    }
-    Ok(match b[0] {
+    };
+    Ok(match byte {
         b'A' => LogicalKey::Up,
         b'B' => LogicalKey::Down,
         b'Z' => LogicalKey::BackTab,
         _ => LogicalKey::Unknown,
     })
+}
+
+fn read_one_byte(reader: &mut impl io::Read) -> io::Result<Option<u8>> {
+    let mut byte = [0_u8; 1];
+    loop {
+        match reader.read(&mut byte) {
+            Ok(0) => return Ok(None),
+            Ok(_) => return Ok(Some(byte[0])),
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(err),
+        }
+    }
 }

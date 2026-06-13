@@ -8,6 +8,30 @@ use crate::{
     picker_lines, resize_dimension,
 };
 
+struct InterruptedReader {
+    interrupted: bool,
+    inner: Cursor<Vec<u8>>,
+}
+
+impl InterruptedReader {
+    fn new(bytes: &[u8]) -> Self {
+        Self {
+            interrupted: false,
+            inner: Cursor::new(bytes.to_vec()),
+        }
+    }
+}
+
+impl io::Read for InterruptedReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if !self.interrupted {
+            self.interrupted = true;
+            return Err(io::Error::from(io::ErrorKind::Interrupted));
+        }
+        self.inner.read(buf)
+    }
+}
+
 fn items(labels: &[&str]) -> Vec<PickerItem> {
     labels.iter().map(|l| PickerItem::enabled(*l)).collect()
 }
@@ -16,6 +40,17 @@ fn run(reader_bytes: &[u8], items: &[PickerItem]) -> Result<usize, PickerError> 
     let writer = Vec::<u8>::new();
     let reader = Cursor::new(reader_bytes.to_vec());
     pick_with_io("pick", items, writer, reader)
+}
+
+/// Protects byte-stream hosts from transient EINTR-style read interruptions
+/// before a valid selection key is read.
+#[test]
+fn interrupted_byte_read_is_retried() {
+    let it = items(&["one", "two"]);
+    let picked = pick_with_io("pick", &it, Vec::<u8>::new(), InterruptedReader::new(b"\n"))
+        .expect("interrupted read should be retried before enter");
+
+    assert_eq!(picked, 0);
 }
 
 #[test]

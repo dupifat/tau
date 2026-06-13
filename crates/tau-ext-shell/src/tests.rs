@@ -652,6 +652,34 @@ fn dir_lock_config_re_registers_tool_disabled_when_config_false() {
 }
 
 #[test]
+fn dir_lock_dispatch_uses_exec_capacity_for_non_update_calls() {
+    // Only `dir_lock update` is allowed to wait on directory-lock capacity;
+    // unlock and malformed calls are bounded by normal worker capacity instead
+    // of spawning unbounded helper threads.
+    let available_exec = Arc::new(Semaphore::new(1));
+    let saturated_exec = Arc::new(Semaphore::new(0));
+    let available_wait = Arc::new(Semaphore::new(1));
+    let saturated_wait = Arc::new(Semaphore::new(0));
+    let update_args = cbor_text_map(vec![("command", "update"), ("directory", "/tmp")]);
+    let unlock_args = cbor_text_map(vec![("command", "unlock"), ("directory", "/tmp")]);
+    let malformed_args = cbor_text_map(vec![("directory", "/tmp")]);
+
+    assert!(
+        acquire_dir_lock_dispatch_permit(&update_args, &available_exec, &saturated_wait).is_none()
+    );
+    assert!(
+        acquire_dir_lock_dispatch_permit(&unlock_args, &saturated_exec, &available_wait).is_none()
+    );
+    assert!(
+        acquire_dir_lock_dispatch_permit(&malformed_args, &saturated_exec, &available_wait)
+            .is_none()
+    );
+    assert!(
+        acquire_dir_lock_dispatch_permit(&unlock_args, &available_exec, &available_wait).is_some()
+    );
+}
+
+#[test]
 fn dir_lock_tool_can_be_disabled_by_config() {
     let tempdir = TempDir::new().expect("tempdir");
     let (mut reader, mut writer) = spawn_extension();

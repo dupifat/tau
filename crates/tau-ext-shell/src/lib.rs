@@ -576,14 +576,13 @@ where
                         let enforce_ro_mode = config.enforce_ro_mode;
                         let running_shells = Arc::clone(&running_shells);
                         if invoke.tool_name == DIR_LOCK_TOOL_NAME {
-                            let permit = if is_dir_lock_update_invocation(&invoke.arguments) {
-                                let Some(permit) = dir_lock_wait_sem.try_acquire() else {
-                                    send_worker_saturated_failure(invoke, &tx);
-                                    continue;
-                                };
-                                Some(permit)
-                            } else {
-                                None
+                            let Some(permit) = acquire_dir_lock_dispatch_permit(
+                                &invoke.arguments,
+                                &sem,
+                                &dir_lock_wait_sem,
+                            ) else {
+                                send_worker_saturated_failure(invoke, &tx);
+                                continue;
                             };
                             let lock_manager = lock_manager.clone();
                             let enabled = config.dir_lock.enable;
@@ -1284,6 +1283,18 @@ fn is_shell_tool(name: &str) -> bool {
             | GPT_SHELL_TOOL_NAME
             | DIR_LOCK_TOOL_NAME
     ) || is_echo_tool(name)
+}
+
+fn acquire_dir_lock_dispatch_permit(
+    arguments: &CborValue,
+    exec_sem: &Arc<Semaphore>,
+    dir_lock_wait_sem: &Arc<Semaphore>,
+) -> Option<OwnedPermit> {
+    if is_dir_lock_update_invocation(arguments) {
+        dir_lock_wait_sem.try_acquire()
+    } else {
+        exec_sem.try_acquire()
+    }
 }
 
 fn is_dir_lock_update_invocation(arguments: &CborValue) -> bool {

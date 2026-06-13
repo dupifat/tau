@@ -110,6 +110,8 @@ pub enum SupervisionError {
     Encode(tau_proto::EncodeError),
     /// The child stdin writer could not be flushed after sending a message.
     Flush(io::Error),
+    /// The child stdout reader thread could not be started.
+    ReaderThread(io::Error),
     /// The child stdout reader observed corrupt or truncated protocol data.
     Decode(DecodeError),
     /// The child process could not be killed during hard termination.
@@ -131,6 +133,9 @@ impl fmt::Display for SupervisionError {
             Self::MissingStdout => f.write_str("spawned child process did not expose stdout"),
             Self::Encode(source) => write!(f, "failed to encode event for child stdin: {source}"),
             Self::Flush(source) => write!(f, "failed to flush child stdin: {source}"),
+            Self::ReaderThread(source) => {
+                write!(f, "failed to start child stdout reader thread: {source}")
+            }
             Self::Decode(source) => write!(f, "failed to decode event from child stdout: {source}"),
             Self::Kill(source) => write!(f, "failed to kill child process: {source}"),
             Self::Wait(source) => write!(f, "failed to wait for child process: {source}"),
@@ -149,6 +154,7 @@ impl std::error::Error for SupervisionError {
             Self::MissingStdout => None,
             Self::Encode(source) => Some(source),
             Self::Flush(source) => Some(source),
+            Self::ReaderThread(source) => Some(source),
             Self::Decode(source) => Some(source),
             Self::Kill(source) => Some(source),
             Self::Wait(source) => Some(source),
@@ -188,7 +194,14 @@ impl SupervisedChild {
 
         let stdin = child.stdin.take().ok_or(SupervisionError::MissingStdin)?;
         let stdout = child.stdout.take().ok_or(SupervisionError::MissingStdout)?;
-        let stdout_frames = spawn_stdout_reader(stdout);
+        let stdout_frames = match spawn_stdout_reader(stdout) {
+            Ok(receiver) => receiver,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
 
         Ok(Self {
             command,
@@ -329,29 +342,32 @@ enum StdoutFrame {
 
 fn spawn_stdout_reader(
     stdout: std::process::ChildStdout,
-) -> Receiver<Result<StdoutFrame, DecodeError>> {
+) -> Result<Receiver<Result<StdoutFrame, DecodeError>>, SupervisionError> {
     let (sender, receiver) = mpsc::sync_channel(STDOUT_FRAME_BUFFER);
-    thread::spawn(move || {
-        let mut reader = HarnessInputReader::new(BufReader::new(stdout));
-        loop {
-            match reader.read_message() {
-                Ok(Some(frame)) => {
-                    if sender.send(Ok(StdoutFrame::Message(frame))).is_err() {
+    thread::Builder::new()
+        .name("tau-supervisor-stdout".to_owned())
+        .spawn(move || {
+            let mut reader = HarnessInputReader::new(BufReader::new(stdout));
+            loop {
+                match reader.read_message() {
+                    Ok(Some(frame)) => {
+                        if sender.send(Ok(StdoutFrame::Message(frame))).is_err() {
+                            return;
+                        }
+                    }
+                    Ok(None) => {
+                        let _ = sender.send(Ok(StdoutFrame::Closed));
+                        return;
+                    }
+                    Err(error) => {
+                        let _ = sender.send(Err(error));
                         return;
                     }
                 }
-                Ok(None) => {
-                    let _ = sender.send(Ok(StdoutFrame::Closed));
-                    return;
-                }
-                Err(error) => {
-                    let _ = sender.send(Err(error));
-                    return;
-                }
             }
-        }
-    });
-    receiver
+        })
+        .map_err(SupervisionError::ReaderThread)?;
+    Ok(receiver)
 }
 
 #[cfg(unix)]

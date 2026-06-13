@@ -20,7 +20,7 @@ Model-visible tools:
 - `gpt_shell` — shell-like execution surface advertised as model-visible `shell_command` for GPT-style tool compatibility. It is registered but disabled by default.
 - `grep` — ripgrep-backed literal or regex search with context, glob filtering, and truncation.
 - `find` — ignore-aware glob file search.
-- `ls` — sorted directory listing with 1-based entry prefixes, escaped control characters/backslashes, Unicode replacement for invalid filename bytes plus `invalid-utf8` flags, and standard truncation metadata.
+- `ls` — sorted directory listing with 1-based entry prefixes, escaped control characters/backslashes, Unicode replacement for invalid filename bytes plus `invalid-utf8` flags, and standard truncation metadata. When `limit_reached` is true, entries are a bounded filesystem-order sample sorted for display rather than a complete alphabetic prefix.
 - `dir_lock` — manual directory update lock/unlock for coordinating mutating agents.
 
 Test builds or the `echo-agent` cargo feature also register `echo` for harness tests.

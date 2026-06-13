@@ -331,7 +331,9 @@ where
                 "List directory contents. Returns entries sorted alphabetically, with '/' suffix \
                  for directories. Includes dotfiles. Output lines are prefixed with 1-based \
                  entry numbers plus flags such as `escaped`, `invalid-utf8`, or `truncated`; \
-                 output is capped at `limit` entries, 2000 lines, or 50KB with standard truncation headers."
+                 output is capped at `limit` entries, 2000 lines, or 50KB with standard truncation headers. \
+                 When `limit_reached` is true, entries are a bounded filesystem-order sample sorted \
+                 for display, not a complete alphabetic prefix."
                     .to_owned(),
             ),
             tool_type: tau_proto::ToolType::Function,

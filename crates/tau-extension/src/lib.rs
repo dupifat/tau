@@ -19,6 +19,7 @@
 //! receive `HarnessOutputMessage::Configure` must still parse and apply
 //! `Configure.config` themselves and send `HarnessInputMessage::ConfigError` if
 //! parsing or applying configuration fails.
+//!
 //! ## Per-extension log targets
 //!
 //! Each extension is expected to declare a short target string and

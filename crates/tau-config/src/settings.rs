@@ -877,8 +877,13 @@ pub struct ExtensionEntry {
     /// use `suffix` to pick the subcommand on the running tau binary.
     pub command: Option<Vec<String>>,
 
-    /// Current working directory used when starting the extension process. When
-    /// absent, the child inherits the harness process working directory.
+    /// Current working directory used when starting the extension process.
+    ///
+    /// The outer option tracks layered config presence: `None` means this layer
+    /// did not mention `cwd`. `Some(Some(path))` sets or overrides the working
+    /// directory, while `Some(None)` comes from explicit `cwd: null` and clears
+    /// a lower-precedence cwd so the child inherits the harness process working
+    /// directory.
     #[serde(default, deserialize_with = "present_option")]
     pub cwd: Option<Option<PathBuf>>,
 

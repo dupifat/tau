@@ -26,16 +26,21 @@ fn write_ready(message: impl Into<String>) -> Result<(), Box<dyn Error>> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    match std::env::args().nth(1).as_deref() {
+    let mut args = std::env::args().skip(1);
+    match args.next().as_deref() {
         Some(EXIT_IMMEDIATELY_ARG) => return Ok(()),
         Some(PARTIAL_FRAME_ARG) => {
             std::io::stdout().write_all(&[0x81])?;
             return Ok(());
         }
         Some(FLOOD_ARG) => {
+            let message_count = args
+                .next()
+                .unwrap_or_else(|| "128".to_owned())
+                .parse::<usize>()?;
             let stdout = std::io::stdout();
             let mut writer = PeerOutputWriter::new(BufWriter::new(stdout.lock()));
-            for index in 0..128 {
+            for index in 0..message_count {
                 writer.write_message(&HarnessInputMessage::Ready(Ready {
                     message: Some(index.to_string()),
                 }))?;

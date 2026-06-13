@@ -13,6 +13,7 @@ use tau_supervisor::{
 
 const SECRET_ENV_SUBPROCESS: &str = "TAU_SUPERVISOR_SECRET_ENV_SUBPROCESS";
 const STDERR_POLICY_SUBPROCESS: &str = "TAU_SUPERVISOR_STDERR_POLICY_SUBPROCESS";
+const FLOOD_MESSAGE_COUNT: usize = 128;
 
 fn test_command(args: &[&str]) -> ExtensionCommand {
     ExtensionCommand {
@@ -141,9 +142,11 @@ fn recv_timeout_reports_partial_frame_as_decode_error() {
 /// Ensures the stdout reader can drain a burst of child messages without loss.
 #[test]
 fn stdout_reader_handles_message_burst_without_loss() {
-    let mut child = SupervisedChild::spawn(test_command(&["--flood"])).expect("child should spawn");
+    let mut child =
+        SupervisedChild::spawn(test_command(&["--flood", &FLOOD_MESSAGE_COUNT.to_string()]))
+            .expect("child should spawn");
 
-    for index in 0..128 {
+    for index in 0..FLOOD_MESSAGE_COUNT {
         assert_eq!(
             child
                 .recv_timeout(Duration::from_secs(1))

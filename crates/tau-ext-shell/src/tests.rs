@@ -4350,6 +4350,57 @@ fn shell_tool_returns_after_foreground_exit_even_if_background_holds_pipe() {
 
 #[cfg(unix)]
 #[test]
+fn user_shell_returns_after_foreground_exit_even_if_background_holds_pipe() {
+    // Regression coverage for user `!` shell dispatch: detached descendants can
+    // inherit stdout after the foreground shell exits, but UI command completion
+    // must not wait for pipe EOF or capture late background output.
+    if !std::process::Command::new("sh")
+        .arg("-c")
+        .arg("command -v setsid >/dev/null")
+        .status()
+        .is_ok_and(|status| status.success())
+    {
+        return;
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let cmd = tau_proto::UiShellCommand {
+        session_id: "s1".into(),
+        command_id: "ui-sh-bg".into(),
+        command: "setsid sh -c 'sleep 5; printf late' & printf early".to_owned(),
+        include_in_context: true,
+        target_agent_id: None,
+    };
+
+    let started = std::time::Instant::now();
+    crate::tools::shell::dispatch_user_shell_command(
+        cmd,
+        crate::config::ShellConfig::default(),
+        &tx,
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "background pipe holder delayed user shell result for {elapsed:?}"
+    );
+
+    let mut finished = None;
+    for message in rx.try_iter() {
+        if let HarnessInputMessage::Emit(emit) = message {
+            if let Event::ShellCommandFinished(event) = *emit.event {
+                finished = Some(event);
+            }
+        }
+    }
+    let finished = finished.expect("finished event");
+    assert_eq!(finished.output, "early");
+    assert!(!finished.output.contains("late"));
+    assert_eq!(finished.exit_code, Some(0));
+    assert!(!finished.cancelled);
+}
+
+#[cfg(unix)]
+#[test]
 fn shell_tool_timeout_returns_without_waiting_for_escaped_pipe_holder() {
     // Regression coverage for timeout with an escaped pipe holder: process-group
     // kill does not reach a setsid child, but timeout return must still be

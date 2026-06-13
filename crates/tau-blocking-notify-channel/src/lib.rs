@@ -79,6 +79,16 @@ struct State {
     disconnected: bool,
 }
 
+// Synchronization invariants:
+// - `State` fields are read and written only while holding `state`.
+// - `sender_count` counts live `Sender` handles; it deliberately does not
+//   include the receiver.
+// - The last sender drop sets `disconnected` while holding `state` before
+//   notifying the condition variable.
+// - Receivers must check `notified` before `disconnected` so a pending
+//   notification is delivered before disconnect.
+// - Receiver drop is intentionally not stored in shared state; senders keep
+//   accepting notifications after the receiver is gone.
 struct Shared {
     // Protected notification/disconnection state.
     state: Mutex<State>,

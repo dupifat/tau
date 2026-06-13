@@ -1,3 +1,5 @@
+//! Integration-test-only child binary coupled to `tests/supervisor.rs`.
+
 use std::error::Error;
 use std::io::{BufReader, BufWriter, Write};
 

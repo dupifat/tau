@@ -1,5 +1,7 @@
 use super::*;
 
+/// Regression guard: armed temp files are deleted on failure paths before
+/// rename.
 #[test]
 fn pending_temp_file_removes_armed_file_on_drop() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -11,6 +13,7 @@ fn pending_temp_file_removes_armed_file_on_drop() {
     assert!(!temp_path.exists(), "armed temp file should be removed");
 }
 
+/// Regression guard: successful rename paths can disarm temp cleanup.
 #[test]
 fn pending_temp_file_disarm_preserves_file_on_drop() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -24,6 +27,7 @@ fn pending_temp_file_disarm_preserves_file_on_drop() {
     assert!(temp_path.exists(), "disarmed temp file should remain");
 }
 
+/// Ensures writes follow destination symlinks and preserve target permissions.
 #[test]
 #[cfg(unix)]
 fn replaces_symlink_target_and_preserves_permissions() {
@@ -58,6 +62,7 @@ fn replaces_symlink_target_and_preserves_permissions() {
     );
 }
 
+/// Ensures newly created files use the caller-provided default permissions.
 #[test]
 #[cfg(unix)]
 fn applies_default_permissions_when_file_is_new() {

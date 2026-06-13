@@ -1908,6 +1908,8 @@ fn harness_role_enabled_alias_is_kept_for_old_config() {
     );
 }
 
+/// Regression guard: legacy `enabled` disables built-in roles after alias
+/// normalization.
 #[test]
 fn harness_legacy_enabled_alias_overrides_built_in_enable() {
     let td = TempDir::new().expect("tempdir");
@@ -1929,6 +1931,8 @@ fn harness_legacy_enabled_alias_overrides_built_in_enable() {
     assert!(!settings.roles.contains_key("senior-engineer"));
 }
 
+/// Regression guard: role filtering happens after all layers so later enables
+/// win.
 #[test]
 fn harness_role_enable_can_be_reenabled_by_later_layers() {
     // Filtering happens after the complete domain merge, so a higher-priority
@@ -1956,6 +1960,7 @@ fn harness_role_enable_can_be_reenabled_by_later_layers() {
     );
 }
 
+/// Ensures sample config files shipped for `tau init` keep deserializing.
 #[test]
 fn sample_configs_deserialize() {
     // Sanity-check the sample configs shipped in the workspace root `config/`
@@ -1980,6 +1985,8 @@ fn sample_configs_deserialize() {
         load_harness_settings_in(&dirs_with_config(dir)).expect("harness sample should parse");
 }
 
+/// Documents accepted/rejected extension names for path and CLI override
+/// safety.
 #[test]
 fn extension_state_dir_rejects_unsafe_extension_names() {
     // Extension names can come from user-authored harness.yaml keys. Rejecting
@@ -2002,6 +2009,7 @@ fn extension_state_dir_rejects_unsafe_extension_names() {
     }
 }
 
+/// Regression guard: invalid extension keys in harness.yaml fail at load time.
 #[test]
 fn harness_settings_reject_invalid_extension_names() {
     let td = TempDir::new().expect("tempdir");
@@ -2024,6 +2032,8 @@ extensions:
     );
 }
 
+/// Regression guard: CLI-created extension entries also validate names at load
+/// time.
 #[test]
 fn harness_config_cli_overrides_reject_invalid_extension_names() {
     let td = TempDir::new().expect("tempdir");
@@ -2044,6 +2054,7 @@ fn harness_config_cli_overrides_reject_invalid_extension_names() {
     );
 }
 
+/// Regression guard: drop-in `cwd: null` clears an inherited extension cwd.
 #[test]
 fn harness_extension_drop_in_can_clear_inherited_cwd() {
     let td = TempDir::new().expect("tempdir");
@@ -2074,6 +2085,7 @@ extensions:
     assert_eq!(settings.extensions["local-tool"].cwd, Some(None));
 }
 
+/// Regression guard: CLI `cwd=null` clears an inherited extension cwd.
 #[test]
 fn harness_config_cli_overrides_can_clear_extension_cwd() {
     let td = TempDir::new().expect("tempdir");
@@ -2098,6 +2110,7 @@ extensions:
     assert_eq!(settings.extensions["local-tool"].cwd, Some(None));
 }
 
+/// Ensures extension secret declarations default to required secrets.
 #[test]
 fn harness_extension_secrets_parse_with_required_default() {
     let td = TempDir::new().expect("tempdir");

@@ -59,7 +59,7 @@
 
 mod handshake;
 
-pub use handshake::Handshake;
+pub use handshake::{Handshake, HandshakeError};
 use tracing_subscriber::EnvFilter;
 
 /// Environment variable controlling extension log filtering. Same

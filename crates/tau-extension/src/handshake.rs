@@ -36,6 +36,7 @@
 //! this workspace uses both, and they belong on the handshake, not
 //! at each call site.
 
+use std::fmt;
 use std::io::Write;
 
 use tau_proto::{
@@ -43,6 +44,56 @@ use tau_proto::{
     ExtensionName, HarnessInputMessage, Hello, Intercept, InterceptionPriority, PROTOCOL_VERSION,
     PeerOutputWriter, PromptFragment, Ready, Subscribe, ToolGroup, ToolRegister, ToolSpec,
 };
+
+/// Error returned while building or writing an extension handshake.
+#[derive(Debug)]
+pub enum HandshakeError {
+    /// Encoding or flushing a startup frame failed.
+    Encode(EncodeError),
+    /// Multiple intercept selectors used different priorities.
+    ///
+    /// The harness stores one interceptor registration per extension
+    /// connection, so one handshake can only send one priority.
+    MixedInterceptPriorities {
+        /// Priority already attached to this handshake's interceptor.
+        existing: InterceptionPriority,
+        /// Priority requested by the later selector.
+        requested: InterceptionPriority,
+    },
+}
+
+impl fmt::Display for HandshakeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Encode(error) => write!(f, "{error}"),
+            Self::MixedInterceptPriorities {
+                existing,
+                requested,
+            } => write!(
+                f,
+                "one extension handshake cannot register mixed interception priorities \
+                 (existing {}, requested {})",
+                existing.get(),
+                requested.get()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for HandshakeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Encode(error) => Some(error),
+            Self::MixedInterceptPriorities { .. } => None,
+        }
+    }
+}
+
+impl From<EncodeError> for HandshakeError {
+    fn from(error: EncodeError) -> Self {
+        Self::Encode(error)
+    }
+}
 
 /// Builder for the opening message sequence an extension sends to the
 /// harness. See the module-level documentation for a worked example.
@@ -52,6 +103,7 @@ pub struct Handshake {
     client_kind: ClientKind,
     selectors: Vec<EventSelector>,
     intercept: Option<Intercept>,
+    error: Option<HandshakeError>,
     tools: Vec<ToolRegister>,
     events: Vec<Event>,
     ready_message: Option<String>,
@@ -72,6 +124,7 @@ impl Handshake {
             client_kind,
             selectors: Vec::new(),
             intercept: None,
+            error: None,
             tools: Vec::new(),
             events: Vec::new(),
             ready_message: None,
@@ -103,19 +156,58 @@ impl Handshake {
 
     /// Intercept events matching `selector` at the given priority.
     ///
-    /// Repeated calls accumulate selectors into one wire `Intercept` message.
+    /// Repeated calls with the same priority accumulate selectors into one wire
+    /// `Intercept` message.
     ///
-    /// # Panics
-    ///
-    /// Panics if a later call uses a different priority, because the harness
-    /// stores a single interceptor registration per extension connection.
+    /// If a later call uses a different priority, the handshake records a
+    /// [`HandshakeError::MixedInterceptPriorities`] and [`Handshake::run`]
+    /// returns it instead of panicking. Use [`Handshake::try_intercept`] to
+    /// receive that error immediately while building the handshake.
     pub fn intercept(mut self, selector: EventSelector, priority: InterceptionPriority) -> Self {
+        if self.error.is_none() {
+            if let Err(error) = self.add_intercept(selector, priority) {
+                self.error = Some(error);
+            }
+        }
+        self
+    }
+
+    /// Try to intercept events matching `selector` at the given priority.
+    ///
+    /// Repeated same-priority calls accumulate selectors into one wire
+    /// `Intercept` message. Mixed priorities return
+    /// [`HandshakeError::MixedInterceptPriorities`] because the harness stores
+    /// a single interceptor registration per extension connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HandshakeError::MixedInterceptPriorities`] when this handshake
+    /// already has an interceptor priority and `priority` differs.
+    pub fn try_intercept(
+        mut self,
+        selector: EventSelector,
+        priority: InterceptionPriority,
+    ) -> Result<Self, HandshakeError> {
+        if let Some(error) = self.error.take() {
+            return Err(error);
+        }
+        self.add_intercept(selector, priority)?;
+        Ok(self)
+    }
+
+    fn add_intercept(
+        &mut self,
+        selector: EventSelector,
+        priority: InterceptionPriority,
+    ) -> Result<(), HandshakeError> {
         match &mut self.intercept {
             Some(intercept) => {
-                assert_eq!(
-                    intercept.priority, priority,
-                    "one extension handshake cannot register mixed interception priorities"
-                );
+                if intercept.priority != priority {
+                    return Err(HandshakeError::MixedInterceptPriorities {
+                        existing: intercept.priority,
+                        requested: priority,
+                    });
+                }
                 intercept.selectors.push(selector);
             }
             None => {
@@ -125,7 +217,7 @@ impl Handshake {
                 });
             }
         }
-        self
+        Ok(())
     }
 
     /// Register a single tool without adding a prompt fragment.
@@ -213,7 +305,17 @@ impl Handshake {
     /// For extensions, `Subscribe` starts live delivery and may also send
     /// replay-marked catch-up frames; side-effecting extensions must check
     /// [`tau_proto::EventDelivery::is_replay`].
-    pub fn run<W: Write>(self, writer: &mut PeerOutputWriter<W>) -> Result<(), EncodeError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HandshakeError::MixedInterceptPriorities`] if chained
+    /// [`Handshake::intercept`] calls used different priorities. Returns
+    /// [`HandshakeError::Encode`] if writing or flushing the protocol frames
+    /// fails.
+    pub fn run<W: Write>(self, writer: &mut PeerOutputWriter<W>) -> Result<(), HandshakeError> {
+        if let Some(error) = self.error {
+            return Err(error);
+        }
         writer.write_message(&HarnessInputMessage::Hello(Hello {
             protocol_version: PROTOCOL_VERSION,
             client_name: self.client_name,

@@ -95,12 +95,11 @@ fn handshake_accumulates_intercepts_into_one_message() {
     );
 }
 
-/// Ensures mixed-priority intercept registrations fail loudly instead of
-/// silently replacing an earlier policy in the harness.
+/// Ensures mixed-priority intercept registrations return a handshake error
+/// instead of panicking or silently replacing an earlier policy in the harness.
 #[test]
-#[should_panic(expected = "mixed interception priorities")]
 fn handshake_rejects_mixed_intercept_priorities() {
-    let _ = Handshake::tool("demo")
+    let handshake = Handshake::tool("demo")
         .intercept(
             EventSelector::Exact(EventName::TOOL_STARTED),
             InterceptionPriority::new(1),
@@ -109,6 +108,51 @@ fn handshake_rejects_mixed_intercept_priorities() {
             EventSelector::Prefix("tool.".to_owned()),
             InterceptionPriority::new(2),
         );
+    let mut bytes = Vec::new();
+    let mut writer = PeerOutputWriter::new(&mut bytes);
+
+    let error = handshake
+        .run(&mut writer)
+        .expect_err("mixed intercept priorities should fail");
+
+    assert!(matches!(
+        error,
+        HandshakeError::MixedInterceptPriorities {
+            existing,
+            requested,
+        } if existing == InterceptionPriority::new(1)
+            && requested == InterceptionPriority::new(2)
+    ));
+    assert!(bytes.is_empty());
+}
+
+/// Ensures callers that want immediate validation can use the fallible builder
+/// method instead of waiting for `run`.
+#[test]
+fn handshake_try_intercept_rejects_mixed_priorities_immediately() {
+    let result = Handshake::tool("demo")
+        .try_intercept(
+            EventSelector::Exact(EventName::TOOL_STARTED),
+            InterceptionPriority::new(1),
+        )
+        .expect("first intercept should be accepted")
+        .try_intercept(
+            EventSelector::Prefix("tool.".to_owned()),
+            InterceptionPriority::new(2),
+        );
+    let error = match result {
+        Ok(_) => panic!("mixed intercept priorities should fail"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        HandshakeError::MixedInterceptPriorities {
+            existing,
+            requested,
+        } if existing == InterceptionPriority::new(1)
+            && requested == InterceptionPriority::new(2)
+    ));
 }
 
 /// Ensures the handshake writes the full protocol prelude in wire order.

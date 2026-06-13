@@ -91,8 +91,9 @@ pub struct RunArgs {
     #[arg(short = 'r', long = "resume", num_args = 0..=1, default_missing_value = "")]
     pub resume: Option<String>,
 
-    /// Path to extension configuration file
-    #[arg(long)]
+    /// Deprecated legacy extension config path; use `--harness-config`
+    /// overrides instead.
+    #[arg(long, hide = true)]
     pub config: Option<PathBuf>,
 
     /// Read one prompt from stdin, submit it, print final output, and exit.

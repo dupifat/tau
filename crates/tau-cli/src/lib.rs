@@ -335,6 +335,16 @@ fn reject_harness_config_overrides(
     )))
 }
 
+fn reject_legacy_config_path(config: Option<&std::path::Path>) -> Result<(), CliError> {
+    if let Some(path) = config {
+        return Err(CliError::Participant(format!(
+            "--config is no longer supported (got `{}`); use harness.yaml or --harness-config KEY=VALUE overrides",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn required_harness_role<'a>(role: Option<&'a str>, command: &str) -> Result<&'a str, CliError> {
     role.ok_or_else(|| CliError::Participant(format!("tau dev {command} requires --role <role>")))
 }
@@ -452,6 +462,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             return Ok(());
         }
 
+        reject_legacy_config_path(run.config.as_deref())?;
         let command = command.unwrap_or(cli::Command::Run(run));
         match &command {
             cli::Command::Run(run) if run.attach => {
@@ -503,10 +514,11 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
         match command {
             cli::Command::Run(cli::RunArgs {
                 resume,
-                config: _config,
+                config,
                 prompt_stdin,
                 attach,
             }) => {
+                reject_legacy_config_path(config.as_deref())?;
                 let (session_id, session_status) = if attach {
                     reject_harness_config_overrides(&harness_config_overrides, "--attach")?;
                     let cwd = std::env::current_dir()?;

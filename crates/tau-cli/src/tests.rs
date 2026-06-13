@@ -152,6 +152,39 @@ fn harness_config_overrides_reject_attach_only_paths() {
     assert!(err.to_string().contains("starting a new harness instance"));
 }
 
+/// The legacy `--config` flag must not be silently ignored because that makes
+/// harness startup appear to use a config file that was never loaded.
+#[test]
+fn legacy_config_path_is_rejected() {
+    let cli = super::cli::Cli::parse_from(["tau", "--config", "legacy.json"]);
+    let err = super::reject_legacy_config_path(cli.run.config.as_deref())
+        .expect_err("legacy config path should fail");
+
+    assert!(err.to_string().contains("--config is no longer supported"));
+
+    let non_run_cli =
+        super::cli::Cli::parse_from(["tau", "--config", "legacy.json", "session-list"]);
+    let non_run_err = super::reject_legacy_config_path(non_run_cli.run.config.as_deref())
+        .expect_err("legacy config path should fail before non-run dispatch");
+    assert!(
+        non_run_err
+            .to_string()
+            .contains("--config is no longer supported")
+    );
+
+    let explicit_run_cli = super::cli::Cli::parse_from(["tau", "run", "--config", "legacy.json"]);
+    let Some(super::cli::Command::Run(explicit_run)) = explicit_run_cli.command else {
+        panic!("expected explicit run command");
+    };
+    let explicit_run_err = super::reject_legacy_config_path(explicit_run.config.as_deref())
+        .expect_err("legacy config path should fail before explicit run dispatch");
+    assert!(
+        explicit_run_err
+            .to_string()
+            .contains("--config is no longer supported")
+    );
+}
+
 #[test]
 fn harness_config_flag_requires_key_value() {
     let err = match super::cli::Cli::try_parse_from(["tau", "--harness-config=missing-equals"]) {

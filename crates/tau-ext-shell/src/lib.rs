@@ -530,8 +530,13 @@ where
                             tx.send(HarnessInputMessage::ConfigError(ConfigError { message }))?;
                             continue;
                         }
-                        let dir_lock_changed = config.dir_lock.enable != cfg.dir_lock.enable;
+                        let dir_lock_was_enabled = config.dir_lock.enable;
+                        let dir_lock_changed = dir_lock_was_enabled != cfg.dir_lock.enable;
+                        let dir_lock_disabling = dir_lock_was_enabled && !cfg.dir_lock.enable;
                         config = cfg;
+                        if dir_lock_disabling {
+                            let _ = lock_manager.disable();
+                        }
                         if dir_lock_changed {
                             tx.send(HarnessInputMessage::emit(Event::ToolRegister(
                                 tau_proto::ToolRegister {

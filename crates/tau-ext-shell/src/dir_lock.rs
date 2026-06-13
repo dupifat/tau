@@ -456,6 +456,20 @@ impl DirLockManager {
         removed
     }
 
+    /// Disable directory locking by releasing manual locks and cancelling
+    /// queued waiters.
+    pub(crate) fn disable(&self) -> (usize, usize) {
+        let mut state = self.inner.state.lock().expect("dir lock state poisoned");
+        let removed_manual = state.manual.len();
+        let cancelled_waiters = state.waiters.len();
+        state.manual.clear();
+        state.waiters.clear();
+        if 0 < removed_manual || 0 < cancelled_waiters {
+            self.inner.changed.notify_all();
+        }
+        (removed_manual, cancelled_waiters)
+    }
+
     fn release_auto(&self, id: u64) {
         let mut state = self.inner.state.lock().expect("dir lock state poisoned");
         let before = state.automatic.len();

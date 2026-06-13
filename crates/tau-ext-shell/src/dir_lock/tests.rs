@@ -204,6 +204,59 @@ fn manual_lock_rejects_same_owner_overlapping_lock_but_allows_auto_reentry() {
 }
 
 #[test]
+fn disable_releases_manual_locks_and_cancels_waiters() {
+    // Disabling dir_lock through config must not strand queued tools behind
+    // locks that can no longer be unlocked through the disabled tool.
+    let manager = DirLockManager::default();
+    manager
+        .acquire_manual(
+            "manual-a".into(),
+            agent_id("agent-a"),
+            path("/repo/a"),
+            || {},
+        )
+        .expect("manual lock");
+
+    let waiter = std::thread::spawn({
+        let manager = manager.clone();
+        move || {
+            manager.acquire_auto(
+                "auto-b".into(),
+                agent_id("agent-b"),
+                vec![path("/repo/a")],
+                || {},
+            )
+        }
+    });
+    wait_until(|| manager.inner.state.lock().expect("state").waiters.len() == 1);
+
+    assert_eq!(manager.disable(), (1, 1));
+    assert!(matches!(
+        waiter.join().expect("waiter"),
+        Err(LockAcquireError::Cancelled)
+    ));
+    assert!(manager.inner.state.lock().expect("state").manual.is_empty());
+    assert!(
+        manager
+            .inner
+            .state
+            .lock()
+            .expect("state")
+            .waiters
+            .is_empty()
+    );
+
+    manager
+        .acquire_manual(
+            "manual-after-disable".into(),
+            agent_id("agent-c"),
+            path("/repo/a"),
+            || {},
+        )
+        .expect("no stale lock remains");
+}
+
+#[test]
 fn same_owner_automatic_locks_still_serialize_without_manual_lock() {
     let manager = DirLockManager::default();
     let guard = manager

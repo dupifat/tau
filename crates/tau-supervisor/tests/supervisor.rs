@@ -21,10 +21,6 @@ fn test_command(args: Vec<String>) -> ExtensionCommand {
     }
 }
 
-fn test_child_path() -> PathBuf {
-    test_command(Vec::new()).program
-}
-
 fn expect_message(child: &mut SupervisedChild, label: &str) -> HarnessInputMessage {
     match child
         .recv_timeout(Duration::from_secs(1))
@@ -203,7 +199,7 @@ fn terminate_kills_long_running_child() {
     let exit = child
         .terminate(Duration::from_secs(2))
         .expect("child should terminate");
-    assert!(exit.exit_code.is_none() || exit.exit_code != Some(0));
+    assert_ne!(exit.exit_code, Some(0));
 }
 
 /// Ensures the null stderr policy discards child stderr output.
@@ -270,16 +266,11 @@ fn spawned_child_does_not_inherit_tau_secret_env() {
         .expect("env regression subprocess should run");
     assert!(status.success());
 }
+
 /// Ensures the supervisor exchanges lifecycle and tool events over child stdio.
 #[test]
 fn supervised_child_exchanges_protocol_events_over_stdio() {
-    let command = ExtensionCommand {
-        name: "test-child".into(),
-        program: test_child_path(),
-        args: Vec::new(),
-        working_dir: None,
-        stderr: StderrPolicy::Inherit,
-    };
+    let command = test_command(Vec::new());
     let mut child = SupervisedChild::spawn(command.clone()).expect("child should spawn");
 
     assert_eq!(child.command(), &command);
@@ -365,13 +356,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
 /// exit.
 #[test]
 fn restarted_child_can_reregister_after_exit() {
-    let command = ExtensionCommand {
-        name: "test-child".into(),
-        program: test_child_path(),
-        args: Vec::new(),
-        working_dir: None,
-        stderr: StderrPolicy::Inherit,
-    };
+    let command = test_command(Vec::new());
 
     for _ in 0..2 {
         let mut child = SupervisedChild::spawn(command.clone()).expect("child should spawn");

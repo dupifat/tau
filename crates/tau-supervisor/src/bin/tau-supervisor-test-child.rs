@@ -15,6 +15,16 @@ const SLEEP_ARG: &str = "--sleep";
 const REPORT_CWD_ARG: &str = "--report-cwd";
 const STDERR_MARKER_ARG: &str = "--stderr-marker";
 
+fn write_ready(message: impl Into<String>) -> Result<(), Box<dyn Error>> {
+    let stdout = std::io::stdout();
+    let mut writer = PeerOutputWriter::new(BufWriter::new(stdout.lock()));
+    writer.write_message(&HarnessInputMessage::Ready(Ready {
+        message: Some(message.into()),
+    }))?;
+    writer.flush()?;
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     match std::env::args().nth(1).as_deref() {
         Some(EXIT_IMMEDIATELY_ARG) => return Ok(()),
@@ -34,14 +44,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             return Ok(());
         }
         Some(REPORT_SECRET_ENV_ARG) => {
-            let stdout = std::io::stdout();
-            let mut writer = PeerOutputWriter::new(BufWriter::new(stdout.lock()));
             let secret_visible = std::env::vars_os()
                 .any(|(key, _)| key.to_string_lossy().starts_with("TAU_SECRET_"));
-            writer.write_message(&HarnessInputMessage::Ready(Ready {
-                message: Some(if secret_visible { "present" } else { "absent" }.to_owned()),
-            }))?;
-            writer.flush()?;
+            write_ready(if secret_visible { "present" } else { "absent" })?;
             return Ok(());
         }
         Some(SLEEP_ARG) => {
@@ -49,22 +54,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             return Ok(());
         }
         Some(REPORT_CWD_ARG) => {
-            let stdout = std::io::stdout();
-            let mut writer = PeerOutputWriter::new(BufWriter::new(stdout.lock()));
-            writer.write_message(&HarnessInputMessage::Ready(Ready {
-                message: Some(std::env::current_dir()?.display().to_string()),
-            }))?;
-            writer.flush()?;
+            write_ready(std::env::current_dir()?.display().to_string())?;
             return Ok(());
         }
         Some(STDERR_MARKER_ARG) => {
             eprintln!("tau-supervisor-stderr-marker");
-            let stdout = std::io::stdout();
-            let mut writer = PeerOutputWriter::new(BufWriter::new(stdout.lock()));
-            writer.write_message(&HarnessInputMessage::Ready(Ready {
-                message: Some("stderr-written".to_owned()),
-            }))?;
-            writer.flush()?;
+            write_ready("stderr-written")?;
             return Ok(());
         }
         _ => {}

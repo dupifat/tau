@@ -7,7 +7,7 @@
 //! - [`init_logging_for`] (or [`init_logging`] when there is no single target
 //!   to scope to) installs a stderr `tracing_subscriber` filtered by the
 //!   `TAU_LOG` env var.
-//! - [`parse_config`] decodes the harness-supplied `LifecycleConfigure.config`
+//! - [`parse_config`] decodes the harness-supplied `configure.config` value
 //!   into a typed struct, flattening `ciborium::value::Error`'s debug shape
 //!   into a one-line message.
 //!
@@ -129,12 +129,12 @@ fn install_subscriber(default_filter: &str) {
     }
 }
 
-/// Decode the harness-provided `LifecycleConfigure.config` value into
+/// Decode the harness-provided `tau_proto::Configure::config` value into
 /// the extension's typed configuration struct.
 ///
-/// `Err` carries a human-readable message suitable for stuffing
-/// straight into `LifecycleConfigError { message }` — the harness
-/// surfaces it verbatim to the user. `ciborium::value::Error::Custom`'s
+/// `Err` carries a human-readable message suitable for sending as
+/// `HarnessInputMessage::ConfigError`; the harness surfaces it verbatim to the
+/// user. `ciborium::value::Error::Custom`'s
 /// `Display` is `{:?}` (so it would render as `Custom("...")`); we
 /// unwrap it to just the inner serde message.
 pub fn parse_config<C: serde::de::DeserializeOwned>(

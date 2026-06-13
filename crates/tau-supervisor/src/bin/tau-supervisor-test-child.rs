@@ -13,6 +13,7 @@ const FLOOD_ARG: &str = "--flood";
 const REPORT_SECRET_ENV_ARG: &str = "--report-secret-env";
 const SLEEP_ARG: &str = "--sleep";
 const REPORT_CWD_ARG: &str = "--report-cwd";
+const STDERR_MARKER_ARG: &str = "--stderr-marker";
 
 fn main() -> Result<(), Box<dyn Error>> {
     match std::env::args().nth(1).as_deref() {
@@ -52,6 +53,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             let mut writer = PeerOutputWriter::new(BufWriter::new(stdout.lock()));
             writer.write_message(&HarnessInputMessage::Ready(Ready {
                 message: Some(std::env::current_dir()?.display().to_string()),
+            }))?;
+            writer.flush()?;
+            return Ok(());
+        }
+        Some(STDERR_MARKER_ARG) => {
+            eprintln!("tau-supervisor-stderr-marker");
+            let stdout = std::io::stdout();
+            let mut writer = PeerOutputWriter::new(BufWriter::new(stdout.lock()));
+            writer.write_message(&HarnessInputMessage::Ready(Ready {
+                message: Some("stderr-written".to_owned()),
             }))?;
             writer.flush()?;
             return Ok(());

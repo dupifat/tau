@@ -207,20 +207,37 @@ fn terminate_kills_long_running_child() {
     assert!(exit.exit_code.is_none() || exit.exit_code != Some(0));
 }
 
-/// Ensures the null stderr policy still permits normal child supervision.
+/// Ensures the null stderr policy discards child stderr output.
 #[test]
-fn spawn_accepts_null_stderr_policy() {
-    let mut command = test_command(Vec::new());
-    command.stderr = StderrPolicy::Null;
-    let mut child = SupervisedChild::spawn(command).expect("child should spawn");
+fn stderr_policy_null_discards_child_stderr() {
+    if std::env::var_os("TAU_SUPERVISOR_STDERR_POLICY_SUBPROCESS").is_some() {
+        let mut command = test_command(vec!["--stderr-marker".to_owned()]);
+        command.stderr = StderrPolicy::Null;
+        let mut child = SupervisedChild::spawn(command).expect("child should spawn");
+        assert_eq!(
+            child
+                .recv_timeout(Duration::from_secs(1))
+                .expect("stderr marker child should report readiness"),
+            ReceiveOutcome::Message(HarnessInputMessage::Ready(Ready {
+                message: Some("stderr-written".to_owned()),
+            }))
+        );
+        let exit = child
+            .wait_for_exit(Duration::from_secs(2))
+            .expect("child should exit");
+        assert_eq!(exit.exit_code, Some(0));
+        return;
+    }
 
-    let register = expect_child_startup(&mut child);
-    assert_eq!(register.tool.name, tau_proto::ToolName::new("echo"));
-    disconnect_child(&mut child, "done");
-    let exit = child
-        .wait_for_exit(Duration::from_secs(2))
-        .expect("child should exit");
-    assert_eq!(exit.exit_code, Some(0));
+    let output = StdCommand::new(std::env::current_exe().expect("test binary path"))
+        .arg("--exact")
+        .arg("stderr_policy_null_discards_child_stderr")
+        .arg("--nocapture")
+        .env("TAU_SUPERVISOR_STDERR_POLICY_SUBPROCESS", "1")
+        .output()
+        .expect("stderr regression subprocess should run");
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).is_empty());
 }
 
 /// Ensures supervised children do not inherit parent `TAU_SECRET_*` values.

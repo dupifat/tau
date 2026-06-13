@@ -196,7 +196,8 @@ impl Handshake {
 
     /// Write the full sequence (`Hello`, optional `Subscribe`, optional
     /// `Intercept`, startup event `Emit`s, `Ready`) and flush. Subscribe is
-    /// startup event `Emit`s, `Ready`) and flush. Subscribe is omitted when no
+    /// omitted when no selectors have been added — sending an empty
+    /// subscription would still be valid but adds noise on the wire.
     /// selectors have been added — sending an empty subscription would still be
     /// valid but adds noise on the wire.
     ///

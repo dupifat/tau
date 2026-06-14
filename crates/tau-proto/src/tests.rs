@@ -388,7 +388,7 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
             request_id: "ext-data-1".to_owned(),
             scope: ExtensionDataScope::Session,
             op: ExtensionDataRequestOp::ReadFile {
-                path: "notes/state.cbor".to_owned(),
+                path: ExtensionDataPath::new("notes/state.cbor"),
             },
         }),
     ]
@@ -549,6 +549,31 @@ fn representative_directional_messages_round_trip_through_cbor() {
         let decoded = decode_harness_output_from_slice(&encoded).expect("output should decode");
         assert_eq!(decoded, message);
     }
+}
+
+/// Ensures extension-data path wrappers keep the existing string wire shape
+/// while giving Rust callers semantic path fields.
+#[test]
+fn extension_data_paths_use_string_wire_shape() {
+    let op = ExtensionDataRequestOp::RenameFile {
+        from: ExtensionDataPath::new("old/name"),
+        to: ExtensionDataPath::new("new/name"),
+    };
+
+    let value = serde_json::to_value(&op).expect("operation should serialize");
+
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "op": "rename_file",
+            "from": "old/name",
+            "to": "new/name"
+        })
+    );
+
+    let decoded: ExtensionDataRequestOp =
+        serde_json::from_value(value).expect("operation should deserialize");
+    assert_eq!(decoded, op);
 }
 
 /// Ensures single-slice decoders reject extra bytes instead of accepting a

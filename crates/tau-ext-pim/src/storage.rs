@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tau_proto::{
-    ExtensionDataErrorKind, ExtensionDataRequest, ExtensionDataRequestOp,
+    ExtensionDataErrorKind, ExtensionDataPath, ExtensionDataRequest, ExtensionDataRequestOp,
     ExtensionDataResultPayload, ExtensionDataScope, ExtensionDataValue, HarnessInputMessage,
     HarnessOutputMessage, PeerInputReader, PeerOutputWriter,
 };
@@ -335,7 +335,7 @@ where
 {
     fn read_file(&self, path: &str) -> Result<Option<Vec<u8>>, String> {
         match self.request(ExtensionDataRequestOp::ReadFile {
-            path: path.to_owned(),
+            path: ExtensionDataPath::new(path),
         }) {
             Ok(ExtensionDataValue::ReadFile { contents }) => Ok(Some(contents)),
             Ok(other) => Err(format!("unexpected extension data read result: {other:?}")),
@@ -346,7 +346,7 @@ where
 
     fn write_file(&self, path: &str, contents: Vec<u8>) -> Result<(), String> {
         match self.request(ExtensionDataRequestOp::WriteFile {
-            path: path.to_owned(),
+            path: ExtensionDataPath::new(path),
             contents,
         })? {
             ExtensionDataValue::WriteFile => Ok(()),
@@ -356,7 +356,7 @@ where
 
     fn create_file(&self, path: &str, contents: Vec<u8>) -> Result<(), StorageCreateError> {
         match self.request(ExtensionDataRequestOp::CreateFile {
-            path: path.to_owned(),
+            path: ExtensionDataPath::new(path),
             contents,
         }) {
             Ok(ExtensionDataValue::CreateFile) => Ok(()),
@@ -372,7 +372,7 @@ where
 
     fn append_file(&self, path: &str, contents: Vec<u8>) -> Result<(), String> {
         match self.request(ExtensionDataRequestOp::AppendFile {
-            path: path.to_owned(),
+            path: ExtensionDataPath::new(path),
             contents,
         })? {
             ExtensionDataValue::AppendFile => Ok(()),
@@ -384,7 +384,7 @@ where
 
     fn delete_file(&self, path: &str) -> Result<(), String> {
         match self.request(ExtensionDataRequestOp::DeleteFile {
-            path: path.to_owned(),
+            path: ExtensionDataPath::new(path),
         })? {
             ExtensionDataValue::DeleteFile => Ok(()),
             other => Err(format!(
@@ -395,7 +395,7 @@ where
 
     fn list_files(&self, path: &str) -> Result<Vec<StorageEntry>, String> {
         match self.request(ExtensionDataRequestOp::ListFiles {
-            path: path.to_owned(),
+            path: ExtensionDataPath::new(path),
         })? {
             ExtensionDataValue::ListFiles { entries } => Ok(entries
                 .into_iter()

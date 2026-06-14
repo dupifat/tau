@@ -458,6 +458,54 @@ pub struct ExtensionDataRequest {
     pub op: ExtensionDataRequestOp,
 }
 
+/// Relative path inside an extension data scope.
+///
+/// The wire format is a plain string for compatibility. This newtype marks
+/// fields that must be interpreted as extension-data paths and validated by the
+/// harness before filesystem access.
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ExtensionDataPath(String);
+
+impl ExtensionDataPath {
+    /// Creates a path value from extension-provided relative path text.
+    #[must_use]
+    pub fn new(path: impl Into<String>) -> Self {
+        Self(path.into())
+    }
+
+    /// Borrows the raw path text as carried on the wire.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consumes the wrapper and returns the raw path string for validation or
+    /// storage-specific path handling.
+    #[must_use]
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl From<String> for ExtensionDataPath {
+    fn from(path: String) -> Self {
+        Self::new(path)
+    }
+}
+
+impl From<&str> for ExtensionDataPath {
+    fn from(path: &str) -> Self {
+        Self::new(path)
+    }
+}
+
+impl AsRef<str> for ExtensionDataPath {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 /// File operation requested by an extension data RPC.
 ///
 /// The harness may reject operations with
@@ -468,24 +516,45 @@ pub struct ExtensionDataRequest {
 pub enum ExtensionDataRequestOp {
     /// Read one whole file at a sanitized relative path, subject to the
     /// harness file-size quota.
-    ReadFile { path: String },
+    ReadFile { path: ExtensionDataPath },
     /// Write one whole file at a sanitized relative path, atomically replacing
     /// any old content and subject to the harness file-size quota.
-    WriteFile { path: String, contents: Vec<u8> },
+    WriteFile {
+        /// Relative file path inside the selected extension data scope.
+        path: ExtensionDataPath,
+        /// Complete replacement file contents.
+        contents: Vec<u8>,
+    },
     /// Create one whole file at a sanitized relative path, failing when the
     /// file already exists and subject to the harness file-size quota.
-    CreateFile { path: String, contents: Vec<u8> },
+    CreateFile {
+        /// Relative file path inside the selected extension data scope.
+        path: ExtensionDataPath,
+        /// Initial file contents.
+        contents: Vec<u8>,
+    },
     /// Append bytes to one file at a sanitized relative path, creating it when
     /// missing and subject to the harness file-size quota.
-    AppendFile { path: String, contents: Vec<u8> },
+    AppendFile {
+        /// Relative file path inside the selected extension data scope.
+        path: ExtensionDataPath,
+        /// Bytes to append.
+        contents: Vec<u8>,
+    },
     /// Delete one file at a sanitized relative path. Missing files succeed.
-    DeleteFile { path: String },
+    DeleteFile { path: ExtensionDataPath },
     /// Rename one file at sanitized relative paths. The destination must not
     /// already exist.
-    RenameFile { from: String, to: String },
+    RenameFile {
+        /// Source relative file path inside the selected extension data scope.
+        from: ExtensionDataPath,
+        /// Destination relative file path inside the selected extension data
+        /// scope.
+        to: ExtensionDataPath,
+    },
     /// List direct children of a sanitized relative directory path, subject to
     /// the harness directory-entry quota.
-    ListFiles { path: String },
+    ListFiles { path: ExtensionDataPath },
 }
 /// Harness response to an [`ExtensionDataRequest`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

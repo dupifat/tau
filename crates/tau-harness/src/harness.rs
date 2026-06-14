@@ -3296,25 +3296,25 @@ impl Harness {
             })?;
         match op {
             tau_proto::ExtensionDataRequestOp::ReadFile { path } => {
-                run_extension_data_read_file(&root, path)
+                run_extension_data_read_file(&root, path.into_string())
             }
             tau_proto::ExtensionDataRequestOp::WriteFile { path, contents } => {
-                run_extension_data_write_file(&root, path, contents)
+                run_extension_data_write_file(&root, path.into_string(), contents)
             }
             tau_proto::ExtensionDataRequestOp::CreateFile { path, contents } => {
-                run_extension_data_create_file(&root, path, contents)
+                run_extension_data_create_file(&root, path.into_string(), contents)
             }
             tau_proto::ExtensionDataRequestOp::AppendFile { path, contents } => {
-                run_extension_data_append_file(&root, path, contents)
+                run_extension_data_append_file(&root, path.into_string(), contents)
             }
             tau_proto::ExtensionDataRequestOp::DeleteFile { path } => {
-                run_extension_data_delete_file(&root, path)
+                run_extension_data_delete_file(&root, path.into_string())
             }
             tau_proto::ExtensionDataRequestOp::RenameFile { from, to } => {
-                run_extension_data_rename_file(&root, from, to)
+                run_extension_data_rename_file(&root, from.into_string(), to.into_string())
             }
             tau_proto::ExtensionDataRequestOp::ListFiles { path } => {
-                run_extension_data_list_files(&root, path)
+                run_extension_data_list_files(&root, path.into_string())
             }
         }
     }

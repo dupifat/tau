@@ -93,6 +93,9 @@ of an agent log.
   operational delivery state for the provider; transcript truth is still the
   accepted prompt, provider response, terminal tool results, and compaction
   facts.
+- **`agent.state`** — Transient live runtime snapshot for one agent. Carries
+  `agent_id` plus `idle`/`running` state so UIs can show work in progress
+  without treating it as transcript history.
 - **`agent.prompt_terminated`** — A prompt ended without an accepted
   `provider.response_finished` (stale or canceled). Runtime lifecycle state.
 - **`agent.prompt_prewarm_requested`** — Best-effort provider cache prewarm for
@@ -100,6 +103,9 @@ of an agent log.
 - **`agent.compaction_triggered`** — Durable manual compaction trigger inserted
   into an agent transcript. Prompt assembly folds it into provider-side
   compaction input; it is not a separate compaction lifecycle event.
+- **`agent.display_name_set`** — Durable fact that changes an agent's
+  human-friendly display name. Carries `agent_id` and the new non-empty display
+  name; UIs use it when rendering agent chips and history.
 
 ## Provider execution
 
@@ -260,8 +266,14 @@ intent.
 - **`ui.prompt_draft`** — Trailing-edge debounced (≤1/s) snapshot of the
   current draft buffer. Transient — used for "user is alive" signals
   (e.g. notification idle reset), not persisted.
+- **`ui.focus_changed`** — Attached terminal UI reports focus gained/lost for a
+  session when terminal focus events are available. Transient; used for idle and
+  notification behavior, not transcript truth.
 - **`ui.role_select`** — User requests a role switch. The harness resolves
   the role to a provider-published model at runtime.
+- **`ui.agent_model_select`** — User requests a model override for a loaded
+  agent. `agent_id` may be omitted only when the harness can unambiguously infer
+  the target from session selection/default state.
 - **`ui.role_update`** — User changes or deletes a role. Wire actions are
   `delete`, `set_model`, `set_effort`, `set_verbosity`,
   `set_thinking_summary`, `set_service_tier`, `set_compaction_threshold`,
@@ -286,6 +298,16 @@ intent.
   agent branching tree to chat.
 - **`ui.navigate_tree`** — User typed `/tree <id>`: move the selected or targeted
   agent head to that node so the next prompt branches off there.
+- **`ui.compact_request`** — User typed `/compact`: request provider-side
+  compaction for the selected or targeted agent before the next prompt.
+- **`ui.cancel_prompt`** — User requests cancellation of a prompt by session,
+  optional target agent, and optional prompt id; applies to active or queued
+  prompt work when still present.
+- **`ui.recall_queued_prompt`** — User requests removing the most recently queued
+  prompt from the selected or targeted agent so it can be edited/resubmitted.
+- **`ui.set_agent_display_name`** — User requests a durable display-name update
+  for a known agent in the session; accepted requests produce
+  `agent.display_name_set`.
 
 ## Shell (shell extension, user-initiated commands)
 
@@ -314,3 +336,6 @@ the UI is the only consumer. Components without a terminal silently no-op.
   OSC 1337 `SetUserVar` escape sequence. The UI base64-encodes the
   value and tmux-wraps if needed. Useful for surfacing notifications,
   build status, or other state to terminal-side tooling.
+- **`term.bell`** — Ask the attached terminal UI to ring/flash according to the
+  user's terminal settings. It may become a sound, visual flash, desktop
+  notification, or no-op.

@@ -473,11 +473,11 @@ fn event_name_round_trips_from_string() {
     }
 }
 
-/// Ensures parsed event names reject empty category or call segments so custom
+/// Ensures parsed event names reject malformed segment structure so custom
 /// events cannot enter routing with malformed dotted names.
 #[test]
 fn event_name_rejects_empty_segments() {
-    for name in [".progress", "demo.", "."] {
+    for name in [".progress", "demo.", ".", "demo.extra.progress"] {
         assert!(name.parse::<EventName>().is_err());
     }
 
@@ -665,15 +665,18 @@ fn custom_event_rejects_reserved_category_spelled_as_other() {
     assert_eq!(error.into_name(), name);
 }
 
-/// Ensures custom event validation also rejects empty segments when callers
-/// construct EventName values directly instead of parsing wire strings.
+/// Ensures dynamic event-name construction rejects invalid segment text before
+/// custom events can enter routing or serialization.
 #[test]
 fn custom_event_rejects_direct_empty_segments() {
-    let empty_category = EventName::new(EventCategory::Other(String::new()), "progress".to_owned());
-    let empty_call = EventName::new(EventCategory::Other("demo".to_owned()), String::new());
-
-    assert!(CustomEvent::try_new(empty_category, None, CborValue::Null).is_err());
-    assert!(CustomEvent::try_new(empty_call, None, CborValue::Null).is_err());
+    assert!(EventName::try_new(EventCategory::Other(String::new()), "progress").is_none());
+    assert!(EventName::try_new(EventCategory::Other("demo".to_owned()), String::new()).is_none());
+    assert!(
+        EventName::try_new(EventCategory::Other("harness.info".to_owned()), "progress").is_none()
+    );
+    assert!(
+        EventName::try_new(EventCategory::Other("demo".to_owned()), "extra.progress").is_none()
+    );
 }
 
 /// Ensures extension-owned custom event categories still round-trip and route

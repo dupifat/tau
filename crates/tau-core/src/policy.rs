@@ -206,7 +206,7 @@ impl SubscriptionPolicy for DefaultSubscriptionPolicy {
             }
             for selector in selectors {
                 let allowed = match selector {
-                    EventSelector::Exact(name) => category_allowed(&name.category),
+                    EventSelector::Exact(name) => category_allowed(name.category()),
                     EventSelector::Prefix(prefix) => {
                         // The category portion of the prefix must
                         // resolve to a known, allowed category. A

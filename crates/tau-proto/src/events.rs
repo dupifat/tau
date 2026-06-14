@@ -1907,16 +1907,14 @@ impl CustomEvent {
         &self.payload
     }
 
-    /// Returns `true` when `name` has non-empty segments and uses an
+    /// Returns `true` when `name` has valid segments and uses an
     /// extension-owned event category.
     #[must_use]
     pub fn name_is_allowed(name: &EventName) -> bool {
-        !name.category.as_str().is_empty()
-            && !name.call.as_str().is_empty()
-            && matches!(
-                EventCategory::from_wire(name.category.as_str()),
-                EventCategory::Other(_)
-            )
+        matches!(
+            EventCategory::from_wire(name.category().as_str()),
+            EventCategory::Other(_)
+        )
     }
 }
 

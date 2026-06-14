@@ -138,14 +138,12 @@ impl From<String> for EventCall {
 /// form. The well-known protocol events are exposed as `pub const`
 /// values directly on this type (`EventName::TOOL_REGISTER`, etc.) so
 /// match-arm-style call sites keep their compactness while gaining
-/// a typed `category` to branch on. Parsed event names must have non-empty
-/// category and call segments.
+/// a typed `category` to branch on. Event names must have exactly two
+/// non-empty segments: neither the category nor the call may contain `.`.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct EventName {
-    /// First segment of the dotted event name.
-    pub category: EventCategory,
-    /// Second segment of the dotted event name.
-    pub call: EventCall,
+    category: EventCategory,
+    call: EventCall,
 }
 
 impl EventName {
@@ -158,11 +156,35 @@ impl EventName {
     }
 
     /// Create an event name from a category and call segment.
+    ///
+    /// # Panics
+    ///
+    /// Panics if either segment is empty or contains `.`. Use [`Self::try_new`]
+    /// to handle invalid dynamic input without panicking.
     pub fn new(category: EventCategory, call: impl Into<EventCall>) -> Self {
-        Self {
-            category,
-            call: call.into(),
-        }
+        Self::try_new(category, call).expect("invalid event name segment")
+    }
+
+    /// Try to create an event name from validated category and call segments.
+    ///
+    /// Returns `None` when either segment is empty or contains `.`.
+    pub fn try_new(category: EventCategory, call: impl Into<EventCall>) -> Option<Self> {
+        let call = call.into();
+        validate_event_segment(category.as_str())?;
+        validate_event_segment(call.as_str())?;
+        Some(Self { category, call })
+    }
+
+    /// Borrow the event category segment.
+    #[must_use]
+    pub fn category(&self) -> &EventCategory {
+        &self.category
+    }
+
+    /// Borrow the event call segment.
+    #[must_use]
+    pub fn call(&self) -> &EventCall {
+        &self.call
     }
 
     /// True iff the dotted form `"<category>.<call>"` starts with
@@ -328,6 +350,10 @@ impl EventName {
     pub const AGENT_HEAD_MOVED: Self = Self::from_static(EventCategory::Agent, "head_moved");
 }
 
+fn validate_event_segment(segment: &str) -> Option<()> {
+    (!segment.is_empty() && !segment.contains('.')).then_some(())
+}
+
 impl fmt::Display for EventName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}.{}", self.category, self.call)
@@ -337,24 +363,20 @@ impl fmt::Display for EventName {
 impl FromStr for EventName {
     type Err = ParseEventNameError;
 
-    /// Always succeeds for well-formed `"a.b"` input with non-empty category
-    /// and call segments. Unknown categories survive as
+    /// Always succeeds for well-formed `"a.b"` input with exactly two
+    /// non-empty segments. Unknown categories survive as
     /// [`EventCategory::Other`]; unknown `call` segments survive as owned
-    /// strings. Errors on missing-dot input or empty segments.
+    /// strings. Errors on missing-dot input, empty segments, or extra dots.
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let Some((cat, call)) = value.split_once('.') else {
             return Err(ParseEventNameError {
                 invalid_name: value.to_owned(),
             });
         };
-        if cat.is_empty() || call.is_empty() {
-            return Err(ParseEventNameError {
+        Self::try_new(EventCategory::from_wire(cat), EventCall::new(call)).ok_or_else(|| {
+            ParseEventNameError {
                 invalid_name: value.to_owned(),
-            });
-        }
-        Ok(Self {
-            category: EventCategory::from_wire(cat),
-            call: EventCall::new(call),
+            }
         })
     }
 }

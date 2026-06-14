@@ -3811,7 +3811,7 @@ impl Harness {
         transient_override: Option<bool>,
     ) -> Result<(), HarnessError> {
         let event_name = event.name();
-        if event_name.category == tau_proto::EventCategory::Provider
+        if event_name.category() == &tau_proto::EventCategory::Provider
             && !self.accepts_provider_event_from(source_id, &event_name)
         {
             return Ok(());
@@ -4271,7 +4271,7 @@ impl Harness {
         transient_override: Option<bool>,
     ) -> Result<bool, HarnessError> {
         let event_name = event.name();
-        if event_name.category == tau_proto::EventCategory::Provider {
+        if event_name.category() == &tau_proto::EventCategory::Provider {
             self.handle_extension_event_inner_with_transient(client_id, event, transient_override)?;
             return Ok(true);
         }

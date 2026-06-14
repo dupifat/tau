@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )));
     handle.redraw();
 
-    spawn_animator(handle.clone());
+    let ball_id = spawn_animator(handle.clone());
 
     loop {
         match term.get_next_event()? {
@@ -83,9 +83,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Demonstrate block removal: remove the ball from
                     // above_active. The block stays in the store but
                     // isn't rendered.
-                    handle.remove_above_active(BALL_ID);
+                    handle.remove_above_active(ball_id);
                     handle.set_block(
-                        STATUS_ID,
+                        status_id,
                         StyledBlock::new(StyledText::from(Span::new(
                             " STATUS: ball removed ",
                             Style::default().fg(Color::Black).bold(),
@@ -96,9 +96,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 "add" => {
                     // Re-add the ball.
-                    handle.push_above_active(BALL_ID);
+                    handle.push_above_active(ball_id);
                     handle.set_block(
-                        STATUS_ID,
+                        status_id,
                         StyledBlock::new(StyledText::from(Span::new(
                             " STATUS: ball restored ",
                             Style::default().fg(Color::Black).bold(),
@@ -118,7 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Event::Resize { width, height } => {
                 handle.set_block(
-                    STATUS_ID,
+                    status_id,
                     StyledBlock::new(StyledText::from(Span::new(
                         format!(" STATUS: resized to {width}x{height} "),
                         Style::default().fg(Color::Black).bold(),
@@ -141,17 +141,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// Well-known block ids shared between main and the animator thread.
-// These are created by the animator with new_block, but since id
-// allocation is sequential and the animator runs first, we know the
-// ids.  A real app would pass them explicitly; here we hard-code for
-// demo simplicity.
-const BALL_ID: tau_cli_term_raw::BlockId = tau_cli_term_raw::BlockId(4);
-const STATUS_ID: tau_cli_term_raw::BlockId = tau_cli_term_raw::BlockId(3);
-// (ids 0-2 are header, help, status; 3=status was created as the 4th
-//  block above, then ball=4, busy=5 in spawn_animator)
-
-fn spawn_animator(handle: TermHandle) {
+fn spawn_animator(handle: TermHandle) -> tau_cli_term_raw::BlockId {
     // Pre-allocate block ids for the animated zones.
     let ball_id = handle.new_block("demo-ball", "");
     handle.push_above_active(ball_id);
@@ -276,4 +266,6 @@ fn spawn_animator(handle: TermHandle) {
             }
         }
     });
+
+    ball_id
 }

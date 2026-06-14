@@ -16,7 +16,8 @@ philosophy and motivation see [README.md](README.md); for design notes see
 - **PIM extensions:** controlled email and calendar tools expose useful personal
   information while keeping reads, writes, approvals, and logs explicit.
 - **Safe shell/filesystem access:** mutating shell and file tools acquire update
-  locks so concurrent agents do not trample the same working tree.
+  locks so concurrent agents do not trample the same working tree, and each
+  shell extension instance remembers per-agent cwd through durable metadata.
 - **Trusted Rhai automation:** disabled-by-default local Rhai scripts can subscribe
   to raw events, intercept events, register agent-invokable tools, handle owned
   `tool.started` calls, and use direct async `ShellJob` host shell execution
@@ -454,7 +455,7 @@ sub-agent runs with that role's resolved model, model parameters, system prompt,
 and tool profile/filtering. The sub-agent starts with a *fresh* context — only
 the parent's `prompt`, the selected role's system prompt, and the selected
 role's tools — with no visibility into the parent conversation's prior turns,
-tool results, or in-flight state. The same isolation applies at every nesting
+tool results, or in-flight state. Inheritable per-agent metadata, such as the shell extension's remembered cwd, is copied to the child so execution context can follow delegation without sharing transcript history. The same isolation applies at every nesting
 depth, so sub-sub-agents don't see ancestor task framing and can't be tricked
 into re-delegating it. Parent agents are responsible for putting everything the
 sub-agent needs into the `prompt`. Live progress (turns, current tool) is shown

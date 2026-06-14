@@ -57,13 +57,15 @@ Agent metadata includes at least:
 
 - original prompt / creation reason;
 - created and last-updated timestamps;
-- cwd / execution root;
+- immutable starting cwd / creation root;
+- extension-visible durable metadata, including inheritable keys copied to child agents;
 - role/model/debug metadata such as git hash where useful.
 
-The agent cwd is the default execution root for filesystem and shell tools. The
-preferred implementation is for the harness to provide this as tool execution
-context, rather than relying on the model to pass a `cwd` argument on every tool
-call. Tool-specific explicit `cwd` arguments can remain as overrides.
+The sidecar starting cwd records where the agent began. The current shell cwd is
+extension-owned durable metadata (`ext_<extension-instance>_cwd`, for example
+`ext_core-shell_cwd`) folded from committed metadata events. Shell/file tools use
+that remembered cwd for relative paths; explicit cwd arguments and the `cd` tool
+update the metadata so resumes and child agents see the same execution context.
 
 While an agent is loaded for write in a session, the harness holds the agent's
 exclusive filesystem lock. Locking prevents multiple harnesses from concurrently

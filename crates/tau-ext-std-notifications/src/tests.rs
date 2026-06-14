@@ -121,6 +121,7 @@ fn disconnect_frame(reason: Option<String>) -> HarnessOutputMessage {
 /// `Event::LifecycleConfigure`.
 fn configure_frame(config: tau_proto::CborValue) -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(tau_proto::Configure {
+        instance_name: None,
         config,
         state_dir: None,
         secrets: std::collections::BTreeMap::new(),

@@ -948,6 +948,7 @@ fn first_agent_event_does_not_force_full_redraw() {
         reason: tau_proto::SessionStartReason::Initial,
     }));
     renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        parent_agent: None,
         agent_id: agent_id("engineer_abc12345"),
         role: "engineer".to_owned(),
         display_name: None,
@@ -1135,6 +1136,7 @@ fn delegate_progress_does_not_overwrite_display_name_with_task_name() {
     );
 
     renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        parent_agent: None,
         agent_id: agent_id("engineer-Ab12"),
         role: "senior-engineer".to_owned(),
         display_name: Some("senior-engineer: look it up".to_owned()),
@@ -2583,6 +2585,7 @@ fn status_agent_chip_keeps_id_primary_and_display_name_secondary() {
         reason: SessionStartReason::New,
     }));
     renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        parent_agent: None,
         agent_id: agent_id("junior-engineer_b"),
         role: "junior-engineer".to_owned(),
         display_name: Some("sleep 6".to_owned()),

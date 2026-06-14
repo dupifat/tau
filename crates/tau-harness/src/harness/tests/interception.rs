@@ -643,6 +643,7 @@ fn interception_drop_of_must_pass_event_is_overridden() {
 
 fn agent_started_event(role: &str) -> Event {
     Event::AgentStarted(tau_proto::AgentStarted {
+        parent_agent: None,
         agent_id: tau_proto::AgentId::parse("agent-started-test").expect("agent id"),
         role: role.to_owned(),
         display_name: Some("Started Test".to_owned()),
@@ -1397,4 +1398,100 @@ fn interception_disconnect_clears_registration() {
         .get_next_from(after_disconnect_seq)
         .expect("event reaches log");
     assert_eq!(entry.event, draft_event("not intercepted"));
+}
+
+#[test]
+fn agent_metadata_set_and_unset_events_are_interceptable() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let interceptor = connect_test_tool(&mut h, "metadata-interceptor");
+    h.handle_extension_event(
+        "metadata-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![
+                EventSelector::Exact(tau_proto::EventName::AGENT_METADATA_SET),
+                EventSelector::Exact(tau_proto::EventName::AGENT_METADATA_UNSET),
+            ],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+
+    let agent_id = tau_proto::AgentId::parse("metadata-agent").expect("agent id");
+    let key = tau_proto::AgentMetadataKey::new("ext_core-shell_cwd");
+    let set = Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+        agent_id: agent_id.clone(),
+        key: key.clone(),
+        value: CborValue::Text("/tmp".to_owned()),
+        inheritable: true,
+    });
+    h.publish_event(None, set.clone());
+    let (event, transient) = intercepted_payload(&interceptor);
+    assert_eq!(event, set);
+    assert!(!transient, "metadata set must be durable by default");
+    h.handle_extension_event(
+        "metadata-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("pass set");
+
+    interceptor.lock().expect("events").clear();
+    let unset = Event::AgentMetadataUnset(tau_proto::AgentMetadataUnset { agent_id, key });
+    h.publish_event(None, unset.clone());
+    let (event, transient) = intercepted_payload(&interceptor);
+    assert_eq!(event, unset);
+    assert!(!transient, "metadata unset must be durable by default");
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn invalid_metadata_interceptor_replacements_fall_back_to_original() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "metadata-rewriter");
+    h.handle_extension_event(
+        "metadata-rewriter",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_METADATA_SET,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+
+    let agent_id = tau_proto::AgentId::parse("metadata-agent").expect("agent id");
+    h.session_loaded_agents.insert(agent_id.clone());
+    let original = Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+        agent_id: agent_id.clone(),
+        key: tau_proto::AgentMetadataKey::new("valid"),
+        value: CborValue::Text("ok".to_owned()),
+        inheritable: true,
+    });
+    h.publish_event(None, original.clone());
+    let replacement = Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+        agent_id,
+        key: tau_proto::AgentMetadataKey::new("too-large"),
+        value: CborValue::Bytes(vec![0; tau_proto::MAX_AGENT_METADATA_VALUE_BYTES + 1]),
+        inheritable: true,
+    });
+    h.handle_extension_event(
+        "metadata-rewriter",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(replacement))),
+        })),
+    )
+    .expect("replace with invalid metadata");
+
+    let events = event_log_events(&h);
+    assert!(events.iter().any(|event| event == &original));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Event::AgentMetadataSet(set) if set.key.as_str() == "too-large"
+    )));
+
+    h.shutdown().expect("shutdown");
 }

@@ -42,6 +42,7 @@ fn write_script(dir: &tempfile::TempDir, source: &str) -> std::path::PathBuf {
 
 fn configure_with_script(path: &Path) -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(Configure {
+        instance_name: None,
         config: CborValue::Map(vec![(
             CborValue::Text("script".to_owned()),
             CborValue::Text(path.display().to_string()),
@@ -53,6 +54,7 @@ fn configure_with_script(path: &Path) -> HarnessOutputMessage {
 
 fn empty_configure() -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(Configure {
+        instance_name: None,
         config: CborValue::Map(Vec::new()),
         state_dir: None,
         secrets: BTreeMap::new(),
@@ -237,6 +239,7 @@ fn start_runs_after_ready_with_host_functions() {
         "#,
     );
     let configure = HarnessOutputMessage::Configure(Configure {
+        instance_name: None,
         config: CborValue::Map(vec![
             (
                 CborValue::Text("script".to_owned()),

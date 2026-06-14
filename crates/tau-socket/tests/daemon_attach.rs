@@ -43,7 +43,7 @@ fn socket_transport_supports_later_attached_end_to_end_clients() {
         .map(|agent| agent.current_branch().len())
         .sum();
     assert!(
-        (8 <= entry_count) && (entry_count <= 12),
+        (8..=12).contains(&entry_count),
         "expected two persisted prompt/tool cycles, got {entry_count} entries"
     );
 }

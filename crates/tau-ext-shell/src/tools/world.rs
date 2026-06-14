@@ -18,6 +18,7 @@ const CASSETTE_VERSION: u32 = 1;
 
 pub(crate) struct ShellWorld {
     mode: WorldMode,
+    cwd: std::path::PathBuf,
 }
 
 enum WorldMode {
@@ -39,18 +40,32 @@ impl ShellWorld {
     pub(crate) fn real() -> Self {
         Self {
             mode: WorldMode::Real,
+            cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn for_tool(
         tool_name: &str,
         call_id: &str,
         arguments: &CborValue,
         config: Option<tau_vcr::VcrConfig>,
     ) -> Result<Self, ToolFailure> {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        Self::for_tool_in_dir(tool_name, call_id, arguments, config, cwd)
+    }
+
+    pub(crate) fn for_tool_in_dir(
+        tool_name: &str,
+        call_id: &str,
+        arguments: &CborValue,
+        config: Option<tau_vcr::VcrConfig>,
+        cwd: std::path::PathBuf,
+    ) -> Result<Self, ToolFailure> {
         let Some(config) = config else {
             return Ok(Self {
                 mode: WorldMode::Real,
+                cwd,
             });
         };
         let key = call_id.to_owned();
@@ -64,6 +79,7 @@ impl ShellWorld {
                     cassette,
                     next_op: 0,
                 },
+                cwd,
             });
         }
         if config.mode == tau_vcr::VcrMode::ReplayOnly {
@@ -79,7 +95,12 @@ impl ShellWorld {
                     ops: Vec::new(),
                 },
             },
+            cwd,
         })
+    }
+
+    pub(crate) fn current_dir(&self) -> &Path {
+        &self.cwd
     }
 
     pub(crate) fn finish(self) -> Result<(), ToolFailure> {

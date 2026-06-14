@@ -81,6 +81,7 @@ fn seed_restored_tool_round(state_dir: &Path, call_ids: &[&str], completed_call_
             "main",
             None,
             Event::AgentStarted(tau_proto::AgentStarted {
+                parent_agent: None,
                 agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
                 role: "engineer".to_owned(),
                 display_name: None,
@@ -145,6 +146,7 @@ fn seed_restored_tool_round_for_agent(
             agent_id,
             None,
             Event::AgentStarted(tau_proto::AgentStarted {
+                parent_agent: None,
                 agent_id: crate::parse_agent_id(agent_id),
                 role: "engineer".to_owned(),
                 display_name: None,
@@ -1408,6 +1410,101 @@ fn resumed_session_repair_errors_are_not_duplicated_for_pre_init_subscribers() {
         "synthetic repair error must arrive exactly once, live (got live/replay flags: {deliveries:?})",
     );
     drop(events);
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn replay_emits_latest_agent_metadata_before_session_agent_loaded() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    {
+        let sessions_dir = tau_config::settings::sessions_dir_of(&sp);
+        let mut sessions = tau_core::SessionStore::open(&sessions_dir).expect("session store");
+        sessions
+            .append_session_event(
+                "s1",
+                None,
+                Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                    session_id: "s1".into(),
+                    agent_id: crate::parse_agent_id("agent-replay-meta"),
+                }),
+            )
+            .expect("seed session membership");
+        let mut agents = tau_core::AgentStore::open(sp.join("agents")).expect("agent store");
+        agents
+            .append_agent_event(
+                "agent-replay-meta",
+                None,
+                Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+                    agent_id: crate::parse_agent_id("agent-replay-meta"),
+                    key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+                    value: CborValue::Text("/first".to_owned()),
+                    inheritable: true,
+                }),
+            )
+            .expect("seed first metadata");
+        agents
+            .append_agent_event(
+                "agent-replay-meta",
+                None,
+                Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+                    agent_id: crate::parse_agent_id("agent-replay-meta"),
+                    key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+                    value: CborValue::Text("/latest".to_owned()),
+                    inheritable: true,
+                }),
+            )
+            .expect("seed latest metadata");
+    }
+
+    let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
+        .expect("resume");
+    let sink = connect_test_client(&mut h, "metadata-ui", tau_proto::ClientKind::Ui);
+    h.handle_client_event(
+        "metadata-ui",
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+            selectors: vec![
+                EventSelector::Exact(tau_proto::EventName::AGENT_METADATA_SET),
+                EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_LOADED),
+            ],
+        })),
+    )
+    .expect("subscribe");
+
+    let replayed: Vec<Event> = sink
+        .lock()
+        .expect("sink")
+        .iter()
+        .filter_map(|routed| peel_inner_event(&routed.frame).cloned())
+        .collect();
+    let metadata_index = replayed
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::AgentMetadataSet(set)
+                    if set.agent_id.as_str() == "agent-replay-meta"
+                        && set.key.as_str() == "ext_core-shell_cwd"
+                        && set.value == CborValue::Text("/latest".to_owned())
+            )
+        })
+        .expect("latest metadata replayed");
+    let loaded_index = replayed
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::SessionAgentLoaded(loaded)
+                    if loaded.agent_id.as_str() == "agent-replay-meta"
+            )
+        })
+        .expect("session loaded replayed");
+    assert!(metadata_index < loaded_index);
+    assert!(replayed.iter().all(|event| !matches!(
+        event,
+        Event::AgentMetadataSet(set) if set.value == CborValue::Text("/first".to_owned())
+    )));
 
     h.shutdown().expect("shutdown");
 }

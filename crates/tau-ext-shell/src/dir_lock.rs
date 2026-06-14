@@ -829,9 +829,10 @@ pub(crate) fn dispatch_dir_lock_tool(
 }
 
 /// Return the canonical update-lock directories for a mutating ext-shell tool.
-pub(crate) fn automatic_lock_dirs_for_tool(
+pub(crate) fn automatic_lock_dirs_for_tool_in_dir(
     tool_name: &str,
     arguments: &CborValue,
+    cwd: &Path,
 ) -> Result<Option<Vec<PathBuf>>, ToolFailure> {
     match tool_name {
         EDIT_TOOL_NAME => {
@@ -844,8 +845,8 @@ pub(crate) fn automatic_lock_dirs_for_tool(
                 ShellAccessMode::ReadWrite => Ok(Some(vec![canonical_shell_cwd(arguments)?])),
             }
         }
-        APPLY_PATCH_TOOL_NAME => Ok(Some(crate::tools::apply_patch::lock_directories(
-            arguments,
+        APPLY_PATCH_TOOL_NAME => Ok(Some(crate::tools::apply_patch::lock_directories_in_dir(
+            arguments, cwd,
         )?)),
         _ => Ok(None),
     }

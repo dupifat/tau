@@ -99,6 +99,7 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
     h.selected_model = None;
 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        parent_agent: None,
         session_id: "s1".into(),
         role: h.selected_role.clone(),
         cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
@@ -256,6 +257,7 @@ fn resume_rehydrates_delegated_agent_role_from_agent_log() {
         h.handle_start_agent_request(
             "conn-delegate",
             StartAgentRequest {
+                parent_agent: None,
                 query_id: "q-role".to_owned(),
                 instruction: "side task".to_owned(),
                 role: Some("staff-engineer".to_owned()),
@@ -1042,6 +1044,7 @@ fn tool_progress(call_id: &str, tool_name: &str, message: &str) -> tau_proto::To
 
 fn ext_query(query_id: &str) -> StartAgentRequest {
     StartAgentRequest {
+        parent_agent: None,
         query_id: query_id.to_owned(),
         instruction: format!("instruction {query_id}"),
         role: None,
@@ -4985,6 +4988,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
     h.handle_start_agent_request(
         "conn-delegate",
         StartAgentRequest {
+            parent_agent: None,
             query_id: "q1".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
@@ -5120,6 +5124,7 @@ fn delegated_agent_user_interaction_prevents_auto_suspend() {
     h.handle_start_agent_request(
         "conn-delegate",
         StartAgentRequest {
+            parent_agent: None,
             query_id: "q-user".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
@@ -5206,6 +5211,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
     h.handle_start_agent_request(
         "conn-delegate",
         StartAgentRequest {
+            parent_agent: None,
             query_id: "q-message".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
@@ -5472,6 +5478,7 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
     h.handle_start_agent_request(
         "conn-delegate",
         StartAgentRequest {
+            parent_agent: None,
             query_id: "q1".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
@@ -5537,18 +5544,10 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
 }
 
 /// A non-tool `StartAgentRequest` (`tool_call_id: None`, e.g.
-/// `std-notifications`' idle summary) is **not** a delegate. Its
-/// purpose is to summarize what the user just did, so the side conv
-/// must inherit the parent conversation's branch — assembling the
-/// user's recent user-message / message-projection history *plus* the new
-/// instruction. The whole feature falls back to a useless generic
-/// greeting if the model is asked to summarize an empty transcript.
-///
-/// This is also why we don't strip tools / system prompt for these
-/// queries: the side conv's request keeps the same provider-visible prefix
-/// (system_prompt + tools + full transcript) and adds only the instruction as a
-/// delta. Verified here by comparing the assembled prompt to what the parent
-/// conv sees.
+/// `std-notifications`' idle summary) is **not** a delegate, but it still
+/// starts an independent agent log. The child prompt contains only its own
+/// instruction and selected role/system/tool setup; it must not inherit the
+/// parent transcript branch.
 #[test]
 fn non_tool_start_agent_request_starts_fresh_agent_branch() {
     let td = TempDir::new().expect("tempdir");
@@ -5620,6 +5619,7 @@ fn non_tool_start_agent_request_starts_fresh_agent_branch() {
     h.handle_start_agent_request(
         "conn-notifications",
         StartAgentRequest {
+            parent_agent: None,
             query_id: "idle-0".to_owned(),
             instruction: "Summarize in one sentence.".to_owned(),
             role: None,
@@ -5708,13 +5708,8 @@ fn non_tool_start_agent_request_starts_fresh_agent_branch() {
 
 /// A non-tool start-agent request (idle-summary path) must not execute
 /// tools, but it also must not mutate provider-visible request fields
-/// to enforce that policy. The side conv inherits the parent's
-/// `previous_response_id` so the upstream prompt cache is reused
-/// instead of paying for a full transcript replay (~50k tokens per
-/// idle summary in real sessions). It must preserve `tool_choice:
-/// Auto`; flipping it to `None` changes the wire request and was
-/// observed to collapse cache usage to near zero even with a valid
-/// `previous_response_id`.
+/// to enforce that policy. It must preserve `tool_choice: Auto`; flipping it
+/// to `None` changes the wire request and can defeat provider cache reuse.
 #[test]
 fn non_tool_start_agent_request_preserves_tool_choice_without_parent_chain_anchor() {
     let td = TempDir::new().expect("tempdir");
@@ -5768,6 +5763,7 @@ fn non_tool_start_agent_request_preserves_tool_choice_without_parent_chain_ancho
     h.handle_start_agent_request(
         "conn-notifications",
         StartAgentRequest {
+            parent_agent: None,
             query_id: "idle-0".to_owned(),
             instruction: "Summarize in one sentence.".to_owned(),
             role: None,
@@ -5877,6 +5873,7 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
     h.handle_start_agent_request(
         "conn-delegate",
         StartAgentRequest {
+            parent_agent: None,
             query_id: "q1".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
@@ -5925,6 +5922,7 @@ fn user_prompt_preempts_in_flight_non_tool_ext_side_conversation() {
     h.handle_start_agent_request(
         "conn-notifications",
         StartAgentRequest {
+            parent_agent: None,
             query_id: "idle-0".to_owned(),
             instruction: "Summarize in one sentence.".to_owned(),
             role: None,
@@ -6081,6 +6079,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
     h.handle_start_agent_request(
         "conn-delegate",
         StartAgentRequest {
+            parent_agent: None,
             query_id: "q1".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
@@ -7291,6 +7290,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
     h.handle_start_agent_request(
         "conn-delegate",
         StartAgentRequest {
+            parent_agent: None,
             query_id: "q-A".to_owned(),
             instruction: "side task A".to_owned(),
             role: None,
@@ -7303,6 +7303,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
     h.handle_start_agent_request(
         "conn-delegate",
         StartAgentRequest {
+            parent_agent: None,
             query_id: "q-B".to_owned(),
             instruction: "side task B".to_owned(),
             role: None,
@@ -7521,6 +7522,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
     h.handle_start_agent_request(
         "conn-delegate",
         StartAgentRequest {
+            parent_agent: None,
             query_id: "q1".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
@@ -7724,6 +7726,7 @@ fn provider_disconnect_for_backgrounded_delegate_tool_updates_progress_and_targe
     h.handle_start_agent_request(
         "conn-delegate",
         StartAgentRequest {
+            parent_agent: None,
             query_id: "q-disconnect".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
@@ -7983,6 +7986,7 @@ fn delegate_explicit_role_uses_role_model_params_prompt_and_tools() {
     h.handle_start_agent_request(
         "conn-delegate",
         StartAgentRequest {
+            parent_agent: None,
             query_id: "q-worker".to_owned(),
             instruction: "side task".to_owned(),
             role: Some("worker".to_owned()),
@@ -8116,6 +8120,7 @@ fn delegate_invalid_or_unavailable_role_errors_with_sorted_available_roles() {
         h.handle_start_agent_request(
             "conn-delegate",
             StartAgentRequest {
+                parent_agent: None,
                 query_id: query_id.to_owned(),
                 instruction: "side task".to_owned(),
                 role: Some(role.to_owned()),
@@ -8155,6 +8160,7 @@ fn delegate_missing_default_senior_engineer_errors_when_unavailable() {
     h.handle_start_agent_request(
         "conn-delegate",
         StartAgentRequest {
+            parent_agent: None,
             query_id: "q-default".to_owned(),
             instruction: "side task".to_owned(),
             role: None,
@@ -8262,6 +8268,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
     h.handle_start_agent_request(
         "conn-delegate",
         StartAgentRequest {
+            parent_agent: None,
             query_id: "q-outer".to_owned(),
             instruction: "outer task".to_owned(),
             role: None,
@@ -8318,6 +8325,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
     h.handle_start_agent_request(
         "conn-delegate",
         StartAgentRequest {
+            parent_agent: None,
             query_id: "q-nested".to_owned(),
             instruction: "nested task".to_owned(),
             role: None,
@@ -8518,6 +8526,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
     h.handle_start_agent_request(
         "conn-delegate",
         StartAgentRequest {
+            parent_agent: None,
             query_id: "q-outer".to_owned(),
             instruction: "outer task".to_owned(),
             role: None,
@@ -8570,6 +8579,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
     h.handle_start_agent_request(
         "conn-delegate",
         StartAgentRequest {
+            parent_agent: None,
             query_id: "q-nested".to_owned(),
             instruction: "nested task".to_owned(),
             role: None,
@@ -8681,6 +8691,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
     h.handle_start_agent_request(
         "conn-delegate",
         StartAgentRequest {
+            parent_agent: None,
             query_id: "q-outer".to_owned(),
             instruction: "outer task".to_owned(),
             role: None,
@@ -8844,6 +8855,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
     h.handle_start_agent_request(
         "conn-delegate",
         StartAgentRequest {
+            parent_agent: None,
             query_id: "q-top".to_owned(),
             instruction: "TOP: delegate exactly two more subtasks".to_owned(),
             role: None,
@@ -8896,6 +8908,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
     h.handle_start_agent_request(
         "conn-delegate",
         StartAgentRequest {
+            parent_agent: None,
             query_id: "q-leaf".to_owned(),
             instruction: "LEAF: do one terminal search only".to_owned(),
             role: None,
@@ -9396,6 +9409,7 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
             agent_id: crate::parse_agent_id("forged-agent"),
         }),
         Event::AgentStarted(tau_proto::AgentStarted {
+            parent_agent: None,
             agent_id: crate::parse_agent_id("forged-agent"),
             role: "engineer".to_owned(),
             display_name: None,
@@ -9726,6 +9740,140 @@ fn queued_extension_prompt_submit_requests_preserve_individual_ctx_ids() {
         event,
         Event::AgentPromptCreated(created)
             if created.agent_id == agent_id && created.ctx_id.as_deref() == Some("ctx-2")
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn agent_metadata_validation_rejects_bad_key_size_value_and_unknown_target() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let agent_id = tau_proto::AgentId::parse("metadata-target").expect("agent id");
+    h.session_loaded_agents.insert(agent_id.clone());
+
+    let valid = tau_proto::AgentMetadataSet {
+        agent_id: agent_id.clone(),
+        key: tau_proto::AgentMetadataKey::new("ok"),
+        value: CborValue::Text("value".to_owned()),
+        inheritable: false,
+    };
+    h.validate_agent_metadata_set(&valid)
+        .expect("valid metadata set");
+
+    let empty_key = tau_proto::AgentMetadataSet {
+        key: tau_proto::AgentMetadataKey::new(""),
+        ..valid.clone()
+    };
+    assert!(
+        h.validate_agent_metadata_set(&empty_key)
+            .expect_err("empty key rejected")
+            .contains("must not be empty")
+    );
+
+    let oversized_key = tau_proto::AgentMetadataSet {
+        key: tau_proto::AgentMetadataKey::new(
+            "k".repeat(tau_proto::MAX_AGENT_METADATA_KEY_BYTES + 1),
+        ),
+        ..valid.clone()
+    };
+    assert!(
+        h.validate_agent_metadata_set(&oversized_key)
+            .expect_err("oversized key rejected")
+            .contains("exceeds 256 bytes")
+    );
+
+    let oversized_value = tau_proto::AgentMetadataSet {
+        value: CborValue::Bytes(vec![0; tau_proto::MAX_AGENT_METADATA_VALUE_BYTES + 1]),
+        ..valid.clone()
+    };
+    assert!(
+        h.validate_agent_metadata_set(&oversized_value)
+            .expect_err("oversized value rejected")
+            .contains("exceeds 64 KiB")
+    );
+
+    let unknown = tau_proto::AgentMetadataSet {
+        agent_id: tau_proto::AgentId::parse("unknown-agent").expect("agent id"),
+        ..valid
+    };
+    assert!(
+        h.validate_agent_metadata_set(&unknown)
+            .expect_err("unknown target rejected")
+            .contains("unknown agent metadata target")
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn explicit_parent_agent_start_inherits_only_inheritable_metadata() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    h.submit_user_prompt("s1".into(), "parent prompt".to_owned())
+        .expect("submit parent");
+    let parent_agent_id = h
+        .agents
+        .get(&test_user_agent(&h))
+        .and_then(|conversation| conversation.agent_id.clone())
+        .expect("parent agent id");
+    let parent = tau_proto::AgentId::parse(&parent_agent_id).expect("parent agent id");
+    let inherit_key = tau_proto::AgentMetadataKey::new("inherit-key");
+    let local_key = tau_proto::AgentMetadataKey::new("local-key");
+
+    for (key, value, inheritable) in [
+        (inherit_key.clone(), "inherited", true),
+        (local_key, "local", false),
+    ] {
+        h.publish_event(
+            None,
+            Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+                agent_id: parent.clone(),
+                key,
+                value: CborValue::Text(value.to_owned()),
+                inheritable,
+            }),
+        );
+    }
+
+    h.handle_start_agent_request(
+        "conn-delegate",
+        StartAgentRequest {
+            parent_agent: Some(parent.clone()),
+            query_id: "q-inherit".to_owned(),
+            instruction: "side task".to_owned(),
+            role: None,
+            input_stats: tau_proto::ToolUseStats::default(),
+            tool_call_id: None,
+            task_name: None,
+        },
+    )
+    .expect("start child");
+    let child_cid = ext_query_cid(&h, "q-inherit").expect("child conversation");
+    let child_agent_id = h
+        .agents
+        .get(&child_cid)
+        .and_then(|conversation| conversation.agent_id.clone())
+        .expect("child agent id");
+
+    let child_events = h
+        .agent_store
+        .agent_events(&child_agent_id)
+        .expect("child events");
+    assert!(child_events.iter().any(|entry| matches!(
+        &entry.event,
+        Event::AgentMetadataSet(set)
+            if set.agent_id.as_str() == child_agent_id
+                && set.key == inherit_key
+                && set.value == CborValue::Text("inherited".to_owned())
+                && set.inheritable
+    )));
+    assert!(child_events.iter().all(|entry| !matches!(
+        &entry.event,
+        Event::AgentMetadataSet(set) if set.key.as_str() == "local-key"
     )));
 
     h.shutdown().expect("shutdown");

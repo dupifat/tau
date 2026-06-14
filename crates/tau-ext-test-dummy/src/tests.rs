@@ -19,6 +19,7 @@ fn invoke_restart() -> HarnessOutputMessage {
 
 fn restart_config(mode: &str) -> HarnessOutputMessage {
     HarnessOutputMessage::Configure(Configure {
+        instance_name: None,
         config: CborValue::Map(vec![(
             CborValue::Text("restart_mode".to_owned()),
             CborValue::Text(mode.to_owned()),

@@ -252,6 +252,8 @@ string_newtype!(/// Extension name.
     ExtensionName);
 string_newtype!(/// Agent-scoped context key published by an extension.
     AgentContextKey);
+string_newtype!(/// Durable agent metadata key visible to extensions.
+    AgentMetadataKey);
 // ProviderName / ModelName / ModelId are defined manually below — they
 // validate at construction (no '/', non-empty, etc.) so the rest of
 // the codebase can stop re-parsing `"provider/model"` strings.

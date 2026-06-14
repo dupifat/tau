@@ -43,29 +43,31 @@ pub(crate) fn apply_patch(
     Ok(ToolOutput { result, display })
 }
 
-pub(crate) fn lock_directories(arguments: &CborValue) -> Result<Vec<PathBuf>, ToolFailure> {
+pub(crate) fn lock_directories_in_dir(
+    arguments: &CborValue,
+    cwd: &Path,
+) -> Result<Vec<PathBuf>, ToolFailure> {
     let patch = patch_text(arguments)?;
     let hunks = parse_patch(patch).map_err(ToolFailure::new)?;
-    let cwd = std::env::current_dir().map_err(|error| ToolFailure::from(error.to_string()))?;
     let mut dirs = Vec::new();
 
     for hunk in &hunks {
         match hunk {
             Hunk::Add { path, .. } => {
-                let abs = resolve_path(&cwd, path);
+                let abs = resolve_path(cwd, path);
                 dirs.push(crate::dir_lock::canonical_write_lock_dir(&abs)?);
             }
             Hunk::Delete { path } => {
-                let abs = resolve_path(&cwd, path);
+                let abs = resolve_path(cwd, path);
                 dirs.push(crate::dir_lock::canonical_path_parent(&abs)?);
             }
             Hunk::Update {
                 path, move_path, ..
             } => {
-                let abs = resolve_path(&cwd, path);
+                let abs = resolve_path(cwd, path);
                 if let Some(move_path) = move_path {
                     dirs.push(crate::dir_lock::canonical_path_parent(&abs)?);
-                    let dest_abs = resolve_path(&cwd, move_path);
+                    let dest_abs = resolve_path(cwd, move_path);
                     dirs.push(crate::dir_lock::canonical_write_lock_dir(&dest_abs)?);
                 } else {
                     dirs.push(crate::dir_lock::canonical_update_lock_dir(&abs)?);
@@ -159,8 +161,7 @@ fn apply_hunks(
         return Err(ApplyPatchFailure::new("No files were modified.", &[]));
     }
 
-    let cwd =
-        std::env::current_dir().map_err(|error| ApplyPatchFailure::new(error.to_string(), &[]))?;
+    let cwd = world.current_dir().to_path_buf();
     let mut changes = Vec::with_capacity(hunks.len());
 
     for hunk in hunks {

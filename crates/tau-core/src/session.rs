@@ -8,7 +8,7 @@
 //! other API mutates the tree, so the on-disk log and the cached
 //! view cannot drift.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -225,6 +225,7 @@ pub struct AgentNode {
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentTree {
     pub(crate) agent_id: AgentId,
+    pub(crate) metadata: BTreeMap<tau_proto::AgentMetadataKey, AgentMetadataEntry>,
     pub(crate) nodes: Vec<AgentNode>,
     pub(crate) head: Option<NodeId>,
     pub(crate) display_name: Option<String>,
@@ -241,6 +242,15 @@ pub struct AgentTree {
     materialized_prompt_count: u64,
     pending_tool_rounds: HashMap<NodeId, PendingToolRound>,
     tool_call_rounds: HashMap<ToolCallId, NodeId>,
+}
+
+/// Latest durable value for one per-agent metadata key.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentMetadataEntry {
+    /// Arbitrary extension-visible CBOR value.
+    pub value: tau_proto::CborValue,
+    /// Whether this entry is copied to child agents at creation time.
+    pub inheritable: bool,
 }
 fn normalize_display_name(value: Option<&str>) -> Option<String> {
     value
@@ -270,6 +280,24 @@ impl AgentTree {
     #[must_use]
     pub fn display_name(&self) -> Option<&str> {
         self.display_name.as_deref()
+    }
+
+    /// Returns latest committed durable metadata entries for this agent.
+    #[must_use]
+    pub fn metadata(&self) -> &BTreeMap<tau_proto::AgentMetadataKey, AgentMetadataEntry> {
+        &self.metadata
+    }
+
+    /// Returns metadata entries marked inheritable for child-agent creation.
+    #[must_use]
+    pub fn inheritable_metadata(
+        &self,
+    ) -> BTreeMap<tau_proto::AgentMetadataKey, AgentMetadataEntry> {
+        self.metadata
+            .iter()
+            .filter(|(_, entry)| entry.inheritable)
+            .map(|(key, entry)| (key.clone(), entry.clone()))
+            .collect()
     }
 
     /// Returns a node by id.
@@ -531,6 +559,7 @@ impl AgentTree {
     pub fn from_events(agent_id: AgentId, events: &[PersistedAgentEvent]) -> Self {
         let mut tree = Self {
             agent_id,
+            metadata: BTreeMap::new(),
             nodes: Vec::new(),
             head: None,
             display_name: None,
@@ -609,6 +638,20 @@ impl AgentTree {
                 if let Some(display_name) = normalize_display_name(Some(&name.display_name)) {
                     self.display_name = Some(display_name);
                 }
+                None
+            }
+            Event::AgentMetadataSet(set) => {
+                self.metadata.insert(
+                    set.key.clone(),
+                    AgentMetadataEntry {
+                        value: set.value.clone(),
+                        inheritable: set.inheritable,
+                    },
+                );
+                None
+            }
+            Event::AgentMetadataUnset(unset) => {
+                self.metadata.remove(&unset.key);
                 None
             }
             Event::AgentPromptSubmitted(prompt) => Some(self.append_node_at(
@@ -815,6 +858,8 @@ impl AgentTree {
                     Ok(())
                 }
             }
+            Event::AgentMetadataSet(set) if set.agent_id == self.agent_id => Ok(()),
+            Event::AgentMetadataUnset(unset) if unset.agent_id == self.agent_id => Ok(()),
             Event::AgentPromptSubmitted(prompt) if prompt.agent_id == self.agent_id => Ok(()),
             Event::AgentUserMessageInjected(injected) if injected.agent_id == self.agent_id => {
                 Ok(())
@@ -1025,7 +1070,8 @@ pub struct PersistedAgentEvent {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AgentMeta {
     /// Working directory at the time of agent creation.
-    pub cwd: Option<PathBuf>,
+    #[serde(default, alias = "cwd", skip_serializing_if = "Option::is_none")]
+    pub starting_cwd: Option<PathBuf>,
     /// Unix epoch seconds when the agent was first created.
     pub created_at: u64,
     /// Unix epoch seconds of the most recent append.
@@ -1048,3 +1094,6 @@ pub struct SessionMeta {
     /// Unix epoch seconds of the most recent membership append.
     pub last_touched: u64,
 }
+
+#[cfg(test)]
+mod tests;

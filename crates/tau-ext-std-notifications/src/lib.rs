@@ -1051,6 +1051,7 @@ fn process_due_idle_hooks<W: Write>(
                 );
                 writer.write_message(&HarnessInputMessage::emit(Event::StartAgentRequest(
                     StartAgentRequest {
+                        parent_agent: None,
                         query_id: query_id.clone(),
                         instruction: SUMMARY_INSTRUCTION.to_owned(),
                         role: None,

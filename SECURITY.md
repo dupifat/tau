@@ -21,11 +21,19 @@ usage across many files, sandbox arbitrary extension code, or prevent protocol
 payloads from being deserialized before the harness validates an operation. Run
 only extensions you trust to execute on your machine.
 
+Per-agent metadata (`agent.metadata_set` / `agent.metadata_unset`) is durable,
+extension-visible, and interceptable by privileged local interceptors. It is a
+coordination mechanism, not a secret store: do not put API keys, tokens, private
+message contents, or other confidential data in metadata. Key ownership is by
+convention (for example `ext_<extension-instance>_cwd`); trusted extensions, UIs,
+and interceptors that can emit protocol events can attempt to write any metadata
+key subject to harness validation.
+
 ## Core shell extension
 
 `std-shell` / `tau-ext-shell` is Tau's local filesystem and subprocess boundary. Its tools can read local files, mutate files, and execute host commands with the user's permissions. Treat shell commands, user `!` commands, and model-requested filesystem writes as local code/data access rather than sandboxed operations.
 
-Read-only shell mode is a defense-in-depth feature. Native filesystem isolation is enforced only when supported and enabled by `enforce_ro_mode`; otherwise `mode: ro` can degrade to ordinary command execution and must not be treated as a hard sandbox. Directory update locks are advisory coordination between Tau agents and ext-shell tools, not an operating-system access-control boundary. They do not prevent commands from writing outside their locked working directory or other local processes from changing files.
+Read-only shell mode is a defense-in-depth feature. Native filesystem isolation is enforced only when supported and enabled by `enforce_ro_mode`; otherwise `mode: ro` can degrade to ordinary command execution and must not be treated as a hard sandbox. Directory update locks are advisory coordination between Tau agents and ext-shell tools, not an operating-system access-control boundary. They do not prevent commands from writing outside their locked working directory or other local processes from changing files. The shell extension remembers each agent's current cwd in durable metadata (`ext_<extension-instance>_cwd`); that value is visible to extensions and should be treated as non-secret path context.
 
 ## Telegram extension
 

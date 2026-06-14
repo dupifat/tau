@@ -29,3 +29,7 @@ Wire identifiers such as `ToolName` and `ToolGroupName` are validated newtypes. 
 ## Compatibility expectations
 
 Prefer additive optional fields with serde defaults for backward compatibility. Required fields should be intentional and covered by tests when missing data would make downstream UI, harness, or provider behavior ambiguous.
+
+## Agent metadata protocol
+
+`agent.metadata_set` and `agent.metadata_unset` are durable, extension-visible agent facts. Metadata keys are strings; values are arbitrary CBOR values capped by `MAX_AGENT_METADATA_VALUE_BYTES`; and `metadata_set.inheritable` controls child-agent copies. Do not classify these events as transient defaults: extensions may subscribe to them for live state, and replay uses the latest folded snapshot before `session.agent_loaded`.

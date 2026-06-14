@@ -53,10 +53,13 @@ is done.
 ## Configuration (harness → extension)
 
 - **`configure`** — Sent point-to-point by the harness to one extension
-  immediately after that extension's `hello`. Carries whatever the `config: { …
-  }` value was for that extension in `harness.yaml`, the extension state
-  directory when available, and authorized secrets. In-process extensions don't
-  carry a supervised config and receive the empty default.
+  immediately after that extension's `hello`. Carries the supervised
+  extension instance name, whatever the `config: { … }` value was for that
+  extension in `harness.yaml`, the extension state directory when available,
+  and authorized secrets. In-process extensions don't carry a supervised
+  config and receive the empty default. Extension authors should use the
+  instance name, not the binary name, when deriving instance-scoped metadata
+  keys such as `ext_<instance>_cwd`.
 - **`config_error`** *(extension → harness)* — An extension reports back that the
   `configure` payload it received was malformed or unusable; the harness
   surfaces the message just like a `harness.yaml` parse error so the user can

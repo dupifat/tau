@@ -397,6 +397,7 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
 fn representative_output_messages() -> Vec<HarnessOutputMessage> {
     vec![
         HarnessOutputMessage::Configure(Configure {
+            instance_name: None,
             config: CborValue::Null,
             state_dir: Some(std::path::PathBuf::from("/tmp/tau/state/ext/demo")),
             secrets: std::collections::BTreeMap::new(),
@@ -777,6 +778,7 @@ fn configure_state_dir_is_optional_for_older_payloads() {
     assert!(parsed.secrets.is_empty());
 
     let with_state = Configure {
+        instance_name: None,
         config: CborValue::Null,
         state_dir: Some(std::path::PathBuf::from("/tmp/tau/state/ext/demo")),
         secrets: std::collections::BTreeMap::new(),
@@ -790,6 +792,7 @@ fn configure_state_dir_is_optional_for_older_payloads() {
     assert_eq!(decoded, with_state);
 
     let without_state = serde_json::to_value(Configure {
+        instance_name: None,
         config: CborValue::Null,
         state_dir: None,
         secrets: std::collections::BTreeMap::new(),
@@ -807,6 +810,7 @@ fn configure_secrets_round_trip_and_debug_redacts_values() {
     let mut secrets = std::collections::BTreeMap::new();
     secrets.insert("mail_password".to_owned(), SecretValue::new("super-secret"));
     let configure = Configure {
+        instance_name: None,
         config: CborValue::Null,
         state_dir: None,
         secrets,
@@ -1269,6 +1273,16 @@ fn event_defaults_to_transient_marks_progress_kinds() {
         Event::SessionAgentLoaded(SessionAgentLoaded {
             session_id: "s1".into(),
             agent_id: agent_id("worker"),
+        }),
+        Event::AgentMetadataSet(AgentMetadataSet {
+            agent_id: agent_id("worker"),
+            key: AgentMetadataKey::new("ext_core-shell_cwd"),
+            value: CborValue::Text("/tmp".to_owned()),
+            inheritable: true,
+        }),
+        Event::AgentMetadataUnset(AgentMetadataUnset {
+            agent_id: agent_id("worker"),
+            key: AgentMetadataKey::new("ext_core-shell_cwd"),
         }),
         Event::ToolError(ToolError {
             call_id: "call-1".into(),

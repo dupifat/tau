@@ -88,7 +88,7 @@ impl Drop for DaemonHandle {
 ///
 /// - `None` → mint `<basename(cwd)>-<rand6>`.
 /// - `Some("")` (bare `-r`) → interactively pick among recent sessions whose
-///   `meta.json.cwd` matches cwd; if none, mint fresh.
+///   `meta.json.starting_cwd` matches cwd; if none, mint fresh.
 /// - `Some(id)` → resume that explicit id; error if it does not exist.
 pub(crate) fn resolve_run_session_id(
     resume: Option<&str>,

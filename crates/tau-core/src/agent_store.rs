@@ -491,8 +491,8 @@ impl AgentStore {
         if meta.created_at == 0 {
             meta.created_at = now;
         }
-        if meta.cwd.is_none() {
-            meta.cwd = cwd;
+        if meta.starting_cwd.is_none() {
+            meta.starting_cwd = cwd;
         }
         meta.last_touched = now;
         if meta.last_user_interaction_time == 0 {

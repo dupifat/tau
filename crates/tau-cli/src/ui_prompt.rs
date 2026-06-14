@@ -14,6 +14,7 @@ pub(crate) fn create_user_agent_prompt(
     prompt: impl Into<String>,
 ) -> Event {
     Event::UiCreateAgent(UiCreateAgent {
+        parent_agent: None,
         session_id: session_id.into(),
         role: role.into(),
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),

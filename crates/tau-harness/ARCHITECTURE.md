@@ -33,9 +33,13 @@ The session store owns durable membership facts such as
 `session.shutdown` are must-pass, immutable runtime/current-session snapshot
 facts, but they are not folded into the durable session membership store. Agent
 stores own durable transcript facts, including `agent.started`, prompt facts,
-provider/tool results, and harness-owned inter-agent message projections. Tests
-should assert durable stores, not only runtime delivery, when changing durable
-facts.
+provider/tool results, harness-owned inter-agent message projections, and
+per-agent metadata set/unset facts. Metadata is committed through the same
+interceptable publish path as other ordinary events; the folded latest metadata
+snapshot is replayed to subscribers before `session.agent_loaded`, and
+inheritable entries are copied to child agents when an explicit or derived
+parent is known. Tests should assert durable stores, not only runtime delivery,
+when changing durable facts.
 
 ## Extension boundary
 

@@ -11,10 +11,10 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ActionInvocationId, AgentContextKey, AgentId, AgentMessageId, AgentPromptId, CborValue,
-    ContextItem, DiffSummary, EventCategory, EventName, ExtensionInstanceId, ExtensionName,
-    ModelId, PromptContext, PromptFragment, ProviderResponseItem, ProviderTokenUsage, SessionId,
-    SkillName, ToolCallId, ToolDefinition, ToolGroupName, ToolName,
+    ActionInvocationId, AgentContextKey, AgentId, AgentMessageId, AgentMetadataKey, AgentPromptId,
+    CborValue, ContextItem, DiffSummary, EventCategory, EventName, ExtensionInstanceId,
+    ExtensionName, ModelId, PromptContext, PromptFragment, ProviderResponseItem,
+    ProviderTokenUsage, SessionId, SkillName, ToolCallId, ToolDefinition, ToolGroupName, ToolName,
 };
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -1683,12 +1683,41 @@ pub struct AgentHeadMoved {
 pub struct AgentStarted {
     /// Durable agent this log belongs to.
     pub agent_id: AgentId,
+    /// Optional parent agent whose inheritable metadata was copied at creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_agent: Option<AgentId>,
     /// Agent role used to build prompts for this agent.
     pub role: String,
     /// Optional human-friendly name for presenting this agent in UIs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
 }
+
+/// Durable per-agent metadata value update.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentMetadataSet {
+    /// Agent whose metadata map is updated.
+    pub agent_id: AgentId,
+    /// Metadata key to replace.
+    pub key: AgentMetadataKey,
+    /// Arbitrary CBOR metadata value.
+    pub value: CborValue,
+    /// Whether this key is copied to newly-created child agents.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub inheritable: bool,
+}
+
+/// Durable per-agent metadata deletion.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentMetadataUnset {
+    /// Agent whose metadata map is updated.
+    pub agent_id: AgentId,
+    /// Metadata key to delete.
+    pub key: AgentMetadataKey,
+}
+
+pub const MAX_AGENT_METADATA_VALUE_BYTES: usize = 64 * 1024;
+pub const MAX_AGENT_METADATA_KEY_BYTES: usize = 256;
 
 /// Durable fact that updates an agent's human-friendly display name.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1749,6 +1778,9 @@ pub struct StartAgentRequest {
     /// `tool_call_id` is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_name: Option<String>,
+    /// Optional parent agent whose inheritable metadata should be copied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_agent: Option<AgentId>,
 }
 
 /// A [`StartAgentRequest`] was accepted for side-agent startup.
@@ -2227,6 +2259,9 @@ pub struct UiCreateAgent {
     /// `initial_prompt`, when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ctx_id: Option<String>,
+    /// Optional parent agent whose inheritable metadata should be copied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_agent: Option<AgentId>,
 }
 
 /// UI request to set a durable agent display name.
@@ -3143,6 +3178,10 @@ pub enum Event {
     AgentStarted(AgentStarted),
     #[serde(rename = "agent.display_name_set")]
     AgentDisplayNameSet(AgentDisplayNameSet),
+    #[serde(rename = "agent.metadata_set")]
+    AgentMetadataSet(AgentMetadataSet),
+    #[serde(rename = "agent.metadata_unset")]
+    AgentMetadataUnset(AgentMetadataUnset),
 
     // Session lifecycle/membership
     #[serde(rename = "session.started")]
@@ -3252,6 +3291,8 @@ impl Event {
             Self::AgentCompactionTriggered(_) => EventName::AGENT_COMPACTION_TRIGGERED,
             Self::AgentStarted(_) => EventName::AGENT_STARTED,
             Self::AgentDisplayNameSet(_) => EventName::AGENT_DISPLAY_NAME_SET,
+            Self::AgentMetadataSet(_) => EventName::AGENT_METADATA_SET,
+            Self::AgentMetadataUnset(_) => EventName::AGENT_METADATA_UNSET,
             Self::SessionStarted(_) => EventName::SESSION_STARTED,
             Self::SessionShutdown(_) => EventName::SESSION_SHUTDOWN,
             Self::SessionAgentLoaded(_) => EventName::SESSION_AGENT_LOADED,

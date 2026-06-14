@@ -39,7 +39,7 @@ When `dir_lock.enable` is true (the default), these mutating tools acquire autom
 
 - `edit`: locks the target file parent. Existing final symlinks are followed to the real edited file. If parents are missing, it locks the deepest existing ancestor so line-oriented create/overwrite behavior remains intact.
 - `apply_patch`: parses the patch and locks all touched source and destination directories as one FIFO request.
-- `shell` and `gpt_shell` with `mode: "rw"`: lock the canonical `cwd`, or the extension process cwd when `cwd` is omitted. `mode: "ro"` declares a read-only command and skips automatic update locking.
+- `shell` and `gpt_shell` with `mode: "rw"`: lock the canonical `cwd`, or the agent's remembered cwd when `cwd` is omitted. `mode: "ro"` declares a read-only command and skips automatic update locking. Relative `apply_patch`, `dir_lock`, and filesystem-tool paths are resolved against the same remembered cwd before lock selection/execution. Once lock selection starts, the tool executes with that cwd snapshot even if later cwd metadata commits while it is waiting.
 
 Automatic locks are held only for the tool invocation duration. They serialize with manual locks and with other automatic mutating calls. When the calling agent already owns a covering manual lock, automatic calls under that lock reenter the same writer section and do not wait on same-owner automatic calls; other agents remain blocked until the manual lock is released and all active automatic calls finish. Lock waiters do not consume the ext-shell worker semaphore; the semaphore is acquired only after the lock is granted.
 

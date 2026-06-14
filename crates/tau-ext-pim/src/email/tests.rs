@@ -3541,6 +3541,7 @@ fn configure_requires_state_dir_and_rejected_config_is_reported() {
     let _tool = drain_startup(&mut pair.reader);
     pair.writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            instance_name: None,
             config: CborValue::Map(Vec::new()),
             state_dir: None,
             secrets: configure_secrets(),

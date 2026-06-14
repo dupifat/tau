@@ -115,6 +115,14 @@ of an agent log.
 - **`agent.display_name_set`** — Durable fact that changes an agent's
   human-friendly display name. Carries `agent_id` and the new non-empty display
   name; UIs use it when rendering agent chips and history.
+- **`agent.metadata_set`** / **`agent.metadata_unset`** — Durable,
+  interceptable per-agent metadata updates. Keys are strings, values are
+  arbitrary CBOR capped at 64 KiB, and `metadata_set` carries an `inheritable`
+  flag copied to child agents at creation time. Extensions use these facts for
+  extension-visible state such as `ext_core-shell_cwd`.
+- **`agent.started`** — Durable creation fact for an agent. It carries optional
+  `parent_agent`; inheritable metadata from that parent is copied into the new
+  agent after this fact commits and before the agent is announced loaded.
 - **`agent.head_moved`** — Durable fact that changes an agent's selected tree
   head after navigation, so future prompts branch from the requested node.
 

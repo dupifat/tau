@@ -35,7 +35,7 @@ pub use policy::{
 };
 pub use session::{
     AgentEntry, AgentEventParent, AgentEventValidationError, AgentMessageDirection, AgentMeta,
-    AgentNode, AgentTree, BackgroundToolCallState, BackgroundToolCompletion,
+    AgentMetadataEntry, AgentNode, AgentTree, BackgroundToolCallState, BackgroundToolCompletion,
     BackgroundToolPlaceholder, NodeId, PersistedAgentEvent, PersistedAgentEventSeq, SessionMeta,
 };
 pub use session_store::{

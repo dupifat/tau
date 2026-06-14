@@ -723,7 +723,7 @@ mod tests {
         let suffix_len = format!("\n\n[{notice}]").len();
         let output = append_notices_within_cap(
             format!("{}étail", "x".repeat(MAX_OUTPUT_BYTES - suffix_len - 1)),
-            &[notice.clone()],
+            std::slice::from_ref(&notice),
         );
 
         assert!(output.len() <= MAX_OUTPUT_BYTES);

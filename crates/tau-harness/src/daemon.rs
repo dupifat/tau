@@ -512,6 +512,7 @@ pub fn send_daemon_message_with_trace(
     let ctx_id = next_ctx_id();
     peer.send(&HarnessInputMessage::emit(Event::UiCreateAgent(
         UiCreateAgent {
+            parent_agent: None,
             session_id: session_id.into(),
             role: "senior-engineer".to_owned(),
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),

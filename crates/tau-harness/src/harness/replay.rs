@@ -103,6 +103,21 @@ impl Harness {
         };
 
         for agent_id in &loaded_agents {
+            if let Ok(Some(tree)) = self.agent_store.load_agent(agent_id.as_str()) {
+                for (key, entry) in tree.metadata() {
+                    let event = Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+                        agent_id: agent_id.clone(),
+                        key: key.clone(),
+                        value: entry.value.clone(),
+                        inheritable: entry.inheritable,
+                    });
+                    if selector_matches_event(selectors, &event) {
+                        let _ =
+                            self.bus
+                                .send_to(client_id, None, HarnessOutputMessage::deliver(event));
+                    }
+                }
+            }
             let event = Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                 session_id: self.current_session_id.clone(),
                 agent_id: agent_id.clone(),

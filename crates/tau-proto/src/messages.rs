@@ -82,6 +82,9 @@ pub struct Disconnect {
 pub struct Configure {
     /// Free-form extension configuration from harness settings.
     pub config: CborValue,
+    /// Configured extension instance name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_name: Option<ExtensionName>,
     /// Persistent directory reserved for this extension's runtime state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_dir: Option<PathBuf>,

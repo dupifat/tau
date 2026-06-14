@@ -622,6 +622,15 @@ impl Harness {
                          publishing original instead",
                     );
                     Some(original_event)
+                } else if let Err(error) = self.validate_agent_metadata_event(&new_event) {
+                    tracing::warn!(
+                        target: "tau_harness::interception",
+                        event = %event_name,
+                        %error,
+                        "interceptor returned invalid agent metadata; \
+                         publishing original instead",
+                    );
+                    Some(original_event)
                 } else {
                     Some(new_event)
                 }

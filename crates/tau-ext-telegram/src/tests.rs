@@ -511,6 +511,7 @@ fn run_exits_after_register_then_disconnect() {
     secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("token"));
     writer
         .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            instance_name: None,
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "bot_token_secret": "bot",
                 "allowed_user_ids": [123],

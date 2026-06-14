@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -25,6 +25,7 @@ use tracing::{debug, trace};
 mod agents;
 mod argument;
 mod config;
+mod cwd_state;
 mod diff;
 mod dir_lock;
 mod display;
@@ -38,16 +39,18 @@ mod tests;
 
 use crate::agents::{ancestor_dirs, discover_session_agents_files};
 use crate::config::{ExtConfig, ShellConfig};
+use crate::cwd_state::CwdState;
 use crate::dir_lock::{DIR_LOCK_TOOL_NAME, DirLockManager};
 use crate::scheduler::{WorkMeta, WorkPriority, WorkScheduler};
 #[cfg(any(test, feature = "echo-agent"))]
 use crate::tools::ECHO_TOOL_NAME;
 use crate::tools::{
-    APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, FIND_TOOL_NAME, GPT_SHELL_TOOL_NAME, GREP_TOOL_NAME,
-    LS_TOOL_NAME, READ_TOOL_NAME, SHELL_TOOL_NAME, execute_tool,
+    APPLY_PATCH_TOOL_NAME, CD_TOOL_NAME, EDIT_TOOL_NAME, FIND_TOOL_NAME, GPT_SHELL_TOOL_NAME,
+    GREP_TOOL_NAME, LS_TOOL_NAME, READ_TOOL_NAME, SHELL_TOOL_NAME, execute_tool,
 };
 
 const SHELL_DIR_FORCE_UNLOCK_ACTION_ID: &str = "shell.dir.force_unlock";
+
 const SLOW_LOCK_WAIT_THRESHOLD_SECS: u64 = 5;
 const LOCK_WAIT_DURATION_SECONDS_HEADER: &str = "lock_wait_duration_seconds";
 
@@ -358,6 +361,21 @@ where
             background_support: None,
         },
         ToolSpec {
+            name: tau_proto::ToolName::new(CD_TOOL_NAME),
+            model_visible_name: None,
+            description: Some("Change the remembered working directory for this shell extension instance.".to_owned()),
+            tool_type: tau_proto::ToolType::Function,
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": { "path": { "type": "string", "description": "Directory to switch to" } },
+                "required": ["path"],
+                "additionalProperties": false
+            })),
+            format: None,
+            enabled_by_default: true,
+            background_support: None,
+        },
+        ToolSpec {
             name: tau_proto::ToolName::new(SHELL_TOOL_NAME),
             model_visible_name: None,
             description: Some(
@@ -455,6 +473,8 @@ where
         tau_proto::EventName::SESSION_STARTED,
         tau_proto::EventName::SESSION_AGENT_LOADED,
         tau_proto::EventName::SESSION_AGENT_UNLOADED,
+        tau_proto::EventName::AGENT_METADATA_SET,
+        tau_proto::EventName::AGENT_METADATA_UNSET,
         tau_proto::EventName::SESSION_SHUTDOWN,
         tau_proto::EventName::AGENT_START_ACCEPTED,
         tau_proto::EventName::AGENT_START_RESULT,
@@ -496,6 +516,7 @@ where
         HashMap::<tau_proto::ToolCallId, mpsc::Sender<()>>::new(),
     ));
     let lock_manager = DirLockManager::default();
+    let cwd_state = CwdState::new();
     let mut start_agent_owners = HashMap::<String, tau_proto::AgentId>::new();
 
     // Writer thread: drains response messages and writes them to the wire.
@@ -523,6 +544,9 @@ where
                     Ok(mut cfg) => {
                         if cfg.working_directory.is_none() {
                             cfg.working_directory = config.working_directory.clone();
+                        }
+                        if let Some(instance_name) = msg.instance_name.as_ref() {
+                            cwd_state.set_instance_name(instance_name.as_str().to_owned());
                         }
                         if let Err(message) =
                             apply_working_directory(&config, &cfg, runtime_started)
@@ -578,6 +602,7 @@ where
                             config.clone(),
                             lock_manager.clone(),
                             Arc::clone(&running_shells),
+                            cwd_state.clone(),
                         ) {
                             let (invoke, failure) = *error;
                             send_tool_failure(invoke, failure, &tx);
@@ -587,12 +612,157 @@ where
                         dispatch_session_started(started, &tx);
                     }
                     Event::SessionAgentLoaded(loaded) => {
-                        dispatch_session_agent_loaded(loaded, &tx);
+                        dispatch_session_agent_loaded(loaded, &tx, &cwd_state);
                     }
                     Event::SessionAgentUnloaded(unloaded) => {
                         lock_manager.release_agent(&unloaded.agent_id);
                         scheduler.cancel_agent(&unloaded.agent_id);
+                        cwd_state.unset(&unloaded.agent_id);
+                        cwd_state.take_pending_ready(&unloaded.agent_id);
+                        cwd_state.take_pending_notice(&unloaded.agent_id);
+                        cwd_state.take_pending_cd_result(&unloaded.agent_id);
                         start_agent_owners.retain(|_, agent_id| agent_id != &unloaded.agent_id);
+                    }
+                    Event::AgentMetadataSet(set) => {
+                        if set.key == cwd_state.key()
+                            && let CborValue::Text(path) = set.value
+                        {
+                            let cwd = PathBuf::from(path);
+                            let agent_id = set.agent_id;
+                            cwd_state.set(agent_id.clone(), cwd.clone());
+                            let _ = tx.send(HarnessInputMessage::emit(cwd_context_event(
+                                agent_id.clone(),
+                                &cwd,
+                            )));
+                            if cwd_state.take_pending_notice(&agent_id).is_some() {
+                                let _ = tx.send(HarnessInputMessage::emit(cwd_notice_event(
+                                    agent_id.clone(),
+                                    &cwd,
+                                )));
+                            }
+                            if let Some(pending_cd) =
+                                cwd_state.take_committed_pending_cd_result(&agent_id, &cwd)
+                            {
+                                if pending_cd.matched_request {
+                                    let output = crate::tools::cd::output(cwd.as_path());
+                                    let event = Event::ToolResult(ToolResult {
+                                        call_id: pending_cd.invoke.call_id,
+                                        tool_name: pending_cd.invoke.tool_name,
+                                        tool_type: tau_proto::ToolType::Function,
+                                        result: output.result,
+                                        kind: ToolResultKind::Final,
+                                        display: Some(output.display),
+                                        originator: pending_cd.invoke.originator,
+                                    });
+                                    let _ = tx.send(HarnessInputMessage::emit(
+                                        with_lock_wait_duration(
+                                            event,
+                                            pending_cd.lock_wait_duration_seconds,
+                                        ),
+                                    ));
+                                } else {
+                                    let event = Event::ToolError(tau_proto::ToolError {
+                                        call_id: pending_cd.invoke.call_id,
+                                        tool_name: pending_cd.invoke.tool_name,
+                                        tool_type: tau_proto::ToolType::Function,
+                                        message: format!(
+                                            "committed cwd metadata did not match requested cwd; cwd changed to {}",
+                                            cwd.display()
+                                        ),
+                                        details: None,
+                                        display: None,
+                                        originator: pending_cd.invoke.originator,
+                                    });
+                                    let _ = tx.send(HarnessInputMessage::emit(
+                                        with_lock_wait_duration(
+                                            event,
+                                            pending_cd.lock_wait_duration_seconds,
+                                        ),
+                                    ));
+                                }
+                            }
+                            if let Some(session_id) = cwd_state.take_pending_ready(&agent_id) {
+                                let _ = tx.send(HarnessInputMessage::emit(
+                                    Event::ExtensionContextReady(ExtensionContextReady {
+                                        session_id,
+                                        agent_id,
+                                    }),
+                                ));
+                            }
+                        } else if set.key == cwd_state.key() {
+                            let agent_id = set.agent_id;
+                            let cwd = cwd_state.get_or_default(&agent_id);
+                            let _ = tx.send(HarnessInputMessage::emit(cwd_context_event(
+                                agent_id.clone(),
+                                &cwd,
+                            )));
+                            cwd_state.take_pending_notice(&agent_id);
+                            if let Some(pending_cd) = cwd_state.take_pending_cd_result(&agent_id) {
+                                let event = Event::ToolError(tau_proto::ToolError {
+                                    call_id: pending_cd.invoke.call_id,
+                                    tool_name: pending_cd.invoke.tool_name,
+                                    tool_type: tau_proto::ToolType::Function,
+                                    message:
+                                        "committed cwd metadata value is not text; cwd unchanged"
+                                            .to_owned(),
+                                    details: None,
+                                    display: None,
+                                    originator: pending_cd.invoke.originator,
+                                });
+                                let _ =
+                                    tx.send(HarnessInputMessage::emit(with_lock_wait_duration(
+                                        event,
+                                        pending_cd.lock_wait_duration_seconds,
+                                    )));
+                            }
+                            if let Some(session_id) = cwd_state.take_pending_ready(&agent_id) {
+                                let _ = tx.send(HarnessInputMessage::emit(
+                                    Event::ExtensionContextReady(ExtensionContextReady {
+                                        session_id,
+                                        agent_id,
+                                    }),
+                                ));
+                            }
+                        }
+                    }
+                    Event::AgentMetadataUnset(unset) => {
+                        if unset.key == cwd_state.key() {
+                            cwd_state.unset(&unset.agent_id);
+                            let cwd = cwd_state.get_or_default(&unset.agent_id);
+                            let _ = tx.send(HarnessInputMessage::emit(cwd_context_event(
+                                unset.agent_id.clone(),
+                                &cwd,
+                            )));
+                            cwd_state.take_pending_notice(&unset.agent_id);
+                            if let Some(pending_cd) =
+                                cwd_state.take_pending_cd_result(&unset.agent_id)
+                            {
+                                let event = Event::ToolError(tau_proto::ToolError {
+                                    call_id: pending_cd.invoke.call_id,
+                                    tool_name: pending_cd.invoke.tool_name,
+                                    tool_type: tau_proto::ToolType::Function,
+                                    message: "committed cwd metadata was unset; cwd reverted to the process default"
+                                        .to_owned(),
+                                    details: None,
+                                    display: None,
+                                    originator: pending_cd.invoke.originator,
+                                });
+                                let _ =
+                                    tx.send(HarnessInputMessage::emit(with_lock_wait_duration(
+                                        event,
+                                        pending_cd.lock_wait_duration_seconds,
+                                    )));
+                            }
+                            if let Some(session_id) = cwd_state.take_pending_ready(&unset.agent_id)
+                            {
+                                let _ = tx.send(HarnessInputMessage::emit(
+                                    Event::ExtensionContextReady(ExtensionContextReady {
+                                        session_id,
+                                        agent_id: unset.agent_id,
+                                    }),
+                                ));
+                            }
+                        }
                     }
                     Event::SessionShutdown(_) => {
                         lock_manager.release_all_manual();
@@ -793,6 +963,89 @@ fn action_error(invoke: ActionInvoke, message: String) -> Event {
     })
 }
 
+fn rewrite_invoke_for_cwd(
+    mut invoke: tau_proto::ToolStarted,
+    cwd_state: &CwdState,
+    tx: &mpsc::Sender<HarnessInputMessage>,
+) -> tau_proto::ToolStarted {
+    if invoke.tool_name == CD_TOOL_NAME {
+        return invoke;
+    }
+    let base = cwd_state.get_or_default(&invoke.agent_id);
+    let field = match invoke.tool_name.as_str() {
+        SHELL_TOOL_NAME | GPT_SHELL_TOOL_NAME => "cwd",
+        READ_TOOL_NAME | EDIT_TOOL_NAME | FIND_TOOL_NAME | GREP_TOOL_NAME | LS_TOOL_NAME => "path",
+        DIR_LOCK_TOOL_NAME => "directory",
+        _ => return invoke,
+    };
+    let explicit_path = cbor_optional_text(&invoke.arguments, field);
+    let Some(path) = explicit_path
+        .clone()
+        .or_else(|| matches!(field, "path").then(|| ".".to_owned()))
+        .or_else(|| (field == "cwd").then(|| base.display().to_string()))
+    else {
+        return invoke;
+    };
+    let path = PathBuf::from(path);
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        base.join(path)
+    };
+    if let Some(canonical) = canonicalize_existing_dir_for_cwd_field(&absolute, field) {
+        if field == "cwd" && explicit_path.is_some() {
+            cwd_state.set_pending_notice(invoke.agent_id.clone(), canonical.clone());
+            let _ = tx.send(HarnessInputMessage::emit(Event::AgentMetadataSet(
+                tau_proto::AgentMetadataSet {
+                    agent_id: invoke.agent_id.clone(),
+                    key: cwd_state.key(),
+                    value: CborValue::Text(canonical.display().to_string()),
+                    inheritable: true,
+                },
+            )));
+        }
+        set_cbor_text_field(
+            &mut invoke.arguments,
+            field,
+            canonical.display().to_string(),
+        );
+    } else {
+        set_cbor_text_field(&mut invoke.arguments, field, absolute.display().to_string());
+    }
+    invoke
+}
+
+fn canonicalize_existing_dir_for_cwd_field(path: &Path, field: &str) -> Option<PathBuf> {
+    (field == "cwd" || field == "directory" || field == "path")
+        .then(|| path.canonicalize().ok())
+        .flatten()
+        .filter(|path| path.is_dir())
+}
+
+fn cbor_optional_text(arguments: &CborValue, field: &str) -> Option<String> {
+    let CborValue::Map(entries) = arguments else {
+        return None;
+    };
+    entries.iter().find_map(|(key, value)| match (key, value) {
+        (CborValue::Text(key), CborValue::Text(value)) if key == field => Some(value.clone()),
+        _ => None,
+    })
+}
+
+fn set_cbor_text_field(arguments: &mut CborValue, field: &str, value: String) {
+    let CborValue::Map(entries) = arguments else {
+        return;
+    };
+    if let Some((_, existing)) = entries
+        .iter_mut()
+        .find(|(key, _)| matches!(key, CborValue::Text(key) if key == field))
+    {
+        *existing = CborValue::Text(value);
+    } else {
+        entries.push((CborValue::Text(field.to_owned()), CborValue::Text(value)));
+    }
+}
+
 fn schedule_tool_started(
     invoke: tau_proto::ToolStarted,
     scheduler: &WorkScheduler,
@@ -800,6 +1053,7 @@ fn schedule_tool_started(
     config: ExtConfig,
     lock_manager: DirLockManager,
     running_shells: Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
+    cwd_state: CwdState,
 ) -> Result<(), Box<(tau_proto::ToolStarted, crate::display::ToolFailure)>> {
     let priority = priority_for_tool(&invoke, &config);
     let meta = WorkMeta {
@@ -812,6 +1066,7 @@ fn schedule_tool_started(
     let invoke_for_error = invoke.clone();
     scheduler
         .enqueue(priority, meta, move || {
+            let invoke = rewrite_invoke_for_cwd(invoke, &cwd_state, &tx_for_job);
             if invoke.tool_name == DIR_LOCK_TOOL_NAME {
                 crate::dir_lock::dispatch_dir_lock_tool(
                     invoke,
@@ -827,6 +1082,7 @@ fn schedule_tool_started(
                     &running_shells,
                     &lock_manager,
                     config.enforce_ro_mode,
+                    cwd_state.clone(),
                 );
             } else {
                 dispatch_tool_invoke(
@@ -836,6 +1092,8 @@ fn schedule_tool_started(
                     &running_shells,
                     None,
                     config.enforce_ro_mode,
+                    cwd_state.clone(),
+                    None,
                 );
             }
         })
@@ -950,10 +1208,13 @@ fn dispatch_locked_tool_invoke(
     running_shells: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
     lock_manager: &DirLockManager,
     enforce_ro_mode: bool,
+    cwd_state: CwdState,
 ) {
-    let dirs = match crate::dir_lock::automatic_lock_dirs_for_tool(
+    let cwd = cwd_state.get_or_default(&invoke.agent_id);
+    let dirs = match crate::dir_lock::automatic_lock_dirs_for_tool_in_dir(
         invoke.tool_name.as_str(),
         &invoke.arguments,
+        &cwd,
     ) {
         Ok(Some(dirs)) => crate::dir_lock::normalize_lock_dirs(dirs),
         Ok(None) => {
@@ -964,6 +1225,8 @@ fn dispatch_locked_tool_invoke(
                 running_shells,
                 None,
                 enforce_ro_mode,
+                cwd_state.clone(),
+                Some(cwd.clone()),
             );
             return;
         }
@@ -1024,6 +1287,8 @@ fn dispatch_locked_tool_invoke(
         running_shells,
         lock_wait_duration_seconds,
         enforce_ro_mode,
+        cwd_state,
+        Some(cwd),
     );
     drop(guard);
 }
@@ -1138,6 +1403,7 @@ fn lock_wait_duration_entry(seconds: u64) -> (CborValue, CborValue) {
 }
 
 /// Execute a single tool invocation and send the response event(s).
+#[allow(clippy::too_many_arguments)]
 fn dispatch_tool_invoke(
     invoke: tau_proto::ToolStarted,
     shell_config: ShellConfig,
@@ -1145,13 +1411,49 @@ fn dispatch_tool_invoke(
     running_shells: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
     lock_wait_duration_seconds: Option<u64>,
     enforce_ro_mode: bool,
+    cwd_state: CwdState,
+    frozen_cwd: Option<PathBuf>,
 ) {
+    if invoke.tool_name == CD_TOOL_NAME {
+        let base = cwd_state.get_or_default(&invoke.agent_id);
+        let agent_id = invoke.agent_id.clone();
+        match crate::tools::cd::target_dir(&invoke.arguments, &base) {
+            Ok(path) => match cwd_state.start_pending_cd_result(
+                agent_id.clone(),
+                path.clone(),
+                invoke,
+                lock_wait_duration_seconds,
+            ) {
+                Ok(()) => {
+                    cwd_state.set_pending_notice(agent_id.clone(), path.clone());
+                    let metadata = Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+                        agent_id,
+                        key: cwd_state.key(),
+                        value: CborValue::Text(path.display().to_string()),
+                        inheritable: true,
+                    });
+                    let _ = tx.send(HarnessInputMessage::emit(metadata));
+                }
+                Err(invoke) => send_tool_failure(
+                    *invoke,
+                    crate::display::ToolFailure::new(
+                        "another cwd change is already pending for this agent",
+                    ),
+                    tx,
+                ),
+            },
+            Err(failure) => send_tool_failure(invoke, failure, tx),
+        }
+        return;
+    }
+    let tool_cwd = frozen_cwd.unwrap_or_else(|| cwd_state.get_or_default(&invoke.agent_id));
     let vcr_config = tau_vcr::VcrConfig::from_env();
-    let world = match crate::tools::world::ShellWorld::for_tool(
+    let world = match crate::tools::world::ShellWorld::for_tool_in_dir(
         invoke.tool_name.as_str(),
         invoke.call_id.as_str(),
         &invoke.arguments,
         vcr_config,
+        tool_cwd,
     ) {
         Ok(world) => world,
         Err(crate::display::ToolFailure {
@@ -1311,22 +1613,48 @@ fn dispatch_session_started(started: SessionStarted, tx: &mpsc::Sender<HarnessIn
 fn dispatch_session_agent_loaded(
     loaded: SessionAgentLoaded,
     tx: &mpsc::Sender<HarnessInputMessage>,
+    cwd_state: &CwdState,
 ) {
-    if let Ok(cwd) = std::env::current_dir() {
-        let _ = tx.send(HarnessInputMessage::emit(Event::ExtAgentContextPublish(
-            ExtAgentContextPublish {
-                agent_id: loaded.agent_id.clone(),
-                key: AgentContextKey::new("cwd"),
-                value: AgentContextValue(serde_json::Value::String(cwd.display().to_string())),
+    if let Some(cwd) = cwd_state.get(&loaded.agent_id) {
+        let _ = tx.send(HarnessInputMessage::emit(cwd_context_event(
+            loaded.agent_id.clone(),
+            &cwd,
+        )));
+        let _ = tx.send(HarnessInputMessage::emit(Event::ExtensionContextReady(
+            ExtensionContextReady {
+                session_id: loaded.session_id,
+                agent_id: loaded.agent_id,
             },
         )));
+        return;
     }
-    let _ = tx.send(HarnessInputMessage::emit(Event::ExtensionContextReady(
-        ExtensionContextReady {
-            session_id: loaded.session_id,
+
+    let cwd = CwdState::process_default();
+    cwd_state.set_pending_ready(loaded.agent_id.clone(), loaded.session_id);
+    let _ = tx.send(HarnessInputMessage::emit(Event::AgentMetadataSet(
+        tau_proto::AgentMetadataSet {
             agent_id: loaded.agent_id,
+            key: cwd_state.key(),
+            value: CborValue::Text(cwd.display().to_string()),
+            inheritable: true,
         },
     )));
+}
+
+fn cwd_context_event(agent_id: tau_proto::AgentId, cwd: &Path) -> Event {
+    Event::ExtAgentContextPublish(ExtAgentContextPublish {
+        agent_id,
+        key: AgentContextKey::new("cwd"),
+        value: AgentContextValue(serde_json::Value::String(cwd.display().to_string())),
+    })
+}
+
+fn cwd_notice_event(agent_id: tau_proto::AgentId, cwd: &Path) -> Event {
+    Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+        agent_id,
+        text: format!("Your working directory changed to {}.", cwd.display()),
+        message_class: tau_proto::PromptMessageClass::Internal,
+    })
 }
 
 fn is_shell_tool(name: &str) -> bool {
@@ -1338,6 +1666,7 @@ fn is_shell_tool(name: &str) -> bool {
             | GREP_TOOL_NAME
             | FIND_TOOL_NAME
             | LS_TOOL_NAME
+            | CD_TOOL_NAME
             | SHELL_TOOL_NAME
             | GPT_SHELL_TOOL_NAME
             | DIR_LOCK_TOOL_NAME

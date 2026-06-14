@@ -1021,7 +1021,7 @@ struct PendingStartAgentRequest {
     query: tau_proto::StartAgentRequest,
     role: String,
     cid: AgentId,
-    parent_cid: AgentId,
+    parent_cid: Option<AgentId>,
     agent_id: String,
     pending_agent_messages: VecDeque<PendingPrompt>,
 }
@@ -2938,6 +2938,8 @@ impl Harness {
         match event {
             Event::AgentStarted(started) => Some(started.agent_id.clone()),
             Event::AgentDisplayNameSet(name) => Some(name.agent_id.clone()),
+            Event::AgentMetadataSet(set) => Some(set.agent_id.clone()),
+            Event::AgentMetadataUnset(unset) => Some(unset.agent_id.clone()),
             Event::AgentPromptSubmitted(prompt) => Some(prompt.agent_id.clone()),
             Event::AgentPromptSteered(prompt) => Some(prompt.agent_id.clone()),
             Event::AgentCompactionTriggered(triggered) => Some(triggered.agent_id.clone()),
@@ -4127,6 +4129,28 @@ impl Harness {
             Event::ExtPromptSubmitRequest(request) => {
                 self.handle_extension_prompt_submit_request(request)?;
             }
+            Event::AgentMetadataSet(set) => {
+                if self.validate_agent_metadata_set(&set).is_ok() {
+                    self.enqueue_publish(
+                        Some(source_id),
+                        Event::AgentMetadataSet(set),
+                        false,
+                        false,
+                        None,
+                    );
+                }
+            }
+            Event::AgentMetadataUnset(unset) => {
+                if self.validate_agent_metadata_unset(&unset).is_ok() {
+                    self.enqueue_publish(
+                        Some(source_id),
+                        Event::AgentMetadataUnset(unset),
+                        false,
+                        false,
+                        None,
+                    );
+                }
+            }
             Event::StartAgentRequest(query) => {
                 if self.should_stage_extension_capabilities(source_id) {
                     self.stage_start_agent_request(source_id, query);
@@ -4288,6 +4312,30 @@ impl Harness {
             Event::UiSwitchSession(req) => self.handle_ui_switch_session(client_id, req),
             Event::UiCreateAgent(req) => self.handle_ui_create_agent(req),
             Event::UiSetAgentDisplayName(req) => self.handle_ui_set_agent_display_name(req),
+            Event::AgentMetadataSet(set) => {
+                if self.validate_agent_metadata_set(&set).is_ok() {
+                    self.enqueue_publish(
+                        Some(client_id),
+                        Event::AgentMetadataSet(set),
+                        false,
+                        false,
+                        None,
+                    );
+                }
+                Ok(true)
+            }
+            Event::AgentMetadataUnset(unset) => {
+                if self.validate_agent_metadata_unset(&unset).is_ok() {
+                    self.enqueue_publish(
+                        Some(client_id),
+                        Event::AgentMetadataUnset(unset),
+                        false,
+                        false,
+                        None,
+                    );
+                }
+                Ok(true)
+            }
             Event::UiTreeRequest(req) => self.handle_ui_tree_request(client_id, req),
             Event::UiNavigateTree(req) => self.handle_ui_navigate_tree(client_id, req),
             Event::UiCompactRequest(req) => self.handle_ui_compact_request(client_id, req),
@@ -4582,8 +4630,24 @@ impl Harness {
             self.emit_info(&format!("unknown role `{}`", req.role));
             return Ok(true);
         }
-
-        let cid = self.create_durable_user_agent(req.session_id.clone(), &req.role, req.cwd);
+        let parent_cid = match req.parent_agent.as_ref() {
+            Some(agent_id) => match self.agent_routes.get(agent_id.as_str()).cloned() {
+                Some(cid) => Some(cid),
+                None => {
+                    self.emit_info(&format!(
+                        "parent_agent `{agent_id}` is not loaded in the current session"
+                    ));
+                    return Ok(true);
+                }
+            },
+            None => None,
+        };
+        let cid = self.create_durable_user_agent_with_parent(
+            req.session_id.clone(),
+            &req.role,
+            req.cwd,
+            parent_cid,
+        );
         if let Some(conv) = self.agents.get_mut(&cid) {
             conv.next_ctx_id = req.ctx_id.clone();
         }
@@ -5890,6 +5954,11 @@ impl Harness {
             None,
             HarnessOutputMessage::Configure(tau_proto::Configure {
                 config: tau_proto::json_to_cbor(&config_json),
+                instance_name: self
+                    .extensions
+                    .entries
+                    .get(source_id)
+                    .map(|entry| entry.name.clone().into()),
                 state_dir: Some(state_dir),
                 secrets,
             }),
@@ -6276,6 +6345,121 @@ impl Harness {
         Ok(agent_id)
     }
 
+    fn validate_agent_metadata_key(&self, key: &tau_proto::AgentMetadataKey) -> Result<(), String> {
+        if key.as_str().is_empty() {
+            return Err("agent metadata key must not be empty".to_owned());
+        }
+        if tau_proto::MAX_AGENT_METADATA_KEY_BYTES < key.as_str().len() {
+            return Err("agent metadata key exceeds 256 bytes".to_owned());
+        }
+        Ok(())
+    }
+
+    fn validate_agent_metadata_target(
+        &mut self,
+        agent_id: &tau_proto::AgentId,
+    ) -> Result<(), String> {
+        if self.session_loaded_agents.contains(agent_id)
+            || self.agent_routes.contains_key(agent_id.as_str())
+        {
+            return Ok(());
+        }
+        match self.agent_store.load_agent(agent_id.as_str()) {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err(format!("unknown agent metadata target `{agent_id}`")),
+            Err(error) => Err(format!(
+                "failed to load metadata target `{agent_id}`: {error}"
+            )),
+        }
+    }
+
+    fn validate_agent_metadata_set(
+        &mut self,
+        set: &tau_proto::AgentMetadataSet,
+    ) -> Result<(), String> {
+        self.validate_agent_metadata_target(&set.agent_id)?;
+        self.validate_agent_metadata_key(&set.key)?;
+        let value_bytes = tau_proto::encode_message_to_vec(&set.value)
+            .map_err(|error| format!("failed to measure agent metadata value: {error}"))?;
+        if tau_proto::MAX_AGENT_METADATA_VALUE_BYTES < value_bytes.len() {
+            return Err("agent metadata value exceeds 64 KiB".to_owned());
+        }
+        Ok(())
+    }
+
+    fn validate_agent_metadata_unset(
+        &mut self,
+        unset: &tau_proto::AgentMetadataUnset,
+    ) -> Result<(), String> {
+        self.validate_agent_metadata_target(&unset.agent_id)?;
+        self.validate_agent_metadata_key(&unset.key)
+    }
+
+    pub(crate) fn validate_agent_metadata_event(&mut self, event: &Event) -> Result<(), String> {
+        match event {
+            Event::AgentMetadataSet(set) => self.validate_agent_metadata_set(set),
+            Event::AgentMetadataUnset(unset) => self.validate_agent_metadata_unset(unset),
+            _ => Ok(()),
+        }
+    }
+
+    fn resolve_start_agent_parent_cid(
+        &self,
+        query: &tau_proto::StartAgentRequest,
+    ) -> Result<Option<AgentId>, String> {
+        let explicit = query
+            .parent_agent
+            .as_ref()
+            .map(|agent_id| {
+                self.agent_routes
+                    .get(agent_id.as_str())
+                    .cloned()
+                    .ok_or_else(|| {
+                        format!("parent_agent `{agent_id}` is not loaded in the current session")
+                    })
+            })
+            .transpose()?;
+        let tool_parent = query
+            .tool_call_id
+            .as_ref()
+            .and_then(|call_id| self.tool_agents.get(call_id))
+            .cloned();
+        if let (Some(explicit), Some(tool_parent)) = (&explicit, &tool_parent)
+            && explicit != tool_parent
+        {
+            return Err("parent_agent does not match tool_call_id owner".to_owned());
+        }
+        Ok(explicit.or(tool_parent))
+    }
+
+    fn parent_agent_id_for_cid(&self, cid: &AgentId) -> Option<tau_proto::AgentId> {
+        self.agents
+            .get(cid)
+            .and_then(|agent| agent.parent_agent_id.as_ref())
+            .and_then(|parent_cid| self.agents.get(parent_cid))
+            .and_then(|parent| parent.agent_id.as_ref())
+            .map(crate::parse_agent_id)
+    }
+
+    fn inherited_metadata_for_cid(
+        &mut self,
+        cid: &AgentId,
+    ) -> Vec<(tau_proto::AgentMetadataKey, tau_core::AgentMetadataEntry)> {
+        let Some(parent_agent_id) = self.parent_agent_id_for_cid(cid) else {
+            return Vec::new();
+        };
+        match self.agent_store.load_agent(parent_agent_id.as_str()) {
+            Ok(Some(tree)) => tree.inheritable_metadata().into_iter().collect(),
+            Ok(None) => Vec::new(),
+            Err(error) => {
+                self.emit_info(&format!(
+                    "failed to load parent agent `{parent_agent_id}` metadata: {error}"
+                ));
+                Vec::new()
+            }
+        }
+    }
+
     fn prepare_start_agent_request(
         &mut self,
         source_id: &str,
@@ -6331,15 +6515,11 @@ impl Harness {
         let agent_id = self.mint_available_agent_id_for_role(&role);
         let cid: AgentId = crate::parse_agent_id(&agent_id);
 
-        // Resolve the parent agent at enqueue time: tool-backed requests
-        // inherit from the conversation that owns the triggering tool call;
-        // non-tool requests start without an in-memory parent agent.
-        let parent_cid = query
-            .tool_call_id
-            .as_ref()
-            .and_then(|call_id| self.tool_agents.get(call_id))
-            .cloned()
-            .unwrap_or_else(|| cid.clone());
+        // Resolve the parent agent at enqueue time for metadata inheritance:
+        // tool-backed requests derive their parent from the conversation that
+        // owns the triggering tool call; non-tool requests use an explicit
+        // `parent_agent` when provided; otherwise they start with no parent.
+        let parent_cid = self.resolve_start_agent_parent_cid(&query)?;
 
         Ok(Some(PendingStartAgentRequest {
             source_id: source_id.to_owned(),
@@ -6387,23 +6567,13 @@ impl Harness {
     /// Spawn a fresh side agent runtime for an extension's
     /// [`tau_proto::StartAgentRequest`] and dispatch it after FIFO admission.
     ///
-    /// Two forking modes depending on whether the request is tool-backed:
-    ///
-    /// - **Tool-backed (`tool_call_id: Some(...)`, e.g. `agent_start`)**: the
-    ///   sub-agent starts with a *fresh* context — only the delegated
-    ///   instruction, no inherited messages from the parent (no user framing,
-    ///   no completed prior turns, no in-flight tool blocks). The parent agent
-    ///   is responsible for putting everything the sub-agent needs into the
-    ///   `prompt`. This applies uniformly at any nesting depth so deeper
-    ///   sub-agents can't see (and restage) ancestor task framing.
-    ///
-    /// - **Non-tool (`tool_call_id: None`, e.g. notifications' idle summary)**:
-    ///   the side agent inherits the parent agent's current head so the
-    ///   assembled prompt actually contains the user's recent history. The
-    ///   whole point of this flow is to summarize what the user/agent were
-    ///   doing — that needs the conversation it is summarizing. Sharing the
-    ///   prefix also lets prompt caching reuse the parent's cached transcript
-    ///   verbatim, since the only delta is the appended instruction.
+    /// All start-agent requests create an independent agent log with fresh
+    /// transcript context. Tool-backed requests (for example `agent_start`) and
+    /// non-tool extension requests differ in result routing and
+    /// cache/tool-choice details, but neither copies parent transcript
+    /// nodes. When an explicit or derived parent agent is known, only
+    /// metadata entries marked inheritable are copied to the child (for
+    /// example the shell extension's remembered cwd).
     fn start_agent_request(
         &mut self,
         pending: PendingStartAgentRequest,
@@ -6427,10 +6597,11 @@ impl Harness {
         } else {
             None
         };
-        let parent_agent_id = self
-            .agents
-            .contains_key(&parent_cid)
-            .then(|| parent_cid.clone());
+        let parent_agent_id = parent_cid.as_ref().and_then(|parent_cid| {
+            self.agents
+                .contains_key(parent_cid)
+                .then(|| parent_cid.clone())
+        });
         let session_id = parent_agent_id
             .as_ref()
             .and_then(|parent_cid| self.agents.get(parent_cid))
@@ -7955,7 +8126,7 @@ impl Harness {
                 .agent_meta(agent_id.as_str())
                 .ok()
                 .flatten();
-            if let Some(cwd) = meta.as_ref().and_then(|meta| meta.cwd.clone()) {
+            if let Some(cwd) = meta.as_ref().and_then(|meta| meta.starting_cwd.clone()) {
                 self.agent_working_directories.insert(agent_id.clone(), cwd);
             }
             let display_name = self
@@ -8141,6 +8312,16 @@ impl Harness {
         role: &str,
         cwd: PathBuf,
     ) -> AgentId {
+        self.create_durable_user_agent_with_parent(session_id, role, cwd, None)
+    }
+
+    pub(crate) fn create_durable_user_agent_with_parent(
+        &mut self,
+        session_id: SessionId,
+        role: &str,
+        cwd: PathBuf,
+        parent_cid: Option<AgentId>,
+    ) -> AgentId {
         let agent_id = self.mint_available_agent_id_for_role(role);
         let display_name = self.display_name_for_new_agent(&agent_id, role, None);
         let cid: AgentId = crate::parse_agent_id(&agent_id);
@@ -8152,6 +8333,7 @@ impl Harness {
             None,
         );
         conv.role = Some(role.to_owned());
+        conv.parent_agent_id = parent_cid;
         conv.agent_id = Some(agent_id.clone());
         conv.display_name = display_name;
         self.agents.insert(cid.clone(), conv);
@@ -8243,6 +8425,7 @@ impl Harness {
             if let Some(role) = role.as_deref() {
                 let started = Event::AgentStarted(tau_proto::AgentStarted {
                     agent_id: agent_id_proto.clone(),
+                    parent_agent: self.parent_agent_id_for_cid(cid),
                     role: role.to_owned(),
                     display_name: self
                         .agents
@@ -8252,6 +8435,23 @@ impl Harness {
                 self.enqueue_publish(
                     None,
                     started,
+                    false,
+                    false,
+                    Some(ConversationHeadSync {
+                        cid: cid.clone(),
+                        agent_id: Some(agent_id_proto.clone()),
+                    }),
+                );
+            }
+            for (key, entry) in self.inherited_metadata_for_cid(cid) {
+                self.enqueue_publish(
+                    None,
+                    Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+                        agent_id: agent_id_proto.clone(),
+                        key,
+                        value: entry.value,
+                        inheritable: entry.inheritable,
+                    }),
                     false,
                     false,
                     Some(ConversationHeadSync {

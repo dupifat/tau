@@ -319,6 +319,7 @@ impl BuiltinTools {
         let input_stats = ToolUseStats::for_text(&parsed.prompt);
         let task_name = parsed.task_name.clone();
         let start_request = StartAgentRequest {
+            parent_agent: None,
             query_id: query_id.clone(),
             instruction: delegate_instruction(&self_agent_id, &parsed.prompt),
             role: parsed.role,

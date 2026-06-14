@@ -1065,6 +1065,7 @@ fn extension_emit_and_start_agent_request_are_staged_until_ready() {
     h.handle_extension_event(
         conn_id,
         TestProtocolItem::Event(Event::StartAgentRequest(StartAgentRequest {
+            parent_agent: None,
             query_id: "q-staged".to_owned(),
             instruction: "STAGED START AGENT REQUEST".to_owned(),
             role: None,

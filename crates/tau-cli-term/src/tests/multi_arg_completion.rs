@@ -102,6 +102,28 @@ fn second_arg_completion_preserves_text_after_cursor() {
     assert_eq!(cands[1].replacement, "/set show-diff false trailing");
 }
 
+/// Protects slash-command name completion when the cursor is still in the
+/// command token but later arguments are already present.
+#[test]
+fn command_name_completion_preserves_trailing_arguments() {
+    let data = CompletionData::new();
+    let buf = "/mod trailing";
+    let cursor = "/mod".len();
+    let cands = build_candidates(
+        &[
+            SlashCommand::new("/model", "switch model"),
+            SlashCommand::new("/quit", "exit"),
+        ],
+        &data,
+        buf,
+        cursor,
+    );
+
+    assert_eq!(cands.len(), 1);
+    assert_eq!(cands[0].label, "/model");
+    assert_eq!(cands[0].replacement, "/model trailing");
+}
+
 #[test]
 fn third_arg_returns_no_candidates() {
     let data = CompletionData::new();

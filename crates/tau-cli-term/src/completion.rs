@@ -421,19 +421,28 @@ pub(crate) fn build_candidates_with_home_and_rules(
     if first_non_whitespace_starts_action(buffer) {
         let leading_len = buffer.len() - buffer.trim_start().len();
         let view = &buffer[leading_len..];
+        let view_cursor = cursor.saturating_sub(leading_len).min(view.len());
         if let Some(space_pos) = view.find(char::is_whitespace) {
+            if view_cursor <= space_pos {
+                let prefix = &view[..view_cursor];
+                let suffix = &view[space_pos..];
+                let candidates = build_cmd_candidates(commands, &data.dynamic_commands(), prefix);
+                return replace_token_candidates(&buffer[..leading_len], suffix, candidates);
+            }
+
             let cmd = &view[..space_pos];
             if cmd.is_empty() {
                 return Vec::new();
             }
             let rest = &view[space_pos + 1..];
-            let view_cursor = cursor.saturating_sub(leading_len).min(view.len());
             let rest_cursor = view_cursor.saturating_sub(space_pos + 1).min(rest.len());
             let candidates = build_arg_candidates(data, cmd, rest, rest_cursor);
             return prepend_to_replacements(&buffer[..leading_len], candidates);
         }
-        let candidates = build_cmd_candidates(commands, &data.dynamic_commands(), view);
-        return replace_token_candidates(&buffer[..leading_len], "", candidates);
+        let prefix = &view[..view_cursor];
+        let suffix = &view[view_cursor..];
+        let candidates = build_cmd_candidates(commands, &data.dynamic_commands(), prefix);
+        return replace_token_candidates(&buffer[..leading_len], suffix, candidates);
     }
 
     let Some(token) = word_token(buffer, cursor) else {

@@ -567,6 +567,10 @@ impl<'de> serde::Deserialize<'de> for ModelId {
 // ToolName (validated newtype)
 // ---------------------------------------------------------------------------
 
+fn is_valid_ascii_identifier(s: &str, max_len: usize) -> bool {
+    !s.is_empty() && s.len() <= max_len && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
 /// Tool name: must be non-empty, at most [`ToolName::MAX_LEN`] bytes,
 /// and contain only ASCII alphanumerics or underscores (`[a-zA-Z0-9_]+`).
 ///
@@ -606,9 +610,7 @@ impl ToolName {
     }
 
     fn is_valid(s: &str) -> bool {
-        !s.is_empty()
-            && s.len() <= Self::MAX_LEN
-            && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        is_valid_ascii_identifier(s, Self::MAX_LEN)
     }
 }
 
@@ -715,9 +717,7 @@ impl ToolGroupName {
     }
 
     fn is_valid(s: &str) -> bool {
-        !s.is_empty()
-            && s.len() <= Self::MAX_LEN
-            && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        is_valid_ascii_identifier(s, Self::MAX_LEN)
     }
 }
 

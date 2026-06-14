@@ -45,11 +45,11 @@
 - `cargo check --workspace --all-targets` or `just check` — check Rust code
 - `cargo nextest run` or `just test` — run tests
 - `treefmt` or `just format` — format code
-- `selfci check` — full local CI verification; WARNING: slow, but independent of working copy state, so it can run safely in parallel, and working copy files can be modified without affecting; prefer to run in parallel and/or only as a final verification step
+- `selfci check --candidate <change-id>` — full local CI verification for an explicit candidate change; WARNING: slow, but independent of working copy state, so it can run safely in parallel, and working copy files can be modified without affecting it; prefer to run in parallel and/or only as a final verification step
 
 ## Definition of done
 
-- `selfci check` (CI) passes
+- `selfci check --candidate <change-id>` (CI) passes
 - Update `FEATURES.md` after editing any new major features.
 
 ## Rules

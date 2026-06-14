@@ -61,8 +61,12 @@ Available completers:
   notices. Arguments are currently split on whitespace; use a wrapper
   script for complex shell snippets or argv entries containing spaces.
 
-Prompt shell actions capture at most 1 MiB of stdout, discard stderr, time out
-after 1 hour, and show failures as local prompt notices.
+`shell-prompt-insert` and `prompt-history-search` capture at most 1 MiB of
+stdout and discard stderr. `shell-prompt-edit` inherits terminal stdio so
+interactive editors can use the terminal directly. All prompt shell actions time
+out after 1 hour and show failures as local prompt notices. History search uses
+the newest 200 non-empty prompts, truncates row summaries to 240 characters, and
+caps preview files to 64 KiB each / 1 MiB total before launching the picker.
 
 The shipped defaults use plain path completion. Configure `./: complete_path_fuzzy`
 to opt into fuzzy git path completion for `./<partial>`.

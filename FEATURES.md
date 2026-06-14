@@ -590,8 +590,9 @@ actions include:
 - `shell-prompt-insert`: run the shell command and insert its stdout at the
   cursor on success.
 - `prompt-history-search`: feed indexed prompt-history rows to a picker command,
-  expose original prompts under `$TAU_PROMPT_HISTORY_DIR/<index>` for previews,
-  then replace the prompt with the selected original prompt.
+  expose bounded original-prompt previews under
+  `$TAU_PROMPT_HISTORY_DIR/<index>`, then replace the prompt with the selected
+  original prompt.
 
 Command environment:
 
@@ -602,7 +603,7 @@ Command environment:
   editor commands that support `file:row:column` syntax. Multi-line row
   calculation is still limited.
 - `TAU_PROMPT_HISTORY_DIR`: for `prompt-history-search`, a temporary directory
-  containing original prompt text files named by row index.
+  containing bounded preview files named by row index.
 
 Tau resolves that editor from `$EDITOR`, then `$VISUAL`, then `hx`, `vim`,
 `vi`, and `nano` if found on `$PATH`.

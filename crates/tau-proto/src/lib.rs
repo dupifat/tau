@@ -711,11 +711,6 @@ impl ToolGroupName {
         self.0
     }
 
-    /// Return true when this group name is empty.
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
     fn is_valid(s: &str) -> bool {
         is_valid_ascii_identifier(s, Self::MAX_LEN)
     }

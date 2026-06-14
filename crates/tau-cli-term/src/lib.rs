@@ -39,6 +39,10 @@ const PROMPT_COMMAND_OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;
 const COMPLETION_COMMAND_OUTPUT_LIMIT_BYTES: usize = 256 * 1024;
 const COMPLETION_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const PROMPT_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+const PROMPT_HISTORY_SEARCH_MAX_ROWS: usize = 200;
+const PROMPT_HISTORY_SUMMARY_MAX_CHARS: usize = 240;
+const PROMPT_HISTORY_PREVIEW_MAX_BYTES: usize = 64 * 1024;
+const PROMPT_HISTORY_PREVIEW_TOTAL_BYTES: usize = 1024 * 1024;
 /// High-level events surfaced to the caller.
 pub enum Event {
     /// The user submitted a line (pressed Enter by default, Ctrl-Enter,
@@ -857,10 +861,7 @@ fn run_prompt_shell_action(
 
 fn prompt_history_search_rows(prompt_history: &[String]) -> String {
     let mut rows = String::new();
-    for (index, prompt) in prompt_history.iter().enumerate().rev() {
-        if prompt.is_empty() {
-            continue;
-        }
+    for (index, prompt) in bounded_prompt_history_entries(prompt_history) {
         rows.push_str(&index.to_string());
         rows.push('\t');
         rows.push_str(&prompt_history_summary(prompt));
@@ -874,18 +875,75 @@ fn prompt_history_preview_dir(prompt_history: &[String]) -> Result<tempfile::Tem
         .prefix("tau-prompt-history-")
         .tempdir()
         .map_err(|e| format!("could not create prompt history tempdir: {e}"))?;
-    for (index, prompt) in prompt_history.iter().enumerate() {
-        if prompt.is_empty() {
-            continue;
-        }
-        std::fs::write(dir.path().join(index.to_string()), prompt.as_bytes())
+    let mut remaining_total = PROMPT_HISTORY_PREVIEW_TOTAL_BYTES;
+    for (index, prompt) in bounded_prompt_history_entries(prompt_history) {
+        let preview = bounded_prompt_history_preview(prompt, &mut remaining_total);
+        std::fs::write(dir.path().join(index.to_string()), preview.as_bytes())
             .map_err(|e| format!("could not write prompt history preview {index}: {e}"))?;
     }
     Ok(dir)
 }
 
+fn bounded_prompt_history_entries(
+    prompt_history: &[String],
+) -> impl Iterator<Item = (usize, &str)> {
+    prompt_history
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, prompt)| !prompt.is_empty())
+        .take(PROMPT_HISTORY_SEARCH_MAX_ROWS)
+        .map(|(index, prompt)| (index, prompt.as_str()))
+}
+
 fn prompt_history_summary(prompt: &str) -> String {
-    prompt.split_whitespace().collect::<Vec<_>>().join(" ")
+    let mut summary = String::new();
+    for word in prompt.split_whitespace() {
+        let separator_len = usize::from(!summary.is_empty());
+        if summary.chars().count() + separator_len + word.chars().count()
+            > PROMPT_HISTORY_SUMMARY_MAX_CHARS
+        {
+            if !summary.is_empty() {
+                summary.push(' ');
+            }
+            summary.push('…');
+            break;
+        }
+        if !summary.is_empty() {
+            summary.push(' ');
+        }
+        summary.push_str(word);
+    }
+    summary
+}
+
+fn bounded_prompt_history_preview(prompt: &str, remaining_total: &mut usize) -> String {
+    const TRUNCATED: &str = "\n[history preview truncated]\n";
+    const OMITTED: &str = "[history preview omitted: preview budget reached]\n";
+    if *remaining_total == 0 {
+        return OMITTED.to_owned();
+    }
+
+    let budget = PROMPT_HISTORY_PREVIEW_MAX_BYTES.min(*remaining_total);
+    if prompt.len() <= budget {
+        *remaining_total = remaining_total.saturating_sub(prompt.len());
+        return prompt.to_owned();
+    }
+
+    let content_budget = budget.saturating_sub(TRUNCATED.len());
+    let end = previous_char_boundary(prompt, content_budget);
+    *remaining_total = remaining_total.saturating_sub(end + TRUNCATED.len());
+    let mut preview = prompt[..end].to_owned();
+    preview.push_str(TRUNCATED);
+    preview
+}
+
+fn previous_char_boundary(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 fn append_prompt_trailer(current: &str, editor_context: &Arc<Mutex<EditorContext>>) -> String {

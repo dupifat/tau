@@ -103,9 +103,12 @@ Bindings live under `cli.bind` in config. The built-in bindings are merged below
 - `agent-previous` — switch to the previous active agent.
 - `agent-next` — switch to the next active agent.
 - `prompt-history-search` — feed indexed prompt-history rows
-  (`<index>\t<single-line summary>`) to `command`; original prompts are also
-  written under `$TAU_PROMPT_HISTORY_DIR/<index>` for picker previews. Replace
-  the prompt with the selected row's original prompt. The current draft is
+  (`<index>\t<single-line summary>`) to `command`; bounded original-prompt
+  previews are also written under `$TAU_PROMPT_HISTORY_DIR/<index>`. Replace the
+  prompt with the selected row's original prompt. The current draft is recorded
+  for `prompt-undo` before the picker opens. History search uses the newest 200
+  non-empty prompts, truncates row summaries to 240 characters, and caps preview
+  files to 64 KiB each / 1 MiB total before launching the picker.
   recorded for `prompt-undo` before the picker opens.
 - `shell-prompt-insert` — run `command` and insert stdout at the cursor.
 - `shell-prompt-edit` — run `command` with the current prompt in

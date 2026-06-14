@@ -1,8 +1,9 @@
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    EditorContext, PromptShellAction, PromptShellCommand, PromptShellResult,
-    prompt_history_search_rows, run_prompt_shell_action,
+    EditorContext, PROMPT_HISTORY_PREVIEW_MAX_BYTES, PROMPT_HISTORY_SEARCH_MAX_ROWS,
+    PROMPT_HISTORY_SUMMARY_MAX_CHARS, PromptShellAction, PromptShellCommand, PromptShellResult,
+    prompt_history_preview_dir, prompt_history_search_rows, run_prompt_shell_action,
 };
 
 #[test]
@@ -19,6 +20,40 @@ fn search_rows_are_newest_first_and_keep_multiline_prompts_one_row() {
     let rows = prompt_history_search_rows(&history);
 
     assert_eq!(rows, "1\tnewer multiline prompt\n0\told prompt\n");
+}
+
+/// Keeps prompt-history picker setup bounded before launching the external
+/// picker, even if the stored prompt history contains many large entries.
+#[test]
+fn search_rows_and_previews_are_bounded_before_picker_launch() {
+    let huge_prompt = "word ".repeat(PROMPT_HISTORY_SUMMARY_MAX_CHARS + 100)
+        + &"x".repeat(PROMPT_HISTORY_PREVIEW_MAX_BYTES * 2);
+    let history: Vec<String> = (0..(PROMPT_HISTORY_SEARCH_MAX_ROWS + 10))
+        .map(|index| format!("prompt {index} {huge_prompt}"))
+        .collect();
+
+    let rows = prompt_history_search_rows(&history);
+    assert_eq!(rows.lines().count(), PROMPT_HISTORY_SEARCH_MAX_ROWS);
+    assert!(
+        rows.lines()
+            .all(|line| line.chars().count() < PROMPT_HISTORY_SUMMARY_MAX_CHARS + 32)
+    );
+    assert!(rows.starts_with(&(PROMPT_HISTORY_SEARCH_MAX_ROWS + 9).to_string()));
+
+    let preview_dir = prompt_history_preview_dir(&history).expect("preview dir");
+    let previews: Vec<_> = std::fs::read_dir(preview_dir.path())
+        .expect("read preview dir")
+        .collect::<Result<_, _>>()
+        .expect("preview entries");
+    assert_eq!(previews.len(), PROMPT_HISTORY_SEARCH_MAX_ROWS);
+    for entry in previews {
+        let len = entry.metadata().expect("preview metadata").len() as usize;
+        assert!(
+            len <= PROMPT_HISTORY_PREVIEW_MAX_BYTES + "\n[history preview truncated]\n".len(),
+            "preview {:?} had {len} bytes",
+            entry.path()
+        );
+    }
 }
 
 #[test]

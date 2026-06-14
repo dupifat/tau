@@ -609,8 +609,10 @@ Tau resolves that editor from `$EDITOR`, then `$VISUAL`, then `hx`, `vim`,
 
 Prompt shell actions capture at most 1 MiB of stdout, discard stderr, and time
 out after 1 hour. Completion commands from `complete_with_command` capture at
-most 256 KiB of stdout, discard stderr, and time out after 10 seconds. Failures
-are shown as local prompt/completion notices.
+most 256 KiB of stdout, discard stderr, and time out after 10 seconds. History
+search uses the newest 200 non-empty prompts, truncates row summaries to 240
+characters, and caps preview files to 64 KiB each / 1 MiB total before launching
+the picker. Failures are shown as local prompt/completion notices.
 
 Default bindings are documented in
 [`docs/cli-keybindings.md`](docs/cli-keybindings.md#built-in-bindings).

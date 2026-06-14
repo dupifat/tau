@@ -43,6 +43,24 @@ fn wait_call(target_call_id: &str) -> AgentToolCall {
     }
 }
 
+fn message_call(recipient_id: &str, message: &str) -> AgentToolCall {
+    AgentToolCall {
+        id: "message-call".into(),
+        name: ToolName::new(MESSAGE_TOOL_NAME),
+        tool_type: ToolType::Function,
+        arguments: CborValue::Map(vec![
+            (
+                CborValue::Text("recipient_id".to_owned()),
+                CborValue::Text(recipient_id.to_owned()),
+            ),
+            (
+                CborValue::Text("message".to_owned()),
+                CborValue::Text(message.to_owned()),
+            ),
+        ]),
+    }
+}
+
 fn tool_result(call_id: &str, kind: ToolResultKind) -> ToolResult {
     ToolResult {
         call_id: call_id.into(),
@@ -220,6 +238,27 @@ fn wait_initial_display_uses_tracked_target_tool_name() {
 
     assert_eq!(display.args, "shell");
     assert_eq!(display.status, ToolUseStatus::InProgress);
+}
+
+/// The message tool progress display must keep the recipient inline and put
+/// the actual delivered text in the rich payload, so UIs can show it even when
+/// the separate message event scrolls by.
+#[test]
+fn message_initial_display_includes_message_payload() {
+    let state = BuiltinState::default();
+
+    let display = state
+        .initial_display(&message_call("user", "please check this"))
+        .expect("message display");
+
+    assert_eq!(display.args, "user");
+    assert_eq!(display.status, ToolUseStatus::InProgress);
+    assert_eq!(
+        display.payload,
+        Some(ToolUsePayload::Text {
+            text: "please check this".to_owned(),
+        })
+    );
 }
 
 #[test]

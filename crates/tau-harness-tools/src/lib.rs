@@ -20,7 +20,8 @@ use tau_harness::{AgentId, AgentToolCall, HarnessError, InternalToolHandler, Int
 use tau_proto::{
     BackgroundSupport, CborValue, ContentPart, ContextItem, ContextRole, Event, PromptOriginator,
     ProviderResponseFinished, StartAgentRequest, ToolCallId, ToolError, ToolName, ToolResult,
-    ToolResultKind, ToolSpec, ToolStarted, ToolType, ToolUseState, ToolUseStats, ToolUseStatus,
+    ToolResultKind, ToolSpec, ToolStarted, ToolType, ToolUsePayload, ToolUseState, ToolUseStats,
+    ToolUseStatus,
 };
 
 const SKILL_TOOL_NAME: &str = "skill";
@@ -98,7 +99,7 @@ impl BuiltinState {
     }
 
     fn initial_display(&self, call: &AgentToolCall) -> Option<ToolUseState> {
-        let (args, status_text) = match call.name.as_str() {
+        let (args, status_text, payload) = match call.name.as_str() {
             SKILL_TOOL_NAME => {
                 let needles = extract_skill_search_queries(&call.arguments).unwrap_or_default();
                 let search_content = extract_optional_bool(&call.arguments, "search_content")
@@ -109,6 +110,7 @@ impl BuiltinState {
                 (
                     format!("{}{scope}", needles.join(" ")),
                     tau_proto::PROGRESS_INDICATOR_TEXT,
+                    None,
                 )
             }
             AGENT_START_TOOL_NAME => {
@@ -117,26 +119,34 @@ impl BuiltinState {
                     Some(role) => format!("[{}] +{role}", parsed.task_name),
                     None => format!("[{}]", parsed.task_name),
                 };
-                (args, tau_proto::PROGRESS_INDICATOR_TEXT)
+                (args, tau_proto::PROGRESS_INDICATOR_TEXT, None)
             }
             WAIT_TOOL_NAME => (
                 self.wait_initial_display_args(&call.arguments),
                 tau_proto::PROGRESS_INDICATOR_TEXT,
+                None,
             ),
             MESSAGE_TOOL_NAME => match parse_message_args(&call.arguments) {
-                Ok(parsed) => (parsed.recipient_id, tau_proto::PROGRESS_INDICATOR_TEXT),
-                Err(_) => (String::new(), tau_proto::PROGRESS_INDICATOR_TEXT),
+                Ok(parsed) => (
+                    parsed.recipient_id,
+                    tau_proto::PROGRESS_INDICATOR_TEXT,
+                    Some(ToolUsePayload::Text {
+                        text: parsed.message,
+                    }),
+                ),
+                Err(_) => (String::new(), tau_proto::PROGRESS_INDICATOR_TEXT, None),
             },
             AGENT_WATCH_TOOL_NAME => match parse_agent_watch_args(&call.arguments) {
                 Ok(parsed) => (
                     agent_watch_display_args(&parsed),
                     tau_proto::PROGRESS_INDICATOR_TEXT,
+                    None,
                 ),
-                Err(_) => (String::new(), tau_proto::PROGRESS_INDICATOR_TEXT),
+                Err(_) => (String::new(), tau_proto::PROGRESS_INDICATOR_TEXT, None),
             },
             CANCEL_TOOL_NAME => match parse_cancel_args(&call.arguments) {
-                Ok(target) => (target.to_string(), tau_proto::PROGRESS_INDICATOR_TEXT),
-                Err(_) => (String::new(), tau_proto::PROGRESS_INDICATOR_TEXT),
+                Ok(target) => (target.to_string(), tau_proto::PROGRESS_INDICATOR_TEXT, None),
+                Err(_) => (String::new(), tau_proto::PROGRESS_INDICATOR_TEXT, None),
             },
             _ => return None,
         };
@@ -144,6 +154,7 @@ impl BuiltinState {
             args,
             status: ToolUseStatus::InProgress,
             status_text: status_text.to_owned(),
+            payload,
             ..Default::default()
         })
     }

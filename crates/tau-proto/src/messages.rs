@@ -458,17 +458,20 @@ pub struct ExtensionDataRequest {
     pub op: ExtensionDataRequestOp,
 }
 
-/// Relative path inside an extension data scope.
+/// Extension-provided path text inside an extension data scope.
 ///
 /// The wire format is a plain string for compatibility. This newtype marks
-/// fields that must be interpreted as extension-data paths and validated by the
-/// harness before filesystem access.
+/// fields that must be interpreted as extension-data paths. Constructors and
+/// deserialization do not validate or sanitize the text; the harness must
+/// validate and sanitize it before filesystem access.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ExtensionDataPath(String);
 
 impl ExtensionDataPath {
-    /// Creates a path value from extension-provided relative path text.
+    /// Creates a raw path value from extension-provided path text.
+    ///
+    /// This performs no validation or sanitization.
     #[must_use]
     pub fn new(path: impl Into<String>) -> Self {
         Self(path.into())
@@ -480,8 +483,8 @@ impl ExtensionDataPath {
         &self.0
     }
 
-    /// Consumes the wrapper and returns the raw path string for validation or
-    /// storage-specific path handling.
+    /// Consumes the wrapper and returns the raw path string for harness
+    /// validation or storage-specific path handling.
     #[must_use]
     pub fn into_string(self) -> String {
         self.0
@@ -514,37 +517,40 @@ impl AsRef<str> for ExtensionDataPath {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ExtensionDataRequestOp {
-    /// Read one whole file at a sanitized relative path, subject to the
-    /// harness file-size quota.
+    /// Read one whole file at an extension-provided path, subject to harness
+    /// path validation and file-size quota.
     ReadFile { path: ExtensionDataPath },
-    /// Write one whole file at a sanitized relative path, atomically replacing
-    /// any old content and subject to the harness file-size quota.
+    /// Write one whole file at an extension-provided path, atomically replacing
+    /// any old content and subject to harness path validation and file-size
+    /// quota.
     WriteFile {
         /// Relative file path inside the selected extension data scope.
         path: ExtensionDataPath,
         /// Complete replacement file contents.
         contents: Vec<u8>,
     },
-    /// Create one whole file at a sanitized relative path, failing when the
-    /// file already exists and subject to the harness file-size quota.
+    /// Create one whole file at an extension-provided path, failing when the
+    /// file already exists and subject to harness path validation and file-size
+    /// quota.
     CreateFile {
         /// Relative file path inside the selected extension data scope.
         path: ExtensionDataPath,
         /// Initial file contents.
         contents: Vec<u8>,
     },
-    /// Append bytes to one file at a sanitized relative path, creating it when
-    /// missing and subject to the harness file-size quota.
+    /// Append bytes to one file at an extension-provided path, creating it when
+    /// missing and subject to harness path validation and file-size quota.
     AppendFile {
         /// Relative file path inside the selected extension data scope.
         path: ExtensionDataPath,
         /// Bytes to append.
         contents: Vec<u8>,
     },
-    /// Delete one file at a sanitized relative path. Missing files succeed.
+    /// Delete one file at an extension-provided path after harness validation.
+    /// Missing files succeed.
     DeleteFile { path: ExtensionDataPath },
-    /// Rename one file at sanitized relative paths. The destination must not
-    /// already exist.
+    /// Rename one file between extension-provided paths after harness
+    /// validation. The destination must not already exist.
     RenameFile {
         /// Source relative file path inside the selected extension data scope.
         from: ExtensionDataPath,
@@ -552,8 +558,8 @@ pub enum ExtensionDataRequestOp {
         /// scope.
         to: ExtensionDataPath,
     },
-    /// List direct children of a sanitized relative directory path, subject to
-    /// the harness directory-entry quota.
+    /// List direct children of an extension-provided directory path after
+    /// harness validation, subject to the harness directory-entry quota.
     ListFiles { path: ExtensionDataPath },
 }
 /// Harness response to an [`ExtensionDataRequest`].

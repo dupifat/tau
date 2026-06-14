@@ -431,16 +431,16 @@ fn extension_data_list_skips_symlinks_and_returns_relative_entries() {
 
     let entries = super::list_extension_data_entries(&root, &root).expect("list entries");
     assert!(
-        entries
-            .iter()
-            .any(|entry| { entry.path == "file.txt" && !entry.is_dir && entry.len == Some(3) })
+        entries.iter().any(|entry| entry.path.as_str() == "file.txt"
+            && !entry.is_dir
+            && entry.len == Some(3))
     );
     assert!(
         entries
             .iter()
-            .any(|entry| entry.path == "nested" && entry.is_dir)
+            .any(|entry| entry.path.as_str() == "nested" && entry.is_dir)
     );
-    assert!(!entries.iter().any(|entry| entry.path == "outside"));
+    assert!(!entries.iter().any(|entry| entry.path.as_str() == "outside"));
 }
 
 #[test]

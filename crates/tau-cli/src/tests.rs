@@ -17,8 +17,9 @@ use tau_proto::{
 };
 
 use super::chat::{
-    DraftSlot, SUSPENDED_AGENT_PROMPT, agent_is_active_in_sets, invalidate_pending_draft,
-    is_local_slash_command, next_active_agent, role_cycling_enabled, should_send_draft_snapshot,
+    DraftSlot, SUSPENDED_AGENT_PROMPT, agent_is_active_in_sets, custom_prompt_replacement,
+    invalidate_pending_draft, is_local_slash_command, next_active_agent, role_cycling_enabled,
+    should_send_draft_snapshot,
 };
 use super::event_renderer::EventRenderer;
 
@@ -342,6 +343,47 @@ fn extension_cli_overrides_preserve_argument_order() {
             tau_config::settings::ExtensionCliOverride::Enable("std-websearch".to_owned()),
         ]
     );
+}
+
+/// Ensures `/prompt <id>` resolves a configured template to editable prompt
+/// text rather than submitting it immediately.
+#[test]
+fn custom_prompt_command_returns_configured_prompt_text() {
+    let prompts = vec![tau_config::settings::CustomPrompt {
+        id: "review".to_owned(),
+        text: "Review this patch carefully".to_owned(),
+    }];
+
+    let replacement = custom_prompt_replacement("/prompt review", &prompts)
+        .expect("prompt command")
+        .expect("known prompt");
+
+    assert_eq!(replacement, "Review this patch carefully");
+}
+
+/// Ensures unknown `/prompt` ids produce a clear local error and list
+/// configured ids so users can recover without accidentally submitting the
+/// command text.
+#[test]
+fn custom_prompt_command_reports_unknown_id() {
+    let prompts = vec![tau_config::settings::CustomPrompt {
+        id: "review".to_owned(),
+        text: "Review this patch carefully".to_owned(),
+    }];
+
+    let error = custom_prompt_replacement("/prompt missing", &prompts)
+        .expect("prompt command")
+        .expect_err("unknown prompt should fail");
+
+    assert!(error.contains("unknown custom prompt `missing`"));
+    assert!(error.contains("available: review"));
+}
+
+/// Ensures `/prompt` remains a local slash command for command echo/history
+/// routing and does not fall through as a normal user prompt.
+#[test]
+fn prompt_command_is_local_slash_command() {
+    assert!(is_local_slash_command("/prompt review"));
 }
 
 #[test]

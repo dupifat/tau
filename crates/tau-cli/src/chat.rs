@@ -544,6 +544,10 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/resume", "Alias for /agent resume on the selected agent"),
     ("/role", "Switch, create, edit, or delete an agent role"),
     (
+        "/prompt",
+        "Replace the editor with a configured custom prompt template",
+    ),
+    (
         "/session",
         "Manage chat sessions (e.g. /session new starts a fresh session)",
     ),
@@ -796,9 +800,15 @@ pub(crate) fn run_chat(
     // falling back to defaults would leave the user with broken
     // keybindings or unreadable colors and no clue why. Refuse to
     // start the TUI instead.
-    let settings = tau_config::settings::load_cli_settings()
-        .map_err(|error| CliError::Participant(format!("cli.yaml failed to parse:\n{error}")))?;
     let dirs = tau_config::settings::TauDirs::default();
+    let settings = tau_config::settings::load_cli_settings_in(&dirs)
+        .map_err(|error| CliError::Participant(format!("cli.yaml failed to parse:\n{error}")))?;
+    let harness_settings = tau_config::settings::load_harness_settings_with_cli_overrides_in(
+        &dirs,
+        role_cli_overrides,
+        harness_config_overrides,
+    )
+    .map_err(|error| CliError::Participant(format!("harness.yaml failed to parse:\n{error}")))?;
     let theme = crate::theme::select_theme(&dirs, settings.theme.clone())
         .map_err(|error| CliError::Participant(format!("cli theme failed to load:\n{error}")))?;
     let prompt = crate::theme::active_prompt_marker(&theme, &settings.prompt_symbol, None);
@@ -916,6 +926,14 @@ pub(crate) fn run_chat(
         tau_cli_term::CommandName::new("/session"),
         build_session_arg_completer(),
     );
+    completion_data.set_arg_completions(
+        tau_cli_term::CommandName::new("/prompt"),
+        harness_settings
+            .custom_prompts
+            .iter()
+            .map(|prompt| tau_cli_term::CompletionItem::plain(prompt.id.clone()))
+            .collect(),
+    );
     let roles_available = renderer.roles_available();
     let role_groups_available = renderer.role_groups_available();
     let role_group_memory = renderer.role_group_memory();
@@ -985,6 +1003,7 @@ pub(crate) fn run_chat(
             action_state,
             draft_handle: draft_handle.clone(),
             prompt_history,
+            custom_prompts: harness_settings.custom_prompts,
         },
     )?;
 
@@ -1164,6 +1183,7 @@ struct TerminalInputLoopCtx {
     action_state: ActionCommandState,
     draft_handle: DraftHandle,
     prompt_history: PromptHistoryStore,
+    custom_prompts: Vec<tau_config::settings::CustomPrompt>,
 }
 
 #[derive(Clone)]
@@ -1519,10 +1539,27 @@ impl<'a> TerminalInputSession<'a> {
         Ok(CommandOutcome::NotHandled)
     }
 
-    fn handle_non_session_command(&self, text: &str) -> bool {
+    fn handle_non_session_command(&mut self, text: &str) -> bool {
         // The grouping mirrors the old dispatch order while keeping each
         // command-family helper below the cargo-crap hotspot range.
-        self.handle_navigation_or_role_shortcut(text) || self.handle_utility_or_shell_shortcut(text)
+        self.handle_custom_prompt_command(text)
+            || self.handle_navigation_or_role_shortcut(text)
+            || self.handle_utility_or_shell_shortcut(text)
+    }
+
+    fn handle_custom_prompt_command(&mut self, text: &str) -> bool {
+        let Some(result) = custom_prompt_replacement(text, &self.ctx.custom_prompts) else {
+            return false;
+        };
+        match result {
+            Ok(prompt) => {
+                let cursor = prompt.len();
+                self.term.handle().set_buffer(prompt, cursor);
+                self.update_draft();
+            }
+            Err(message) => self.output.system_info(&message),
+        }
+        true
     }
 
     fn handle_navigation_or_role_shortcut(&self, text: &str) -> bool {
@@ -2485,6 +2522,55 @@ fn parsed_action_arguments(
     )
 }
 
+/// Parses `/prompt <id>` and returns the configured prompt replacement or a
+/// user-visible validation message.
+pub(crate) fn custom_prompt_replacement(
+    text: &str,
+    prompts: &[tau_config::settings::CustomPrompt],
+) -> Option<Result<String, String>> {
+    let mut parts = text.split_whitespace();
+    if parts.next() != Some("/prompt") {
+        return None;
+    }
+
+    let id = parts.next();
+    let extra = parts.next();
+    match (id, extra) {
+        (Some(id), None) => match prompts.iter().find(|prompt| prompt.id == id) {
+            Some(prompt) => Some(Ok(prompt.text.clone())),
+            None => Some(Err(format!(
+                "unknown custom prompt `{id}`{}",
+                custom_prompt_hint(prompts)
+            ))),
+        },
+        (None, None) => Some(Err(if prompts.is_empty() {
+            "no custom prompts are configured".to_owned()
+        } else {
+            format!(
+                "usage: /prompt <id>; available: {}",
+                custom_prompt_ids(prompts)
+            )
+        })),
+        _ => Some(Err("usage: /prompt <id>".to_owned())),
+    }
+}
+
+fn custom_prompt_hint(prompts: &[tau_config::settings::CustomPrompt]) -> String {
+    if prompts.is_empty() {
+        String::new()
+    } else {
+        format!("; available: {}", custom_prompt_ids(prompts))
+    }
+}
+
+fn custom_prompt_ids(prompts: &[tau_config::settings::CustomPrompt]) -> String {
+    prompts
+        .iter()
+        .map(|prompt| prompt.id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 pub(crate) fn is_local_slash_command(text: &str) -> bool {
     let command = text.split_whitespace().next().unwrap_or(text);
     matches!(
@@ -2503,6 +2589,7 @@ pub(crate) fn is_local_slash_command(text: &str) -> bool {
             | "/resume"
             | "/set"
             | "/role"
+            | "/prompt"
             | "/model"
             | "/version"
     )

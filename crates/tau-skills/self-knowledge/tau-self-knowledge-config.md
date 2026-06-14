@@ -13,7 +13,7 @@ Tau follows the XDG directory layout on Linux:
 
 - Config: `~/.config/tau/`
   - `cli.yaml`, `cli.d/*.yaml` — CLI display preferences, key bindings, and prompt completions. See `tau-self-knowledge-cli-ui` for UI-specific behavior.
-  - `harness.yaml`, `harness.d/*.yaml` — harness roles/defaults, extensions, tools, and session retention.
+  - `harness.yaml`, `harness.d/*.yaml` — harness roles/defaults, extensions, tools, custom prompts, and session retention.
 - State: `~/.local/state/tau/` or the platform/user state directory.
   - `sessions/<session_id>/` — durable session membership, metadata, logs, and debug captures.
   - `agents/<agent_id>/` — durable agent transcripts and metadata.
@@ -76,3 +76,5 @@ Other provider commands:
 - `tau provider remove <name>` — remove a provider profile.
 
 Models are published by provider extensions at runtime; start Tau and use `/model` to inspect the current model list.
+
+- `harness.yaml` can define `custom_prompts: [{{ id, text }}]`; in the CLI, `/prompt <id>` replaces the editable prompt buffer with that text without submitting it.

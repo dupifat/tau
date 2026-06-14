@@ -240,9 +240,10 @@ harness/agent.
   projections. See [agent-messaging.md](agent-messaging.md) for model-facing tool
   examples.
 - **`extension.event`** — Custom extension-defined event with an
-  extension-owned dotted name and CBOR payload. The nested name must not use
-  reserved first-party categories (`tool`, `action`, `agent`, `extension`,
-  `provider`, `harness`, `ui`, `shell`, `session`, or `term`). The harness
+  extension-owned dotted name and CBOR payload. The nested name must have
+  non-empty category and call segments, and must not use reserved first-party
+  categories (`tool`, `action`, `agent`, `extension`, `provider`, `harness`,
+  `ui`, `shell`, `session`, or `term`). The harness
   routes it like any other event. It is runtime/debug-log state unless a typed
   semantic event is added for a durable use case.
 

@@ -471,6 +471,17 @@ fn event_name_round_trips_from_string() {
     }
 }
 
+/// Ensures parsed event names reject empty category or call segments so custom
+/// events cannot enter routing with malformed dotted names.
+#[test]
+fn event_name_rejects_empty_segments() {
+    for name in [".progress", "demo.", "."] {
+        assert!(name.parse::<EventName>().is_err());
+    }
+
+    assert!("demo.progress".parse::<EventName>().is_ok());
+}
+
 #[test]
 fn agent_message_events_have_names_and_persistence_defaults() {
     let sent = Event::AgentMessageSent(AgentMessageSent {
@@ -617,6 +628,17 @@ fn custom_event_rejects_reserved_category_spelled_as_other() {
         .expect_err("reserved custom event name should fail");
     assert_eq!(error.name(), &name);
     assert_eq!(error.into_name(), name);
+}
+
+/// Ensures custom event validation also rejects empty segments when callers
+/// construct EventName values directly instead of parsing wire strings.
+#[test]
+fn custom_event_rejects_direct_empty_segments() {
+    let empty_category = EventName::new(EventCategory::Other(String::new()), "progress".to_owned());
+    let empty_call = EventName::new(EventCategory::Other("demo".to_owned()), String::new());
+
+    assert!(CustomEvent::try_new(empty_category, None, CborValue::Null).is_err());
+    assert!(CustomEvent::try_new(empty_call, None, CborValue::Null).is_err());
 }
 
 /// Ensures extension-owned custom event categories still round-trip and route

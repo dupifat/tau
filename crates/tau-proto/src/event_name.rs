@@ -138,7 +138,8 @@ impl From<String> for EventCall {
 /// form. The well-known protocol events are exposed as `pub const`
 /// values directly on this type (`EventName::TOOL_REGISTER`, etc.) so
 /// match-arm-style call sites keep their compactness while gaining
-/// a typed `category` to branch on.
+/// a typed `category` to branch on. Parsed event names must have non-empty
+/// category and call segments.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct EventName {
     /// First segment of the dotted event name.
@@ -336,16 +337,21 @@ impl fmt::Display for EventName {
 impl FromStr for EventName {
     type Err = ParseEventNameError;
 
-    /// Always succeeds for well-formed `"a.b"` input. Unknown
-    /// categories survive as [`EventCategory::Other`]; unknown
-    /// `call` segments survive as owned strings. Errors only on
-    /// missing-dot input.
+    /// Always succeeds for well-formed `"a.b"` input with non-empty category
+    /// and call segments. Unknown categories survive as
+    /// [`EventCategory::Other`]; unknown `call` segments survive as owned
+    /// strings. Errors on missing-dot input or empty segments.
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let Some((cat, call)) = value.split_once('.') else {
             return Err(ParseEventNameError {
                 invalid_name: value.to_owned(),
             });
         };
+        if cat.is_empty() || call.is_empty() {
+            return Err(ParseEventNameError {
+                invalid_name: value.to_owned(),
+            });
+        }
         Ok(Self {
             category: EventCategory::from_wire(cat),
             call: EventCall::new(call),
@@ -367,7 +373,7 @@ impl<'de> Deserialize<'de> for EventName {
 }
 
 /// Error returned when an event-name string lacks the required
-/// `<category>.<call>` shape (no dot separator).
+/// `<category>.<call>` shape or contains an empty segment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParseEventNameError {
     invalid_name: String,

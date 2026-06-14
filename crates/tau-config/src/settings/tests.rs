@@ -1887,8 +1887,8 @@ fn harness_role_groups_load_custom_roles() {
     );
 }
 
-/// Ensures harness custom prompts parse, preserve order, and are available by
-/// stable id for the CLI `/prompt <id>` command.
+/// Ensures harness custom prompts parse from map syntax, sort by id, and are
+/// available by stable id for the CLI `/prompt <id>` command.
 #[test]
 fn harness_custom_prompts_parse_from_config() {
     let td = TempDir::new().expect("tempdir");
@@ -1896,11 +1896,9 @@ fn harness_custom_prompts_parse_from_config() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"custom_prompts:
-  - id: review
-    text: "Review this code carefully"
-  - id: summarize
-    text: |
-      Summarize the current session.
+  summarize: |
+    Summarize the current session.
+  review: "Review this code carefully"
 "#,
     )
     .expect("write");
@@ -1925,19 +1923,12 @@ fn harness_custom_prompts_parse_from_config() {
 /// Ensures invalid custom prompt ids fail during config loading instead of
 /// producing ambiguous or unreachable `/prompt <id>` commands.
 #[test]
-fn harness_custom_prompts_reject_empty_whitespace_and_duplicate_ids() {
+fn harness_custom_prompts_reject_empty_and_whitespace_ids() {
     for (yaml, expected) in [
+        ("custom_prompts:\n  '': hello\n", "must not be empty"),
         (
-            "custom_prompts:\n  - id: ''\n    text: hello\n",
-            "must not be empty",
-        ),
-        (
-            "custom_prompts:\n  - id: 'bad id'\n    text: hello\n",
+            "custom_prompts:\n  'bad id': hello\n",
             "must not contain whitespace",
-        ),
-        (
-            "custom_prompts:\n  - id: dup\n    text: one\n  - id: dup\n    text: two\n",
-            "configured more than once",
         ),
     ] {
         let td = TempDir::new().expect("tempdir");
@@ -1959,11 +1950,7 @@ fn harness_custom_prompts_reject_empty_whitespace_and_duplicate_ids() {
 fn harness_custom_prompts_reject_empty_text() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
-    std::fs::write(
-        dir.join("harness.yaml"),
-        "custom_prompts:\n  - id: empty\n    text: ''\n",
-    )
-    .expect("write");
+    std::fs::write(dir.join("harness.yaml"), "custom_prompts:\n  empty: ''\n").expect("write");
 
     let error = load_harness_settings_in(&dirs_with_config(dir)).expect_err("reject empty text");
 

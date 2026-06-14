@@ -6,7 +6,7 @@
 //!
 //! Uses the `config` crate for layered YAML loading.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -507,8 +507,8 @@ pub struct HarnessSettings {
     pub prompt_fragments: Vec<RolePromptFragment>,
 
     /// User-configured prompt templates exposed in the CLI as `/prompt <id>`.
-    /// IDs are unique, non-empty, and contain no whitespace so they can be
-    /// addressed unambiguously from the slash command.
+    /// Map keys are non-empty ids with no whitespace so they can be addressed
+    /// unambiguously from the slash command.
     pub custom_prompts: Vec<CustomPrompt>,
 
     /// Handlebars template used to mint new durable agent identifiers.
@@ -530,7 +530,7 @@ struct HarnessSettingsWire {
     #[serde(default, alias = "promptFragments")]
     prompt_fragments: Vec<RolePromptFragment>,
     #[serde(default, alias = "customPrompts")]
-    custom_prompts: Vec<CustomPrompt>,
+    custom_prompts: BTreeMap<String, String>,
     agents: AgentsSettings,
 }
 #[derive(Clone, Debug, Deserialize)]
@@ -558,7 +558,7 @@ impl<'de> Deserialize<'de> for HarnessSettings {
             roles: HashMap::new(),
             role_groups: Vec::new(),
             prompt_fragments: wire.prompt_fragments,
-            custom_prompts: wire.custom_prompts,
+            custom_prompts: custom_prompt_map_to_vec(wire.custom_prompts),
             agent_id_template: wire.agents.id_template,
             agent_display_name_template: wire.agents.display_name_template,
         };
@@ -584,19 +584,24 @@ struct HarnessRoleOverrides {
 }
 
 /// One saved prompt template exposed through the CLI `/prompt <id>` command.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CustomPrompt {
-    /// Stable command argument used to select the prompt. Must be unique,
-    /// non-empty, and contain no whitespace.
+    /// Stable command argument used to select the prompt. Must be non-empty
+    /// and contain no whitespace.
     pub id: String,
     /// Prompt text inserted into the editable CLI prompt buffer. Must be
     /// non-empty; users can still edit it before submission.
     pub text: String,
 }
 
+fn custom_prompt_map_to_vec(prompts: BTreeMap<String, String>) -> Vec<CustomPrompt> {
+    prompts
+        .into_iter()
+        .map(|(id, text)| CustomPrompt { id, text })
+        .collect()
+}
+
 fn validate_custom_prompts(prompts: &[CustomPrompt]) -> Result<(), String> {
-    let mut seen = HashSet::new();
     for prompt in prompts {
         if prompt.id.is_empty() {
             return Err("custom prompt id must not be empty".to_owned());
@@ -610,12 +615,6 @@ fn validate_custom_prompts(prompts: &[CustomPrompt]) -> Result<(), String> {
         if prompt.text.is_empty() {
             return Err(format!(
                 "custom prompt `{}` text must not be empty",
-                prompt.id
-            ));
-        }
-        if !seen.insert(prompt.id.as_str()) {
-            return Err(format!(
-                "custom prompt id `{}` is configured more than once",
                 prompt.id
             ));
         }

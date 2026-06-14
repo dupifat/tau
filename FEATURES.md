@@ -344,10 +344,18 @@ tool-provided fragments, so global style instructions, role guidance, and
 tool-specific instructions share one prompt assembly path.
 
 Custom prompt templates are separate from system-prompt fragments. Define
-`custom_prompts` in `harness.yaml` as a list of `{id, text}` entries, then type
-`/prompt <id>` in the CLI to replace the current editable prompt buffer with
-that text. The prompt is not submitted automatically, so it can be adjusted
+`custom_prompts` in `harness.yaml` as a map from prompt id to prompt text, then
+type `/prompt <id>` in the CLI to replace the current editable prompt buffer
+with that text. The prompt is not submitted automatically, so it can be adjusted
 before sending.
+
+```yaml
+custom_prompts:
+  review: |
+    Please review this change carefully.
+  summarize: |
+    Summarize the current session.
+```
 
 Fragment templates
 also receive the durable agent working directory as `cwd` and

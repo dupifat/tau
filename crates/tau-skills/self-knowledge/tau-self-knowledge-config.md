@@ -77,4 +77,4 @@ Other provider commands:
 
 Models are published by provider extensions at runtime; start Tau and use `/model` to inspect the current model list.
 
-- `harness.yaml` can define `custom_prompts: [{{ id, text }}]`; in the CLI, `/prompt <id>` replaces the editable prompt buffer with that text without submitting it.
+- `harness.yaml` can define `custom_prompts` as a map from prompt id to prompt text; in the CLI, `/prompt <id>` replaces the editable prompt buffer with that text without submitting it.

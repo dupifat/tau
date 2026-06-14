@@ -409,7 +409,7 @@ fn read_grep_json<R: Read>(stdout: R, limit: usize) -> GrepStreamResult {
                     match_count += 1;
                 }
                 let sep = if is_match { ':' } else { '-' };
-                let (rendered, truncated) = render_grep_line(&path, lineno, sep, &text);
+                let (rendered, truncated) = render_grep_line(&path, lineno, sep, text);
                 if truncated {
                     lines_truncated = true;
                 }

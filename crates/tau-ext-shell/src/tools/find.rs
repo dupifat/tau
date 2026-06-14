@@ -198,7 +198,7 @@ fn render_path(path: &Path) -> String {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
-        return render_path_bytes(path.as_os_str().as_bytes());
+        render_path_bytes(path.as_os_str().as_bytes())
     }
     #[cfg(not(unix))]
     {

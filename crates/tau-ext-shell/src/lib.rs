@@ -571,7 +571,7 @@ where
                         if !is_shell_tool(invoke.tool_name.as_str()) {
                             continue;
                         }
-                        if let Err((invoke, failure)) = schedule_tool_started(
+                        if let Err(error) = schedule_tool_started(
                             invoke,
                             &scheduler,
                             &tx,
@@ -579,6 +579,7 @@ where
                             lock_manager.clone(),
                             Arc::clone(&running_shells),
                         ) {
+                            let (invoke, failure) = *error;
                             send_tool_failure(invoke, failure, &tx);
                         }
                     }
@@ -635,9 +636,10 @@ where
                         }
                     }
                     Event::UiShellCommand(cmd) => {
-                        if let Err((cmd, message)) =
+                        if let Err(error) =
                             schedule_ui_shell_command(cmd, &scheduler, &tx, config.shell.clone())
                         {
+                            let (cmd, message) = *error;
                             send_ui_shell_saturated_failure(cmd, message, &tx);
                         }
                     }
@@ -798,7 +800,7 @@ fn schedule_tool_started(
     config: ExtConfig,
     lock_manager: DirLockManager,
     running_shells: Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
-) -> Result<(), (tau_proto::ToolStarted, crate::display::ToolFailure)> {
+) -> Result<(), Box<(tau_proto::ToolStarted, crate::display::ToolFailure)>> {
     let priority = priority_for_tool(&invoke, &config);
     let meta = WorkMeta {
         call_id: Some(invoke.call_id.clone()),
@@ -838,10 +840,10 @@ fn schedule_tool_started(
             }
         })
         .map_err(|error| {
-            (
+            Box::new((
                 invoke_for_error,
                 crate::display::ToolFailure::new(error.message),
-            )
+            ))
         })
 }
 
@@ -850,7 +852,7 @@ fn schedule_ui_shell_command(
     scheduler: &WorkScheduler,
     tx: &mpsc::Sender<HarnessInputMessage>,
     shell_config: ShellConfig,
-) -> Result<(), (tau_proto::UiShellCommand, String)> {
+) -> Result<(), Box<(tau_proto::UiShellCommand, String)>> {
     let meta = WorkMeta {
         call_id: None,
         tool_name: None,
@@ -863,7 +865,7 @@ fn schedule_ui_shell_command(
         .enqueue(WorkPriority::User, meta, move || {
             crate::tools::shell::dispatch_user_shell_command(cmd, shell_config, &tx_for_job);
         })
-        .map_err(|error| (cmd_for_error, error.message))
+        .map_err(|error| Box::new((cmd_for_error, error.message)))
 }
 
 fn priority_for_tool(invoke: &tau_proto::ToolStarted, config: &ExtConfig) -> WorkPriority {

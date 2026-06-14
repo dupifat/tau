@@ -2473,6 +2473,163 @@ fn extension_apply_patch_reports_context_mismatch_without_writing() {
     writer.flush().expect("flush");
 }
 
+/// Ensures apply_patch escapes control characters in model-visible path fields
+/// so malicious filenames cannot inject fake summary or error lines.
+#[test]
+fn extension_apply_patch_escapes_control_characters_in_paths() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("line\tbreak.txt");
+    fs::write(&file_path, "before\n").expect("write");
+
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+
+    let patch = format!(
+        "*** Begin Patch\n*** Update File: {}\n@@\n-before\n+after\n*** End Patch",
+        file_path.display()
+    );
+    writer
+        .write_event(&Event::ToolStarted(ToolStarted {
+            call_id: "call-patch-escaped-success".into(),
+            tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
+            arguments: CborValue::Text(patch),
+            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+            originator: tau_proto::PromptOriginator::User,
+        }))
+        .expect("invoke");
+    writer.flush().expect("flush");
+
+    let result = reader.read_event().expect("read").expect("result");
+    let Event::ToolResult(result) = result else {
+        panic!("expected tool result");
+    };
+    let CborValue::Text(output) = result.result else {
+        panic!("expected text result");
+    };
+    assert!(
+        output.contains("line\\tbreak.txt"),
+        "escaped path missing: {output}"
+    );
+    assert!(
+        !output.contains("line\tbreak.txt"),
+        "path tab should be escaped in output: {output}"
+    );
+
+    let created_path = tempdir.path().join("created\tfile.txt");
+    let missing_path = tempdir.path().join("missing\tfile.txt");
+    let patch = format!(
+        "*** Begin Patch\n*** Add File: {}\n+hello\n*** Update File: {}\n@@\n-old\n+new\n*** End Patch",
+        created_path.display(),
+        missing_path.display(),
+    );
+    writer
+        .write_event(&Event::ToolStarted(ToolStarted {
+            call_id: "call-patch-escaped-partial".into(),
+            tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
+            arguments: CborValue::Text(patch),
+            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+            originator: tau_proto::PromptOriginator::User,
+        }))
+        .expect("invoke");
+    writer.flush().expect("flush");
+
+    let error = reader.read_event().expect("read").expect("error");
+    let Event::ToolError(error) = error else {
+        panic!("expected tool error");
+    };
+    assert!(
+        error.message.contains("missing\\tfile.txt"),
+        "escaped error path missing: {}",
+        error.message
+    );
+    let details = error.details.expect("partial changes details");
+    let CborValue::Map(entries) = details else {
+        panic!("expected structured partial change details");
+    };
+    let partial_changes = entries
+        .iter()
+        .find_map(|(key, value)| match (key, value) {
+            (CborValue::Text(key), CborValue::Array(changes)) if key == "partial_changes" => {
+                Some(changes)
+            }
+            _ => None,
+        })
+        .expect("partial_changes detail");
+    let CborValue::Map(change) = &partial_changes[0] else {
+        panic!("expected partial change map");
+    };
+    assert!(change.iter().any(|(key, value)| matches!(
+        (key, value),
+        (CborValue::Text(key), CborValue::Text(value))
+            if key == "path" && value.contains("created\\tfile.txt")
+    )));
+
+    let dir_path = tempdir.path().join("dir\tname");
+    fs::create_dir(&dir_path).expect("create tab dir");
+    let patch = format!(
+        "*** Begin Patch\n*** Update File: {}\n@@\n-old\n+new\n*** End Patch",
+        dir_path.display(),
+    );
+    writer
+        .write_event(&Event::ToolStarted(ToolStarted {
+            call_id: "call-patch-escaped-io-error".into(),
+            tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
+            arguments: CborValue::Text(patch),
+            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+            originator: tau_proto::PromptOriginator::User,
+        }))
+        .expect("invoke");
+    writer.flush().expect("flush");
+
+    let error = reader.read_event().expect("read").expect("error");
+    let Event::ToolError(error) = error else {
+        panic!("expected tool error");
+    };
+    assert!(
+        error.message.contains("dir\\tname"),
+        "escaped diagnostic path missing: {}",
+        error.message
+    );
+    assert!(
+        !error.message.contains("dir\tname"),
+        "embedded I/O diagnostic should not keep raw tabs: {}",
+        error.message
+    );
+
+    writer
+        .write_event(&Event::ToolStarted(ToolStarted {
+            call_id: "call-patch-escaped-invalid-op".into(),
+            tool_name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
+            arguments: CborValue::Text(
+                "*** Begin Patch\n*** Bad\tOperation\n*** End Patch".to_owned(),
+            ),
+            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+            originator: tau_proto::PromptOriginator::User,
+        }))
+        .expect("invoke");
+    writer.flush().expect("flush");
+
+    let error = reader.read_event().expect("read").expect("error");
+    let Event::ToolError(error) = error else {
+        panic!("expected tool error");
+    };
+    assert!(
+        error.message.contains("Bad\\tOperation"),
+        "escaped invalid operation missing: {}",
+        error.message
+    );
+    assert!(
+        !error.message.contains("Bad\tOperation"),
+        "invalid operation should not keep raw tabs: {}",
+        error.message
+    );
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
 #[test]
 fn extension_apply_patch_move_renames_file() {
     let tempdir = TempDir::new().expect("tempdir");

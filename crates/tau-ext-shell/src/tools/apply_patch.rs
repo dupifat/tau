@@ -6,6 +6,7 @@ use tau_proto::{CborValue, ToolUsePayload};
 
 use crate::diff::compute_diff;
 use crate::display::{ToolFailure, ToolOutput};
+use crate::tools::find::escape_path_text;
 use crate::tools::world::{MAX_SAFE_FILE_READ_BYTES, ShellWorld};
 
 const SUMMARY_HEADER: &str = "Success. Updated the following files:";
@@ -171,19 +172,23 @@ fn apply_hunks(
                     .is_some()
                 {
                     return Err(ApplyPatchFailure::new(
-                        format!("Add File target already exists: {}", abs.display()),
+                        format!("Add File target already exists: {}", render_path(&abs)),
                         &changes,
                     ));
                 }
                 let old_content = String::new();
                 write_file_creating_parent(&abs, contents, world).map_err(|error| {
                     ApplyPatchFailure::new(
-                        format!("Failed to write file {}: {error}", abs.display()),
+                        format!(
+                            "Failed to write file {}: {}",
+                            render_path(&abs),
+                            render_diagnostic(error)
+                        ),
                         &changes,
                     )
                 })?;
                 changes.push(AppliedChange {
-                    display_path: path.display().to_string(),
+                    display_path: render_path(path),
                     path: abs.clone(),
                     status: ChangeStatus::Add,
                     old_content,
@@ -194,12 +199,12 @@ fn apply_hunks(
                 let abs = resolve_path(&cwd, path);
                 if world.is_dir(&abs).map_err(|_| {
                     ApplyPatchFailure::new(
-                        format!("Failed to delete file {}", abs.display()),
+                        format!("Failed to delete file {}", render_path(&abs)),
                         &changes,
                     )
                 })? {
                     return Err(ApplyPatchFailure::new(
-                        format!("Failed to delete file {}", abs.display()),
+                        format!("Failed to delete file {}", render_path(&abs)),
                         &changes,
                     ));
                 }
@@ -207,18 +212,18 @@ fn apply_hunks(
                     .read_to_string_limited(&abs, MAX_SAFE_FILE_READ_BYTES)
                     .map_err(|_| {
                         ApplyPatchFailure::new(
-                            format!("Failed to delete file {}", abs.display()),
+                            format!("Failed to delete file {}", render_path(&abs)),
                             &changes,
                         )
                     })?;
                 world.remove_file(&abs).map_err(|_| {
                     ApplyPatchFailure::new(
-                        format!("Failed to delete file {}", abs.display()),
+                        format!("Failed to delete file {}", render_path(&abs)),
                         &changes,
                     )
                 })?;
                 changes.push(AppliedChange {
-                    display_path: path.display().to_string(),
+                    display_path: render_path(path),
                     path: abs.clone(),
                     status: ChangeStatus::Delete,
                     old_content,
@@ -235,7 +240,11 @@ fn apply_hunks(
                     .read_to_string_limited(&abs, MAX_SAFE_FILE_READ_BYTES)
                     .map_err(|error| {
                         ApplyPatchFailure::new(
-                            format!("Failed to read file to update {}: {error}", abs.display()),
+                            format!(
+                                "Failed to read file to update {}: {}",
+                                render_path(&abs),
+                                render_diagnostic(error)
+                            ),
                             &changes,
                         )
                     })?;
@@ -249,21 +258,28 @@ fn apply_hunks(
                         .is_some()
                     {
                         return Err(ApplyPatchFailure::new(
-                            format!("Move destination already exists: {}", dest_abs.display()),
+                            format!(
+                                "Move destination already exists: {}",
+                                render_path(&dest_abs)
+                            ),
                             &changes,
                         ));
                     }
                     write_file_creating_parent(&dest_abs, &new_content, world).map_err(
                         |error| {
                             ApplyPatchFailure::new(
-                                format!("Failed to write file {}: {error}", dest_abs.display()),
+                                format!(
+                                    "Failed to write file {}: {}",
+                                    render_path(&dest_abs),
+                                    render_diagnostic(error)
+                                ),
                                 &changes,
                             )
                         },
                     )?;
                     let dest_write_change_index = changes.len();
                     changes.push(AppliedChange {
-                        display_path: move_path.display().to_string(),
+                        display_path: render_path(move_path),
                         path: dest_abs.clone(),
                         status: ChangeStatus::Add,
                         old_content: String::new(),
@@ -271,23 +287,23 @@ fn apply_hunks(
                     });
                     if world.is_dir(&abs).map_err(|_| {
                         ApplyPatchFailure::new(
-                            format!("Failed to remove original {}", abs.display()),
+                            format!("Failed to remove original {}", render_path(&abs)),
                             &changes,
                         )
                     })? {
                         return Err(ApplyPatchFailure::new(
-                            format!("Failed to remove original {}", abs.display()),
+                            format!("Failed to remove original {}", render_path(&abs)),
                             &changes,
                         ));
                     }
                     world.remove_file(&abs).map_err(|_| {
                         ApplyPatchFailure::new(
-                            format!("Failed to remove original {}", abs.display()),
+                            format!("Failed to remove original {}", render_path(&abs)),
                             &changes,
                         )
                     })?;
                     changes[dest_write_change_index] = AppliedChange {
-                        display_path: move_path.display().to_string(),
+                        display_path: render_path(move_path),
                         path: abs.clone(),
                         status: ChangeStatus::Modify,
                         old_content: old_content.clone(),
@@ -299,11 +315,15 @@ fn apply_hunks(
                         .write_file(&abs, new_content.as_bytes())
                         .map_err(|error| {
                             ApplyPatchFailure::new(
-                                format!("Failed to write file {}: {error}", abs.display()),
+                                format!(
+                                    "Failed to write file {}: {}",
+                                    render_path(&abs),
+                                    render_diagnostic(error)
+                                ),
                                 &changes,
                             )
                         })?;
-                    (abs.clone(), path.display().to_string())
+                    (abs.clone(), render_path(path))
                 };
 
                 changes.push(AppliedChange {
@@ -420,11 +440,19 @@ fn format_summary(changes: &[AppliedChange]) -> String {
     lines.join("\n")
 }
 
+fn render_path(path: &Path) -> String {
+    escape_path_text(&path.display().to_string())
+}
+
+fn render_diagnostic(error: impl std::fmt::Display) -> String {
+    escape_path_text(&error.to_string())
+}
+
 fn read_optional_file(path: &Path, world: &mut ShellWorld) -> Result<Option<String>, String> {
     match world.read_to_string_limited(path, MAX_SAFE_FILE_READ_BYTES) {
         Ok(content) => Ok(Some(content)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.to_string()),
+        Err(error) => Err(render_diagnostic(error)),
     }
 }
 
@@ -486,7 +514,7 @@ fn compute_replacements(
                 return Err(format!(
                     "Failed to find context '{}' in {}",
                     ctx_line,
-                    path.display()
+                    render_path(path)
                 ));
             }
         }
@@ -519,7 +547,7 @@ fn compute_replacements(
         } else {
             return Err(format!(
                 "Failed to find expected lines in {}:\n{}",
-                path.display(),
+                render_path(path),
                 chunk.old_lines.join("\n")
             ));
         }
@@ -611,7 +639,10 @@ fn parse_patch(patch: &str) -> Result<Vec<Hunk>, String> {
             let mut contents = Vec::new();
             while index + 1 < lines.len() && !lines[index].starts_with("*** ") {
                 let Some(content) = lines[index].strip_prefix('+') else {
-                    return Err(format!("invalid add-file line: {}", lines[index]));
+                    return Err(format!(
+                        "invalid add-file line: {}",
+                        escape_path_text(lines[index])
+                    ));
                 };
                 contents.push(content.to_owned());
                 index += 1;
@@ -619,7 +650,7 @@ fn parse_patch(patch: &str) -> Result<Vec<Hunk>, String> {
             if contents.is_empty() {
                 return Err(format!(
                     "Add File hunk for {} must contain at least one line",
-                    path
+                    escape_path_text(path)
                 ));
             }
             hunks.push(Hunk::Add {
@@ -655,7 +686,10 @@ fn parse_patch(patch: &str) -> Result<Vec<Hunk>, String> {
                 } else if let Some(context) = header.strip_prefix("@@ ") {
                     Some(context.to_owned())
                 } else {
-                    return Err(format!("invalid update hunk header: {header}"));
+                    return Err(format!(
+                        "invalid update hunk header: {}",
+                        escape_path_text(header)
+                    ));
                 };
                 index += 1;
 
@@ -690,7 +724,12 @@ fn parse_patch(patch: &str) -> Result<Vec<Hunk>, String> {
                             let rest = chars.as_str().to_owned();
                             new_lines.push(rest);
                         }
-                        _ => return Err(format!("invalid update hunk line: {}", lines[index])),
+                        _ => {
+                            return Err(format!(
+                                "invalid update hunk line: {}",
+                                escape_path_text(lines[index])
+                            ));
+                        }
                     }
                     index += 1;
                 }
@@ -698,7 +737,7 @@ fn parse_patch(patch: &str) -> Result<Vec<Hunk>, String> {
                 if old_lines.is_empty() && new_lines.is_empty() {
                     return Err(format!(
                         "Update File hunk for {} must contain at least one line",
-                        path
+                        escape_path_text(path)
                     ));
                 }
                 chunks.push(UpdateChunk {
@@ -712,7 +751,7 @@ fn parse_patch(patch: &str) -> Result<Vec<Hunk>, String> {
             if chunks.is_empty() {
                 return Err(format!(
                     "Update File hunk for {} must contain at least one chunk",
-                    path
+                    escape_path_text(path)
                 ));
             }
             hunks.push(Hunk::Update {
@@ -723,7 +762,10 @@ fn parse_patch(patch: &str) -> Result<Vec<Hunk>, String> {
             continue;
         }
 
-        return Err(format!("invalid patch operation: {line}"));
+        return Err(format!(
+            "invalid patch operation: {}",
+            escape_path_text(line)
+        ));
     }
 
     if hunks.is_empty() {

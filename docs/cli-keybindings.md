@@ -109,7 +109,6 @@ Bindings live under `cli.bind` in config. The built-in bindings are merged below
   for `prompt-undo` before the picker opens. History search uses the newest 200
   non-empty prompts, truncates row summaries to 240 characters, and caps preview
   files to 64 KiB each / 1 MiB total before launching the picker.
-  recorded for `prompt-undo` before the picker opens.
 - `shell-prompt-insert` — run `command` and insert stdout at the cursor.
 - `shell-prompt-edit` — run `command` with the current prompt in
   `$TAU_PROMPT_PATH` and replace the prompt with the edited file content. When
@@ -119,7 +118,9 @@ Bindings live under `cli.bind` in config. The built-in bindings are merged below
   above the marker. Leaving the trailer unchanged clears old recovery. Deleting
   the marker makes the whole file prompt-owned and also clears old recovery.
 
-Shell prompt actions capture at most 1 MiB of stdout, discard stderr, and time
+`shell-prompt-insert` and `prompt-history-search` capture at most 1 MiB of
+stdout and discard stderr. `shell-prompt-edit` inherits terminal stdio so
+interactive editors can use the terminal directly. All prompt shell actions time
 out after 1 hour. `complete_with_command` completion commands capture at most
 256 KiB of stdout, discard stderr, and time out after 10 seconds. Failures are
 shown as local prompt/completion notices rather than submitted to the agent.

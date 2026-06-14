@@ -607,7 +607,9 @@ Command environment:
 Tau resolves that editor from `$EDITOR`, then `$VISUAL`, then `hx`, `vim`,
 `vi`, and `nano` if found on `$PATH`.
 
-Prompt shell actions capture at most 1 MiB of stdout, discard stderr, and time
+`shell-prompt-insert` and `prompt-history-search` capture at most 1 MiB of
+stdout and discard stderr. `shell-prompt-edit` inherits terminal stdio so
+interactive editors can use the terminal directly. All prompt shell actions time
 out after 1 hour. Completion commands from `complete_with_command` capture at
 most 256 KiB of stdout, discard stderr, and time out after 10 seconds. History
 search uses the newest 200 non-empty prompts, truncates row summaries to 240

@@ -186,18 +186,24 @@ impl ToolResponse {
 }
 
 fn sanitize_provider_header_text(input: &str) -> String {
-    sanitize_provider_text(input, false)
+    sanitize_provider_text(input, ProviderTextMode::Header)
 }
 
 fn sanitize_provider_body_text(input: &str) -> String {
-    sanitize_provider_text(input, true)
+    sanitize_provider_text(input, ProviderTextMode::Body)
 }
 
-fn sanitize_provider_text(input: &str, preserve_lf: bool) -> String {
+#[derive(Clone, Copy)]
+enum ProviderTextMode {
+    Header,
+    Body,
+}
+
+fn sanitize_provider_text(input: &str, mode: ProviderTextMode) -> String {
     let mut output = String::new();
     for ch in input.chars() {
         match ch {
-            '\n' if preserve_lf => output.push('\n'),
+            '\n' if matches!(mode, ProviderTextMode::Body) => output.push('\n'),
             '\n' => output.push_str("\\n"),
             '\r' => output.push_str("\\r"),
             '\t' => output.push_str("\\t"),

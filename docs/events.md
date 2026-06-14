@@ -24,13 +24,20 @@ for control of the emit/intercept pipeline.
 - **`harness.info`** — A free-form informational message from the
   harness for the user, with a severity (`normal` / `important`). Used
   for things like `/tree` rendering and ad-hoc notices.
+- **`harness.session_dir`** — Announces the current session directory for UIs
+  and extensions that need to present or inspect session-local paths.
+- **`harness.ui_dir`** — Announces the UI state directory for UI-facing helpers.
 - **`harness.models_available`** — The full provider-published model list
   as `provider/model_id` strings. Re-emitted when provider snapshots change.
+- **`harness.roles_available`** — Snapshot of roles currently available from
+  effective configuration, including their display descriptions for UIs.
 - **`harness.role_selected`** — Which role is currently selected, plus
   the model it resolves to and that model's context-window size if known.
 - **`harness.context_usage_changed`** — Updated input/cached token counts
   and percent-of-context-window for the selected role's resolved model,
   after each agent response that reports usage.
+- **`harness.agent_context_usage_changed`** — Updated context-usage snapshot for
+  a specific agent, used by UIs that render per-agent context pressure.
 - **`harness.efforts_available`** — Which effort levels are valid for the
   selected role's resolved model. Empty when the selected role has no
   resolved model or the provider doesn't support reasoning.
@@ -106,6 +113,8 @@ of an agent log.
 - **`agent.display_name_set`** — Durable fact that changes an agent's
   human-friendly display name. Carries `agent_id` and the new non-empty display
   name; UIs use it when rendering agent chips and history.
+- **`agent.head_moved`** — Durable fact that changes an agent's selected tree
+  head after navigation, so future prompts branch from the requested node.
 
 ## Provider execution
 
@@ -181,6 +190,20 @@ the agent requests calls, and the harness orchestrates dispatch.
   tools-in-flight, total, context tokens, percent. Transient; the UI
   re-renders the parent tool block.
 
+## Actions
+
+Action events carry slash-command/action schema and invocation traffic between
+extensions, the harness, and interested UIs.
+
+- **`action.schema_published`** — An extension publishes its current action
+  schema tree, including command names, descriptions, arguments, and action ids.
+- **`action.invoke`** — The harness or UI requests execution of a published
+  action by id with CBOR/YAML-compatible arguments and correlation metadata.
+- **`action.result`** — The action provider returns a successful result for a
+  prior invocation.
+- **`action.error`** — The action provider reports an invocation failure with a
+  human-readable message and optional structured detail.
+
 ## Extensions
 
 Two sub-classes:
@@ -211,9 +234,15 @@ harness/agent.
 - **`extension.agents_md_available`** — The extension discovered an
   AGENTS.md file and is shipping its contents eagerly so the harness
   can inject them without a tool round-trip.
+- **`extension.context_provider_register`** — The extension registers a named
+  context provider that can publish agent/session context updates.
 - **`extension.context_ready`** — The extension finished publishing
   refreshed prompt context for one session (the reply to
   `session.started`).
+- **`extension.agent_context_publish`** — The extension publishes context for a
+  particular agent/session context provider slot.
+- **`extension.prompt_fragment_publish`** — The extension publishes a prompt
+  fragment contribution that prompt assembly may include according to config.
 - **`extension.prompt_submit_request`** — An extension request to submit a
   normal user-style prompt to an already loaded agent. The harness validates the
   target agent and, when accepted, publishes the normal durable
@@ -226,6 +255,8 @@ harness/agent.
   Tool-backed delegate requests default to `senior-engineer` when `role` is
   absent; non-tool requests without `role` use the currently selected
   interactive role.
+- **`agent.start_accepted`** — The harness accepted an agent-start request and
+  created or reused the delegated agent route for the requested task.
 - **`agent.start_result`** — The agent's final answer to an
   earlier `agent.start_request`, routed point-to-point back to the
   requesting extension. Carries the same `query_id`.

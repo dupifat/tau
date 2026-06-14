@@ -84,8 +84,8 @@ pub struct ExtensionOverrideArgs {
 pub struct RunArgs {
     /// Resume an existing session.
     ///
-    /// Bare `-r` resumes the most recent session whose `meta.json.starting_cwd`
-    /// matches the current working directory. `-r <id>` resumes that
+    /// Bare `-r` resumes the most recent session whose metadata matches
+    /// the current working directory. `-r <id>` resumes that
     /// specific session id. Without `-r`, a fresh session id is minted
     /// (`<basename(cwd)>-<rand6>`).
     #[arg(short = 'r', long = "resume", num_args = 0..=1, default_missing_value = "")]

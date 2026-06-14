@@ -85,6 +85,7 @@ fn seed_restored_tool_round(state_dir: &Path, call_ids: &[&str], completed_call_
                 agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
                 role: "engineer".to_owned(),
                 display_name: None,
+                metadata: Vec::new(),
             }),
         )
         .expect("seed agent start");
@@ -150,6 +151,7 @@ fn seed_restored_tool_round_for_agent(
                 agent_id: crate::parse_agent_id(agent_id),
                 role: "engineer".to_owned(),
                 display_name: None,
+                metadata: Vec::new(),
             }),
         )
         .expect("seed agent start");

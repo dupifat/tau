@@ -303,7 +303,7 @@ fn ui_agent_model_select_sets_model_override_for_target_agent() {
     clear_startup_echo_models(&mut h);
     connect_provider_source(&mut h, "provider-ext");
     let role = h.selected_role.clone();
-    let cid = h.create_durable_user_agent("s1".into(), &role, test_cwd());
+    let cid = h.create_durable_user_agent("s1".into(), &role);
     let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent id");
 
     let default_model: ModelId = "test/default".parse().expect("model id");
@@ -351,7 +351,7 @@ fn unavailable_agent_model_override_falls_back_to_role_model() {
     clear_startup_echo_models(&mut h);
     connect_provider_source(&mut h, "provider-ext");
     let role = h.selected_role.clone();
-    let cid = h.create_durable_user_agent("s1".into(), &role, test_cwd());
+    let cid = h.create_durable_user_agent("s1".into(), &role);
     let role_model: ModelId = "test/role-model".parse().expect("model id");
     h.handle_extension_event(
         "provider-ext",
@@ -377,8 +377,8 @@ fn targetless_agent_model_select_rejects_ambiguous_user_agents() {
     clear_startup_echo_models(&mut h);
     connect_provider_source(&mut h, "provider-ext");
     let role = h.selected_role.clone();
-    let first = h.create_durable_user_agent("s1".into(), &role, test_cwd());
-    let second = h.create_durable_user_agent("s1".into(), &role, test_cwd());
+    let first = h.create_durable_user_agent("s1".into(), &role);
+    let second = h.create_durable_user_agent("s1".into(), &role);
     let selected_model: ModelId = "test/selected".parse().expect("model id");
     h.handle_extension_event(
         "provider-ext",

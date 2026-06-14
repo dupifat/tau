@@ -6,7 +6,6 @@
 //! There are no requests or responses, only announcements.
 
 use std::fmt;
-use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -1679,7 +1678,7 @@ pub struct AgentHeadMoved {
 }
 
 /// Immutable agent creation fact recorded at the start of an agent log.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentStarted {
     /// Durable agent this log belongs to.
     pub agent_id: AgentId,
@@ -1691,6 +1690,9 @@ pub struct AgentStarted {
     /// Optional human-friendly name for presenting this agent in UIs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// Metadata facts present at creation time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata: Vec<AgentInitialMetadata>,
 }
 
 /// Durable per-agent metadata value update.
@@ -2238,14 +2240,18 @@ pub struct UiSwitchSession {
 /// that should be submitted to it. This is the explicit boundary between
 /// pre-agent UI state (role/cwd can still change freely) and durable agent
 /// state.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UiCreateAgent {
     /// Session in which the agent should be loaded.
     pub session_id: SessionId,
     /// Role to bind to the new durable agent.
     pub role: String,
-    /// Working directory used for agent-scoped context discovery.
-    pub cwd: PathBuf,
+    /// Initial metadata facts to publish for the new agent.
+    ///
+    /// The harness fills in the newly-created agent id when publishing these
+    /// as durable `agent.metadata_set` events.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata: Vec<AgentInitialMetadata>,
     /// Optional first prompt to append after agent context has been loaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_prompt: Option<String>,
@@ -2262,6 +2268,18 @@ pub struct UiCreateAgent {
     /// Optional parent agent whose inheritable metadata should be copied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_agent: Option<AgentId>,
+}
+
+/// Initial metadata value requested while creating a new UI-owned agent.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentInitialMetadata {
+    /// Metadata key to publish for the new agent.
+    pub key: AgentMetadataKey,
+    /// Metadata value to publish for the new agent.
+    pub value: CborValue,
+    /// Whether the metadata should be inherited by child agents.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub inheritable: bool,
 }
 
 /// UI request to set a durable agent display name.

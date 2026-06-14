@@ -582,16 +582,18 @@ where
             HarnessOutputMessage::Deliver(delivery) => {
                 runtime_started = true;
                 // Replay-marked frames re-send historical facts to late
-                // subscribers. Everything this extension reacts to is either
-                // an execution trigger (tool calls, shell commands — acting
-                // on history would re-run side effects) or a current-state
-                // announcement the harness never replay-marks, so replay
-                // frames are skipped wholesale.
-                if delivery.is_replay() {
-                    continue;
-                }
+                // subscribers. Execution triggers are skipped on replay so
+                // history does not re-run side effects; metadata-bearing facts
+                // are folded so cwd state is restored before live readiness.
+                let is_replay = delivery.is_replay();
                 match delivery.into_event() {
+                    Event::AgentStarted(started) => {
+                        apply_started_cwd_metadata(started, &tx, &cwd_state, is_replay);
+                    }
                     Event::ToolStarted(invoke) => {
+                        if is_replay {
+                            continue;
+                        }
                         if !is_shell_tool(invoke.tool_name.as_str()) {
                             continue;
                         }
@@ -609,12 +611,21 @@ where
                         }
                     }
                     Event::SessionStarted(started) => {
+                        if is_replay {
+                            continue;
+                        }
                         dispatch_session_started(started, &tx);
                     }
                     Event::SessionAgentLoaded(loaded) => {
+                        if is_replay {
+                            continue;
+                        }
                         dispatch_session_agent_loaded(loaded, &tx, &cwd_state);
                     }
                     Event::SessionAgentUnloaded(unloaded) => {
+                        if is_replay {
+                            continue;
+                        }
                         lock_manager.release_agent(&unloaded.agent_id);
                         scheduler.cancel_agent(&unloaded.agent_id);
                         cwd_state.unset(&unloaded.agent_id);
@@ -630,6 +641,9 @@ where
                             let cwd = PathBuf::from(path);
                             let agent_id = set.agent_id;
                             cwd_state.set(agent_id.clone(), cwd.clone());
+                            if is_replay {
+                                continue;
+                            }
                             let _ = tx.send(HarnessInputMessage::emit(cwd_context_event(
                                 agent_id.clone(),
                                 &cwd,
@@ -690,6 +704,9 @@ where
                                 ));
                             }
                         } else if set.key == cwd_state.key() {
+                            if is_replay {
+                                continue;
+                            }
                             let agent_id = set.agent_id;
                             let cwd = cwd_state.get_or_default(&agent_id);
                             let _ = tx.send(HarnessInputMessage::emit(cwd_context_event(
@@ -728,6 +745,9 @@ where
                     Event::AgentMetadataUnset(unset) => {
                         if unset.key == cwd_state.key() {
                             cwd_state.unset(&unset.agent_id);
+                            if is_replay {
+                                continue;
+                            }
                             let cwd = cwd_state.get_or_default(&unset.agent_id);
                             let _ = tx.send(HarnessInputMessage::emit(cwd_context_event(
                                 unset.agent_id.clone(),
@@ -1607,6 +1627,28 @@ fn dispatch_cancellable_shell_tool(
 fn dispatch_session_started(started: SessionStarted, tx: &mpsc::Sender<HarnessInputMessage>) {
     for event in build_session_started_events(started) {
         let _ = tx.send(HarnessInputMessage::emit(event));
+    }
+}
+
+fn apply_started_cwd_metadata(
+    started: tau_proto::AgentStarted,
+    tx: &mpsc::Sender<HarnessInputMessage>,
+    cwd_state: &CwdState,
+    is_replay: bool,
+) {
+    for item in started.metadata {
+        if item.key == cwd_state.key()
+            && let CborValue::Text(path) = item.value
+        {
+            let cwd = PathBuf::from(path);
+            cwd_state.set(started.agent_id.clone(), cwd.clone());
+            if !is_replay {
+                let _ = tx.send(HarnessInputMessage::emit(cwd_context_event(
+                    started.agent_id.clone(),
+                    &cwd,
+                )));
+            }
+        }
     }
 }
 

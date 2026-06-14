@@ -52,8 +52,6 @@ impl ToolPromptFragment {
 pub(crate) struct RolePromptTemplateContext<'a> {
     /// Name of the role whose prompt is being rendered.
     pub(crate) role_name: &'a str,
-    /// Working directory associated with the agent receiving the prompt.
-    pub(crate) working_directory: Option<&'a std::path::Path>,
 }
 
 /// Builds the system prompt from Tau defaults plus role prompt and prompt
@@ -75,10 +73,7 @@ pub(crate) fn build_system_prompt(
         skills,
         prompt_fragments,
         serde_json::json!({}),
-        RolePromptTemplateContext {
-            role_name: "",
-            working_directory: None,
-        },
+        RolePromptTemplateContext { role_name: "" },
     )
 }
 
@@ -169,20 +164,10 @@ fn prompt_template_data(
     skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
     agent_context: serde_json::Value,
 ) -> serde_json::Value {
-    let cwd = context
-        .working_directory
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
-    let working_directory = context
-        .working_directory
-        .map(working_directory_template_value)
-        .unwrap_or_else(empty_working_directory_template_value);
     serde_json::json!({
         "role": {
             "name": context.role_name,
         },
-        "cwd": cwd,
-        "working_directory": working_directory,
         "skills": prompt_template_skills(skills),
         "agent_context": agent_context,
     })
@@ -307,33 +292,6 @@ fn prompt_template_renderer() -> handlebars::Handlebars<'static> {
     handlebars
 }
 
-fn working_directory_template_value(path: &std::path::Path) -> serde_json::Value {
-    let display = path.display().to_string();
-    let basename = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("")
-        .to_owned();
-    let ancestors = path
-        .ancestors()
-        .map(|ancestor| ancestor.display().to_string())
-        .collect::<Vec<_>>();
-    serde_json::json!({
-        "present": true,
-        "path": display,
-        "basename": basename,
-        "ancestors": ancestors,
-    })
-}
-
-fn empty_working_directory_template_value() -> serde_json::Value {
-    serde_json::json!({
-        "present": false,
-        "path": "",
-        "basename": "",
-        "ancestors": [],
-    })
-}
 fn prompt_template_skills(
     skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
 ) -> Vec<serde_json::Value> {

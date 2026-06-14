@@ -81,7 +81,7 @@ fn agent_meta_initializes_and_explicitly_bumps_last_user_interaction() {
     let mut store = AgentStore::open(&agents_dir).expect("open agent store");
 
     store
-        .record_agent_meta("agent-1", None)
+        .record_agent_meta("agent-1")
         .expect("record initial metadata");
     let meta = store
         .agent_meta("agent-1")

@@ -39,8 +39,7 @@ impl Harness {
             })
             .unwrap_or_else(|| {
                 let role = self.selected_role.clone();
-                let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                self.create_durable_user_agent(session_id, &role, cwd)
+                self.create_durable_user_agent(session_id, &role)
             });
         self.dispatch_prompt_for_agent(&agent_id, PendingPrompt::user(text))
     }

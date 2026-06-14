@@ -539,8 +539,8 @@ fn minted_agent_ids_use_deterministic_test_rng_sequence() {
         let tmp = TempDir::new().expect("tempdir");
         let mut h = echo_harness(tmp.path()).expect("harness");
         let role = h.selected_role.clone();
-        let first = h.create_durable_user_agent("s1".into(), &role, test_cwd());
-        let second = h.create_durable_user_agent("s1".into(), &role, test_cwd());
+        let first = h.create_durable_user_agent("s1".into(), &role);
+        let second = h.create_durable_user_agent("s1".into(), &role);
         (first.to_string(), second.to_string())
     };
 
@@ -770,10 +770,6 @@ fn agent_tree_for_conversation<'a>(h: &'a Harness, cid: &AgentId) -> &'a AgentTr
     h.agent_store.agent(agent_id).expect("agent tree")
 }
 
-fn test_cwd() -> PathBuf {
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-}
-
 fn ensure_test_user_agent(h: &mut Harness) -> AgentId {
     let cid = h
         .agents
@@ -782,7 +778,7 @@ fn ensure_test_user_agent(h: &mut Harness) -> AgentId {
         .unwrap_or_else(|| {
             let session_id = h.current_session_id.clone();
             let role = h.selected_role.clone();
-            h.create_durable_user_agent(session_id, &role, test_cwd())
+            h.create_durable_user_agent(session_id, &role)
         });
     // Most harness unit tests use this helper to focus on tool/provider state,
     // not extension-provided prompt context. Treat the synthetic agent as if

@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use tau_proto::{Event, PromptMessageClass, PromptOriginator, UiCreateAgent};
+use tau_proto::{
+    AgentInitialMetadata, CborValue, Event, PromptMessageClass, PromptOriginator, UiCreateAgent,
+};
 
 /// Default role used when the UI submits a prompt without an explicit selected
 /// role from session state.
@@ -17,12 +19,25 @@ pub(crate) fn create_user_agent_prompt(
         parent_agent: None,
         session_id: session_id.into(),
         role: role.into(),
-        cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        metadata: shell_cwd_metadata(),
         initial_prompt: Some(prompt.into()),
         message_class: PromptMessageClass::User,
         originator: PromptOriginator::User,
         ctx_id: None,
     })
+}
+
+pub(crate) fn shell_cwd_metadata() -> Vec<AgentInitialMetadata> {
+    vec![AgentInitialMetadata {
+        key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+        value: CborValue::Text(
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .display()
+                .to_string(),
+        ),
+        inheritable: true,
+    }]
 }
 
 #[cfg(test)]

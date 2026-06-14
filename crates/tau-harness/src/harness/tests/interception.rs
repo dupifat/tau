@@ -647,6 +647,7 @@ fn agent_started_event(role: &str) -> Event {
         agent_id: tau_proto::AgentId::parse("agent-started-test").expect("agent id"),
         role: role.to_owned(),
         display_name: Some("Started Test".to_owned()),
+        metadata: Vec::new(),
     })
 }
 

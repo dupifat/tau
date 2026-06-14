@@ -476,23 +476,16 @@ impl AgentStore {
         }
     }
 
-    /// Records initial cwd metadata for an agent if not already
-    /// present. Idempotent: subsequent calls only update
-    /// `last_touched`.
-    pub fn record_agent_meta(
-        &mut self,
-        agent_id: &str,
-        cwd: Option<PathBuf>,
-    ) -> Result<(), AgentStoreError> {
+    /// Records sidecar metadata timestamps for an agent.
+    ///
+    /// Idempotent: subsequent calls only update `last_touched`.
+    pub fn record_agent_meta(&mut self, agent_id: &str) -> Result<(), AgentStoreError> {
         self.ensure_locked(agent_id)?;
         let path = self.agent_dir(agent_id).join("meta.json");
         let now = unix_now();
         let mut meta = read_meta(&path).unwrap_or_default();
         if meta.created_at == 0 {
             meta.created_at = now;
-        }
-        if meta.starting_cwd.is_none() {
-            meta.starting_cwd = cwd;
         }
         meta.last_touched = now;
         if meta.last_user_interaction_time == 0 {

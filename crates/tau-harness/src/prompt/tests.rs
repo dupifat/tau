@@ -70,7 +70,6 @@ fn build_system_prompt_does_not_html_escape_cwd() {
         }),
         RolePromptTemplateContext {
             role_name: "engineer",
-            working_directory: None,
         },
     );
 
@@ -94,10 +93,7 @@ fn build_system_prompt_encourages_parallel_tool_calls() {
             ),
         )],
         serde_json::json!({}),
-        RolePromptTemplateContext {
-            role_name: "",
-            working_directory: None,
-        },
+        RolePromptTemplateContext { role_name: "" },
     );
     assert!(prompt.contains("## Tool calling"));
     assert!(prompt.contains("shell tool docs"));
@@ -140,7 +136,6 @@ fn build_system_prompt_renders_role_prompt_handlebars_context() {
         }),
         RolePromptTemplateContext {
             role_name: "engineer",
-            working_directory: None,
         },
     );
 
@@ -149,53 +144,32 @@ fn build_system_prompt_renders_role_prompt_handlebars_context() {
     assert!(!prompt.contains("{{role.name}}"));
 }
 
-/// Templates can branch on the durable agent working directory without relying
-/// on extension-published context arriving first.
+/// Templates can branch on cwd values derived from shell-published agent
+/// context, keeping the shell extension as the single cwd source of truth.
 #[test]
-fn build_system_prompt_exposes_agent_working_directory_to_handlebars() {
+fn build_system_prompt_exposes_shell_cwd_to_handlebars() {
     let skills = std::collections::HashMap::new();
     let fragments = vec![tau_proto::PromptFragment::new(
         "engineer.cwd.conditional",
         tau_proto::PromptPriority::new(100),
-        "{{#if (starts_with cwd \"/tmp/work\")}}WORK {{working_directory.basename}}{{/if}} {{#if (eq working_directory.path \"/tmp/work/project\")}}EXACT{{/if}}",
+        "{{#each agent_context.cwd}}{{#if @first}}{{#if (starts_with value \"/tmp/work\")}}WORK{{/if}} {{#if (eq value \"/tmp/work/project\")}}EXACT{{/if}}{{/if}}{{/each}}",
     )];
-    let cwd = std::path::Path::new("/tmp/work/project");
-
     let prompt = build_system_prompt_with_template_context(
         BUILT_IN_SYSTEM_PROMPT_TEMPLATE,
         &skills,
         &fragments,
-        serde_json::json!({}),
+        serde_json::json!({
+            "cwd": [
+                { "extension_name": "tau-ext-shell", "value": "/tmp/work/project" }
+            ]
+        }),
         RolePromptTemplateContext {
             role_name: "engineer",
-            working_directory: Some(cwd),
         },
     );
 
-    assert!(prompt.contains("WORK project"));
+    assert!(prompt.contains("WORK"));
     assert!(prompt.contains("EXACT"));
-}
-
-/// Missing agent cwd still exposes a stable object so strict-mode rendering
-/// does not reject fragments that guard on `working_directory.path`.
-#[test]
-fn build_system_prompt_exposes_empty_working_directory_without_agent() {
-    let prompt = build_system_prompt_with_template_context(
-        BUILT_IN_SYSTEM_PROMPT_TEMPLATE,
-        &std::collections::HashMap::new(),
-        &[tau_proto::PromptFragment::new(
-            "engineer.cwd.empty",
-            tau_proto::PromptPriority::new(100),
-            "cwd={{cwd}} path={{working_directory.path}} present={{working_directory.present}}",
-        )],
-        serde_json::json!({}),
-        RolePromptTemplateContext {
-            role_name: "engineer",
-            working_directory: None,
-        },
-    );
-
-    assert!(prompt.contains("cwd= path= present=false"));
 }
 
 /// Templates receive the prompt-visible skills and can sort them
@@ -231,7 +205,6 @@ fn build_system_prompt_exposes_sortable_skills_to_handlebars() {
         serde_json::json!({}),
         RolePromptTemplateContext {
             role_name: "engineer",
-            working_directory: None,
         },
     );
 
@@ -274,7 +247,6 @@ fn build_system_prompt_sort_helper_sorts_scalar_items_without_default_key() {
         serde_json::json!({}),
         RolePromptTemplateContext {
             role_name: "engineer",
-            working_directory: None,
         },
     );
 
@@ -319,7 +291,6 @@ fn build_system_prompt_exposes_agent_context_to_handlebars() {
         }),
         RolePromptTemplateContext {
             role_name: "engineer",
-            working_directory: None,
         },
     );
 
@@ -348,7 +319,6 @@ fn prompt_fragment_renders_agent_context_variable() {
         }),
         RolePromptTemplateContext {
             role_name: "engineer",
-            working_directory: None,
         },
     );
 
@@ -367,7 +337,6 @@ fn prompt_fragments_order_by_priority_name_and_expose_priority() {
     let data = system_prompt_template_data(
         RolePromptTemplateContext {
             role_name: "engineer",
-            working_directory: None,
         },
         &std::collections::HashMap::new(),
         &fragments,
@@ -411,7 +380,6 @@ fn big_system_prompt_template_is_builtin_and_renders_context() {
         }),
         RolePromptTemplateContext {
             role_name: "engineer",
-            working_directory: None,
         },
     );
 
@@ -443,7 +411,6 @@ fn tool_prompt_fragments_render_in_dedicated_section() {
         serde_json::json!({}),
         RolePromptTemplateContext {
             role_name: "engineer",
-            working_directory: None,
         },
     );
 
@@ -478,10 +445,7 @@ fn rendered_empty_tool_prompt_fragment_skips_automatic_heading() {
             ),
         )],
         serde_json::json!({}),
-        RolePromptTemplateContext {
-            role_name: "",
-            working_directory: None,
-        },
+        RolePromptTemplateContext { role_name: "" },
     );
 
     assert!(!prompt.contains("### `conditional_tool` instructions"));
@@ -552,7 +516,6 @@ fn build_system_prompt_composes_role_and_prompt_fragments_in_order() {
         }),
         RolePromptTemplateContext {
             role_name: "engineer",
-            working_directory: None,
         },
     );
 
@@ -610,7 +573,6 @@ fn build_system_prompt_normalizes_prompt_fragment_spacing() {
         serde_json::json!({}),
         RolePromptTemplateContext {
             role_name: "manager",
-            working_directory: None,
         },
     );
 

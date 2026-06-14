@@ -9,7 +9,6 @@
 //! view cannot drift.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use tau_proto::{
@@ -632,6 +631,15 @@ impl AgentTree {
                 {
                     self.display_name = Some(display_name);
                 }
+                for item in &started.metadata {
+                    self.metadata.insert(
+                        item.key.clone(),
+                        AgentMetadataEntry {
+                            value: item.value.clone(),
+                            inheritable: item.inheritable,
+                        },
+                    );
+                }
                 None
             }
             Event::AgentDisplayNameSet(name) => {
@@ -1069,9 +1077,6 @@ pub struct PersistedAgentEvent {
 /// Per-agent sidecar metadata at `<agents_dir>/<agent_id>/meta.json`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AgentMeta {
-    /// Working directory at the time of agent creation.
-    #[serde(default, alias = "cwd", skip_serializing_if = "Option::is_none")]
-    pub starting_cwd: Option<PathBuf>,
     /// Unix epoch seconds when the agent was first created.
     pub created_at: u64,
     /// Unix epoch seconds of the most recent append.

@@ -1246,8 +1246,6 @@ pub struct Harness {
     pub(crate) discovered_agents_files: Vec<DiscoveredAgentsFile>,
     /// Session-scoped JSON context contributions published by extensions.
     pub(crate) agent_context: AgentContextStore,
-    /// Agent creation working directory, used as stable prompt-template input.
-    pub(crate) agent_working_directories: HashMap<tau_proto::AgentId, PathBuf>,
     /// Extensions that explicitly registered as per-agent prompt-context
     /// providers.
     pub(crate) agent_context_providers: HashSet<tau_proto::ConnectionId>,
@@ -1616,7 +1614,6 @@ impl Harness {
             discovered_skill_candidates,
             discovered_agents_files: Vec::new(),
             agent_context: AgentContextStore::default(),
-            agent_working_directories: HashMap::new(),
             agent_context_providers: HashSet::new(),
             pending_agent_context_ready: HashMap::new(),
             extension_prompt_fragments: BTreeMap::new(),
@@ -4630,6 +4627,10 @@ impl Harness {
             self.emit_info(&format!("unknown role `{}`", req.role));
             return Ok(true);
         }
+        if let Err(error) = self.validate_initial_agent_metadata(&req.metadata) {
+            self.emit_info(&format!("create-agent metadata rejected: {error}"));
+            return Ok(true);
+        }
         let parent_cid = match req.parent_agent.as_ref() {
             Some(agent_id) => match self.agent_routes.get(agent_id.as_str()).cloned() {
                 Some(cid) => Some(cid),
@@ -4645,8 +4646,8 @@ impl Harness {
         let cid = self.create_durable_user_agent_with_parent(
             req.session_id.clone(),
             &req.role,
-            req.cwd,
             parent_cid,
+            req.metadata,
         );
         if let Some(conv) = self.agents.get_mut(&cid) {
             conv.next_ctx_id = req.ctx_id.clone();
@@ -4804,9 +4805,7 @@ impl Harness {
         match candidates.len() {
             0 => {
                 let role = self.selected_role.clone();
-                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                let cid =
-                    self.create_durable_user_agent(self.current_session_id.clone(), &role, cwd);
+                let cid = self.create_durable_user_agent(self.current_session_id.clone(), &role);
                 let agent_id = self
                     .agents
                     .get(&cid)
@@ -6387,6 +6386,21 @@ impl Harness {
         Ok(())
     }
 
+    fn validate_initial_agent_metadata(
+        &self,
+        metadata: &[tau_proto::AgentInitialMetadata],
+    ) -> Result<(), String> {
+        for item in metadata {
+            self.validate_agent_metadata_key(&item.key)?;
+            let value_bytes = tau_proto::encode_message_to_vec(&item.value)
+                .map_err(|error| format!("failed to measure agent metadata value: {error}"))?;
+            if tau_proto::MAX_AGENT_METADATA_VALUE_BYTES < value_bytes.len() {
+                return Err("agent metadata value exceeds 64 KiB".to_owned());
+            }
+        }
+        Ok(())
+    }
+
     fn validate_agent_metadata_unset(
         &mut self,
         unset: &tau_proto::AgentMetadataUnset,
@@ -7103,8 +7117,7 @@ impl Harness {
             })
             .unwrap_or_else(|| {
                 let role = self.selected_role.clone();
-                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                self.create_durable_user_agent(session_id.clone(), &role, cwd)
+                self.create_durable_user_agent(session_id.clone(), &role)
             });
         self.preempt_blocking_ext_side_agents(&session_id);
         if !self.session_initialized(&session_id)
@@ -7427,7 +7440,6 @@ impl Harness {
         self.agents.clear();
         self.agent_routes.clear();
         self.agent_states.clear();
-        self.agent_working_directories.clear();
         self.stopped_agent_ids.clear();
 
         self.current_session_id = new_session_id.clone();
@@ -8126,9 +8138,6 @@ impl Harness {
                 .agent_meta(agent_id.as_str())
                 .ok()
                 .flatten();
-            if let Some(cwd) = meta.as_ref().and_then(|meta| meta.starting_cwd.clone()) {
-                self.agent_working_directories.insert(agent_id.clone(), cwd);
-            }
             let display_name = self
                 .agent_store
                 .agent(agent_id.as_str())
@@ -8310,17 +8319,16 @@ impl Harness {
         &mut self,
         session_id: SessionId,
         role: &str,
-        cwd: PathBuf,
     ) -> AgentId {
-        self.create_durable_user_agent_with_parent(session_id, role, cwd, None)
+        self.create_durable_user_agent_with_parent(session_id, role, None, Vec::new())
     }
 
     pub(crate) fn create_durable_user_agent_with_parent(
         &mut self,
         session_id: SessionId,
         role: &str,
-        cwd: PathBuf,
         parent_cid: Option<AgentId>,
+        metadata: Vec<tau_proto::AgentInitialMetadata>,
     ) -> AgentId {
         let agent_id = self.mint_available_agent_id_for_role(role);
         let display_name = self.display_name_for_new_agent(&agent_id, role, None);
@@ -8337,11 +8345,9 @@ impl Harness {
         conv.agent_id = Some(agent_id.clone());
         conv.display_name = display_name;
         self.agents.insert(cid.clone(), conv);
-        self.agent_working_directories
-            .insert(crate::parse_agent_id(&agent_id), cwd.clone());
         self.publish_delegate_roles_context();
-        let _ = self.agent_store.record_agent_meta(&agent_id, Some(cwd));
-        self.ensure_loaded_agent_for_agent(&cid, &agent_id);
+        let _ = self.agent_store.record_agent_meta(&agent_id);
+        self.ensure_loaded_agent_for_agent_with_metadata(&cid, &agent_id, metadata);
         self.insert_agents_context_for_agent(&cid, &agent_id);
         cid
     }
@@ -8372,19 +8378,22 @@ impl Harness {
     }
 
     fn ensure_loaded_agent_for_agent(&mut self, cid: &AgentId, agent_id: &str) {
+        self.ensure_loaded_agent_for_agent_with_metadata(cid, agent_id, Vec::new());
+    }
+
+    fn ensure_loaded_agent_for_agent_with_metadata(
+        &mut self,
+        cid: &AgentId,
+        agent_id: &str,
+        initial_metadata: Vec<tau_proto::AgentInitialMetadata>,
+    ) {
         self.stopped_agent_ids.remove(agent_id);
         self.agent_routes.insert(agent_id.to_owned(), cid.clone());
         let role = self
             .agents
             .get(cid)
             .map(|conv| self.role_name_for_agent(conv));
-        let cwd = std::env::current_dir().ok();
-        if let Some(cwd) = cwd.as_ref() {
-            self.agent_working_directories
-                .entry(crate::parse_agent_id(agent_id))
-                .or_insert_with(|| cwd.clone());
-        }
-        let _ = self.agent_store.record_agent_meta(agent_id, cwd);
+        let _ = self.agent_store.record_agent_meta(agent_id);
         let agent_id_proto: tau_proto::AgentId = crate::parse_agent_id(agent_id);
         let prompt_index_initialized = self
             .agents
@@ -8431,6 +8440,7 @@ impl Harness {
                         .agents
                         .get(cid)
                         .and_then(|conv| normalize_display_name(conv.display_name.as_deref())),
+                    metadata: initial_metadata,
                 });
                 self.enqueue_publish(
                     None,
@@ -8661,21 +8671,13 @@ impl Harness {
         let (prompt_fragments, tool_prompt_fragments) =
             self.gather_prompt_fragment_groups_for_role(role_name);
         let system_template = self.system_template_for_role(role_name);
-        let working_directory = agent_id.and_then(|agent_id| {
-            self.agent_working_directories
-                .get(agent_id)
-                .map(PathBuf::as_path)
-        });
         build_system_prompt_with_tool_template_context(
             system_template,
             &self.discovered_skills,
             &prompt_fragments,
             &tool_prompt_fragments,
             self.agent_context.template_value(agent_id),
-            RolePromptTemplateContext {
-                role_name,
-                working_directory,
-            },
+            RolePromptTemplateContext { role_name },
         )
     }
 
@@ -10414,8 +10416,7 @@ impl Harness {
         harness.selected_model = Some("test/model".parse().expect("model id"));
 
         let role = harness.selected_role.clone();
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let cid = harness.create_durable_user_agent("s1".into(), &role, cwd);
+        let cid = harness.create_durable_user_agent("s1".into(), &role);
         let agent_id = harness
             .target_agent_id_for_agent(&cid)
             .expect("agent has durable id");

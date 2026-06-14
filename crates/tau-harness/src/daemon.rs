@@ -515,7 +515,16 @@ pub fn send_daemon_message_with_trace(
             parent_agent: None,
             session_id: session_id.into(),
             role: "senior-engineer".to_owned(),
-            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            metadata: vec![tau_proto::AgentInitialMetadata {
+                key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+                value: tau_proto::CborValue::Text(
+                    std::env::current_dir()
+                        .unwrap_or_else(|_| PathBuf::from("."))
+                        .display()
+                        .to_string(),
+                ),
+                inheritable: true,
+            }],
             initial_prompt: Some(message.to_owned()),
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,

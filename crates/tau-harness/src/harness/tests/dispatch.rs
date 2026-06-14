@@ -102,7 +102,7 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
         parent_agent: None,
         session_id: "s1".into(),
         role: h.selected_role.clone(),
-        cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        metadata: Vec::new(),
         initial_prompt: Some("hello while cold".to_owned()),
         message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
@@ -169,6 +169,45 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
     assert_eq!(queued.len(), 1);
     assert_eq!(queued[0].text, "hello while cold");
     assert_eq!(queued[0].agent_id.as_str(), agent_id.as_str());
+
+    h.shutdown().expect("shutdown");
+}
+
+/// `UiCreateAgent.metadata` must be embedded in the durable creation fact so
+/// replay restores shell cwd before `session.agent_loaded`.
+#[test]
+fn ui_create_agent_embeds_shell_cwd_metadata_in_agent_started() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cwd = std::path::PathBuf::from("/tmp/tau-ui-cwd");
+
+    h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        parent_agent: None,
+        session_id: "s1".into(),
+        role: h.selected_role.clone(),
+        metadata: vec![tau_proto::AgentInitialMetadata {
+            key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+            value: CborValue::Text(cwd.display().to_string()),
+            inheritable: true,
+        }],
+        initial_prompt: None,
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    })
+    .expect("create agent");
+
+    assert!(event_log_events(&h).iter().any(|event| {
+        let Event::AgentStarted(started) = event else {
+            return false;
+        };
+        started.metadata.iter().any(|item| {
+            item.key.as_str() == "ext_core-shell_cwd"
+                && item.value == CborValue::Text(cwd.display().to_string())
+                && item.inheritable
+        })
+    }));
 
     h.shutdown().expect("shutdown");
 }
@@ -4820,11 +4859,8 @@ fn agent_message_interrupts_exact_wait_by_wait_owner() {
     );
 
     let target_cid = ensure_test_user_agent(&mut h);
-    let waiter_cid = h.create_durable_user_agent(
-        h.current_session_id.clone(),
-        &h.selected_role.clone(),
-        test_cwd(),
-    );
+    let waiter_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
     let target_agent_id = h.agents[&target_cid]
         .agent_id
         .clone()
@@ -9413,6 +9449,7 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
             agent_id: crate::parse_agent_id("forged-agent"),
             role: "engineer".to_owned(),
             display_name: None,
+            metadata: Vec::new(),
         }),
         Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
             query_id: "delegate-0".to_owned(),

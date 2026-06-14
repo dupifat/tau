@@ -393,11 +393,12 @@ fn build_request_chain_turn_still_emits_prompt_cache_key() {
     assert!(body["prompt_cache_key"].is_string());
 }
 
-/// The Responses backend must split the wire `prompt_cache_key` for side-query
-/// turns. This test pins the wiring at the request-build layer
-/// so a future refactor can't silently regress it on one path.
+/// The Responses backend must keep the wire `prompt_cache_key` stable for the
+/// same target agent even when prompt provenance changes. This pins the
+/// regression where manager-relayed sub-agent messages changed originator and
+/// cold-started the provider cache bucket.
 #[test]
-fn build_request_prompt_cache_key_differs_for_side_query_originator() {
+fn build_request_prompt_cache_key_ignores_originator() {
     let config = ResponsesConfig {
         surface: ResponsesSurface::ChatGpt,
         supports_prompt_cache_key: true,
@@ -439,17 +440,14 @@ fn build_request_prompt_cache_key_differs_for_side_query_originator() {
 
     assert!(user_body["prompt_cache_key"].is_string());
     assert!(ext_body["prompt_cache_key"].is_string());
-    assert_ne!(ext_body["prompt_cache_key"], user_body["prompt_cache_key"]);
+    assert_eq!(ext_body["prompt_cache_key"], user_body["prompt_cache_key"]);
 }
 
-/// Single-shot side queries (idle-summary): `share_user_cache_key`
-/// makes the extension turn ride on the user's base
-/// `prompt_cache_key` so it hits the user's already-warm prefix
-/// cache. Regression for the "the keepalive's there but the
-/// idle-summary still costs ~70k uncached tokens" issue traced in
-/// session `tau-agent-qv103q` analysis.
+/// The legacy `share_user_cache_key` flag should no longer be needed to make an
+/// extension-originated prompt use the stable per-agent cache key. Keeping this
+/// no-op avoids letting the flag reintroduce a provenance-derived bucket split.
 #[test]
-fn build_request_share_user_cache_key_pins_extension_to_user_bucket() {
+fn build_request_share_user_cache_key_does_not_change_agent_bucket() {
     let config = ResponsesConfig {
         surface: ResponsesSurface::ChatGpt,
         supports_prompt_cache_key: true,
@@ -473,11 +471,18 @@ fn build_request_share_user_cache_key_pins_extension_to_user_bucket() {
     };
     let body =
         serde_json::to_value(build_request(&config, &shared_request, None)).expect("serialize");
+    let default_request = PromptPayload {
+        share_user_cache_key: false,
+        ..shared_request
+    };
+    let default_body =
+        serde_json::to_value(build_request(&config, &default_request, None)).expect("serialize");
     assert!(body["prompt_cache_key"].is_string());
+    assert_eq!(body["prompt_cache_key"], default_body["prompt_cache_key"]);
 }
 
 #[test]
-fn build_request_cache_shared_extension_matches_user_wire_body() {
+fn build_request_extension_matches_user_wire_body_for_same_context() {
     let config = ResponsesConfig {
         surface: ResponsesSurface::ChatGpt,
         supports_prompt_cache_key: true,
@@ -519,7 +524,7 @@ fn build_request_cache_shared_extension_matches_user_wire_body() {
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
     };
-    let shared_ext_request = PromptPayload {
+    let ext_request = PromptPayload {
         system_prompt: "sys",
         context: ext_context,
         tools: std::slice::from_ref(&tool),
@@ -527,7 +532,7 @@ fn build_request_cache_shared_extension_matches_user_wire_body() {
         tool_choice: tau_proto::ToolChoice::Auto,
         compaction: None,
         originator: &ext,
-        share_user_cache_key: true,
+        share_user_cache_key: false,
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
     };
@@ -535,12 +540,8 @@ fn build_request_cache_shared_extension_matches_user_wire_body() {
     let user_body =
         serde_json::to_value(build_request(&config, &user_request, Some("resp_parent")))
             .expect("serialize");
-    let ext_body = serde_json::to_value(build_request(
-        &config,
-        &shared_ext_request,
-        Some("resp_parent"),
-    ))
-    .expect("serialize");
+    let ext_body = serde_json::to_value(build_request(&config, &ext_request, Some("resp_parent")))
+        .expect("serialize");
 
     assert_eq!(ext_body, user_body);
     assert_eq!(ext_body["prompt_cache_key"], user_body["prompt_cache_key"]);

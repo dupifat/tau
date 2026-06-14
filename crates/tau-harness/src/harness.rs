@@ -8327,12 +8327,10 @@ impl Harness {
             tau_proto::PromptOriginator::Extension { .. }
         ) && conv.parent_tool_call_id.is_none();
         let tool_choice = tau_proto::ToolChoice::Auto;
-        // Single-shot side queries (idle-summary) reuse the user's
-        // `prompt_cache_key` bucket so they hit the user's warm
-        // prefix cache instead of cold-starting their own. Delegate
-        // sub-agents keep the per-extension split — they fan out and
-        // could overflow the user's bucket past OpenAI's 15 RPM
-        // routing guideline.
+        // Legacy cache-sharing hint for older provider implementations. The
+        // first-party ChatGPT/Codex provider now derives cache keys only from
+        // base URL and target agent id, so prompt originator and this flag do
+        // not split cache buckets.
         let share_user_cache_key = is_non_tool_ext_query;
         // Walk the agent's *own* branch, not whatever tree.head
         // currently points at. With multiple side agents

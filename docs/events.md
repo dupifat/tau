@@ -95,8 +95,10 @@ of an agent log.
 - **`agent.prompt_created`** — The harness assembled a provider prompt and
   assigned it an `agent_prompt_id`; payload carries `agent_id`, `session_id`,
   `system_prompt`, materialized `context`, tools or `tools_ref`, model, model
-  params, tool choice, originator, cache-sharing flag, optional UI correlation
-  id, and optional compaction summary. This is
+  params, tool choice, originator/provenance, legacy cache-sharing flag,
+  optional UI correlation id, and optional compaction summary. First-party
+  ChatGPT/Codex cache routing is stable per target agent and does not split on
+  those provenance fields. This is
   operational delivery state for the provider; transcript truth is still the
   accepted prompt, provider response, terminal tool results, and compaction
   facts.

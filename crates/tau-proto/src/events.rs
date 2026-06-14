@@ -2630,14 +2630,10 @@ pub struct AgentPromptCreated {
     /// for backward compatibility with old persisted events.
     #[serde(default)]
     pub originator: PromptOriginator,
-    /// When `true`, the backend uses the **user's** `prompt_cache_key`
-    /// bucket for this turn even though [`Self::originator`] is an
-    /// extension. The harness sets this for non-fan-out side queries
-    /// (notably `std-notifications`' idle-summary) so a single side
-    /// turn can hit the user's already-warm prefix cache. Delegate
-    /// sub-agents leave it `false` because parallel fan-out on a
-    /// shared key would exceed OpenAI's 15 RPM-per-bucket guideline
-    /// and degrade routing.
+    /// Legacy cache-sharing hint kept for compatibility with persisted events
+    /// and older provider implementations. First-party ChatGPT/Codex cache
+    /// routing is now stable per target agent and ignores this flag; prompt
+    /// originator/provenance must not split provider cache buckets.
     #[serde(default, skip_serializing_if = "is_false")]
     pub share_user_cache_key: bool,
     /// Echo of [`UiPromptSubmitted::ctx_id`] when this prompt was
@@ -2716,10 +2712,13 @@ pub struct AgentPromptPrewarmRequested {
     /// Whether tool calls are allowed on the warmed prefix.
     #[serde(default, skip_serializing_if = "ToolChoice::is_default")]
     pub tool_choice: ToolChoice,
-    /// Prewarm only warms the interactive user's cache bucket.
+    /// Prompt provenance mirrored from the prompt being warmed. First-party
+    /// ChatGPT/Codex cache routing is stable per target agent and ignores this
+    /// field for cache-bucket selection.
     #[serde(default)]
     pub originator: PromptOriginator,
-    /// Preserve the first real user prompt's cache-key derivation.
+    /// Legacy cache-sharing hint mirrored from the first real prompt. Kept for
+    /// compatibility; first-party ChatGPT/Codex ignores it for cache routing.
     #[serde(default, skip_serializing_if = "is_false")]
     pub share_user_cache_key: bool,
 }

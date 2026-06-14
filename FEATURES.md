@@ -230,14 +230,13 @@ context usage stay out of the bar to keep it compact.
 ### Prompt input caching
 
 For providers that support it, Tau emits stable `prompt_cache_key` routing
-keys (derived from base URL and agent id) so cache hits survive restarts
-within an agent transcript, and sets `prompt_cache_retention` where
-available. Side-query turns (e.g. delegated sub-agents) get a distinct key so
-parallel delegations don't pile onto the user agent's routing bucket and trip
-OpenAI's `>15 RPM`-per-key overflow heuristic. Provider compatibility flags live
-next to the model entry (`supports_prompt_cache_key`,
-`supports_prompt_cache_retention`). Toggle the status-bar hit-rate readout with
-`/set show-cache-stats <true|false>`.
+keys (derived from base URL and agent id) so cache hits survive across turns
+within an agent transcript, and sets `prompt_cache_retention` where available.
+First-party ChatGPT/Codex cache routing is stable for the target agent and does
+not change when a turn is direct user input, extension-originated work, a manager
+relay, or an agent-to-agent message. Provider compatibility flags live next to
+the model entry (`supports_prompt_cache_key`, `supports_prompt_cache_retention`).
+Toggle the status-bar hit-rate readout with `/set show-cache-stats <true|false>`.
 
 ### Policy / approvals
 

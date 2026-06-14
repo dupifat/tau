@@ -132,8 +132,8 @@ pub struct ResponsesConfig {
     /// Whether this provider supports server-side context compaction.
     pub supports_compaction: bool,
     /// Whether this provider accepts the `prompt_cache_key` field.
-    /// The wire key is derived per `(base_url, agent lifetime)`, then split by
-    /// the prompt originator's cache bucket.
+    /// The wire key is derived per `(base_url, agent lifetime)` and is stable
+    /// across prompt originators for the same target agent.
     pub supports_prompt_cache_key: bool,
 }
 

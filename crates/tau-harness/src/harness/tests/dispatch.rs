@@ -5545,10 +5545,10 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
 /// greeting if the model is asked to summarize an empty transcript.
 ///
 /// This is also why we don't strip tools / system prompt for these
-/// queries: the side conv's request reuses the parent's cached prefix
-/// (system_prompt + tools + full transcript) and adds only the
-/// instruction as a delta. Verified here by comparing the assembled
-/// prompt to what the parent conv sees.
+/// queries: the side conv's request keeps the same provider-visible prefix
+/// (system_prompt + tools + full transcript) and adds only the instruction as a
+/// delta. Verified here by comparing the assembled prompt to what the parent
+/// conv sees.
 #[test]
 fn non_tool_start_agent_request_starts_fresh_agent_branch() {
     let td = TempDir::new().expect("tempdir");
@@ -5792,9 +5792,9 @@ fn non_tool_start_agent_request_preserves_tool_choice_without_parent_chain_ancho
     );
     assert!(
         side_prompt.share_user_cache_key,
-        "idle-summary side conv must opt out of the extension cache-key split — \
-         otherwise it cold-starts a separate cache bucket from the user's prefix \
-         and the whole point of sharing the warm prefix is lost",
+        "idle-summary side conv keeps setting the legacy cache-sharing hint for \
+         older providers; first-party ChatGPT/Codex ignores it and uses the \
+         target agent cache bucket",
     );
 }
 
@@ -5900,9 +5900,8 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
     );
     assert!(
         !prompt.share_user_cache_key,
-        "delegate sub-agents must keep the per-extension cache-key split — \
-         parallel fan-out would otherwise push the user's bucket past \
-         OpenAI's 15-RPM-per-(prefix, key) routing guideline",
+        "delegate sub-agents leave the legacy cache-sharing hint unset; \
+         first-party ChatGPT/Codex still uses the target agent cache bucket",
     );
 
     h.shutdown().expect("shutdown");

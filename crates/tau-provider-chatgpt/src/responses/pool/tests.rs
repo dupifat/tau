@@ -48,20 +48,20 @@ fn keys_distinguish_agents_under_same_account() {
 }
 
 #[test]
-fn keys_follow_prompt_cache_originator_buckets() {
-    // Upgrade headers are fixed for the socket lifetime, so the pool must split
-    // exactly where the prompt-cache UUID splits: extension buckets get their
-    // own socket, while share-user side queries reuse the user's bucket.
+fn keys_ignore_prompt_originator_buckets() {
+    // Upgrade headers are fixed for the socket lifetime, so the pool must follow
+    // the prompt-cache UUID exactly. Since the cache key is stable per agent,
+    // originator changes and the legacy share-user flag must not split sockets.
     let cfg = make_config("https://chatgpt.com/backend-api", Some("acc"));
     let user = pool_key_for(&cfg, "agent", tau_proto::PromptOriginator::User, false);
     let ext = tau_proto::PromptOriginator::Extension {
         name: tau_proto::ExtensionName::new("__harness__"),
         query_id: "delegate-1".into(),
     };
-    let split_ext = pool_key_for(&cfg, "agent", ext.clone(), false);
+    let default_ext = pool_key_for(&cfg, "agent", ext.clone(), false);
     let shared_ext = pool_key_for(&cfg, "agent", ext, true);
 
-    assert_ne!(user, split_ext);
+    assert_eq!(user, default_ext);
     assert_eq!(user, shared_ext);
 }
 

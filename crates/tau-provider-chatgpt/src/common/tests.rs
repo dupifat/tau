@@ -108,31 +108,37 @@ fn ws_stream_error_without_type_suffix_is_retryable() {
     assert_eq!(error.retry_after(), Some(std::time::Duration::ZERO));
 }
 
-fn cache_key(originator: &PromptOriginator, share_user_bucket: bool) -> String {
-    prompt_cache_key_for(
-        "https://api.openai.com/v1",
-        &tau_proto::AgentId::parse("agent-1").expect("agent id"),
+fn cache_key(originator: &PromptOriginator, share_user_cache_key: bool) -> String {
+    let context = tau_proto::PromptContext::default();
+    let session_id = tau_proto::SessionId::new("test-session");
+    let agent_id = tau_proto::AgentId::parse("agent-1").expect("agent id");
+    let payload = PromptPayload {
+        system_prompt: "sys",
+        context: &context,
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        compaction: None,
         originator,
-        share_user_bucket,
-    )
+        share_user_cache_key,
+        session_id: &session_id,
+        agent_id: &agent_id,
+    };
+    payload.prompt_cache_key("https://api.openai.com/v1")
 }
 
-/// Distinct agents on the same provider endpoint must not share the
-/// same routing bucket.
+/// Distinct agents on the same provider endpoint must not share the same
+/// routing bucket.
 #[test]
 fn prompt_cache_key_distinct_agents_diverge() {
     assert_ne!(
         prompt_cache_key_for(
             "https://api.openai.com/v1",
             &tau_proto::AgentId::parse("agent-1").expect("agent id"),
-            &PromptOriginator::User,
-            false,
         ),
         prompt_cache_key_for(
             "https://api.openai.com/v1",
             &tau_proto::AgentId::parse("agent-2").expect("agent id"),
-            &PromptOriginator::User,
-            false,
         ),
     );
 }
@@ -145,38 +151,34 @@ fn prompt_cache_key_distinct_base_urls_diverge() {
         prompt_cache_key_for(
             "https://api.openai.com/v1",
             &tau_proto::AgentId::parse("agent-1").expect("agent id"),
-            &PromptOriginator::User,
-            false,
         ),
         prompt_cache_key_for(
             "https://chatgpt.com/backend-api",
             &tau_proto::AgentId::parse("agent-1").expect("agent id"),
-            &PromptOriginator::User,
-            false,
         ),
     );
 }
 
-/// A side-query turn must NOT inherit the user's wire key — otherwise
-/// parallel delegate runs pile onto the user agent's
-/// routing bucket and push the `(prefix, prompt_cache_key)` pair past
-/// the ~15 RPM threshold the OpenAI deployment checklist warns about.
+/// Prompt originator must not split cache buckets for the same agent. A
+/// delegated sub-agent can receive direct extension-originated turns and later
+/// user-originated manager relay messages; both must keep the same provider
+/// cache key so the target agent's context stays warm.
 #[test]
-fn prompt_cache_key_extension_diverges_from_user() {
+fn prompt_cache_key_ignores_originator_bucket() {
     let ext = PromptOriginator::Extension {
         name: tau_proto::ExtensionName::new("__harness__"),
         query_id: "delegate-1".into(),
     };
     let user_key = cache_key(&PromptOriginator::User, false);
     let ext_key = cache_key(&ext, false);
-    assert_ne!(user_key, ext_key);
+    assert_eq!(user_key, ext_key);
     assert!(uuid::Uuid::parse_str(&ext_key).is_ok());
 }
 
-/// Two distinct side-query originators must route to distinct cache buckets so
-/// e.g. a websearch helper and a delegate sub-agent don't share load.
+/// Extension identity and query id are provenance only; neither should alter
+/// the wire cache key for a fixed agent.
 #[test]
-fn prompt_cache_key_distinct_extensions_diverge() {
+fn prompt_cache_key_ignores_extension_identity_and_query_id() {
     let delegate = PromptOriginator::Extension {
         name: tau_proto::ExtensionName::new("__harness__"),
         query_id: "q-1".into(),
@@ -185,40 +187,18 @@ fn prompt_cache_key_distinct_extensions_diverge() {
         name: tau_proto::ExtensionName::new("websearch"),
         query_id: "q-2".into(),
     };
-    assert_ne!(cache_key(&delegate, false), cache_key(&websearch, false),);
+    assert_eq!(cache_key(&delegate, false), cache_key(&websearch, false));
 }
 
-/// The `query_id` is intentionally NOT mixed in: a sub-agent's own
-/// multi-turn loop (each turn carries a fresh query id) must keep
-/// hitting the same cache. If this regressed, every delegate turn
-/// would be a cold cache.
+/// The legacy share-user flag no longer changes cache routing because the key
+/// is already stable per agent rather than per prompt originator.
 #[test]
-fn prompt_cache_key_ignores_extension_query_id() {
-    let first = PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::new("__harness__"),
-        query_id: "delegate-1".into(),
-    };
-    let second = PromptOriginator::Extension {
-        name: tau_proto::ExtensionName::new("__harness__"),
-        query_id: "delegate-2".into(),
-    };
-    assert_eq!(cache_key(&first, false), cache_key(&second, false),);
-}
-
-/// When the harness flags a side query as "share the user's bucket"
-/// (`share_user_bucket=true`), the side-query turn must produce the user's
-/// base key — not the per-originator hash — so the
-/// single-shot probe (idle-summary) hits the user's already-warm
-/// prefix cache instead of cold-starting its own.
-#[test]
-fn prompt_cache_key_share_user_bucket_overrides_extension_split() {
+fn prompt_cache_key_ignores_share_user_bucket_flag() {
     let ext = PromptOriginator::Extension {
         name: tau_proto::ExtensionName::new("std-notifications"),
         query_id: "idle-0".into(),
     };
-    let user_key = cache_key(&PromptOriginator::User, false);
     let ext_shared_key = cache_key(&ext, true);
-    let ext_split_key = cache_key(&ext, false);
-    assert_eq!(ext_shared_key, user_key);
-    assert_ne!(ext_split_key, user_key);
+    let ext_default_key = cache_key(&ext, false);
+    assert_eq!(ext_shared_key, ext_default_key);
 }

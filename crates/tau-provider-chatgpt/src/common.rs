@@ -30,17 +30,13 @@ pub struct PromptPayload<'a> {
     pub compaction: Option<tau_proto::PromptCompactionContext>,
 
     /// Who originated this prompt — the interactive user, or a side query
-    /// such as a harness-owned delegated sub-agent.
-    /// Folded into the wire `prompt_cache_key` so concurrent
-    /// delegated turns don't share a routing bucket with the user's
-    /// own turns (OpenAI's deployment checklist warns that >15 RPM
-    /// per `(prefix, prompt_cache_key)` overflows to additional
-    /// machines and degrades hit rate).
+    /// such as a harness-owned delegated sub-agent. This remains available for
+    /// provenance, retry policy, and provider lifecycle events, but it must not
+    /// affect prompt-cache routing.
     pub originator: &'a PromptOriginator,
-    /// When `true`, force the wire `prompt_cache_key` to the user's
-    /// user bucket key for this turn even though
-    /// [`Self::originator`] is an extension. Lets a single-shot side query
-    /// (idle-summary) reuse the user's already-warm prefix cache.
+    /// Legacy request flag for callers that once requested the user's cache
+    /// bucket explicitly. Prompt-cache routing is now stable per agent, so this
+    /// no longer changes the wire `prompt_cache_key`.
     pub share_user_cache_key: bool,
     /// Harness session this prompt belongs to. Used for debug paths,
     /// tracing, and transport fallback state; the Responses WebSocket
@@ -59,12 +55,7 @@ impl PromptPayload<'_> {
     /// through this method rather than duplicating the hashing inputs.
     #[must_use]
     pub fn prompt_cache_key(&self, base_url: &str) -> String {
-        prompt_cache_key_for(
-            base_url,
-            self.agent_id,
-            self.originator,
-            self.share_user_cache_key,
-        )
+        prompt_cache_key_for(base_url, self.agent_id)
     }
 }
 
@@ -648,34 +639,15 @@ pub fn verbosity_wire(level: tau_proto::Verbosity) -> &'static str {
 
 /// Derive the wire `prompt_cache_key` for the OpenAI-style provider cache.
 ///
-/// The resulting UUID is version 7 shaped: its timestamp bits come from the
-/// durable `AgentStarted` record's timestamp, while the non-time bits are a
-/// deterministic hash of the provider endpoint, agent lifetime, and cache
-/// bucket namespace. This preserves cache reuse across turns while making the
-/// key sort/debug like a UUIDv7 value.
-pub fn prompt_cache_key_for(
-    base_url: &str,
-    agent_id: &tau_proto::AgentId,
-    originator: &PromptOriginator,
-    share_user_bucket: bool,
-) -> String {
+/// The resulting UUID is version 8 shaped from a deterministic hash of the
+/// provider endpoint and durable agent lifetime. Prompt provenance/originator
+/// is intentionally excluded so agent-to-agent messages, manager relays, and
+/// direct user prompts keep the target agent on the same provider cache bucket.
+pub fn prompt_cache_key_for(base_url: &str, agent_id: &tau_proto::AgentId) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(base_url.as_bytes());
-    hasher.update(b"\0");
+    hasher.update(b" agent:");
     hasher.update(agent_id.as_str().as_bytes());
-    hasher.update(b"\0bucket:");
-    match originator {
-        PromptOriginator::User => {
-            hasher.update(b"user");
-        }
-        PromptOriginator::Extension { .. } if share_user_bucket => {
-            hasher.update(b"user");
-        }
-        PromptOriginator::Extension { name, .. } => {
-            hasher.update(b"ext:");
-            hasher.update(name.as_str().as_bytes());
-        }
-    };
 
     let mut bytes = [0; 16];
     bytes.copy_from_slice(&hasher.finalize().as_bytes()[..16]);

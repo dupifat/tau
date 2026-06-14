@@ -120,6 +120,10 @@ of an agent log.
 
 Emitted by the provider backend that owns the selected model.
 
+- **`provider.models_updated`** — Provider extension replacement snapshot of
+  currently servable models and their capabilities. The harness folds provider
+  snapshots into `harness.models_available` and related role/model availability
+  events.
 - **`provider.prompt_submitted`** — The provider accepted an `agent.prompt_created`
   and started processing it. Echoes the originator. Transient.
 - **`provider.response_updated`** — Replace-style ordered item streaming

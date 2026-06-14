@@ -994,6 +994,10 @@ pub struct ToolGroup {
     pub prompt_fragment: Option<PromptFragment>,
 }
 
+/// Tool registration event emitted by an extension or provider.
+///
+/// Registers or refreshes one tool definition and its optional grouping/prompt
+/// context. The harness uses this as routing metadata for later tool requests.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolRegister {
     /// Tool metadata made available to the agent and used for routing calls.
@@ -1007,8 +1011,10 @@ pub struct ToolRegister {
     pub prompt_fragment: Option<PromptFragment>,
 }
 
+/// Tool unregistration event emitted when a provider withdraws one tool.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ToolUnregister {
+    /// Name of the tool to remove from harness routing metadata.
     pub tool_name: ToolName,
 }
 
@@ -1291,6 +1297,7 @@ pub struct ProgressCounter {
     pub total: Option<u64>,
 }
 
+/// Unit used to interpret numeric progress counters.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProgressUnit {
@@ -1311,15 +1318,19 @@ pub enum ProgressUnit {
 /// matches; `grep` has all three.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct ToolUseStats {
+    /// Number of matches produced by search-like tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matches: Option<u64>,
+    /// Number of text lines read, written, or returned by the tool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lines: Option<u64>,
+    /// Number of bytes read, written, or returned by the tool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes: Option<u64>,
 }
 
 impl ToolUseStats {
+    /// Returns true when no statistic counters are present.
     pub fn is_empty(&self) -> bool {
         self.matches.is_none() && self.lines.is_none() && self.bytes.is_none()
     }
@@ -1376,20 +1387,29 @@ pub enum ToolUsePayload {
     Text { text: String },
 }
 
+/// Simple current/total progress counter for tool progress events.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProgressUpdate {
+    /// Completed units so far. Omitted when the tool only has a message or
+    /// display update.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current: Option<u64>,
+    /// Optional total units for bounded progress.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
 }
 
+/// Live progress update emitted by a tool provider for one in-flight call.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolProgress {
+    /// Tool call id this progress update belongs to.
     pub call_id: ToolCallId,
+    /// Name of the tool handling the call.
     pub tool_name: ToolName,
+    /// Optional human-readable progress message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Optional numeric progress counter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<ProgressUpdate>,
     /// Optional complete replacement for the running tool-use UI state.

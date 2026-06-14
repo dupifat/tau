@@ -1569,3 +1569,50 @@ fn tool_response_keeps_scalar_arrays_compact() {
 
     assert_eq!(response.render(), "name\ndescription");
 }
+
+/// Provider-visible rendering must not let header keys or values inject extra
+/// records or raw terminal controls into model input.
+#[test]
+fn tool_response_escapes_header_controls() {
+    let response = ToolResponse::from_cbor(&CborValue::Map(vec![(
+        CborValue::Text("bad\nkey".to_owned()),
+        CborValue::Text("value\r\u{1b}\0\t\u{85}".to_owned()),
+    )]));
+
+    assert_eq!(
+        response.render(),
+        "bad\\nkey: value\\r\\x1b\\0\\t\\u{85}\n\n"
+    );
+}
+
+/// Body sanitization is last-resort provider safety: it preserves legitimate
+/// line-feed record separators but escapes other raw controls.
+#[test]
+fn tool_response_preserves_body_lfs_but_escapes_controls() {
+    let response = ToolResponse::from_cbor(&CborValue::Text(
+        "line 1\nline 2\r\u{1b}\0\t\u{85}".to_owned(),
+    ));
+
+    assert_eq!(response.render(), "line 1\nline 2\\r\\x1b\\0\\t\\u{85}");
+}
+
+/// Metadata labels that are pushed into a multiline body still need single-line
+/// escaping so a malicious key cannot forge additional labels.
+#[test]
+fn tool_response_escapes_multiline_body_labels() {
+    let response = ToolResponse::from_cbor(&CborValue::Map(vec![(
+        CborValue::Text("label\nforged".to_owned()),
+        CborValue::Text("first\nsecond".to_owned()),
+    )]));
+
+    assert_eq!(response.render(), "label\\nforged:\nfirst\nsecond");
+}
+
+/// Binary fallback rendering stays bounded and does not leak raw bytes into the
+/// provider-visible transcript.
+#[test]
+fn tool_response_renders_bytes_as_bounded_placeholder() {
+    let response = ToolResponse::from_cbor(&CborValue::Bytes(vec![0; 1024]));
+
+    assert_eq!(response.render(), "<1024 bytes>");
+}

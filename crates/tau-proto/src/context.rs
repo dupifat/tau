@@ -1,5 +1,7 @@
 //! Provider context and transcript item support types.
 
+use std::fmt::Write as _;
+
 use serde::{Deserialize, Serialize};
 
 use crate::events::{ProviderBackend, ToolFormat, ToolType};
@@ -97,9 +99,12 @@ pub struct ToolResponseHeader {
 /// Provider-facing text form of a tool response.
 ///
 /// The canonical rendering is header lines in `<key>: <value>` form, followed
-/// by an empty line and then the tool-specific body. Tool result events still
-/// carry raw CBOR so extensions do not need to coordinate a wire-format
-/// migration; this type is the normalized boundary used before provider output.
+/// by an empty line and then the tool-specific body. [`Self::render`] applies a
+/// final provider-visible safety pass: headers are forced to single lines,
+/// control characters are escaped, and body line feeds are preserved as record
+/// separators while other controls are escaped. Tool result events still carry
+/// raw CBOR so extensions do not need to coordinate a wire-format migration;
+/// this type is the normalized boundary used before provider output.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolResponse {
     /// Original tool payload kept for non-provider consumers that need
@@ -127,19 +132,24 @@ impl ToolResponse {
     }
 
     /// Renders this response as header lines, a blank line, then body text.
+    ///
+    /// This is the last provider-visible defense-in-depth boundary. It escapes
+    /// header controls including line feeds, escapes body controls except for
+    /// legitimate `\n` record separators, and never emits raw terminal-control
+    /// characters such as ESC, CR, NUL, DEL, or C1 controls.
     #[must_use]
     pub fn render(&self) -> String {
         let mut out = String::new();
         for header in &self.headers {
-            out.push_str(&header.key);
+            out.push_str(&sanitize_provider_header_text(&header.key));
             out.push_str(": ");
-            out.push_str(&header.value);
+            out.push_str(&sanitize_provider_header_text(&header.value));
             out.push('\n');
         }
         if !self.headers.is_empty() {
             out.push('\n');
         }
-        out.push_str(&self.body);
+        out.push_str(&sanitize_provider_body_text(&self.body));
         out
     }
 
@@ -159,6 +169,7 @@ impl ToolResponse {
             if key == "output" || key == "line-numbered content" {
                 body_parts.push(value);
             } else if value.contains('\n') {
+                let key = sanitize_provider_header_text(&key);
                 body_parts.push(format!("{key}:\n{value}"));
             } else {
                 headers.push(ToolResponseHeader { key, value });
@@ -170,6 +181,37 @@ impl ToolResponse {
             body: body_parts.join("\n"),
         }
     }
+}
+
+fn sanitize_provider_header_text(input: &str) -> String {
+    sanitize_provider_text(input, false)
+}
+
+fn sanitize_provider_body_text(input: &str) -> String {
+    sanitize_provider_text(input, true)
+}
+
+fn sanitize_provider_text(input: &str, preserve_lf: bool) -> String {
+    let mut output = String::new();
+    for ch in input.chars() {
+        match ch {
+            '\n' if preserve_lf => output.push('\n'),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            '\0' => output.push_str("\\0"),
+            '\u{1b}' => output.push_str("\\x1b"),
+            ch if is_provider_unsafe_control(ch) => {
+                write!(output, "\\u{{{:x}}}", ch as u32).expect("writing to String cannot fail");
+            }
+            ch => output.push(ch),
+        }
+    }
+    output
+}
+
+fn is_provider_unsafe_control(ch: char) -> bool {
+    matches!(ch, '\u{0000}'..='\u{001f}' | '\u{007f}'..='\u{009f}')
 }
 
 fn cbor_tool_response_text(value: &CborValue) -> String {

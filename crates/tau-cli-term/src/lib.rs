@@ -939,9 +939,8 @@ fn append_prompt_history_summary_ellipsis(summary: &mut String, summary_chars: &
 
 fn bounded_prompt_history_preview(prompt: &str, remaining_total: &mut usize) -> String {
     const TRUNCATED: &str = "\n[history preview truncated]\n";
-    const OMITTED: &str = "[history preview omitted: preview budget reached]\n";
     if *remaining_total == 0 {
-        return OMITTED.to_owned();
+        return String::new();
     }
 
     let budget = PROMPT_HISTORY_PREVIEW_MAX_BYTES.min(*remaining_total);
@@ -950,11 +949,17 @@ fn bounded_prompt_history_preview(prompt: &str, remaining_total: &mut usize) -> 
         return prompt.to_owned();
     }
 
-    let content_budget = budget.saturating_sub(TRUNCATED.len());
+    let content_budget = if budget > TRUNCATED.len() {
+        budget - TRUNCATED.len()
+    } else {
+        budget
+    };
     let end = previous_char_boundary(prompt, content_budget);
-    *remaining_total = remaining_total.saturating_sub(end + TRUNCATED.len());
     let mut preview = prompt[..end].to_owned();
-    preview.push_str(TRUNCATED);
+    if preview.len() + TRUNCATED.len() <= budget {
+        preview.push_str(TRUNCATED);
+    }
+    *remaining_total = remaining_total.saturating_sub(preview.len());
     preview
 }
 

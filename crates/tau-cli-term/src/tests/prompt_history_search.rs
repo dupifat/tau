@@ -1,9 +1,10 @@
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    EditorContext, PROMPT_HISTORY_PREVIEW_MAX_BYTES, PROMPT_HISTORY_SEARCH_MAX_ROWS,
-    PROMPT_HISTORY_SUMMARY_MAX_CHARS, PromptShellAction, PromptShellCommand, PromptShellResult,
-    prompt_history_preview_dir, prompt_history_search_rows, run_prompt_shell_action,
+    EditorContext, PROMPT_HISTORY_PREVIEW_MAX_BYTES, PROMPT_HISTORY_PREVIEW_TOTAL_BYTES,
+    PROMPT_HISTORY_SEARCH_MAX_ROWS, PROMPT_HISTORY_SUMMARY_MAX_CHARS, PromptShellAction,
+    PromptShellCommand, PromptShellResult, prompt_history_preview_dir, prompt_history_search_rows,
+    run_prompt_shell_action,
 };
 
 #[test]
@@ -46,14 +47,20 @@ fn search_rows_and_previews_are_bounded_before_picker_launch() {
         .collect::<Result<_, _>>()
         .expect("preview entries");
     assert_eq!(previews.len(), PROMPT_HISTORY_SEARCH_MAX_ROWS);
+    let mut total_preview_bytes = 0usize;
     for entry in previews {
         let len = entry.metadata().expect("preview metadata").len() as usize;
+        total_preview_bytes += len;
         assert!(
-            len <= PROMPT_HISTORY_PREVIEW_MAX_BYTES + "\n[history preview truncated]\n".len(),
+            len <= PROMPT_HISTORY_PREVIEW_MAX_BYTES,
             "preview {:?} had {len} bytes",
             entry.path()
         );
     }
+    assert!(
+        total_preview_bytes <= PROMPT_HISTORY_PREVIEW_TOTAL_BYTES,
+        "preview directory used {total_preview_bytes} bytes"
+    );
 }
 
 /// Protects prompt-history setup against huge single-token entries: summary

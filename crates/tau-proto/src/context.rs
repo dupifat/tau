@@ -101,8 +101,9 @@ pub struct ToolResponseHeader {
 /// The canonical rendering is header lines in `<key>: <value>` form, followed
 /// by an empty line and then the tool-specific body. [`Self::render`] applies a
 /// final provider-visible safety pass: headers are forced to single lines,
-/// control characters are escaped, and body line feeds are preserved as record
-/// separators while other controls are escaped. Tool result events still carry
+/// controls and Unicode line/paragraph separators are escaped, and body ASCII
+/// line feeds are preserved as record separators while other controls and
+/// separators are escaped. Tool result events still carry
 /// raw CBOR so extensions do not need to coordinate a wire-format migration;
 /// this type is the normalized boundary used before provider output.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -134,9 +135,10 @@ impl ToolResponse {
     /// Renders this response as header lines, a blank line, then body text.
     ///
     /// This is the last provider-visible defense-in-depth boundary. It escapes
-    /// header controls including line feeds, escapes body controls except for
-    /// legitimate `\n` record separators, and never emits raw terminal-control
-    /// characters such as ESC, CR, NUL, DEL, or C1 controls.
+    /// header controls and Unicode line/paragraph separators, escapes body
+    /// controls and separators except for legitimate ASCII `\n` record
+    /// separators, and never emits raw ESC, CR, NUL, DEL, C1 controls, or
+    /// Unicode line/paragraph separators.
     #[must_use]
     pub fn render(&self) -> String {
         let mut out = String::new();

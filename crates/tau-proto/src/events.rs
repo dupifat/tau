@@ -1809,17 +1809,72 @@ pub struct ProviderModelsUpdated {
 /// reserved first-party categories such as `tool`, `harness`, `agent`, or
 /// `extension`; this prevents custom payloads from spoofing typed protocol
 /// events in routing code keyed by [`Event::name`].
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CustomEvent {
-    /// Extension-owned dotted event name used for routing and subscription
-    /// matching. The category must be unknown to Tau's first-party protocol.
-    pub name: EventName,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<SessionId>,
-    pub payload: CborValue,
+    name: EventName,
+    session_id: Option<SessionId>,
+    payload: CborValue,
 }
 
+/// Error returned when a custom event uses a reserved first-party event
+/// category.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvalidCustomEventName {
+    name: EventName,
+}
+
+impl std::fmt::Display for InvalidCustomEventName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "custom event name must use an extension-owned category, got {}",
+            self.name
+        )
+    }
+}
+
+impl std::error::Error for InvalidCustomEventName {}
+
 impl CustomEvent {
+    /// Create a custom event with a validated extension-owned event name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidCustomEventName`] when `name` uses a reserved
+    /// first-party event category.
+    pub fn try_new(
+        name: EventName,
+        session_id: Option<SessionId>,
+        payload: CborValue,
+    ) -> Result<Self, InvalidCustomEventName> {
+        if !Self::name_is_allowed(&name) {
+            return Err(InvalidCustomEventName { name });
+        }
+        Ok(Self {
+            name,
+            session_id,
+            payload,
+        })
+    }
+
+    /// Event name used for routing and subscription matching.
+    #[must_use]
+    pub fn name(&self) -> &EventName {
+        &self.name
+    }
+
+    /// Optional session metadata associated with this custom event.
+    #[must_use]
+    pub fn session_id(&self) -> Option<&SessionId> {
+        self.session_id.as_ref()
+    }
+
+    /// Extension-owned CBOR payload.
+    #[must_use]
+    pub fn payload(&self) -> &CborValue {
+        &self.payload
+    }
+
     /// Returns `true` when `name` uses an extension-owned event category.
     #[must_use]
     pub fn name_is_allowed(name: &EventName) -> bool {
@@ -1827,6 +1882,34 @@ impl CustomEvent {
             EventCategory::from_wire(name.category.as_str()),
             EventCategory::Other(_)
         )
+    }
+}
+
+impl Serialize for CustomEvent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if !Self::name_is_allowed(&self.name) {
+            return Err(serde::ser::Error::custom(InvalidCustomEventName {
+                name: self.name.clone(),
+            }));
+        }
+
+        #[derive(Serialize)]
+        struct WireCustomEvent<'a> {
+            name: &'a EventName,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            session_id: Option<&'a SessionId>,
+            payload: &'a CborValue,
+        }
+
+        WireCustomEvent {
+            name: &self.name,
+            session_id: self.session_id.as_ref(),
+            payload: &self.payload,
+        }
+        .serialize(serializer)
     }
 }
 
@@ -1844,17 +1927,7 @@ impl<'de> Deserialize<'de> for CustomEvent {
         }
 
         let wire = WireCustomEvent::deserialize(deserializer)?;
-        if !Self::name_is_allowed(&wire.name) {
-            return Err(serde::de::Error::custom(format!(
-                "custom event name must use an extension-owned category, got {}",
-                wire.name
-            )));
-        }
-        Ok(Self {
-            name: wire.name,
-            session_id: wire.session_id,
-            payload: wire.payload,
-        })
+        Self::try_new(wire.name, wire.session_id, wire.payload).map_err(serde::de::Error::custom)
     }
 }
 
@@ -3080,7 +3153,7 @@ impl Event {
             Self::StartAgentResult(_) => EventName::AGENT_START_RESULT,
             Self::AgentMessageSent(_) => EventName::AGENT_MESSAGE_SENT,
             Self::AgentMessageReceived(_) => EventName::AGENT_MESSAGE_RECEIVED,
-            Self::ExtensionEvent(event) => event.name.clone(),
+            Self::ExtensionEvent(event) => event.name().clone(),
             Self::ProviderModelsUpdated(_) => EventName::PROVIDER_MODELS_UPDATED,
             Self::ProviderToolResult(_) => EventName::PROVIDER_TOOL_RESULT,
             Self::ProviderToolError(_) => EventName::PROVIDER_TOOL_ERROR,

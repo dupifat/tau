@@ -260,11 +260,14 @@ fn representative_events() -> Vec<Event> {
             session_id: "s1".into(),
             agent_id: agent_id("agent-1"),
         }),
-        Event::ExtensionEvent(CustomEvent {
-            name: "demo.progress".parse().expect("event name"),
-            session_id: Some("s1".into()),
-            payload: CborValue::Text("working".to_owned()),
-        }),
+        Event::ExtensionEvent(
+            CustomEvent::try_new(
+                "demo.progress".parse().expect("event name"),
+                Some("s1".into()),
+                CborValue::Text("working".to_owned()),
+            )
+            .expect("valid custom event"),
+        ),
         Event::ProviderModelsUpdated(ProviderModelsUpdated {
             models: vec![ProviderModelInfo {
                 id: "openai/gpt-4.1".parse().expect("model id"),
@@ -355,11 +358,14 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
             message: "bad config".to_owned(),
         }),
         HarnessInputMessage::Emit(Emit {
-            event: Box::new(Event::ExtensionEvent(CustomEvent {
-                name: "demo.transient_progress".parse().expect("event name"),
-                session_id: Some("s1".into()),
-                payload: CborValue::Text("working".to_owned()),
-            })),
+            event: Box::new(Event::ExtensionEvent(
+                CustomEvent::try_new(
+                    "demo.transient_progress".parse().expect("event name"),
+                    Some("s1".into()),
+                    CborValue::Text("working".to_owned()),
+                )
+                .expect("valid custom event"),
+            )),
             transient: true,
         }),
         HarnessInputMessage::InterceptReply(InterceptReply {
@@ -406,11 +412,14 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
             UnixMicros::new(1_700_000_000_000_000),
             sample_session_started(),
         )),
-        HarnessOutputMessage::Deliver(EventDelivery::direct(Event::ExtensionEvent(CustomEvent {
-            name: "demo.snapshot".parse().expect("event name"),
-            session_id: Some("s1".into()),
-            payload: CborValue::Text("snapshot".to_owned()),
-        }))),
+        HarnessOutputMessage::Deliver(EventDelivery::direct(Event::ExtensionEvent(
+            CustomEvent::try_new(
+                "demo.snapshot".parse().expect("event name"),
+                Some("s1".into()),
+                CborValue::Text("snapshot".to_owned()),
+            )
+            .expect("valid custom event"),
+        ))),
         HarnessOutputMessage::InterceptRequest(InterceptRequest {
             event: Box::new(sample_session_started()),
             transient: false,
@@ -609,11 +618,14 @@ fn custom_event_rejects_reserved_category_spelled_as_other() {
 /// by their payload name.
 #[test]
 fn custom_event_allows_extension_owned_event_names() {
-    let event = Event::ExtensionEvent(CustomEvent {
-        name: "demo.progress".parse().expect("custom event name"),
-        session_id: None,
-        payload: CborValue::Text("working".to_owned()),
-    });
+    let event = Event::ExtensionEvent(
+        CustomEvent::try_new(
+            "demo.progress".parse().expect("custom event name"),
+            None,
+            CborValue::Text("working".to_owned()),
+        )
+        .expect("valid custom event"),
+    );
 
     let encoded = serde_json::to_value(&event).expect("serialize custom event");
     let decoded: Event = serde_json::from_value(encoded).expect("decode custom event");

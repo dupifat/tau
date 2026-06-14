@@ -1050,11 +1050,12 @@ fn extension_emit_and_start_agent_request_are_staged_until_ready() {
     h.handle_extension_message(
         conn_id,
         TestMessage::Emit(tau_proto::Emit {
-            event: Box::new(Event::ExtensionEvent(tau_proto::CustomEvent {
-                name: custom_name.clone(),
-                session_id: Some("s1".into()),
-                payload: CborValue::Text("STAGED CUSTOM EVENT".to_owned()),
-            })),
+            event: Box::new(Event::ExtensionEvent(tau_proto::CustomEvent::try_new(
+                custom_name.clone(),
+                Some("s1".into()),
+                CborValue::Text("STAGED CUSTOM EVENT".to_owned()),
+            )
+            .expect("valid custom event"))),
             transient: false,
         }),
     )
@@ -1309,11 +1310,12 @@ fn disconnect_before_ready_drops_all_staged_state() {
     h.handle_extension_message(
         conn_id,
         TestMessage::Emit(tau_proto::Emit {
-            event: Box::new(Event::ExtensionEvent(tau_proto::CustomEvent {
-                name: "demo.dropped".parse().expect("event name"),
-                session_id: Some("s1".into()),
-                payload: CborValue::Text("DROPPED EVENT".to_owned()),
-            })),
+            event: Box::new(Event::ExtensionEvent(tau_proto::CustomEvent::try_new(
+                "demo.dropped".parse().expect("event name"),
+                Some("s1".into()),
+                CborValue::Text("DROPPED EVENT".to_owned()),
+            )
+            .expect("valid custom event"))),
             transient: false,
         }),
     )

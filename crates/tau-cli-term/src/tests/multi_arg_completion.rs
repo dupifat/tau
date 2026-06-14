@@ -164,6 +164,24 @@ fn slash_arg_completion_ignores_non_boundary_cursor() {
     assert!(result.is_ok());
 }
 
+/// Protects cursor-aware command completion from rewriting a slash command when
+/// the cursor is still in leading whitespace before the slash token.
+#[test]
+fn command_completion_ignores_cursor_before_slash_token() {
+    let data = CompletionData::new();
+    let buf = "  /mod trailing";
+    for cursor in [1, 2] {
+        let cands = build_candidates(
+            &[SlashCommand::new("/model", "switch model")],
+            &data,
+            buf,
+            cursor,
+        );
+
+        assert!(cands.is_empty(), "cursor {cursor} produced {cands:?}");
+    }
+}
+
 /// Protects command-name completion from preserving same-token text after the
 /// cursor; accepting a command should replace the whole command token.
 #[test]

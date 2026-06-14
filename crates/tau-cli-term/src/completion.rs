@@ -421,7 +421,13 @@ pub(crate) fn build_candidates_with_home_and_rules(
     if first_non_whitespace_starts_action(buffer) {
         let leading_len = buffer.len() - buffer.trim_start().len();
         let view = &buffer[leading_len..];
+        if cursor < leading_len {
+            return Vec::new();
+        }
         let view_cursor = clamp_to_char_boundary(view, cursor.saturating_sub(leading_len));
+        if view_cursor == 0 {
+            return Vec::new();
+        }
         let command_token_end = first_whitespace(view)
             .map(|(index, _)| index)
             .unwrap_or(view.len());

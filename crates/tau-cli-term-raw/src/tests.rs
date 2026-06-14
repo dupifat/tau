@@ -77,6 +77,42 @@ fn external_pause_disables_and_resume_enables_focus_reporting() {
     assert!(resume.contains("\u{1b}[?1004h"), "resume: {resume:?}");
 }
 
+/// Real terminal poll errors must propagate through `get_next_event` instead
+/// of being treated as EOF.
+#[test]
+fn real_raw_event_propagates_poll_errors() {
+    let result = read_real_raw_event(
+        || false,
+        |_| Err(io::Error::other("synthetic poll error")),
+        || unreachable!("read should not be called"),
+        || Ok((80, 24)),
+    );
+    let err = match result {
+        Ok(_) => panic!("poll error should propagate"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.to_string(), "synthetic poll error");
+}
+
+/// Real terminal read errors must propagate through `get_next_event` instead
+/// of being treated as EOF.
+#[test]
+fn real_raw_event_propagates_read_errors() {
+    let result = read_real_raw_event(
+        || false,
+        |_| Ok(true),
+        || Err(io::Error::other("synthetic read error")),
+        || Ok((80, 24)),
+    );
+    let err = match result {
+        Ok(_) => panic!("read error should propagate"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.to_string(), "synthetic read error");
+}
+
 // --- full_render: content overflows terminal height ---
 
 /// Full redraw is allowed to write past the viewport; this locks in which rows

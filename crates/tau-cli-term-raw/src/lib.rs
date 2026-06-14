@@ -1367,7 +1367,7 @@ impl Term {
     /// a redraw before returning so internal state changes are visible.
     pub fn get_next_event(&self) -> io::Result<Event> {
         loop {
-            let raw = match self.next_raw() {
+            let raw = match self.next_raw()? {
                 Some(ev) => ev,
                 None => return Ok(Event::Eof),
             };
@@ -1431,55 +1431,25 @@ impl Term {
     /// is no background reader thread fighting a foreground program
     /// (e.g. `$EDITOR`) for stdin bytes. Virtual terminals receive
     /// from the test sender returned by `new_virtual`.
-    fn next_raw(&self) -> Option<RawEvent> {
+    fn next_raw(&self) -> io::Result<Option<RawEvent>> {
         if let Some(rx) = self.term_input_rx.as_ref() {
             loop {
                 if self.handle.lock().input_shutdown {
-                    return None;
+                    return Ok(None);
                 }
                 match rx.recv_timeout(INPUT_SHUTDOWN_POLL_INTERVAL) {
-                    Ok(raw) => return Some(raw),
+                    Ok(raw) => return Ok(Some(raw)),
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(None),
                 }
             }
         }
-        loop {
-            if self.handle.lock().input_shutdown {
-                return None;
-            }
-            if !event::poll(INPUT_SHUTDOWN_POLL_INTERVAL).ok()? {
-                continue;
-            }
-            let raw = event::read().ok()?;
-            tracing::trace!(target: "tau_cli_term_raw::input", ?raw, "terminal raw input event");
-            match raw {
-                CtEvent::Key(key) => {
-                    // The kitty protocol surfaces Press/Repeat/Release
-                    // events; drop Release here so each keystroke fires
-                    // exactly once downstream. (On terminals that don't
-                    // support the protocol, only Press is ever emitted —
-                    // this branch is a no-op there.)
-                    if key.kind == KeyEventKind::Release {
-                        continue;
-                    }
-                    return Some(RawEvent::Key(key));
-                }
-                CtEvent::Resize(w, h) => {
-                    let (actual_w, actual_h) = raw_term_size().unwrap_or((0, 0));
-                    return Some(RawEvent::Resize(
-                        resample_resize_dimension(w, actual_w),
-                        resample_resize_dimension(h, actual_h),
-                    ));
-                }
-                CtEvent::FocusGained => return Some(RawEvent::FocusChanged { focused: true }),
-                CtEvent::FocusLost => return Some(RawEvent::FocusChanged { focused: false }),
-                CtEvent::Paste(text) => return Some(RawEvent::Paste(text)),
-                // Mouse events: skip so the caller still observes stdin as
-                // "blocking" without unbounded recursion under noisy input.
-                _ => {}
-            }
-        }
+        read_real_raw_event(
+            || self.handle.lock().input_shutdown,
+            event::poll,
+            event::read,
+            raw_term_size,
+        )
     }
 
     /// Plugs in (or replaces) the completion source. Pass `None` to
@@ -2416,6 +2386,47 @@ impl Term {
 
         if let Some(handle) = self.redraw_thread.take() {
             let _ = handle.join();
+        }
+    }
+}
+
+fn read_real_raw_event(
+    mut is_shutdown: impl FnMut() -> bool,
+    mut poll: impl FnMut(Duration) -> io::Result<bool>,
+    mut read: impl FnMut() -> io::Result<CtEvent>,
+    mut term_size: impl FnMut() -> io::Result<(u16, u16)>,
+) -> io::Result<Option<RawEvent>> {
+    loop {
+        if is_shutdown() {
+            return Ok(None);
+        }
+        if !poll(INPUT_SHUTDOWN_POLL_INTERVAL)? {
+            continue;
+        }
+        let raw = read()?;
+        tracing::trace!(target: "tau_cli_term_raw::input", ?raw, "terminal raw input event");
+        match raw {
+            CtEvent::Key(key) => {
+                // The kitty protocol surfaces Press/Repeat/Release events; drop
+                // Release here so each keystroke fires exactly once downstream.
+                if key.kind == KeyEventKind::Release {
+                    continue;
+                }
+                return Ok(Some(RawEvent::Key(key)));
+            }
+            CtEvent::Resize(w, h) => {
+                let (actual_w, actual_h) = term_size().unwrap_or((0, 0));
+                return Ok(Some(RawEvent::Resize(
+                    resample_resize_dimension(w, actual_w),
+                    resample_resize_dimension(h, actual_h),
+                )));
+            }
+            CtEvent::FocusGained => return Ok(Some(RawEvent::FocusChanged { focused: true })),
+            CtEvent::FocusLost => return Ok(Some(RawEvent::FocusChanged { focused: false })),
+            CtEvent::Paste(text) => return Ok(Some(RawEvent::Paste(text))),
+            // Mouse events: skip so the caller still observes stdin as
+            // "blocking" without unbounded recursion under noisy input.
+            _ => {}
         }
     }
 }

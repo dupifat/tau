@@ -124,6 +124,25 @@ fn command_name_completion_preserves_trailing_arguments() {
     assert_eq!(cands[0].replacement, "/model trailing");
 }
 
+/// Protects command-name completion from preserving same-token text after the
+/// cursor; accepting a command should replace the whole command token.
+#[test]
+fn command_name_completion_replaces_same_token_suffix() {
+    let data = CompletionData::new();
+    let buf = "/modXYZ";
+    let cursor = "/mod".len();
+    let cands = build_candidates(
+        &[SlashCommand::new("/model", "switch model")],
+        &data,
+        buf,
+        cursor,
+    );
+
+    assert_eq!(cands.len(), 1);
+    assert_eq!(cands[0].label, "/model");
+    assert_eq!(cands[0].replacement, "/model");
+}
+
 #[test]
 fn third_arg_returns_no_candidates() {
     let data = CompletionData::new();

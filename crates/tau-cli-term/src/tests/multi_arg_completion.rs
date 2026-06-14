@@ -62,6 +62,46 @@ fn second_arg_completion_keeps_first_arg_in_replacement() {
     assert_eq!(cands[1].replacement, "/set show-diff false");
 }
 
+/// Protects cursor-aware slash-command argument completion: completing the
+/// first arg in the middle of a command must preserve the untouched suffix.
+#[test]
+fn first_arg_completion_preserves_text_after_cursor() {
+    let data = CompletionData::new();
+    data.set_arg_completer(CommandName::new("/set"), make_completer());
+    let buf = "/set sh trailing";
+    let cursor = "/set sh".len();
+    let cands = build_candidates(
+        &[SlashCommand::new("/set", "set a UI setting")],
+        &data,
+        buf,
+        cursor,
+    );
+
+    assert_eq!(cands.len(), 2);
+    assert_eq!(cands[0].replacement, "/set show-diff trailing");
+    assert_eq!(cands[1].replacement, "/set show-thinking trailing");
+}
+
+/// Protects later-argument completion at a non-final cursor position so
+/// accepting a value does not drop text after the active token.
+#[test]
+fn second_arg_completion_preserves_text_after_cursor() {
+    let data = CompletionData::new();
+    data.set_arg_completer(CommandName::new("/set"), make_completer());
+    let buf = "/set show-diff t trailing";
+    let cursor = "/set show-diff t".len();
+    let cands = build_candidates(
+        &[SlashCommand::new("/set", "set a UI setting")],
+        &data,
+        buf,
+        cursor,
+    );
+
+    assert_eq!(cands.len(), 2);
+    assert_eq!(cands[0].replacement, "/set show-diff true trailing");
+    assert_eq!(cands[1].replacement, "/set show-diff false trailing");
+}
+
 #[test]
 fn third_arg_returns_no_candidates() {
     let data = CompletionData::new();

@@ -427,7 +427,9 @@ pub(crate) fn build_candidates_with_home_and_rules(
                 return Vec::new();
             }
             let rest = &view[space_pos + 1..];
-            let candidates = build_arg_candidates(data, cmd, rest);
+            let view_cursor = cursor.saturating_sub(leading_len).min(view.len());
+            let rest_cursor = view_cursor.saturating_sub(space_pos + 1).min(rest.len());
+            let candidates = build_arg_candidates(data, cmd, rest, rest_cursor);
             return prepend_to_replacements(&buffer[..leading_len], candidates);
         }
         let candidates = build_cmd_candidates(commands, &data.dynamic_commands(), view);
@@ -698,41 +700,39 @@ fn build_filesystem_candidates_with_home(
     candidates
 }
 
-fn build_arg_candidates(data: &CompletionData, cmd: &str, rest: &str) -> Vec<Candidate> {
+fn build_arg_candidates(
+    data: &CompletionData,
+    cmd: &str,
+    rest: &str,
+    rest_cursor: usize,
+) -> Vec<Candidate> {
     let cmd_name = CommandName::new(cmd);
     let Some(completer) = data.get_arg_completer(&cmd_name) else {
         return Vec::new();
     };
 
-    // Split args on whitespace, but preserve a trailing empty arg
-    // when the buffer ends in a space — that's the position the user
-    // is currently completing (e.g. "/set show-diff " → args
-    // ["show-diff", ""]).
-    let args: Vec<&str> = if rest.is_empty() {
-        vec![""]
-    } else if rest.ends_with(' ') {
-        let mut v: Vec<&str> = rest.split_whitespace().collect();
-        v.push("");
-        v
-    } else {
-        rest.split_whitespace().collect()
-    };
+    let rest_cursor = rest_cursor.min(rest.len());
+    let token_start = rest[..rest_cursor]
+        .rfind(char::is_whitespace)
+        .map(|pos| pos + 1)
+        .unwrap_or(0);
+    let token_end = rest[rest_cursor..]
+        .find(char::is_whitespace)
+        .map(|pos| rest_cursor + pos)
+        .unwrap_or(rest.len());
 
-    // Everything up to and including the last *completed* token is
-    // preserved as the replacement prefix — completion replaces the
-    // final, partial token.
-    let prefix = if args.len() <= 1 {
-        cmd.to_owned()
-    } else {
-        format!("{cmd} {}", args[..args.len() - 1].join(" "))
-    };
+    let mut args: Vec<&str> = rest[..token_start].split_whitespace().collect();
+    args.push(&rest[token_start..rest_cursor]);
+
+    let replacement_prefix = format!("{cmd} {}", &rest[..token_start]);
+    let replacement_suffix = &rest[token_end..];
 
     completer(&args)
         .into_iter()
         .map(|item| Candidate {
             label: item.value.clone(),
             description: item.description.clone(),
-            replacement: format!("{prefix} {}", item.value),
+            replacement: format!("{replacement_prefix}{}{}", item.value, replacement_suffix),
         })
         .collect()
 }

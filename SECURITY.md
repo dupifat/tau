@@ -97,7 +97,9 @@ clients, and it must produce only Tau styled text spans rather than raw terminal
 escape sequences. Keep its scope narrow to submitted user prompts, assistant
 responses, and thinking text; do not accidentally run it over tool output, shell
 output, or other machine-generated blocks where styling could obscure exact
-results.
+results. Markdown table padding is also display-only: it may add spacing around
+cell contents for readability, but must preserve the cell text, avoid code
+contexts, and keep bounded output amplification.
 
 ## Reporting guidance
 

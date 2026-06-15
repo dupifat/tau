@@ -6,14 +6,16 @@
 //! data, durable event logs, model context, or transcript copies.
 //!
 //! Supported syntax is intentionally small: ATX headings (`# Heading`),
-//! unordered list markers (`-`, `*`, `+`), `*strong*`, `_emphasis_`, and
-//! unordered (`-`, `*`, `+`) and ordered (`1.`) list markers, `*strong*`,
-//! `_emphasis_`, and
-//! source characters, including delimiters and list/header markers, so live
-//! text keeps stable byte lengths and wrapping. Inline backtick spans, fenced
-//! code blocks, and indented code-like lines use code styling and suppress
-//! nested Markdown-lite styling. Escaped marker sequences use a separate escape
-//! style so opt-outs remain visible.
+//! unordered (`-`, `*`, `+`) and ordered (`1.`/`1)`) list markers, `*strong*`,
+//! `_emphasis_`, backslash escapes, and leading-pipe tables. Most constructs
+//! preserve exact source characters; tables may receive bounded display-only
+//! padding spaces so cells align while the result remains valid Markdown table
+//! syntax.
+//!
+//! Inline backtick spans, fenced code blocks, and indented code-like lines use
+//! code styling and suppress nested Markdown-lite styling. Escaped marker
+//! sequences use a separate escape style so opt-outs remain visible. Table
+//! padding is disabled in code contexts.
 //!
 //! Live rendering uses [`MarkdownStreamCache`]. Blank lines seal earlier text;
 //! sealed chunks are parsed once and cached, while the current unsealed suffix
@@ -34,6 +36,76 @@ impl FenceKind {
             Self::Backticks => "```",
             Self::Tildes => "~~~",
         }
+    }
+}
+
+/// Parsed leading-pipe table row.
+///
+/// Invariant: `cells` excludes the opening and closing pipe delimiters. For
+/// rendered table blocks, [`pad_table_lines`] has verified every row's `cells`
+/// vector has the same number of entries. Cell slices are trimmed views into
+/// the source line; rendering may add bounded display padding around them but
+/// must not change their contents.
+#[derive(Debug)]
+struct TableRow<'line> {
+    indent: &'line str,
+    cells: Vec<&'line str>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TableRowKind {
+    Body,
+    Separator,
+}
+
+const TABLE_MAX_COLUMNS: usize = 12;
+const TABLE_MAX_CELL_WIDTH: usize = 80;
+const TABLE_MAX_EXTRA_PADDING_BYTES: usize = 4096;
+const TABLE_MAX_RENDERED_LINE_BYTES: usize = 240;
+
+impl<'line> TableRow<'line> {
+    fn parse(line: &'line str) -> Option<Self> {
+        if !line.contains('|') || is_indented_code(line) {
+            return None;
+        }
+        let indent_len = line.len() - line.trim_start_matches([' ', '\t']).len();
+        let indent = &line[..indent_len];
+        let body = &line[indent_len..];
+        if !body.starts_with('|') || !ends_with_unescaped_pipe(body) {
+            return None;
+        }
+        let mut cells = split_unescaped_pipes(body);
+        cells.remove(0);
+        cells.pop();
+        if cells.len() < 2 || TABLE_MAX_COLUMNS < cells.len() {
+            return None;
+        }
+        Some(Self {
+            indent,
+            cells: cells.into_iter().map(str::trim).collect(),
+        })
+    }
+
+    fn render(&self, widths: &[usize], row_kind: TableRowKind) -> String {
+        let mut rendered = self.indent.to_owned();
+        rendered.push('|');
+        for (index, width) in widths.iter().copied().enumerate() {
+            if index > 0 {
+                rendered.push('|');
+            }
+            rendered.push(' ');
+            let cell = self.cells.get(index).copied().unwrap_or_default();
+            match row_kind {
+                TableRowKind::Separator => rendered.push_str(&render_separator_cell(cell, width)),
+                TableRowKind::Body => {
+                    rendered.push_str(cell);
+                    rendered.push_str(&" ".repeat(width.saturating_sub(cell.chars().count())));
+                }
+            }
+            rendered.push(' ');
+        }
+        rendered.push('|');
+        rendered
     }
 }
 
@@ -294,10 +366,16 @@ fn latest_sealed_boundary(text: &str) -> Option<usize> {
 
 fn parse_markdown_with_state(text: &str, in_fence: &mut Option<FenceKind>) -> Vec<MarkdownRun> {
     let mut runs = Vec::new();
-    for line in text.split_inclusive('\n') {
-        let (body, newline) = line
-            .strip_suffix('\n')
-            .map_or((line, ""), |body| (body, "\n"));
+    let lines = text
+        .split_inclusive('\n')
+        .map(|line| {
+            line.strip_suffix('\n')
+                .map_or((line, ""), |body| (body, "\n"))
+        })
+        .collect::<Vec<_>>();
+    let mut index = 0;
+    while index < lines.len() {
+        let (body, newline) = lines[index];
         let trimmed = body.trim_start();
         if let Some(fence) = *in_fence {
             push_run(&mut runs, body, MarkdownStyle::Code);
@@ -305,17 +383,30 @@ fn parse_markdown_with_state(text: &str, in_fence: &mut Option<FenceKind>) -> Ve
             if trimmed.starts_with(fence.marker()) {
                 *in_fence = None;
             }
+            index += 1;
             continue;
         }
         if let Some(fence) = fence_marker(trimmed) {
             push_run(&mut runs, body, MarkdownStyle::Code);
             push_run(&mut runs, newline, MarkdownStyle::Base);
             *in_fence = Some(fence);
+            index += 1;
+            continue;
+        }
+        if let Some(table_end) = table_block_end(&lines, index)
+            && let Some(padded_lines) = pad_table_lines(&lines[index..table_end])
+        {
+            for (padded, (_, newline)) in padded_lines.into_iter().zip(&lines[index..table_end]) {
+                parse_inline(&padded, &mut runs);
+                push_run(&mut runs, newline, MarkdownStyle::Base);
+            }
+            index = table_end;
             continue;
         }
         if is_heading(body) {
             push_run(&mut runs, body, MarkdownStyle::Heading);
             push_run(&mut runs, newline, MarkdownStyle::Base);
+            index += 1;
             continue;
         }
         if let Some((indent_end, marker_end)) = list_marker_range(body) {
@@ -327,17 +418,158 @@ fn parse_markdown_with_state(text: &str, in_fence: &mut Option<FenceKind>) -> Ve
             );
             parse_inline(&body[marker_end..], &mut runs);
             push_run(&mut runs, newline, MarkdownStyle::Base);
+            index += 1;
             continue;
         }
         if is_indented_code(body) {
             push_run(&mut runs, body, MarkdownStyle::Code);
             push_run(&mut runs, newline, MarkdownStyle::Base);
+            index += 1;
             continue;
         }
         parse_inline(body, &mut runs);
         push_run(&mut runs, newline, MarkdownStyle::Base);
+        index += 1;
     }
     runs
+}
+
+fn table_block_end(lines: &[(&str, &str)], start: usize) -> Option<usize> {
+    if start + 1 >= lines.len()
+        || is_indented_code(lines[start].0)
+        || TableRow::parse(lines[start].0).is_none()
+    {
+        return None;
+    }
+    let separator = TableRow::parse(lines[start + 1].0)?;
+    if !separator.cells.iter().all(|cell| is_separator_cell(cell)) {
+        return None;
+    }
+
+    let mut end = start + 2;
+    while end < lines.len() {
+        if is_indented_code(lines[end].0) || TableRow::parse(lines[end].0).is_none() {
+            break;
+        }
+        end += 1;
+    }
+    Some(end)
+}
+
+fn split_unescaped_pipes(text: &str) -> Vec<&str> {
+    let mut cells = Vec::new();
+    let mut start = 0;
+    let mut escaped = false;
+    let mut in_code_span = false;
+    for (index, ch) in text.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '`' {
+            in_code_span = !in_code_span;
+            continue;
+        }
+        if ch == '|' && !in_code_span {
+            cells.push(&text[start..index]);
+            start = index + ch.len_utf8();
+        }
+    }
+    cells.push(&text[start..]);
+    cells
+}
+
+fn ends_with_unescaped_pipe(text: &str) -> bool {
+    let mut escaped = false;
+    let mut in_code_span = false;
+    let mut last_unescaped_pipe = false;
+    for ch in text.chars() {
+        if escaped {
+            escaped = false;
+            last_unescaped_pipe = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            last_unescaped_pipe = false;
+            continue;
+        }
+        if ch == '`' {
+            in_code_span = !in_code_span;
+            last_unescaped_pipe = false;
+            continue;
+        }
+        last_unescaped_pipe = ch == '|' && !in_code_span;
+    }
+    last_unescaped_pipe
+}
+
+fn is_separator_cell(cell: &str) -> bool {
+    let cell = cell.trim();
+    let cell = cell.strip_prefix(':').unwrap_or(cell);
+    let cell = cell.strip_suffix(':').unwrap_or(cell);
+    3 <= cell.len() && cell.chars().all(|ch| ch == '-')
+}
+
+fn pad_table_lines(lines: &[(&str, &str)]) -> Option<Vec<String>> {
+    let rows = lines
+        .iter()
+        .map(|(line, _)| TableRow::parse(line))
+        .collect::<Option<Vec<_>>>()?;
+    let columns = rows.first()?.cells.len();
+    if rows.iter().any(|row| row.cells.len() != columns) {
+        return None;
+    }
+    let mut widths = vec![3; columns];
+    for (row_index, row) in rows.iter().enumerate() {
+        if row_index == 1 {
+            continue;
+        }
+        for (index, cell) in row.cells.iter().enumerate() {
+            widths[index] = widths[index].max(cell.chars().count());
+        }
+    }
+    if widths.iter().any(|width| TABLE_MAX_CELL_WIDTH < *width) {
+        return None;
+    }
+
+    let mut extra_padding = 0usize;
+    let mut padded = Vec::with_capacity(rows.len());
+    for (row_index, row) in rows.iter().enumerate() {
+        let row_kind = if row_index == 1 {
+            TableRowKind::Separator
+        } else {
+            TableRowKind::Body
+        };
+        let rendered = row.render(&widths, row_kind);
+        if TABLE_MAX_RENDERED_LINE_BYTES < rendered.len() {
+            return None;
+        }
+        extra_padding =
+            extra_padding.saturating_add(rendered.len().saturating_sub(lines[row_index].0.len()));
+        if TABLE_MAX_EXTRA_PADDING_BYTES < extra_padding {
+            return None;
+        }
+        padded.push(rendered);
+    }
+    Some(padded)
+}
+
+fn render_separator_cell(cell: &str, width: usize) -> String {
+    let left = cell.trim().starts_with(':');
+    let right = cell.trim().ends_with(':');
+    let dash_count = width.saturating_sub(usize::from(left) + usize::from(right));
+    let dash_count = dash_count.max(3);
+    format!(
+        "{}{}{}",
+        if left { ":" } else { "" },
+        "-".repeat(dash_count),
+        if right { ":" } else { "" }
+    )
 }
 
 fn is_heading(line: &str) -> bool {

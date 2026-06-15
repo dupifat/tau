@@ -29,10 +29,12 @@ fn rendered_text(block: &tau_cli_term::StyledBlock) -> String {
         .collect()
 }
 
-/// Ensures Markdown-lite is style-only and preserves source text exactly.
+/// Ensures non-table Markdown-lite syntax is style-only and preserves source
+/// text exactly. Leading-pipe tables are covered separately because they may
+/// get display-only padding.
 #[test]
-fn final_render_preserves_source_text() {
-    let theme = tau_themes::Theme::builtin();
+fn final_render_preserves_non_table_source_text() {
+    let theme = markdown_test_theme();
     let block = markdown_block(
         &theme,
         names::USER_PROMPT,
@@ -94,6 +96,215 @@ fn nested_ordered_list_items_are_not_indented_code() {
         .find(|span| span.text.contains("Nested numbered item"))
         .expect("nested ordered item body");
     assert_eq!(nested_body.style.bg, None);
+}
+
+/// Ensures pipe tables remain Markdown tables while cells are padded for
+/// display.
+#[test]
+fn markdown_tables_are_padded_without_changing_cell_text() {
+    let theme = markdown_test_theme();
+    let block = markdown_block(
+        &theme,
+        names::SHELL_OUTPUT,
+        "| A | Longer |\n| --- | --- |\n| one | two |\n| three | four |\n",
+    );
+
+    assert_eq!(
+        rendered_text(&block),
+        "| A     | Longer |\n| ----- | ------ |\n| one   | two    |\n| three | four   |\n"
+    );
+}
+
+/// Ensures table padding is not applied inside fenced code blocks.
+#[test]
+fn markdown_tables_inside_code_fences_are_not_padded() {
+    let theme = markdown_test_theme();
+    let source = "```\n| A | Longer |\n| --- | --- |\n```\n";
+    let block = markdown_block(&theme, names::SHELL_OUTPUT, source);
+
+    assert_eq!(rendered_text(&block), source);
+}
+
+/// Ensures alignment marker colons survive table separator padding.
+#[test]
+fn markdown_table_separator_alignment_is_preserved() {
+    let theme = markdown_test_theme();
+    let block = markdown_block(
+        &theme,
+        names::SHELL_OUTPUT,
+        "| Left | Right | Center |\n| :--- | ---: | :---: |\n| a | b | c |\n",
+    );
+
+    assert_eq!(
+        rendered_text(&block),
+        "| Left | Right | Center |\n| :--- | ----: | :----: |\n| a    | b     | c      |\n"
+    );
+}
+
+/// Ensures escaped pipes remain cell content instead of becoming separators.
+#[test]
+fn markdown_table_escaped_pipes_remain_cell_content() {
+    let theme = markdown_test_theme();
+    let block = markdown_block(
+        &theme,
+        names::SHELL_OUTPUT,
+        "| Cell | Other |\n| --- | --- |\n| x\\|y | z |\n",
+    );
+
+    assert_eq!(
+        rendered_text(&block),
+        "| Cell | Other |\n| ---- | ----- |\n| x\\|y | z     |\n"
+    );
+}
+
+/// Ensures pipes inside inline code spans remain cell content.
+#[test]
+fn markdown_table_code_span_pipes_remain_cell_content() {
+    let theme = markdown_test_theme();
+    let block = markdown_block(
+        &theme,
+        names::SHELL_OUTPUT,
+        "| Cell | Other |\n| --- | --- |\n| `x|y` | z |\n",
+    );
+
+    assert_eq!(
+        rendered_text(&block),
+        "| Cell  | Other |\n| ----- | ----- |\n| `x|y` | z     |\n"
+    );
+}
+
+/// Ensures indented pipe-shaped text remains code and is not table-padded.
+#[test]
+fn indented_pipe_tables_remain_code() {
+    let theme = markdown_test_theme();
+    let source = "    | A | Longer |\n    | --- | --- |\n";
+    let block = markdown_block(&theme, names::SHELL_OUTPUT, source);
+
+    assert_eq!(rendered_text(&block), source);
+    assert!(block.content.spans().iter().any(|span| {
+        span.style.bg
+            == Some(tau_cli_term::Color::Rgb {
+                r: 0x11,
+                g: 0x11,
+                b: 0x11,
+            })
+    }));
+}
+
+/// Ensures ambiguous no-leading-pipe tables are left unchanged.
+#[test]
+fn no_leading_pipe_tables_are_left_unchanged() {
+    let theme = markdown_test_theme();
+    let source = "   A | Longer\n   --- | ---\n";
+    let block = markdown_block(&theme, names::SHELL_OUTPUT, source);
+
+    assert_eq!(rendered_text(&block), source);
+}
+
+/// Ensures pathological wide tables fall back to source text instead of
+/// expanding output.
+#[test]
+fn very_wide_tables_are_not_padded() {
+    let theme = markdown_test_theme();
+    let wide = "x".repeat(TABLE_MAX_CELL_WIDTH + 1);
+    let source = format!("| A | B |\n| --- | --- |\n| {wide} | y |\n| z | q |\n");
+    let block = markdown_block(&theme, names::SHELL_OUTPUT, &source);
+
+    assert_eq!(rendered_text(&block), source);
+}
+
+/// Ensures tables with too many columns fall back to source text.
+#[test]
+fn too_many_table_columns_are_not_padded() {
+    let theme = markdown_test_theme();
+    let header = format!(
+        "| {} |\n",
+        (0..=TABLE_MAX_COLUMNS)
+            .map(|_| "H")
+            .collect::<Vec<_>>()
+            .join(" | ")
+    );
+    let separator = format!(
+        "| {} |\n",
+        (0..=TABLE_MAX_COLUMNS)
+            .map(|_| "---")
+            .collect::<Vec<_>>()
+            .join(" | ")
+    );
+    let row = format!(
+        "| {} |\n",
+        (0..=TABLE_MAX_COLUMNS)
+            .map(|_| "x")
+            .collect::<Vec<_>>()
+            .join(" | ")
+    );
+    let source = format!("{header}{separator}{row}");
+    let block = markdown_block(&theme, names::SHELL_OUTPUT, &source);
+
+    assert_eq!(rendered_text(&block), source);
+}
+
+/// Ensures rendered-line byte limits fall back to source text independently of
+/// the per-cell width limit.
+#[test]
+fn too_long_rendered_table_lines_are_not_padded() {
+    let theme = markdown_test_theme();
+    let medium = "x".repeat((TABLE_MAX_RENDERED_LINE_BYTES / TABLE_MAX_COLUMNS) + 1);
+    let header = format!(
+        "| {} |\n",
+        (0..TABLE_MAX_COLUMNS)
+            .map(|_| medium.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    );
+    let separator = format!(
+        "| {} |\n",
+        (0..TABLE_MAX_COLUMNS)
+            .map(|_| "---")
+            .collect::<Vec<_>>()
+            .join(" | ")
+    );
+    let row = format!(
+        "| {} |\n",
+        (0..TABLE_MAX_COLUMNS)
+            .map(|_| "x")
+            .collect::<Vec<_>>()
+            .join(" | ")
+    );
+    let source = format!("{header}{separator}{row}");
+    let block = markdown_block(&theme, names::SHELL_OUTPUT, &source);
+
+    assert_eq!(rendered_text(&block), source);
+}
+
+/// Ensures aggregate padding limits fall back even when each rendered line is
+/// individually within bounds.
+#[test]
+fn too_much_total_table_padding_is_not_padded() {
+    let theme = markdown_test_theme();
+    let wide = "x".repeat(TABLE_MAX_CELL_WIDTH);
+    let mut source = format!("| {wide} | {wide} |\n| --- | --- |\n");
+    let short_rows = (TABLE_MAX_EXTRA_PADDING_BYTES / TABLE_MAX_CELL_WIDTH) + 1;
+    for _ in 0..short_rows {
+        source.push_str("| a | b |\n");
+    }
+    let block = markdown_block(&theme, names::SHELL_OUTPUT, &source);
+
+    assert_eq!(rendered_text(&block), source);
+}
+
+/// Ensures live sealed table chunks are padded once they become stable.
+#[test]
+fn live_stream_pads_sealed_markdown_tables() {
+    let theme = markdown_test_theme();
+    let mut cache = MarkdownStreamCache::default();
+    let source = "| A | Longer |\n| --- | --- |\n| one | two |\n\n";
+    let block = markdown_streaming_block(&theme, names::SHELL_OUTPUT, source, &mut cache);
+
+    assert_eq!(
+        rendered_text(&block),
+        "| A   | Longer |\n| --- | ------ |\n| one | two    |\n\n…"
+    );
 }
 
 /// Ensures unmatched, escaped, identifier, and code-like delimiters do not

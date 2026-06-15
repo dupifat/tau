@@ -779,6 +779,54 @@ fn harness_config_cli_overrides_are_applied_last_and_typed() {
     assert_eq!(s.extensions["std-websearch"].enable, Some(false));
 }
 
+#[test]
+fn harness_settings_extension_require_parses_and_cli_overrides() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"{
+            extensions: {
+                "core-shell": { require: false },
+                "std-websearch": { enable: true },
+            },
+        }"#,
+    )
+    .expect("write");
+
+    let overrides = [
+        HarnessConfigCliOverride::from_str("extensions.std-websearch.require=false")
+            .expect("override"),
+    ];
+    let settings =
+        load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &overrides)
+            .expect("load");
+
+    assert_eq!(settings.extensions["core-shell"].require, Some(false));
+    assert_eq!(settings.extensions["std-websearch"].require, Some(false));
+    let no_cli = load_harness_settings_in(&dirs_with_config(dir)).expect("load without cli");
+    assert_eq!(no_cli.extensions["std-websearch"].require, None);
+}
+
+#[test]
+fn harness_settings_extension_require_rejects_wrong_type() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"{ extensions: { "core-shell": { require: "sometimes" } } }"#,
+    )
+    .expect("write");
+
+    let error = load_harness_settings_in(&dirs_with_config(dir))
+        .expect_err("wrong require type should fail");
+
+    assert!(
+        error.to_string().contains("require") || error.to_string().contains("bool"),
+        "unexpected error: {error}"
+    );
+}
+
 /// Ensures `--harness-config` can update nested role settings at highest
 /// precedence.
 #[test]

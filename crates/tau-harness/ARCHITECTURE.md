@@ -67,6 +67,20 @@ user prompt through the same machinery as UI prompt intake. The durable
 transcript fact remains the harness-owned `agent.prompt_submitted`; extensions
 may not forge prompt or message transcript facts directly.
 
+## Optional extension startup
+
+Extension startup availability is controlled by resolved `ExtensionConfig.require`.
+Required extensions preserve startup-fatal behavior for harness-owned init
+failures such as missing commands, missing required declared secrets, spawn
+failure, and pre-Ready timeout. Other pre-Ready disconnect handling follows the
+existing compatibility behavior unless the disconnect is already provider/socket
+fatal. Optional extensions (`require: false`) are skipped or disabled for
+startup/config/secret/pre-Ready failures, but the failure must still be emitted as
+an Important replayable `harness.info` so initial and late UI subscribers see why
+the extension is absent. This policy is limited to startup/init availability; do
+not broaden it into new post-Ready respawn or runtime-failure semantics without a
+separate design change.
+
 ## Extension data
 
 Extension-data RPCs confine paths to per-extension state roots, reject traversal

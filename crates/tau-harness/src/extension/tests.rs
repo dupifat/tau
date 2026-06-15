@@ -8,6 +8,7 @@ fn test_extension_config(cwd: Option<PathBuf>) -> ExtensionConfig {
         command: "tau-test-extension".to_owned(),
         args: vec!["--stdio".to_owned()],
         role: None,
+        require: true,
         cwd,
         config: serde_json::json!({}),
         secrets: BTreeMap::new(),

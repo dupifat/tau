@@ -138,10 +138,15 @@ variables (suffixes are lowercased; use portable names with ASCII letters,
 digits, `.`, `_`, and `-`). Environment secrets are removed from the harness
 environment after startup and values are sent only to that extension during the
 Configure handshake. Secret entries are required by default; set
-`optional: true` to allow startup without a value. For `std-pim`, migrate old
-`auth.password_env`, `auth.command`, and `auth.password_command` settings to
-`auth.password_secret` plus `extensions.std-pim.secrets`; the legacy `std-email`
-alias accepts the same secret declaration shape.
+`optional: true` to omit only that one secret when absent. Set
+`extensions.<name>.require: false` when the whole extension is optional and Tau
+should continue startup without it if a required declared secret or other
+startup/pre-Ready setup fails; the skipped extension is still reported as an
+Important replayed `harness.info` notice.
+For `std-pim`, migrate old `auth.password_env`, `auth.command`, and
+`auth.password_command` settings to `auth.password_secret` plus
+`extensions.std-pim.secrets`; the legacy `std-email` alias accepts the same
+secret declaration shape.
 
 ### Model parameters: effort, verbosity, thinking summary, service tier
 
@@ -255,9 +260,10 @@ with `tau policy-show`.
 
 Most built-in integrations are regular extensions under `crates/tau-ext-*/`.
 They are configured under `extensions.<name>` in `harness.yaml` and can be
-disabled with `enable: false`, started from a configured `cwd:`, swapped via
-`command:` / `prefix:`, or given free-form `config:` payload that arrives at
-startup as a `LifecycleConfigure` message. Extension names must contain only
+disabled with `enable: false`, marked optional with `require: false`, started
+from a configured `cwd:`, swapped via `command:` / `prefix:`, or given free-form
+`config:` payload that arrives at startup as a `LifecycleConfigure` message.
+Extension names must contain only
 ASCII letters, digits, `_`, and `-` so they are safe as state-directory path
 components and unambiguous in dotted `--harness-config` paths. Some core tools,
 such as `agent_start`,
@@ -266,9 +272,10 @@ such as `agent_start`,
 ```json5
 extensions: {
   "core-shell":         { enable: false },                       // disable
-  "provider-builtin":    { prefix: ["ssh", "user@host"] },        // run remotely
-  "custom-tool":         { command: ["./tool"], cwd: "/srv/tool" }, // run from cwd
-  "std-notifications": { config: { "agent_idle": [{ delay_seconds: 30, osc1337: { key: "user-text-notification", value: "..." } }] } }, // reconfigure
+  "std-telegram":       { enable: true, require: false },        // skip visibly if unavailable
+  "provider-builtin":   { prefix: ["ssh", "user@host"] },        // run remotely
+  "custom-tool":        { command: ["./tool"], cwd: "/srv/tool" }, // run from cwd
+  "std-notifications":  { config: { "agent_idle": [{ delay_seconds: 30, osc1337: { key: "user-text-notification", value: "..." } }] } }, // reconfigure
 },
 ```
 

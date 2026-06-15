@@ -1,7 +1,8 @@
 use std::str::FromStr;
 
 use tau_config::settings::{
-    ExtensionEntry, HarnessConfigCliOverride, HarnessSettings, load_harness_settings_in,
+    ExtensionCliOverride, ExtensionEntry, HarnessConfigCliOverride, HarnessSettings,
+    load_harness_settings_in,
 };
 use tempfile::TempDir;
 
@@ -22,6 +23,7 @@ fn builtin(
         role: Some(role.into()),
         cwd: None,
         enable,
+        require: true,
         config,
         secrets: BTreeMap::new(),
     }
@@ -574,4 +576,116 @@ fn resolve_extensions_drops_disabled_entries_with_secret_declarations() {
     let resolved = resolve_extensions(&s, builtins).expect("resolve");
 
     assert!(resolved.iter().all(|e| e.name != "test-dummy"));
+}
+
+#[test]
+fn resolve_extensions_require_defaults_true_and_user_can_override_builtin() {
+    let mut settings = HarnessSettings::built_in();
+    settings.extensions.insert(
+        "core-shell".into(),
+        ExtensionEntry {
+            require: Some(false),
+            ..Default::default()
+        },
+    );
+    settings.extensions.insert(
+        "custom-tool".into(),
+        ExtensionEntry {
+            command: Some(vec!["custom-tool".into()]),
+            ..Default::default()
+        },
+    );
+
+    let resolved = resolve_extensions(&settings, builtins()).expect("resolve");
+
+    let provider = resolved
+        .iter()
+        .find(|extension| extension.name == "provider-builtin")
+        .expect("provider");
+    assert!(provider.require);
+    let core_shell = resolved
+        .iter()
+        .find(|extension| extension.name == "core-shell")
+        .expect("core shell");
+    assert!(!core_shell.require);
+    let custom = resolved
+        .iter()
+        .find(|extension| extension.name == "custom-tool")
+        .expect("custom extension");
+    assert!(custom.require);
+}
+
+#[test]
+fn resolve_extensions_cli_availability_overrides_preserve_require() {
+    let mut settings = HarnessSettings::built_in();
+    settings.extensions.insert(
+        "std-pim".into(),
+        ExtensionEntry {
+            require: Some(false),
+            ..Default::default()
+        },
+    );
+
+    let resolved = resolve_extensions_with_cli_overrides(
+        &settings,
+        builtins(),
+        &[ExtensionCliOverride::Enable("std-pim".to_owned())],
+    )
+    .expect("resolve");
+
+    let pim = resolved
+        .iter()
+        .find(|extension| extension.name == "std-pim")
+        .expect("pim enabled by cli");
+    assert!(!pim.require);
+}
+
+#[test]
+fn resolve_extensions_optional_empty_command_is_skipped_with_diagnostic() {
+    let mut settings = HarnessSettings::built_in();
+    settings.extensions.insert(
+        "optional-empty".into(),
+        ExtensionEntry {
+            require: Some(false),
+            ..Default::default()
+        },
+    );
+
+    let resolved =
+        resolve_extensions_with_cli_overrides_and_diagnostics(&settings, builtins(), &[])
+            .expect("optional empty command should not be fatal");
+
+    assert!(
+        resolved
+            .extensions
+            .iter()
+            .all(|extension| extension.name != "optional-empty")
+    );
+    assert_eq!(resolved.diagnostics.len(), 1);
+    assert_eq!(resolved.diagnostics[0].extension, "optional-empty");
+    assert!(
+        resolved.diagnostics[0]
+            .message
+            .contains("optional extension optional-empty skipped")
+    );
+    assert!(
+        resolved.diagnostics[0]
+            .message
+            .contains("extensions.optional-empty.command")
+    );
+}
+
+#[test]
+fn resolve_extensions_required_empty_command_remains_fatal() {
+    let mut settings = HarnessSettings::built_in();
+    settings
+        .extensions
+        .insert("required-empty".into(), ExtensionEntry::default());
+
+    let error = resolve_extensions_with_cli_overrides_and_diagnostics(&settings, builtins(), &[])
+        .expect_err("required empty command should fail");
+
+    assert!(
+        matches!(error, ResolveExtensionsError::EmptyCommand(name) if name == "required-empty")
+    );
 }

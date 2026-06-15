@@ -24,11 +24,13 @@ fn config_with_secret(optional: bool) -> Config {
                 command: "tau".to_owned(),
                 args: Vec::new(),
                 role: None,
+                require: true,
                 cwd: None,
                 config: serde_json::json!({}),
                 secrets,
             },
         )]),
+        extension_startup_diagnostics: Vec::new(),
     }
 }
 
@@ -44,7 +46,7 @@ fn file_secret_values_are_trimmed() {
         .expect("resolve secrets");
 
     assert_eq!(
-        resolved["std-email"]["mail_password"].expose_secret(),
+        resolved.secrets["std-email"]["mail_password"].expose_secret(),
         "value"
     );
 }
@@ -66,7 +68,7 @@ fn env_overrides_file_and_is_removed() {
         .expect("resolve secrets");
 
     assert_eq!(
-        resolved["std-email"]["mail_password"].expose_secret(),
+        resolved.secrets["std-email"]["mail_password"].expose_secret(),
         "env"
     );
 }
@@ -94,7 +96,7 @@ fn uppercase_configured_secret_name_matches_normalized_env() {
         resolve_extension_secrets(&config, tempdir.path(), &sources).expect("resolve secrets");
 
     assert_eq!(
-        resolved["std-email"]["GOOGLE_CALENDAR_CLIENT_ID"].expose_secret(),
+        resolved.secrets["std-email"]["GOOGLE_CALENDAR_CLIENT_ID"].expose_secret(),
         "client"
     );
 }
@@ -114,6 +116,48 @@ fn missing_required_secret_names_extension_and_secret() {
 }
 
 #[test]
+fn optional_extension_missing_required_secret_is_skipped_with_diagnostic() {
+    let td = TempDir::new().expect("tempdir");
+    let mut config = config_with_secret(false);
+    config
+        .extensions
+        .get_mut("std-email")
+        .expect("extension")
+        .require = false;
+
+    let resolved = resolve_extension_secrets(&config, td.path(), &SecretSources::default())
+        .expect("optional missing secret should not fail startup");
+
+    assert!(resolved.secrets.get("std-email").is_none());
+    assert!(resolved.skipped_extensions.contains("std-email"));
+    assert_eq!(resolved.diagnostics.len(), 1);
+    assert_eq!(resolved.diagnostics[0].extension, "std-email");
+    assert!(
+        resolved.diagnostics[0]
+            .message
+            .contains("optional extension std-email skipped")
+    );
+    assert!(resolved.diagnostics[0].message.contains("mail_password"));
+    assert!(!resolved.diagnostics[0].message.contains("super-secret"));
+}
+
+#[test]
+fn optional_extension_invalid_secret_name_is_skipped_with_diagnostic() {
+    let td = TempDir::new().expect("tempdir");
+    let mut config = config_with_secret(false);
+    let extension = config.extensions.get_mut("std-email").expect("extension");
+    extension.require = false;
+    extension.secrets = BTreeMap::from([("../bad".to_owned(), ExtensionSecretEntry::default())]);
+
+    let resolved = resolve_extension_secrets(&config, td.path(), &SecretSources::default())
+        .expect("optional invalid secret name should skip extension");
+
+    assert!(resolved.secrets.get("std-email").is_none());
+    assert!(resolved.skipped_extensions.contains("std-email"));
+    assert!(resolved.diagnostics[0].message.contains("../bad"));
+}
+
+#[test]
 fn missing_optional_secret_is_omitted() {
     let td = TempDir::new().expect("tempdir");
     let resolved = resolve_extension_secrets(
@@ -122,7 +166,7 @@ fn missing_optional_secret_is_omitted() {
         &SecretSources::default(),
     )
     .expect("optional missing secret resolves");
-    assert!(resolved["std-email"].is_empty());
+    assert!(resolved.secrets["std-email"].is_empty());
 }
 
 #[test]

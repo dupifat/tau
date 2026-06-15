@@ -1,13 +1,13 @@
 //! Harness-owned secret loading and per-extension resolution.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use tau_config::settings::ExtensionSecretEntry;
 use tau_proto::SecretValue;
 
-use crate::settings::Config;
+use crate::settings::{Config, ExtensionStartupDiagnostic};
 
 const ENV_PREFIX: &str = "TAU_SECRET_";
 
@@ -165,25 +165,59 @@ fn resolve_one_secret(
     }
 }
 
+/// Secret resolution result for all configured extensions.
+#[derive(Debug)]
+pub struct ResolvedExtensionSecrets {
+    /// Per-extension secrets authorized for Configure messages.
+    pub secrets: BTreeMap<String, BTreeMap<String, SecretValue>>,
+    /// Optional extensions skipped because their secret declarations could not
+    /// resolve safely.
+    pub skipped_extensions: BTreeSet<String>,
+    /// Important diagnostics explaining optional secret-resolution skips.
+    pub diagnostics: Vec<ExtensionStartupDiagnostic>,
+}
+
 /// Resolve all configured extension secrets from files and one-shot env vars.
 pub fn resolve_extension_secrets(
     config: &Config,
     state_dir: &Path,
     sources: &SecretSources,
-) -> Result<BTreeMap<String, BTreeMap<String, SecretValue>>, SecretsError> {
+) -> Result<ResolvedExtensionSecrets, SecretsError> {
     let mut out = BTreeMap::new();
+    let mut skipped_extensions = BTreeSet::new();
+    let mut diagnostics = Vec::new();
     for (extension, extension_config) in &config.extensions {
         let mut secrets = BTreeMap::new();
         for (name, declaration) in &extension_config.secrets {
-            if let Some(value) =
-                resolve_one_secret(state_dir, sources, extension, name, declaration)?
-            {
-                secrets.insert(name.clone(), value);
+            match resolve_one_secret(state_dir, sources, extension, name, declaration) {
+                Ok(Some(value)) => {
+                    secrets.insert(name.clone(), value);
+                }
+                Ok(None) => {}
+                Err(error) if !extension_config.require => {
+                    diagnostics.push(ExtensionStartupDiagnostic {
+                        extension: extension.clone(),
+                        message: format!(
+                            "optional extension {extension} skipped: {}; check `extensions.{extension}.secrets` in harness.yaml",
+                            error
+                        ),
+                    });
+                    skipped_extensions.insert(extension.clone());
+                    secrets.clear();
+                    break;
+                }
+                Err(error) => return Err(error),
             }
         }
-        out.insert(extension.clone(), secrets);
+        if !skipped_extensions.contains(extension) {
+            out.insert(extension.clone(), secrets);
+        }
     }
-    Ok(out)
+    Ok(ResolvedExtensionSecrets {
+        secrets: out,
+        skipped_extensions,
+        diagnostics,
+    })
 }
 
 #[cfg(test)]

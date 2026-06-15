@@ -59,6 +59,13 @@ later at a consumer.
 precedence config, a path sets cwd, and explicit `cwd: null` clears a lower-layer
 cwd so the child inherits the harness process cwd.
 
+Extension availability uses two separate fields. `enable` decides whether an
+extension is desired at all; disabled entries should be inert for command,
+secret, and spawn validation. `require` decides whether an enabled extension is
+startup-critical; absence inherits lower layers/built-in defaults, and user-added
+entries ultimately default to required. Both fields are ordinary layered config,
+so file/drop-in/CLI override tests should cover parsing and precedence.
+
 ## Atomic writes
 
 `atomic_write_following_symlink` follows a destination symlink and replaces its

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use super::*;
 use crate::agent::PendingPrompt;
@@ -165,6 +165,8 @@ fn connect_handshaking_extension(
             instance_id: 42.into(),
             connection_id: connection_id.clone(),
             kind,
+            require: true,
+            respawn_allowed: true,
             pid: None,
             in_process_thread: None,
             supervised_config: None,
@@ -326,6 +328,320 @@ fn extension_config_error_is_important_and_replayed_to_late_ui() {
             if info.level == tau_proto::HarnessInfoLevel::Important
                 && info.message.contains("extension config-bad-ext rejected its config")
                 && info.message.contains("unknown field `enforce_ro_mode`")
+    )));
+}
+
+#[test]
+fn optional_extension_config_error_is_replayed_and_disables_extension() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let conn_id = "optional-config-bad-ext";
+    let _extension_sink = connect_handshaking_tool(&mut h, conn_id);
+    h.extensions
+        .entries
+        .get_mut(conn_id)
+        .expect("extension entry")
+        .require = false;
+
+    h.handle_extension_message(
+        conn_id,
+        TestMessage::ConfigError(tau_proto::ConfigError {
+            message: "missing token".to_owned(),
+        }),
+    )
+    .expect("config error handled");
+
+    let entry = h.extensions.entries.get(conn_id).expect("extension entry");
+    assert_eq!(entry.state, ExtensionState::Disconnected);
+    assert!(!entry.respawn_allowed);
+    assert!(event_log_contains_source_event(
+        &h,
+        "harness",
+        |event| matches!(
+            event,
+            Event::HarnessInfo(info)
+                if info.level == tau_proto::HarnessInfoLevel::Important
+                    && info.message.contains("extension optional-config-bad-ext rejected its config")
+                    && info.message.contains("missing token")
+        )
+    ));
+    assert!(event_log_contains_source_event(
+        &h,
+        "harness",
+        |event| matches!(
+            event,
+            Event::HarnessInfo(info)
+                if info.level == tau_proto::HarnessInfoLevel::Important
+                    && info.message.contains("optional extension optional-config-bad-ext disabled")
+        )
+    ));
+
+    let ui_conn: tau_proto::ConnectionId = "late-ui-optional-config".into();
+    let ui_sink = connect_test_client(&mut h, ui_conn.as_str(), tau_proto::ClientKind::Ui);
+    h.handle_client_event(
+        &ui_conn,
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+            selectors: vec![EventSelector::Prefix("harness.".to_owned())],
+        })),
+    )
+    .expect("subscribe");
+
+    let frames = ui_sink.lock().expect("ui sink");
+    assert!(frames.iter().any(|routed| matches!(
+        peel_inner_event(&routed.frame),
+        Some(Event::HarnessInfo(info))
+            if info.level == tau_proto::HarnessInfoLevel::Important
+                && info.message.contains("extension optional-config-bad-ext rejected its config")
+    )));
+    assert!(frames.iter().any(|routed| matches!(
+        peel_inner_event(&routed.frame),
+        Some(Event::HarnessInfo(info))
+            if info.level == tau_proto::HarnessInfoLevel::Important
+                && info.message.contains("optional extension optional-config-bad-ext disabled")
+    )));
+}
+
+#[test]
+fn optional_extension_spawn_failure_is_important_and_nonfatal() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let config = crate::settings::Config {
+        core: crate::settings::CoreConfig {
+            mode: crate::settings::CoreMode::Embedded,
+        },
+        extensions: BTreeMap::from([(
+            "optional-spawn-bad".to_owned(),
+            crate::settings::ExtensionConfig {
+                name: "optional-spawn-bad".to_owned(),
+                command: "/definitely/not/a/tau-extension".to_owned(),
+                args: Vec::new(),
+                role: None,
+                require: false,
+                cwd: None,
+                config: serde_json::json!({}),
+                secrets: BTreeMap::new(),
+            },
+        )]),
+        extension_startup_diagnostics: Vec::new(),
+    };
+    let sessions_dir = tau_config::settings::sessions_dir_of(&sp);
+
+    h.spawn_configured_extensions(
+        &config,
+        &sessions_dir,
+        "s1",
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+        Instant::now(),
+    )
+    .expect("optional spawn failure should not fail startup");
+
+    assert!(h.extension_connection_id("optional-spawn-bad").is_none());
+    assert!(event_log_contains_source_event(
+        &h,
+        "harness",
+        |event| matches!(
+            event,
+            Event::HarnessInfo(info)
+                if info.level == tau_proto::HarnessInfoLevel::Important
+                    && info.message.contains("optional extension optional-spawn-bad skipped")
+                    && info.message.contains("failed to spawn")
+        )
+    ));
+}
+
+#[test]
+fn optional_pre_ready_disconnect_is_important_replayed_and_nonfatal() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let conn_id = "optional-pre-ready-drop";
+    let _extension_sink = connect_handshaking_tool(&mut h, conn_id);
+    h.extensions
+        .entries
+        .get_mut(conn_id)
+        .expect("extension entry")
+        .require = false;
+
+    h.handle_startup_disconnect(conn_id)
+        .expect("optional pre-ready disconnect should not fail startup");
+
+    let entry = h.extensions.entries.get(conn_id).expect("extension entry");
+    assert_eq!(entry.state, ExtensionState::Disconnected);
+    assert!(!entry.respawn_allowed);
+    assert!(event_log_contains_source_event(
+        &h,
+        "harness",
+        |event| matches!(
+            event,
+            Event::HarnessInfo(info)
+                if info.level == tau_proto::HarnessInfoLevel::Important
+                    && info.message.contains("optional extension optional-pre-ready-drop skipped")
+                    && info.message.contains("disconnected before becoming ready")
+        )
+    ));
+
+    let ui_conn: tau_proto::ConnectionId = "late-ui-pre-ready-drop".into();
+    let ui_sink = connect_test_client(&mut h, ui_conn.as_str(), tau_proto::ClientKind::Ui);
+    h.handle_client_event(
+        &ui_conn,
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+            selectors: vec![EventSelector::Prefix("harness.".to_owned())],
+        })),
+    )
+    .expect("subscribe");
+    let frames = ui_sink.lock().expect("ui sink");
+    assert!(frames.iter().any(|routed| matches!(
+        peel_inner_event(&routed.frame),
+        Some(Event::HarnessInfo(info))
+            if info.level == tau_proto::HarnessInfoLevel::Important
+                && info.message.contains("optional extension optional-pre-ready-drop skipped")
+    )));
+}
+
+#[test]
+fn optional_startup_timeout_is_important_replayed_and_nonfatal() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let conn_id = "optional-timeout-ext";
+    let _extension_sink = connect_handshaking_tool(&mut h, conn_id);
+    h.extensions
+        .entries
+        .get_mut(conn_id)
+        .expect("extension entry")
+        .require = false;
+
+    h.handle_extensions_startup_timeout()
+        .expect("only optional blockers should not fail startup");
+
+    let entry = h.extensions.entries.get(conn_id).expect("extension entry");
+    assert_eq!(entry.state, ExtensionState::Disconnected);
+    assert!(!entry.respawn_allowed);
+    assert!(event_log_contains_source_event(
+        &h,
+        "harness",
+        |event| matches!(
+            event,
+            Event::HarnessInfo(info)
+                if info.level == tau_proto::HarnessInfoLevel::Important
+                    && info.message.contains("optional extension optional-timeout-ext skipped")
+                    && info.message.contains("timed out before becoming ready")
+        )
+    ));
+
+    let ui_conn: tau_proto::ConnectionId = "late-ui-timeout".into();
+    let ui_sink = connect_test_client(&mut h, ui_conn.as_str(), tau_proto::ClientKind::Ui);
+    h.handle_client_event(
+        &ui_conn,
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+            selectors: vec![EventSelector::Prefix("harness.".to_owned())],
+        })),
+    )
+    .expect("subscribe");
+    let frames = ui_sink.lock().expect("ui sink");
+    assert!(frames.iter().any(|routed| matches!(
+        peel_inner_event(&routed.frame),
+        Some(Event::HarnessInfo(info))
+            if info.level == tau_proto::HarnessInfoLevel::Important
+                && info.message.contains("optional extension optional-timeout-ext skipped")
+    )));
+}
+
+#[test]
+fn required_startup_timeout_remains_startup_timeout() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let conn_id = "required-timeout-ext";
+    let _extension_sink = connect_handshaking_tool(&mut h, conn_id);
+
+    let error = h
+        .handle_extensions_startup_timeout()
+        .expect_err("required blocker should keep startup timeout behavior");
+
+    assert!(matches!(error, HarnessError::StartupTimeout));
+    assert!(event_log_contains_source_event(
+        &h,
+        "harness",
+        |event| matches!(
+            event,
+            Event::HarnessInfo(info)
+                if info.level == tau_proto::HarnessInfoLevel::Important
+                    && info.message.contains("startup timed out waiting for required extension")
+                    && info.message.contains("required-timeout-ext")
+        )
+    ));
+}
+
+#[test]
+fn post_ready_optional_tool_disconnect_keeps_existing_respawn_policy_flag() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let conn_id = "optional-ready-tool";
+    let _sink = connect_handshaking_tool(&mut h, conn_id);
+    h.handle_extension_message(
+        conn_id,
+        TestMessage::Ready(tau_proto::Ready { message: None }),
+    )
+    .expect("ready");
+    {
+        let entry = h
+            .extensions
+            .entries
+            .get_mut(conn_id)
+            .expect("extension entry");
+        entry.require = false;
+        entry.respawn_allowed = true;
+    }
+
+    h.handle_disconnect(conn_id);
+
+    let entry = h.extensions.entries.get(conn_id).expect("extension entry");
+    assert_eq!(entry.state, ExtensionState::Disconnected);
+    assert!(entry.respawn_allowed);
+}
+
+#[test]
+fn startup_diagnostics_are_important_and_replayed() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+
+    h.emit_extension_startup_diagnostics(&[crate::settings::ExtensionStartupDiagnostic {
+        extension: "optional-diagnostic".to_owned(),
+        message: "optional extension optional-diagnostic skipped: test diagnostic".to_owned(),
+    }]);
+
+    assert!(event_log_contains_source_event(
+        &h,
+        "harness",
+        |event| matches!(
+            event,
+            Event::HarnessInfo(info)
+                if info.level == tau_proto::HarnessInfoLevel::Important
+                    && info.message.contains("optional extension optional-diagnostic skipped")
+        )
+    ));
+
+    let ui_conn: tau_proto::ConnectionId = "late-ui-startup-diagnostic".into();
+    let ui_sink = connect_test_client(&mut h, ui_conn.as_str(), tau_proto::ClientKind::Ui);
+    h.handle_client_event(
+        &ui_conn,
+        TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
+            selectors: vec![EventSelector::Prefix("harness.".to_owned())],
+        })),
+    )
+    .expect("subscribe");
+    let frames = ui_sink.lock().expect("ui sink");
+    assert!(frames.iter().any(|routed| matches!(
+        peel_inner_event(&routed.frame),
+        Some(Event::HarnessInfo(info))
+            if info.level == tau_proto::HarnessInfoLevel::Important
+                && info.message.contains("optional extension optional-diagnostic skipped")
     )));
 }
 
@@ -1854,6 +2170,8 @@ fn extension_connect_command_installs_state_before_reader_ack() {
             in_process_thread: Some(spawned.thread),
             supervised_config: None,
             secrets: BTreeMap::new(),
+            require: true,
+            respawn_allowed: true,
             restart_attempt: 0,
             state: ExtensionState::Spawning,
         },

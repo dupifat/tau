@@ -5397,6 +5397,8 @@ fn start_agent_request_conversation_id_is_public_agent_id() {
                 instance_id: 42.into(),
                 connection_id: connection_id.clone(),
                 kind: tau_proto::ClientKind::Tool,
+                require: true,
+                respawn_allowed: true,
                 pid: None,
                 in_process_thread: None,
                 supervised_config: None,

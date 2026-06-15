@@ -21,6 +21,13 @@ usage across many files, sandbox arbitrary extension code, or prevent protocol
 payloads from being deserialized before the harness validates an operation. Run
 only extensions you trust to execute on your machine.
 
+`extensions.<name>.require: false` is only a degraded-startup availability
+policy for trusted local extensions. It lets Tau continue without that extension
+when startup/config/secret/pre-Ready setup fails; it is not a sandbox and does
+not broadly change post-Ready respawn/runtime semantics. Optional skips must
+still be surfaced as Important replayable harness diagnostics and must never hide
+extension config errors or leak secret values.
+
 Per-agent metadata (`agent.metadata_set` / `agent.metadata_unset`) is durable,
 extension-visible, and interceptable by privileged local interceptors. It is a
 coordination mechanism, not a secret store: do not put API keys, tokens, private

@@ -41,6 +41,21 @@ Tau layers these defaults underneath user config and `*.d/*.yaml` drop-ins.
 {ui_config}
 ```
 
+## Extension availability
+
+Harness extensions are configured under `extensions.<name>` in `harness.yaml`.
+Use `enable: false` to disable an extension entirely. Enabled extensions default
+to `require: true`, which preserves startup-fatal behavior for harness-owned
+startup failures such as an empty command, missing required declared secret, or
+spawn failure. Set `require: false` next to `enable` when the extension is useful
+but optional; Tau will skip it on startup/config/secret/pre-ready failures,
+continue without it, and emit an Important replayed `harness.info` explaining the
+skip.
+
+Per-secret `optional: true` is narrower: it omits only that secret when absent.
+A missing non-optional secret skips the whole extension only when
+`extensions.<name>.require: false`; otherwise it remains fatal.
+
 ## Agent IDs and display names
 
 Tau mints durable agent IDs from the harness setting `agents.id_template`. Tau can also name newly created agents with optional `agents.display_name_template`:

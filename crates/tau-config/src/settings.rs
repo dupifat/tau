@@ -981,6 +981,12 @@ pub struct ExtensionEntry {
     /// to keep the entry in config but skip spawning.
     pub enable: Option<bool>,
 
+    /// Whether harness startup requires this enabled extension to initialize.
+    /// Defaults to the built-in's `require` value, or `true` for user-added
+    /// entries and built-ins that do not specify it. Disabled extensions ignore
+    /// this field because they are not desired at all.
+    pub require: Option<bool>,
+
     /// Role tag. Built-in providers use `role: "provider"`; entries
     /// without that role are treated as tool extensions.
     pub role: Option<String>,

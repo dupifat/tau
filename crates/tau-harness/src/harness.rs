@@ -2,7 +2,7 @@
 //! store, and the live extensions; routes every event between the agent,
 //! tools, and clients.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -87,7 +87,7 @@ use crate::prompt::{
     built_in_system_prompt_templates, render_agents_context_message,
 };
 use crate::secrets::{load_secret_sources, resolve_extension_secrets};
-use crate::settings::{Config, load_harness_settings_or_warn};
+use crate::settings::{Config, ExtensionStartupDiagnostic, load_harness_settings_or_warn};
 use crate::tool_turn::{ForegroundAction, PendingToolInvocation, ToolTurnMachine};
 use crate::turn::{PromptSubmission, TurnState};
 
@@ -1684,6 +1684,8 @@ impl Harness {
                 instance_id: next_iid(),
                 connection_id: provider_conn_id,
                 kind: ClientKind::Provider,
+                require: true,
+                respawn_allowed: true,
                 pid: Some(own_pid),
                 in_process_thread: Some(provider_spawn.thread),
                 supervised_config: None,
@@ -1707,6 +1709,8 @@ impl Harness {
                     instance_id: next_iid(),
                     connection_id: conn_id,
                     kind: ClientKind::Tool,
+                    require: true,
+                    respawn_allowed: true,
                     pid: Some(own_pid),
                     in_process_thread: Some(tool_spawn.thread),
                     supervised_config: None,
@@ -1961,12 +1965,15 @@ impl Harness {
             None
         };
         harness.publish_current_session_dir();
+        harness.emit_extension_startup_diagnostics(&config.extension_startup_diagnostics);
+        harness.emit_extension_startup_diagnostics(&extension_secrets.diagnostics);
 
         if let Err(error) = harness.spawn_configured_extensions(
             config,
             &sessions_dir,
             eager_session_id,
-            &extension_secrets,
+            &extension_secrets.secrets,
+            &extension_secrets.skipped_extensions,
             startup_started_at,
         ) {
             harness.send_startup_disconnect_to_initial_client(initial_client_id.as_ref(), &error);
@@ -2002,11 +2009,15 @@ impl Harness {
         sessions_dir: &Path,
         eager_session_id: &str,
         extension_secrets: &BTreeMap<String, BTreeMap<String, SecretValue>>,
+        skipped_extensions: &BTreeSet<String>,
         startup_started_at: Instant,
     ) -> Result<(), HarnessError> {
         let mut extension_connects = Vec::new();
         let mut next_iid = instance_id_factory();
         for ext_config in config.extensions.values() {
+            if skipped_extensions.contains(&ext_config.name) {
+                continue;
+            }
             tracing::info!(
                 target: "tau_harness::startup",
                 extension = %ext_config.name,
@@ -2023,7 +2034,18 @@ impl Harness {
             let log_path =
                 extension_stderr_log_path(sessions_dir, eager_session_id, &ext_config.name)
                     .map_err(|error| HarnessError::Participant(error.to_string()))?;
-            let spawned = spawn_supervised(ext_config, kind.clone(), Some(log_path), &self.tx)?;
+            let spawned = match spawn_supervised(ext_config, kind.clone(), Some(log_path), &self.tx)
+            {
+                Ok(spawned) => spawned,
+                Err(error) if !ext_config.require => {
+                    self.emit_info_important(&format!(
+                        "optional extension {} skipped: failed to spawn `extensions.{}`: {error}",
+                        ext_config.name, ext_config.name
+                    ));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let conn_id = spawned.connection_id.clone();
             tracing::info!(
                 target: "tau_harness::startup",
@@ -2039,6 +2061,8 @@ impl Harness {
                     instance_id: next_iid(),
                     connection_id: conn_id,
                     kind: kind.clone(),
+                    require: ext_config.require,
+                    respawn_allowed: true,
                     pid: Some(spawned.child_pid),
                     in_process_thread: None,
                     supervised_config: Some(ext_config.clone()),
@@ -2140,6 +2164,18 @@ impl Harness {
             .connection(connection_id)
             .is_some_and(|m| m.origin == ConnectionOrigin::Socket);
         let was_provider = self.is_provider_extension(connection_id);
+        let optional_pre_ready_extension = self
+            .extensions
+            .entries
+            .get(connection_id)
+            .is_some_and(|entry| !entry.require && entry.state != ExtensionState::Ready);
+        if optional_pre_ready_extension {
+            self.disable_optional_extension(
+                connection_id,
+                &format!("optional extension {name} skipped: disconnected before becoming ready"),
+            );
+            return Ok(());
+        }
         self.handle_disconnect(connection_id);
         if was_socket {
             if self.startup_detach_requested {
@@ -3076,10 +3112,10 @@ impl Harness {
             let remaining = STARTUP_TIMEOUT
                 .checked_sub(started_at.elapsed())
                 .unwrap_or(Duration::ZERO);
-            let harness_evt = self
-                .rx
-                .recv_timeout(remaining)
-                .map_err(|_| HarnessError::StartupTimeout)?;
+            let harness_evt = match self.rx.recv_timeout(remaining) {
+                Ok(event) => event,
+                Err(_) => return self.handle_extensions_startup_timeout(),
+            };
             self.log_event(&harness_evt);
             match harness_evt {
                 HarnessEvent::FromConnection {
@@ -3096,6 +3132,50 @@ impl Harness {
             }
         }
         Ok(())
+    }
+
+    fn handle_extensions_startup_timeout(&mut self) -> Result<(), HarnessError> {
+        let blockers: Vec<_> = self
+            .extensions
+            .entries
+            .iter()
+            .filter(|(_, entry)| {
+                !matches!(
+                    entry.state,
+                    ExtensionState::Ready | ExtensionState::Disconnected
+                )
+            })
+            .map(|(connection_id, entry)| {
+                (connection_id.to_string(), entry.name.clone(), entry.require)
+            })
+            .collect();
+        let required_blockers: Vec<_> = blockers
+            .iter()
+            .filter_map(|(_, name, require)| require.then_some(name.as_str()))
+            .collect();
+        if !required_blockers.is_empty() {
+            self.emit_info_important(&format!(
+                "startup timed out waiting for required extension(s): {}",
+                required_blockers.join(", ")
+            ));
+            return Err(HarnessError::StartupTimeout);
+        }
+
+        for (connection_id, name, require) in blockers {
+            if require {
+                continue;
+            }
+            self.disable_optional_extension(
+                connection_id.as_str(),
+                &format!("optional extension {name} skipped: timed out before becoming ready"),
+            );
+        }
+
+        if self.extensions.pending_connects == 0 && self.extensions_all_ready() {
+            Ok(())
+        } else {
+            Err(HarnessError::StartupTimeout)
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -3825,6 +3905,17 @@ impl Harness {
                      invalid values are being ignored",
                     err.message,
                 ));
+                let optional = self
+                    .extensions
+                    .entries
+                    .get(source_id)
+                    .is_some_and(|entry| !entry.require);
+                if optional {
+                    self.disable_optional_extension(
+                        source_id,
+                        &format!("optional extension {name} disabled after rejecting its config"),
+                    );
+                }
             }
             HarnessInputMessage::Subscribe(subscribe) => {
                 // Extensions get the same subscribe-time catch-up as UI
@@ -5310,6 +5401,14 @@ impl Harness {
         self.pending_agent_context_ready.clear();
     }
 
+    fn disable_optional_extension(&mut self, connection_id: &str, message: &str) {
+        if let Some(entry) = self.extensions.entries.get_mut(connection_id) {
+            entry.respawn_allowed = false;
+        }
+        self.emit_info_important(message);
+        self.handle_disconnect(connection_id);
+    }
+
     fn handle_disconnect(&mut self, connection_id: &str) {
         let meta = self.bus.connection(connection_id).cloned();
         let is_extension = meta.as_ref().is_some_and(|meta| {
@@ -5764,7 +5863,7 @@ impl Harness {
         let Some(config) = entry.supervised_config.clone() else {
             return Ok(());
         };
-        if entry.kind == ClientKind::Provider {
+        if entry.kind == ClientKind::Provider || !entry.respawn_allowed {
             return Ok(());
         }
 
@@ -5816,6 +5915,8 @@ impl Harness {
                 instance_id,
                 connection_id: new_connection_id,
                 kind,
+                require: config.require,
+                respawn_allowed: true,
                 pid: Some(spawned.child_pid),
                 in_process_thread: None,
                 supervised_config: Some(config),
@@ -6122,6 +6223,12 @@ impl Harness {
 
     pub(crate) fn emit_info_important(&mut self, message: &str) {
         self.emit_info_with_level(message, tau_proto::HarnessInfoLevel::Important);
+    }
+
+    fn emit_extension_startup_diagnostics(&mut self, diagnostics: &[ExtensionStartupDiagnostic]) {
+        for diagnostic in diagnostics {
+            self.emit_info_important(&diagnostic.message);
+        }
     }
 
     fn emit_info_with_level(&mut self, message: &str, level: tau_proto::HarnessInfoLevel) {

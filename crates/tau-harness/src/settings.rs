@@ -7,7 +7,7 @@
 //! schema for `harness.yaml` lives in `tau-config`; this module turns that
 //! schema into something the harness can spawn.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::PathBuf;
 
@@ -19,8 +19,24 @@ use tau_config::settings::{
 /// The resolved harness configuration handed to the daemon.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Config {
+    /// Core harness runtime settings.
     pub core: CoreConfig,
+    /// Enabled extensions that should be spawned unless skipped later by
+    /// secrets.
     pub extensions: BTreeMap<String, ExtensionConfig>,
+    /// Important diagnostics for optional extensions skipped during config
+    /// resolution.
+    pub extension_startup_diagnostics: Vec<ExtensionStartupDiagnostic>,
+}
+
+/// Replayable startup diagnostic for an optional extension skipped before
+/// spawn.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExtensionStartupDiagnostic {
+    /// Extension config key that the diagnostic is about.
+    pub extension: String,
+    /// User-visible explanation safe to publish as Important `harness.info`.
+    pub message: String,
 }
 
 /// Resolved core configuration values.
@@ -52,6 +68,8 @@ pub struct ExtensionConfig {
     pub command: String,
     pub args: Vec<String>,
     pub role: Option<String>,
+    /// Whether harness startup requires this extension to initialize.
+    pub require: bool,
     /// Current working directory used when starting the extension process. When
     /// absent, the child inherits the harness process working directory.
     pub cwd: Option<PathBuf>,
@@ -75,6 +93,8 @@ pub struct BuiltinExtension {
     /// Built-in default current working directory for this extension.
     pub cwd: Option<PathBuf>,
     pub enable: bool,
+    /// Whether this built-in must initialize when enabled.
+    pub require: bool,
     /// Built-in default config for this extension, merged below any
     /// user-provided `config: { … }` object in `harness.yaml`.
     pub config: serde_json::Value,
@@ -85,8 +105,9 @@ pub struct BuiltinExtension {
 /// Error returned by [`resolve_extensions`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResolveExtensionsError {
-    /// A user-added extension entry has no `command` (and therefore
-    /// no executable to spawn).
+    /// A required enabled extension entry resolved to an empty argv, leaving no
+    /// executable to spawn. Optional empty-argv entries are omitted with
+    /// startup diagnostics instead.
     EmptyCommand(String),
     /// A CLI override named an extension absent from built-ins and user config.
     UnknownCliOverride(String),
@@ -97,7 +118,7 @@ impl fmt::Display for ResolveExtensionsError {
         match self {
             Self::EmptyCommand(name) => write!(
                 f,
-                "extension {name:?} has no `command` set; user-added entries must specify the executable",
+                "required extension {name:?} resolved to an empty command; set `extensions.{name}.command` or disable the extension",
             ),
             Self::UnknownCliOverride(name) => {
                 write!(f, "unknown extension in CLI override: `{name}`")
@@ -114,6 +135,7 @@ struct ResolvedExtension {
     command: Vec<String>,
     suffix: Vec<String>,
     enable: bool,
+    require: bool,
     role: Option<String>,
     cwd: Option<PathBuf>,
     config: serde_json::Value,
@@ -128,13 +150,20 @@ struct ResolvedExtension {
 /// - Field-level overlay for built-in keys: only fields the user explicitly set
 ///   (`Some(_)` after deserialization) replace the built-in's value. Absent
 ///   fields keep the built-in's defaults.
-/// - User keys not in the built-in list are added as-is. They must specify a
-///   non-empty `command`. Their `enable` defaults to `true`.
-/// - Entries with a resolved `enable: false` are dropped.
+/// - User keys not in the built-in list are added as-is. Their `enable` and
+///   `require` fields both default to `true`.
+/// - Entries with a resolved `enable: false` are dropped before command
+///   validation, secret resolution, and spawn.
+/// - Enabled required entries with empty argv are fatal. Enabled optional
+///   entries with empty argv are omitted and reported through diagnostics by
+///   [`resolve_extensions_with_cli_overrides_and_diagnostics`].
 ///
-/// Returns `Err` for enabled entries that end up with an empty `command` after
-/// the merge — only possible for user-added unknown keys. Disabled user-added
-/// entries are inert and are dropped before command validation.
+/// Returns `Err` for enabled required entries that end up with empty resolved
+/// argv after the merge. Disabled user-added entries are inert and are
+/// dropped before command validation. This wrapper discards diagnostics for
+/// optional skipped entries; startup code should call
+/// [`resolve_extensions_with_cli_overrides_and_diagnostics`] when those
+/// diagnostics must be surfaced to users.
 pub fn resolve_extensions(
     settings: &HarnessSettings,
     builtins: Vec<BuiltinExtension>,
@@ -147,8 +176,30 @@ pub fn resolve_extensions_with_cli_overrides(
     builtins: Vec<BuiltinExtension>,
     cli_overrides: &[ExtensionCliOverride],
 ) -> Result<Vec<ExtensionConfig>, ResolveExtensionsError> {
-    use std::collections::HashMap;
+    Ok(
+        resolve_extensions_with_cli_overrides_and_diagnostics(settings, builtins, cli_overrides)?
+            .extensions,
+    )
+}
 
+/// Resolved extension list with optional-extension startup diagnostics.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ResolvedExtensions {
+    /// Enabled extensions to spawn.
+    pub extensions: Vec<ExtensionConfig>,
+    /// Important diagnostics for optional entries skipped during resolution.
+    pub diagnostics: Vec<ExtensionStartupDiagnostic>,
+}
+
+/// Resolve extensions like [`resolve_extensions_with_cli_overrides`], while
+/// also returning Important startup diagnostics for optional entries skipped
+/// during resolution. Harness startup must use this variant so diagnostics can
+/// be published and replayed instead of silently discarded.
+pub fn resolve_extensions_with_cli_overrides_and_diagnostics(
+    settings: &HarnessSettings,
+    builtins: Vec<BuiltinExtension>,
+    cli_overrides: &[ExtensionCliOverride],
+) -> Result<ResolvedExtensions, ResolveExtensionsError> {
     // Pass 1: seed an indexed map with built-ins, in order.
     let mut order: Vec<String> = builtins.iter().map(|b| b.name.clone()).collect();
     let mut entries: HashMap<String, ResolvedExtension> = builtins
@@ -161,6 +212,7 @@ pub fn resolve_extensions_with_cli_overrides(
                     command: b.command,
                     suffix: b.suffix,
                     enable: b.enable,
+                    require: b.require,
                     role: b.role,
                     cwd: b.cwd,
                     config: b.config,
@@ -195,6 +247,9 @@ pub fn resolve_extensions_with_cli_overrides(
                 if let Some(enable) = user.enable {
                     existing.enable = enable;
                 }
+                if let Some(require) = user.require {
+                    existing.require = require;
+                }
                 if let Some(role) = user.role.as_ref() {
                     existing.role = Some(role.clone());
                 }
@@ -218,6 +273,7 @@ pub fn resolve_extensions_with_cli_overrides(
                         command,
                         suffix: user.suffix.clone().unwrap_or_default(),
                         enable: user.enable.unwrap_or(true),
+                        require: user.require.unwrap_or(true),
                         role: user.role.clone(),
                         cwd: user.cwd.clone().flatten(),
                         config: user
@@ -263,6 +319,7 @@ pub fn resolve_extensions_with_cli_overrides(
     // disabled entries. argv = prefix ++ command ++ suffix; argv[0]
     // is the executable, rest are args.
     let mut out = Vec::new();
+    let mut diagnostics = Vec::new();
     for name in order {
         let entry = entries.remove(&name).expect("seeded above");
         if !entry.enable {
@@ -273,19 +330,32 @@ pub fn resolve_extensions_with_cli_overrides(
         argv.extend(entry.suffix);
         let (program, args) = match argv.split_first() {
             Some((first, rest)) => (first.clone(), rest.to_vec()),
-            None => return Err(ResolveExtensionsError::EmptyCommand(name)),
+            None if entry.require => return Err(ResolveExtensionsError::EmptyCommand(name)),
+            None => {
+                diagnostics.push(ExtensionStartupDiagnostic {
+                    extension: name.clone(),
+                    message: format!(
+                        "optional extension {name} skipped: `extensions.{name}.command` is empty; set a command or disable the extension"
+                    ),
+                });
+                continue;
+            }
         };
         out.push(ExtensionConfig {
             name,
             command: program,
             args,
             role: entry.role,
+            require: entry.require,
             cwd: entry.cwd,
             config: entry.config,
             secrets: entry.secrets,
         });
     }
-    Ok(out)
+    Ok(ResolvedExtensions {
+        extensions: out,
+        diagnostics,
+    })
 }
 
 /// Merge `over` on top of `base` for extension config objects.
@@ -405,6 +475,7 @@ pub fn builtin_extensions() -> Vec<BuiltinExtension> {
             role: def.role.clone(),
             cwd: def.cwd.clone(),
             enable: def.enable,
+            require: def.require,
             config: def.config.clone(),
             secrets: def.secrets.clone().unwrap_or_default(),
         })
@@ -431,9 +502,15 @@ pub(crate) struct BuiltInExtensionDef {
     #[serde(default)]
     pub cwd: Option<PathBuf>,
     pub enable: bool,
+    #[serde(default = "default_true")]
+    pub require: bool,
     pub config: serde_json::Value,
     #[serde(default)]
     pub secrets: Option<BTreeMap<String, ExtensionSecretEntry>>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 pub(crate) fn built_in_extension_defs() -> &'static [BuiltInExtensionDef] {
@@ -450,10 +527,10 @@ pub(crate) fn built_in_extension_defs() -> &'static [BuiltInExtensionDef] {
 
 #[must_use]
 pub fn default_config() -> Config {
-    // `resolve_extensions` is fallible only for user-added entries with an
-    // empty `command`. Here we pass an empty `HarnessSettings` and the
-    // hard-coded `builtin_extensions()` list (all with non-empty `command`),
-    // so the failure path is unreachable.
+    // `resolve_extensions` is fallible only for enabled required entries with
+    // empty resolved argv. The built-in settings have no user entries or
+    // overrides, and the hard-coded `builtin_extensions()` list resolves to
+    // non-empty commands, so the failure path is unreachable.
     let extensions = match resolve_extensions(&HarnessSettings::built_in(), builtin_extensions()) {
         Ok(extensions) => extensions,
         Err(err) => unreachable!("built-in extensions resolve cleanly: {err}"),
@@ -467,6 +544,7 @@ pub fn default_config() -> Config {
             .into_iter()
             .map(|extension| (extension.name.clone(), extension))
             .collect(),
+        extension_startup_diagnostics: Vec::new(),
     }
 }
 
@@ -538,7 +616,7 @@ pub(crate) fn resolve_config_in(
     let settings =
         load_settings_for_cli_overrides_in(dirs, &role_overrides, &harness_config_overrides)?;
     let extension_overrides = extension_cli_overrides_from_env();
-    let extensions = resolve_extensions_with_cli_overrides(
+    let resolved_extensions = resolve_extensions_with_cli_overrides_and_diagnostics(
         &settings,
         builtin_extensions(),
         &extension_overrides,
@@ -547,10 +625,12 @@ pub(crate) fn resolve_config_in(
         core: CoreConfig {
             mode: CoreMode::Embedded,
         },
-        extensions: extensions
+        extensions: resolved_extensions
+            .extensions
             .into_iter()
             .map(|extension| (extension.name.clone(), extension))
             .collect(),
+        extension_startup_diagnostics: resolved_extensions.diagnostics,
     })
 }
 

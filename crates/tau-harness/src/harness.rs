@@ -3,6 +3,7 @@
 //! tools, and clients.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::io;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -20,14 +21,14 @@ use tau_proto::{
     ActionError, ActionInvocationId, ActionInvoke, ActionResult, ActionSchemaPublished, AgentId,
     AgentPromptCreated, AgentPromptId, AgentPromptQueued, AgentPromptRecalled,
     AgentPromptTerminated, AgentPromptTerminationReason, BackgroundSupport, CborValue, ClientKind,
-    ContentPart, ContextItem, ContextRole, Disconnect, Event, EventSelector, ExtensionName,
-    HarnessAgentContextUsageChanged, HarnessContextUsageChanged, HarnessInputMessage,
-    HarnessOutputMessage, HarnessRoleSelected, Hello, MessageItem, ModelId, PROTOCOL_VERSION,
-    PromptFragment, PromptOriginator, ProviderModelInfo, ProviderResponseFinished,
-    ProviderStopReason, ProviderTokenUsage, SecretValue, SessionId, ToolBackgroundError,
-    ToolBackgroundResult, ToolCallId, ToolCallItem, ToolCancelled, ToolDefinition, ToolError,
-    ToolName, ToolRegister, ToolRejected, ToolRequest, ToolResult, ToolResultKind, ToolType,
-    UiCancelPrompt,
+    ConnectionId, ContentPart, ContextItem, ContextRole, Disconnect, Event, EventSelector,
+    ExtensionName, HarnessAgentContextUsageChanged, HarnessContextUsageChanged,
+    HarnessInputMessage, HarnessOutputMessage, HarnessRoleSelected, Hello, MessageItem, ModelId,
+    PROTOCOL_VERSION, PromptFragment, PromptOriginator, ProviderModelInfo,
+    ProviderResponseFinished, ProviderStopReason, ProviderTokenUsage, SecretValue, SessionId,
+    ToolBackgroundError, ToolBackgroundResult, ToolCallId, ToolCallItem, ToolCancelled,
+    ToolDefinition, ToolError, ToolName, ToolRegister, ToolRejected, ToolRequest, ToolResult,
+    ToolResultKind, ToolType, UiCancelPrompt,
 };
 
 use crate::agent::{Agent, AgentTurnState, PendingCancel, PendingPrompt};
@@ -41,7 +42,7 @@ use crate::dirs::policy_store_path_from;
 use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill, DiscoveredSkillSource};
 use crate::error::HarnessError;
 use crate::event::{
-    ChannelSink, HarnessCommand, HarnessEvent, WriterShutdown, spawn_reader_thread,
+    ChannelSink, HarnessCommand, HarnessEvent, WriterCommand, WriterShutdown, spawn_reader_thread,
     spawn_writer_thread,
 };
 use crate::event_log::EventLog;
@@ -1047,6 +1048,18 @@ pub(crate) enum AgentMessageRecipientStatus {
     Unknown,
 }
 
+/// Initial UI transport owned by the harness process during startup.
+pub(crate) enum InitialClient {
+    Stdio,
+}
+
+/// Output path used before an initial UI has been accepted by the normal bus.
+pub(crate) enum InitialClientStartupErrorOutput {
+    #[cfg(test)]
+    Stream(UnixStream),
+    Stdout,
+}
+
 /// Central harness event loop and runtime state.
 ///
 /// `Harness` owns the event bus, live connections, durable session and agent
@@ -1123,7 +1136,7 @@ pub struct Harness {
     /// Writer channels for socket clients, keyed by connection ID.
     /// Used to start follower threads for log-based replay + delivery.
     pub(crate) client_writers:
-        std::collections::HashMap<tau_proto::ConnectionId, Sender<HarnessOutputMessage>>,
+        std::collections::HashMap<tau_proto::ConnectionId, Sender<WriterCommand>>,
     /// A UI sent `/detach` while the harness was still in startup gating.
     /// The main event loop consumes this to preserve detach semantics after
     /// startup completes.
@@ -1823,6 +1836,7 @@ impl Harness {
         eager_session_id: &str,
         eager_session_start_reason: tau_proto::SessionStartReason,
     ) -> Result<Self, HarnessError> {
+        let mut initial_client_error_stream = None;
         Self::from_config_with_initial_client(
             config,
             state_dir,
@@ -1830,7 +1844,9 @@ impl Harness {
             eager_session_id,
             eager_session_start_reason,
             None,
+            &mut initial_client_error_stream,
         )
+        .map(|(harness, _)| harness)
     }
 
     pub(crate) fn from_config_with_initial_client(
@@ -1839,8 +1855,9 @@ impl Harness {
         dirs: tau_config::settings::TauDirs,
         eager_session_id: &str,
         eager_session_start_reason: tau_proto::SessionStartReason,
-        initial_client: Option<UnixStream>,
-    ) -> Result<Self, HarnessError> {
+        initial_client: Option<InitialClient>,
+        initial_client_error_stream: &mut Option<InitialClientStartupErrorOutput>,
+    ) -> Result<(Self, Option<ConnectionId>), HarnessError> {
         let startup_started_at = Instant::now();
         tracing::debug!(target: "tau_harness::startup", eager_session_id, "constructing harness from config");
         let state_dir = state_dir.into();
@@ -1930,20 +1947,35 @@ impl Harness {
         ) {
             harness.rehydrate_agents_from_session();
         }
-        if let Some(stream) = initial_client {
-            harness.accept_client(stream)?;
-            harness.wait_for_initial_ui_subscribe()?;
-        }
+        let initial_client_id = if let Some(initial_client) = initial_client {
+            let client_id = match initial_client {
+                InitialClient::Stdio => harness.accept_stdio_client()?,
+            };
+            *initial_client_error_stream = None;
+            if let Err(error) = harness.wait_for_initial_ui_subscribe() {
+                harness.send_startup_disconnect_to_initial_client(Some(&client_id), &error);
+                return Err(error);
+            }
+            Some(client_id)
+        } else {
+            None
+        };
         harness.publish_current_session_dir();
 
-        harness.spawn_configured_extensions(
+        if let Err(error) = harness.spawn_configured_extensions(
             config,
             &sessions_dir,
             eager_session_id,
             &extension_secrets,
             startup_started_at,
-        )?;
-        harness.wait_for_extensions_ready()?;
+        ) {
+            harness.send_startup_disconnect_to_initial_client(initial_client_id.as_ref(), &error);
+            return Err(error);
+        }
+        if let Err(error) = harness.wait_for_extensions_ready() {
+            harness.send_startup_disconnect_to_initial_client(initial_client_id.as_ref(), &error);
+            return Err(error);
+        }
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "extensions ready");
         #[cfg(test)]
         harness.register_harness_tools();
@@ -1956,9 +1988,12 @@ impl Harness {
 
         harness.start_session_init(eager_session_id.into(), eager_session_start_reason);
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "session init started");
-        harness.wait_for_session_init()?;
+        if let Err(error) = harness.wait_for_session_init() {
+            harness.send_startup_disconnect_to_initial_client(initial_client_id.as_ref(), &error);
+            return Err(error);
+        }
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "session init complete");
-        Ok(harness)
+        Ok((harness, initial_client_id))
     }
 
     fn spawn_configured_extensions(
@@ -2049,7 +2084,9 @@ impl Harness {
                 HarnessEvent::Disconnected { connection_id } => {
                     self.handle_startup_disconnect(&connection_id)?;
                 }
-                HarnessEvent::NewClient(stream) => self.accept_client(stream)?,
+                HarnessEvent::NewClient(stream) => {
+                    self.accept_client(stream)?;
+                }
                 HarnessEvent::Command(command) => self.handle_harness_command(command)?,
             }
         }
@@ -3163,23 +3200,71 @@ impl Harness {
     // Client acceptance
     // -----------------------------------------------------------------------
 
-    fn accept_client(&mut self, stream: UnixStream) -> Result<(), HarnessError> {
+    pub(crate) fn accept_client(
+        &mut self,
+        stream: UnixStream,
+    ) -> Result<ConnectionId, HarnessError> {
         let write_stream = stream.try_clone()?;
-        let writer_tx = spawn_writer_thread(write_stream, WriterShutdown::CloseStream);
+        self.accept_client_io(stream, write_stream, ConnectionOrigin::Socket)
+    }
+
+    pub(crate) fn accept_stdio_client(&mut self) -> Result<ConnectionId, HarnessError> {
+        self.accept_client_io(io::stdin(), io::stdout(), ConnectionOrigin::Socket)
+    }
+
+    fn accept_client_io<R, W>(
+        &mut self,
+        read: R,
+        write: W,
+        origin: ConnectionOrigin,
+    ) -> Result<ConnectionId, HarnessError>
+    where
+        R: io::Read + Send + 'static,
+        W: io::Write + Send + 'static,
+    {
+        let writer_tx = spawn_writer_thread(write, WriterShutdown::CloseStream);
         let writer_tx_for_follower = writer_tx.clone();
         let conn_id = self.bus.connect(Connection::new(
             ConnectionMetadata {
                 id: tau_proto::ConnectionId::default(),
                 name: "socket-ui".to_owned(),
                 kind: ClientKind::Ui,
-                origin: ConnectionOrigin::Socket,
+                origin,
             },
             Box::new(ChannelSink { tx: writer_tx }),
         ));
         self.client_writers
             .insert(conn_id.clone(), writer_tx_for_follower);
-        spawn_reader_thread(conn_id, stream, self.tx.clone());
-        Ok(())
+        spawn_reader_thread(conn_id.clone(), read, self.tx.clone());
+        Ok(conn_id)
+    }
+
+    pub(crate) fn send_startup_disconnect_to_initial_client(
+        &mut self,
+        client_id: Option<&ConnectionId>,
+        error: &dyn std::fmt::Display,
+    ) {
+        let Some(client_id) = client_id else {
+            return;
+        };
+        let _ = self.bus.send_to(
+            client_id.as_str(),
+            None,
+            HarnessOutputMessage::Disconnect(Disconnect {
+                reason: Some(format!("harness startup failed: {error}")),
+            }),
+        );
+        self.flush_initial_client_writer(client_id);
+    }
+
+    fn flush_initial_client_writer(&mut self, client_id: &ConnectionId) {
+        let Some(writer) = self.client_writers.get(client_id) else {
+            return;
+        };
+        let (ack_tx, ack_rx) = mpsc::channel();
+        if writer.send(WriterCommand::Flush(ack_tx)).is_ok() {
+            let _ = ack_rx.recv_timeout(Duration::from_secs(2));
+        }
     }
 
     // -----------------------------------------------------------------------

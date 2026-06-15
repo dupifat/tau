@@ -267,6 +267,32 @@ fn send_frame(writer: &WriterHandle, message: &HarnessInputMessage) -> io::Resul
     locked(writer).send_frame(message)
 }
 
+fn send_handshake_frame(
+    writer: &WriterHandle,
+    read_stream: &mut Box<dyn Read + Send>,
+    message: &HarnessInputMessage,
+) -> Result<(), CliError> {
+    match send_frame(writer, message) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(startup_disconnect_or_io_error(read_stream, error)),
+    }
+}
+
+fn startup_disconnect_or_io_error(
+    read_stream: &mut Box<dyn Read + Send>,
+    error: io::Error,
+) -> CliError {
+    let mut reader = PeerInputReader::new(BufReader::new(read_stream));
+    match reader.read_message() {
+        Ok(Some(HarnessOutputMessage::Disconnect(disconnect))) => CliError::DaemonExited(
+            disconnect
+                .reason
+                .unwrap_or_else(|| "harness disconnected during startup handshake".to_owned()),
+        ),
+        _ => CliError::Io(error),
+    }
+}
+
 /// Convenience wrapper around [`send_frame`] for [`Event`] payloads.
 fn send_event(writer: &WriterHandle, event: &Event) -> io::Result<()> {
     send_frame(writer, &HarnessInputMessage::emit(event.clone()))
@@ -358,6 +384,10 @@ fn format_ui_io_scaled_bytes(bytes: u64, divisor: u64, suffix: &str) -> String {
 
 #[cfg(test)]
 mod ui_io_tests {
+    use std::os::unix::net::UnixStream;
+
+    use tau_proto::HarnessOutputWriter;
+
     use super::*;
 
     /// Downlink deliveries should attribute bytes to the inner event name so
@@ -382,6 +412,33 @@ mod ui_io_tests {
             format_ui_io_breakdown(&breakdown),
             "large.event=12K, small.event=512B"
         );
+    }
+
+    #[test]
+    fn handshake_write_error_reads_pending_startup_disconnect() {
+        let (mut harness_stdout, ui_stdout) = UnixStream::pair().expect("stdout pair");
+        let (ui_stdin, harness_stdin) = UnixStream::pair().expect("stdin pair");
+        drop(harness_stdin);
+
+        let mut harness_writer = HarnessOutputWriter::new(&mut harness_stdout);
+        harness_writer
+            .write_message(&HarnessOutputMessage::Disconnect(Disconnect {
+                reason: Some("harness startup failed: missing secret".to_owned()),
+            }))
+            .expect("write disconnect");
+        harness_writer.flush().expect("flush disconnect");
+
+        let writer = Arc::new(Mutex::new(UiWriter::new(ui_stdin, UiIoMeter::default())));
+        let mut read_stream: Box<dyn Read + Send> = Box::new(ui_stdout);
+        let error = send_handshake_frame(
+            &writer,
+            &mut read_stream,
+            &crate::ui_client::hello_message("tau-chat"),
+        )
+        .expect_err("handshake should fail");
+
+        assert!(error.to_string().contains("harness startup failed"));
+        assert!(error.to_string().contains("missing secret"));
     }
 }
 
@@ -704,19 +761,23 @@ pub(crate) fn run_chat(
     )?;
     let ui_io_meter = UiIoMeter::default();
     let UiConnection {
-        read_stream,
+        mut read_stream,
         writer,
         socket_shutdown_stream,
     } = connect_ui_transport(&mut daemon, &ui_io_meter, startup_started_at)?;
 
     // Handshake.
-    send_frame(&writer, &crate::ui_client::hello_message("tau-chat")).map_err(CliError::Io)?;
-    tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "sent hello");
-    send_frame(
+    send_handshake_frame(
         &writer,
+        &mut read_stream,
+        &crate::ui_client::hello_message("tau-chat"),
+    )?;
+    tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "sent hello");
+    send_handshake_frame(
+        &writer,
+        &mut read_stream,
         &crate::ui_client::subscribe_message(crate::ui_client::chat_subscription_selectors()),
-    )
-    .map_err(CliError::Io)?;
+    )?;
     tracing::debug!(target: "tau_cli::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "sent subscribe");
 
     // Background socket reader — decodes events and sends them to

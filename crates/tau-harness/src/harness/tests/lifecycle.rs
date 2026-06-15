@@ -2819,6 +2819,33 @@ fn explicit_socket_disconnect_cleans_client_writer_and_bus_state() {
     assert!(!h.client_writers.contains_key(&socket_conn));
 }
 
+/// Ensures startup failures after the initial UI is accepted are delivered
+/// through the connection's normal writer, avoiding unsynchronized side-channel
+/// writes to the same protocol stream.
+#[test]
+fn accepted_initial_client_startup_error_uses_normal_writer() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let (server_end, client_end) = UnixStream::pair().expect("pair");
+    let client_id = h.accept_client(server_end).expect("accept client");
+
+    let error = std::io::Error::other("post-accept startup failure");
+    h.send_startup_disconnect_to_initial_client(Some(&client_id), &error);
+
+    let mut reader = HarnessOutputReader::new(BufReader::new(client_end));
+    let message = reader
+        .read_message()
+        .expect("read startup disconnect")
+        .expect("startup disconnect");
+    let HarnessOutputMessage::Disconnect(disconnect) = message else {
+        panic!("expected disconnect frame");
+    };
+    let reason = disconnect.reason.expect("disconnect reason");
+    assert!(reason.contains("harness startup failed"));
+    assert!(reason.contains("post-accept startup failure"));
+}
+
 #[test]
 fn client_hello_protocol_mismatch_disconnects_only_client() {
     let td = TempDir::new().expect("tempdir");

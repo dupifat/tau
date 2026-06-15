@@ -34,7 +34,8 @@ In this mode:
 
 - child stdin/stdout are reserved for the initial UI protocol connection,
 - the CLI does not use those pipes for the readiness byte,
-- the harness bridges process stdin/stdout into an internal UnixStream client,
+- the harness accepts stdin/stdout directly as the initial UI reader/writer,
+- fatal startup failures are sent to the initial UI as protocol `Disconnect` frames when possible,
 - extension and session startup wait until that initial UI has connected and subscribed,
 - runtime markers are written after the startup state is ready for later socket attaches.
 

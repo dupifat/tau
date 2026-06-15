@@ -80,8 +80,8 @@ fn writer_failure_still_reaps_supervised_child() {
     let pid = child.id();
     let tx = spawn_writer_thread(FailingWriter, WriterShutdown::KillChild(child));
 
-    tx.send(tau_proto::HarnessOutputMessage::Disconnect(
-        tau_proto::Disconnect { reason: None },
+    tx.send(WriterCommand::Message(
+        tau_proto::HarnessOutputMessage::Disconnect(tau_proto::Disconnect { reason: None }),
     ))
     .expect("queue output");
     drop(tx);

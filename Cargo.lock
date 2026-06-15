@@ -2599,6 +2599,8 @@ dependencies = [
  "tau-ext-telegram",
  "tau-ext-test-dummy",
  "tau-ext-websearch",
+ "tau-proto",
+ "tempfile",
 ]
 
 [[package]]

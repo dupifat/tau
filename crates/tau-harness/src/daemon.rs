@@ -1,24 +1,27 @@
 //! Public entry points: blocking `run_*` daemons, the embedded
 //! single-message helpers, and the small types passed to/from them.
 
-use std::io::{self, Read as _, Write as _};
-use std::net::Shutdown;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixListener;
+#[cfg(any(test, feature = "echo-agent"))]
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::thread;
 use std::time::{Duration, Instant};
+use std::{fmt, io, thread};
 
 use tau_proto::{
-    ClientKind, Disconnect, Event, EventSelector, HarnessInputMessage, HarnessOutputMessage, Hello,
-    PROTOCOL_VERSION, Subscribe, UiCreateAgent,
+    ClientKind, ConnectionId, Disconnect, Event, EventSelector, HarnessInputMessage,
+    HarnessOutputMessage, HarnessOutputWriter, Hello, PROTOCOL_VERSION, Subscribe, UiCreateAgent,
 };
 use tau_socket::{SocketListener, SocketPeer, SocketReceive};
 
 use crate::error::HarnessError;
 use crate::event::HarnessEvent;
 use crate::format::{format_extension_event, format_tool_progress};
-use crate::harness::{Harness, assistant_text_from_output_items, tool_calls_from_output_items};
+use crate::harness::{
+    Harness, InitialClient, InitialClientStartupErrorOutput, assistant_text_from_output_items,
+    tool_calls_from_output_items,
+};
 use crate::runtime_dir;
 use crate::settings::{Config, resolve_config, resolve_config_in};
 
@@ -796,6 +799,7 @@ pub fn run_harness_daemon_with_internal_tools(
         options,
         internal_tool_handlers,
         None,
+        None,
     )
 }
 
@@ -805,38 +809,68 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
     eager_session_id: &str,
     options: ServeOptions,
     internal_tool_handlers: crate::InternalToolHandlers,
-    initial_client: Option<UnixStream>,
+    initial_client: Option<InitialClient>,
+    mut initial_client_error_stream: Option<InitialClientStartupErrorOutput>,
 ) -> Result<(), HarnessError> {
     let startup_started_at = Instant::now();
     tracing::debug!(target: "tau_harness::startup", project_root = %project_root.display(), eager_session_id, "starting harness daemon");
-    let daemon_dir = runtime_dir::prepare_daemon_dir(project_root)?;
+    let daemon_dir = notify_startup_error(
+        runtime_dir::prepare_daemon_dir(project_root),
+        &mut initial_client_error_stream,
+    )?;
     tracing::debug!(target: "tau_harness::startup", daemon_dir = %daemon_dir.path().display(), elapsed_ms = startup_started_at.elapsed().as_millis(), "prepared daemon dir");
-    let listener = bind_listener(&daemon_dir.socket_path())?;
+    let listener = notify_startup_error(
+        bind_listener(&daemon_dir.socket_path()),
+        &mut initial_client_error_stream,
+    )?;
 
     let state_dir = tau_session_inspect::default_state_dir();
     let dirs = options.dirs.clone().unwrap_or_default();
     tracing::debug!(target: "tau_harness::startup", state_dir = %state_dir.display(), elapsed_ms = startup_started_at.elapsed().as_millis(), "constructing harness");
-    let mut harness = Harness::from_config_with_initial_client(
-        config,
-        &state_dir,
-        dirs,
-        eager_session_id,
-        session_start_reason(options.session_status),
-        initial_client,
+    let (mut harness, initial_client_id) = notify_startup_error(
+        Harness::from_config_with_initial_client(
+            config,
+            &state_dir,
+            dirs,
+            eager_session_id,
+            session_start_reason(options.session_status),
+            initial_client,
+            &mut initial_client_error_stream,
+        ),
+        &mut initial_client_error_stream,
     )?;
     harness.install_internal_tool_handlers(internal_tool_handlers);
     tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "harness constructed");
 
     tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "writing daemon ready markers");
-    daemon_dir.write_marker()?;
-    daemon_dir.write_pid()?;
-    daemon_dir.write_session_id(eager_session_id)?;
+    notify_startup_error_after_accept(
+        daemon_dir.write_marker(),
+        &mut initial_client_error_stream,
+        &mut harness,
+        initial_client_id.as_ref(),
+    )?;
+    notify_startup_error_after_accept(
+        daemon_dir.write_pid(),
+        &mut initial_client_error_stream,
+        &mut harness,
+        initial_client_id.as_ref(),
+    )?;
+    notify_startup_error_after_accept(
+        daemon_dir.write_session_id(eager_session_id),
+        &mut initial_client_error_stream,
+        &mut harness,
+        initial_client_id.as_ref(),
+    )?;
     tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "daemon ready markers written");
 
     let tx = harness.tx.clone();
     let listener_handle = ListenerHandle::Bound(listener);
-    let forwarder = listener_handle.spawn_forwarder(tx)?;
-
+    let forwarder = notify_startup_error_after_accept(
+        listener_handle.spawn_forwarder(tx),
+        &mut initial_client_error_stream,
+        &mut harness,
+        initial_client_id.as_ref(),
+    )?;
     let result = harness.run_event_loop(options.max_clients, options.exit_on_disconnect);
     let _ = harness.shutdown();
     drop(forwarder);
@@ -862,89 +896,138 @@ pub fn run_component_with_internal_tools(
 pub fn run_component_with_internal_tools_and_initial_ui_stdio(
     internal_tool_handlers: crate::InternalToolHandlers,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (harness_end, bridge_end) = UnixStream::pair()?;
-    spawn_stdio_bridge(bridge_end)?;
-    run_component_with_internal_tools_and_initial_client(internal_tool_handlers, Some(harness_end))
+    run_component_with_internal_tools_and_initial_client(
+        internal_tool_handlers,
+        Some(InitialClient::Stdio),
+    )
 }
 
 fn run_component_with_internal_tools_and_initial_client(
     internal_tool_handlers: crate::InternalToolHandlers,
-    initial_client: Option<UnixStream>,
+    initial_client: Option<InitialClient>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let startup_started_at = Instant::now();
-    let current_exe = std::env::current_exe()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "<unknown>".to_owned());
-    tracing::info!(
-        target: "tau_harness::startup",
-        pid = std::process::id(),
-        current_exe = %current_exe,
-        version = env!("CARGO_PKG_VERSION"),
-        build = %crate::version::build_revision(),
-        "harness component starting",
-    );
-    // Make TAU_VERSION/TAU_BUILD/TAU_LAST_MODIFIED visible to anything
-    // we spawn (shell extension, sub-agents) by reading our own
-    // `built` snapshot — saves the parent CLI from having to forward
-    // these via env vars on every daemon launch.
-    crate::version::export_to_env();
-    let project_root = std::env::current_dir()?;
-    tracing::debug!(target: "tau_harness::startup", project_root = %project_root.display(), elapsed_ms = startup_started_at.elapsed().as_millis(), "resolved project root");
-    let config = resolve_config(None)?;
-    tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "resolved config");
-    // The CLI passes the minted/resumed session id via the harness's
-    // SESSION_ID env var when spawning a daemon. Fallback to
-    // `default_session_id()` covers a bare `tau ext harness`
-    // launched without a CLI in front of it.
-    let eager_session_id = std::env::var("TAU_SESSION_ID")
-        .unwrap_or_else(|_| tau_session_inspect::default_session_id().to_owned());
-    let session_status = match std::env::var("TAU_SESSION_STATUS").as_deref() {
-        Ok("resumed") => crate::daemon::SessionLaunchStatus::Resumed,
-        _ => crate::daemon::SessionLaunchStatus::New,
-    };
-    run_harness_daemon_with_internal_tools_and_initial_client(
-        &project_root,
-        &config,
-        &eager_session_id,
-        // Exit once the spawning UI leaves. A UI that wants the
-        // daemon to outlive it sends `ui.detach_request`, which
-        // flips this to `false` at runtime.
-        ServeOptions {
-            exit_on_disconnect: true,
-            session_status,
-            ..Default::default()
-        },
-        internal_tool_handlers,
-        initial_client,
-    )
-    .map_err(Into::into)
+    let mut initial_client_error_output = initial_client
+        .as_ref()
+        .map(|InitialClient::Stdio| InitialClientStartupErrorOutput::Stdout);
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let startup_started_at = Instant::now();
+        let current_exe = std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "<unknown>".to_owned());
+        tracing::info!(
+            target: "tau_harness::startup",
+            pid = std::process::id(),
+            current_exe = %current_exe,
+            version = env!("CARGO_PKG_VERSION"),
+            build = %crate::version::build_revision(),
+            "harness component starting",
+        );
+        // Make TAU_VERSION/TAU_BUILD/TAU_LAST_MODIFIED visible to anything
+        // we spawn (shell extension, sub-agents) by reading our own
+        // `built` snapshot — saves the parent CLI from having to forward
+        // these via env vars on every daemon launch.
+        crate::version::export_to_env();
+        let project_root = std::env::current_dir()?;
+        tracing::debug!(target: "tau_harness::startup", project_root = %project_root.display(), elapsed_ms = startup_started_at.elapsed().as_millis(), "resolved project root");
+        let config = resolve_config(None)?;
+        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "resolved config");
+        // The CLI passes the minted/resumed session id via the harness's
+        // SESSION_ID env var when spawning a daemon. Fallback to
+        // `default_session_id()` covers a bare `tau ext harness`
+        // launched without a CLI in front of it.
+        let eager_session_id = std::env::var("TAU_SESSION_ID")
+            .unwrap_or_else(|_| tau_session_inspect::default_session_id().to_owned());
+        let session_status = match std::env::var("TAU_SESSION_STATUS").as_deref() {
+            Ok("resumed") => crate::daemon::SessionLaunchStatus::Resumed,
+            _ => crate::daemon::SessionLaunchStatus::New,
+        };
+        run_harness_daemon_with_internal_tools_and_initial_client(
+            &project_root,
+            &config,
+            &eager_session_id,
+            // Exit once the spawning UI leaves. A UI that wants the
+            // daemon to outlive it sends `ui.detach_request`, which
+            // flips this to `false` at runtime.
+            ServeOptions {
+                exit_on_disconnect: true,
+                session_status,
+                ..Default::default()
+            },
+            internal_tool_handlers,
+            initial_client,
+            initial_client_error_output.take(),
+        )
+        .map_err(Into::into)
+    })();
+    if let Err(error) = result.as_ref() {
+        send_initial_client_startup_error(initial_client_error_output.take(), error.as_ref());
+    }
+    result
 }
 
-fn spawn_stdio_bridge(mut stream: UnixStream) -> io::Result<()> {
-    let mut stream_read = stream.try_clone()?;
-    thread::spawn(move || {
-        let mut stdin = io::stdin().lock();
-        let _ = io::copy(&mut stdin, &mut stream);
-        let _ = stream.shutdown(Shutdown::Write);
-    });
-    thread::spawn(move || {
-        let mut stdout = io::stdout().lock();
-        let mut buffer = [0_u8; 8192];
-        loop {
-            match stream_read.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if stdout.write_all(&buffer[..n]).is_err() {
-                        break;
-                    }
-                    if stdout.flush().is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
+fn notify_startup_error<T, E>(
+    result: Result<T, E>,
+    stream: &mut Option<InitialClientStartupErrorOutput>,
+) -> Result<T, HarnessError>
+where
+    E: fmt::Display + Into<HarnessError>,
+{
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            send_initial_client_startup_error(stream.take(), &error);
+            Err(error.into())
         }
-        let _ = stdout.flush();
-    });
-    Ok(())
+    }
 }
+
+fn notify_startup_error_after_accept<T, E>(
+    result: Result<T, E>,
+    stream: &mut Option<InitialClientStartupErrorOutput>,
+    harness: &mut Harness,
+    initial_client_id: Option<&ConnectionId>,
+) -> Result<T, HarnessError>
+where
+    E: fmt::Display + Into<HarnessError>,
+{
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            if stream.is_some() {
+                send_initial_client_startup_error(stream.take(), &error);
+            } else {
+                harness.send_startup_disconnect_to_initial_client(initial_client_id, &error);
+            }
+            Err(error.into())
+        }
+    }
+}
+
+fn send_initial_client_startup_error(
+    output: Option<InitialClientStartupErrorOutput>,
+    error: &dyn fmt::Display,
+) {
+    let Some(output) = output else {
+        return;
+    };
+    match output {
+        #[cfg(test)]
+        InitialClientStartupErrorOutput::Stream(stream) => {
+            let mut writer = HarnessOutputWriter::new(stream);
+            let _ = writer.write_message(&HarnessOutputMessage::Disconnect(Disconnect {
+                reason: Some(format!("harness startup failed: {error}")),
+            }));
+            let _ = writer.flush();
+        }
+        InitialClientStartupErrorOutput::Stdout => {
+            let mut writer = HarnessOutputWriter::new(io::stdout().lock());
+            let _ = writer.write_message(&HarnessOutputMessage::Disconnect(Disconnect {
+                reason: Some(format!("harness startup failed: {error}")),
+            }));
+            let _ = writer.flush();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

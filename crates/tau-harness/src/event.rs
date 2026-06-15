@@ -40,15 +40,23 @@ pub(crate) enum HarnessEvent {
     Command(HarnessCommand),
 }
 
+/// Commands accepted by per-connection writer threads.
+pub(crate) enum WriterCommand {
+    /// Write one protocol frame to the connection.
+    Message(HarnessOutputMessage),
+    /// Flush all previously queued frames, then acknowledge completion.
+    Flush(Sender<()>),
+}
+
 /// Connection sink — sends to the per-connection writer channel.
 pub(crate) struct ChannelSink {
-    pub(crate) tx: Sender<HarnessOutputMessage>,
+    pub(crate) tx: Sender<WriterCommand>,
 }
 
 impl ConnectionSink for ChannelSink {
     fn send(&mut self, routed: tau_core::RoutedFrame) -> Result<(), ConnectionSendError> {
         self.tx
-            .send(routed.frame)
+            .send(WriterCommand::Message(routed.frame))
             .map_err(|_| ConnectionSendError::new("writer closed"))
     }
 }
@@ -123,18 +131,26 @@ pub(crate) enum WriterShutdown {
 pub(crate) fn spawn_writer_thread(
     writer: impl Write + Send + 'static,
     shutdown: WriterShutdown,
-) -> Sender<HarnessOutputMessage> {
-    let (tx, rx) = mpsc::channel::<HarnessOutputMessage>();
+) -> Sender<WriterCommand> {
+    let (tx, rx) = mpsc::channel::<WriterCommand>();
     thread::spawn(move || {
         let mut w = HarnessOutputWriter::new(BufWriter::new(writer));
         // Drain output messages until the channel closes. Write failures still
         // fall through to the shutdown sequence so supervised children are
         // reaped instead of being abandoned after stdin breaks.
         let mut can_write_disconnect = true;
-        while let Ok(message) = rx.recv() {
-            if w.write_message(&message).is_err() || w.flush().is_err() {
-                can_write_disconnect = false;
-                break;
+        while let Ok(command) = rx.recv() {
+            match command {
+                WriterCommand::Message(message) => {
+                    if w.write_message(&message).is_err() || w.flush().is_err() {
+                        can_write_disconnect = false;
+                        break;
+                    }
+                }
+                WriterCommand::Flush(ack) => {
+                    let _ = w.flush();
+                    let _ = ack.send(());
+                }
             }
         }
 

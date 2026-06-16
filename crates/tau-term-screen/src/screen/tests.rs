@@ -639,6 +639,23 @@ fn styled_content_renders_with_color() {
     );
 }
 
+/// Ensures the terminal style model emits real crossed-out SGR for
+/// strikethrough text instead of relying on color-only fallbacks.
+#[test]
+fn styled_content_emits_strikethrough_sgr() {
+    let styled = StyledText::from(Span::new("gone", Style::default().strikethrough()));
+    let desired = layout_lines().content(&styled).width(80).call();
+    let mut buf = Vec::new();
+
+    emit_styled_cells(&mut buf, &desired[0]).expect("cell emission should succeed");
+
+    let rendered = String::from_utf8(buf).expect("screen output should be utf8-ish ANSI");
+    assert!(
+        rendered.contains("\u{1b}[9m"),
+        "expected crossed-out SGR in output, got: {rendered:?}"
+    );
+}
+
 /// Changing only style attributes must still be treated as a diff so style-only
 /// updates reach the terminal.
 #[test]

@@ -16,6 +16,7 @@ pub const AGENT_THINKING: &str = "agent.thinking";
 // -- Markdown-lite transcript formatting --
 pub const MARKDOWN_STRONG: &str = "markdown.strong";
 pub const MARKDOWN_EMPHASIS: &str = "markdown.emphasis";
+pub const MARKDOWN_STRIKETHROUGH: &str = "markdown.strikethrough";
 pub const MARKDOWN_HEADING: &str = "markdown.heading";
 pub const MARKDOWN_LIST_MARKER: &str = "markdown.list.marker";
 pub const MARKDOWN_CODE: &str = "markdown.code";

@@ -20,6 +20,7 @@ pub struct ThemeStyle {
     pub bold: bool,
     pub underline: bool,
     pub italic: bool,
+    pub strikethrough: bool,
 }
 
 impl ThemeStyle {
@@ -30,6 +31,7 @@ impl ThemeStyle {
             bold: self.bold || inner.bold,
             underline: self.underline || inner.underline,
             italic: self.italic || inner.italic,
+            strikethrough: self.strikethrough || inner.strikethrough,
         }
     }
 }

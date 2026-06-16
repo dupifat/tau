@@ -9,6 +9,7 @@ fn markdown_test_theme() -> tau_themes::Theme {
                 "prompt.marker.submitted": { fg: "red" },
                 "markdown.strong": { bold: true },
                 "markdown.emphasis": { italic: true },
+                "markdown.strikethrough": { strikethrough: true },
                 "markdown.heading": { underline: true },
                 "markdown.list.marker": { fg: "green" },
                 "markdown.code": { bg: "#111111" },
@@ -38,21 +39,24 @@ fn final_render_preserves_non_table_source_text() {
     let block = markdown_block(
         &theme,
         names::USER_PROMPT,
-        "# Title\n- *bold* and _italics_\n",
+        "# Title\n- *bold* and _italics_ and ~~deleted~~\n",
     );
 
-    assert_eq!(rendered_text(&block), "# Title\n- *bold* and _italics_\n");
+    assert_eq!(
+        rendered_text(&block),
+        "# Title\n- *bold* and _italics_ and ~~deleted~~\n"
+    );
 }
 
-/// Ensures headings, list markers, strong, and emphasis map to semantic
-/// theme attributes.
+/// Ensures headings, list markers, strong, emphasis, and strikethrough map to
+/// semantic theme attributes.
 #[test]
 fn final_render_applies_markdown_styles() {
     let theme = markdown_test_theme();
     let block = markdown_block(
         &theme,
         names::SHELL_OUTPUT,
-        "# Title\n- *bold* and _italics_",
+        "# Title\n- *bold* and _italics_ and ~~deleted~~",
     );
     let spans = block.content.spans();
 
@@ -68,6 +72,12 @@ fn final_render_applies_markdown_styles() {
     let emphasis = spans.iter().find(|span| span.text == "_italics_").unwrap();
     assert!(!emphasis.style.bold);
     assert!(emphasis.style.italic);
+
+    let strikethrough = spans
+        .iter()
+        .find(|span| span.text == "~~deleted~~")
+        .unwrap();
+    assert!(strikethrough.style.strikethrough);
 }
 
 /// Ensures reported emphasis forms map to italic and combined bold+italic
@@ -342,13 +352,17 @@ fn inline_parser_avoids_common_false_positives() {
     let block = markdown_block(
         &theme,
         names::SHELL_OUTPUT,
-        "foo_bar_baz \\*literal\\* `*code*`\n```\n*code*\n```",
+        "foo_bar_baz \\*literal\\* \\~~deleted\\~~ `~~code~~`\n```\n~~code~~\n```\n~~open",
     );
 
     let spans = block.content.spans();
     for span in spans {
         assert!(!span.style.bold, "unexpected bold span: {span:?}");
         assert!(!span.style.italic, "unexpected italic span: {span:?}");
+        assert!(
+            !span.style.strikethrough,
+            "unexpected strikethrough span: {span:?}"
+        );
     }
     let escape = spans
         .iter()
@@ -356,9 +370,15 @@ fn inline_parser_avoids_common_false_positives() {
         .expect("escaped marker span");
     assert!(escape.style.bg.is_some());
 
+    let tilde_escape = spans
+        .iter()
+        .find(|span| span.text == "\\~")
+        .expect("escaped tilde marker span");
+    assert!(tilde_escape.style.bg.is_some());
+
     let inline_code = spans
         .iter()
-        .find(|span| span.text == "`*code*`")
+        .find(|span| span.text == "`~~code~~`")
         .expect("inline code span");
     assert!(inline_code.style.bg.is_some());
 }

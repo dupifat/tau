@@ -29,7 +29,10 @@ philosophy and motivation see [README.md](README.md); for design notes see
 ### Markdown-lite transcript styling
 
 The terminal transcript applies lightweight Markdown-like formatting to submitted
-prompts, assistant responses, and thinking blocks.
+prompts, assistant responses, and thinking blocks. Supported syntax includes ATX
+headings, list markers, `*strong*` / `**strong**`, `_emphasis_`,
+`***strong emphasis***`, `~~strikethrough~~`, inline and fenced code, escaped
+markers, and leading-pipe tables with bounded display-only padding.
 
 
 ## Architecture
@@ -754,9 +757,11 @@ for one process. Auto currently uses terminal background hints such as
 `~/.config/tau/themes/<name>.json5` (or the active Tau config directory) and
 Tau fails visibly if a configured theme is missing or malformed. Themes map
 semantic style names (`prompt.marker`, `prompt.cwd`, `banner.accent`,
-`system.info`, diff hunks, reasoning blocks, …) to terminal attributes. See
-`crates/tau-themes/themes/tau.json5` and `tau-light.json5` for the full style
-key list.
+`system.info`, diff hunks, reasoning blocks, …) to terminal attributes. Style
+attributes include `fg`, `bg`, `bold`, `underline`, `italic`, and
+`strikethrough`; `strikethrough` maps to terminal crossed-out SGR where the
+terminal supports it. See `crates/tau-themes/themes/tau.json5` and
+`tau-light.json5` for the full style key list.
 
 ### Session resume and detach
 

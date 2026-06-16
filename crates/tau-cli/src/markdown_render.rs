@@ -8,8 +8,9 @@
 //! Supported syntax is intentionally small: ATX headings (`# Heading`),
 //! unordered (`-`, `*`, `+`) and ordered (`1.`/`1)`) list markers,
 //! `*strong*`/`**strong**`, `_emphasis_`, combined `***strong emphasis***`,
-//! backslash escapes, and leading-pipe tables. Triple-asterisk runs compose
-//! existing strong and emphasis semantic styles; this remains
+//! `~~strikethrough~~`, backslash escapes, and leading-pipe tables.
+//! Triple-asterisk runs compose strong and emphasis styles, while
+//! strikethrough uses its own semantic style; this remains
 //! delimiter-preserving Markdown-lite, not a general CommonMark parser. Most
 //! constructs preserve exact source characters; tables may receive bounded
 //! display-only padding spaces so cells align while the result remains valid
@@ -118,6 +119,7 @@ enum MarkdownStyle {
     Strong,
     StrongEmphasis,
     Emphasis,
+    Strikethrough,
     Heading,
     ListMarker,
     PromptMarker,
@@ -231,6 +233,7 @@ fn styled_block_from_runs(
     let base = themed.add_style(base_style_name);
     let strong = themed.add_style(names::MARKDOWN_STRONG);
     let emphasis = themed.add_style(names::MARKDOWN_EMPHASIS);
+    let strikethrough = themed.add_style(names::MARKDOWN_STRIKETHROUGH);
     let heading = themed.add_style(names::MARKDOWN_HEADING);
     let list_marker = themed.add_style(names::MARKDOWN_LIST_MARKER);
     let prompt_marker = themed.add_style(names::PROMPT_MARKER_SUBMITTED);
@@ -242,6 +245,7 @@ fn styled_block_from_runs(
     let styles = MarkdownStyleIndexes {
         strong,
         emphasis,
+        strikethrough,
         heading,
         list_marker,
         prompt_marker,
@@ -292,6 +296,7 @@ fn runs_end_non_whitespace(runs: &[MarkdownRun]) -> bool {
 struct MarkdownStyleIndexes {
     strong: StyleIdx,
     emphasis: StyleIdx,
+    strikethrough: StyleIdx,
     heading: StyleIdx,
     list_marker: StyleIdx,
     prompt_marker: StyleIdx,
@@ -328,6 +333,12 @@ fn push_runs(
             MarkdownStyle::Emphasis => {
                 children.push(SpanTree::span(
                     styles.emphasis,
+                    vec![SpanTree::text(run.text.clone())],
+                ));
+            }
+            MarkdownStyle::Strikethrough => {
+                children.push(SpanTree::span(
+                    styles.strikethrough,
                     vec![SpanTree::text(run.text.clone())],
                 ));
             }
@@ -662,6 +673,13 @@ fn parse_inline(text: &str, runs: &mut Vec<MarkdownRun>) {
                 index = end;
                 continue;
             }
+            if rest.starts_with("~~")
+                && let Some(end) = find_closing_sequence(text, index, "~~")
+            {
+                push_run(runs, &text[index..end], MarkdownStyle::Strikethrough);
+                index = end;
+                continue;
+            }
             if matches!(ch, '*' | '_')
                 && delimiter_allowed(text, index, ch)
                 && let Some(end) = find_closing_delimiter(text, index, ch)
@@ -686,7 +704,7 @@ fn escaped_len(rest: &str) -> Option<usize> {
     let mut chars = rest.chars();
     (chars.next() == Some('\\'))
         .then_some(chars.next()?)
-        .filter(|c| matches!(c, '*' | '_' | '#' | '-' | '\\' | '`'))
+        .filter(|c| matches!(c, '*' | '_' | '~' | '#' | '-' | '\\' | '`'))
         .map(|c| 1 + c.len_utf8())
 }
 

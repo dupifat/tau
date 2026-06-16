@@ -482,6 +482,9 @@ fn apply_style(w: &mut impl Write, style: &Style) -> io::Result<()> {
     if style.italic {
         w.queue(SetAttribute(Attribute::Italic))?;
     }
+    if style.strikethrough {
+        w.queue(SetAttribute(Attribute::CrossedOut))?;
+    }
     Ok(())
 }
 

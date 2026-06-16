@@ -397,6 +397,7 @@ pub(crate) fn streaming_block(
         bold: body_ts.bold,
         underline: body_ts.underline,
         italic: body_ts.italic,
+        strikethrough: body_ts.strikethrough,
     };
     let progress_style = resolve(theme, names::PROGRESS_INDICATOR);
 
@@ -1085,6 +1086,7 @@ fn overlay_style(base: tau_cli_term::Style, overlay: tau_cli_term::Style) -> tau
         bold: base.bold || overlay.bold,
         underline: base.underline || overlay.underline,
         italic: base.italic || overlay.italic,
+        strikethrough: base.strikethrough || overlay.strikethrough,
     }
 }
 

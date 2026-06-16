@@ -16,9 +16,10 @@ clients continue to see the original plain text.
 
 The formatter is deliberately small. It recognizes headings, unordered and
 ordered list markers, `*strong*` / `**strong**`, `_emphasis_`, combined
-`***strong emphasis***`, basic backslash escapes, and leading-pipe tables.
-Triple-asterisk runs compose the existing strong and emphasis semantic styles;
-they do not introduce a separate theme key or a general CommonMark parser. Most
+`***strong emphasis***`, `~~strikethrough~~`, basic backslash escapes, and
+leading-pipe tables. Triple-asterisk runs compose strong and emphasis styles,
+while strikethrough uses its own semantic style; this does not introduce a
+general CommonMark parser. Most
 constructs are style-only and preserve exact source characters rather than
 stripping delimiters or rewriting list/header prefixes. Tables are the exception:
 the UI may add bounded display-only padding spaces so cells align while the

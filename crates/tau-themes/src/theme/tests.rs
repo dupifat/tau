@@ -18,7 +18,7 @@ fn named_style_resolves() {
     let theme: Theme = Theme::parse(
         r#"{
                 styles: {
-                    prompt: { fg: "green", bold: true },
+                    prompt: { fg: "green", bold: true, strikethrough: true },
                 }
             }"#,
     )
@@ -32,6 +32,7 @@ fn named_style_resolves() {
     assert_eq!(resolved[0].style.fg, Some(Color::Green));
     assert!(resolved[0].style.bold);
     assert!(!resolved[0].style.italic);
+    assert!(resolved[0].style.strikethrough);
 }
 
 #[test]
@@ -224,6 +225,11 @@ fn builtin_theme_parses() {
     );
     assert!(!markdown_heading.underline);
 
+    let markdown_strikethrough =
+        theme.resolve_style(&StyleName::new(crate::names::MARKDOWN_STRIKETHROUGH));
+    assert!(markdown_strikethrough.strikethrough);
+    assert_eq!(markdown_strikethrough.fg, Some(Color::DarkGrey));
+
     let markdown_list_marker =
         theme.resolve_style(&StyleName::new(crate::names::MARKDOWN_LIST_MARKER));
     assert!(markdown_list_marker.bold);
@@ -318,6 +324,11 @@ fn builtin_light_theme_parses() {
     assert!(markdown_heading.bold);
     assert_eq!(markdown_heading.fg, Some(Color::Blue));
     assert!(!markdown_heading.underline);
+
+    let markdown_strikethrough =
+        theme.resolve_style(&StyleName::new(crate::names::MARKDOWN_STRIKETHROUGH));
+    assert!(markdown_strikethrough.strikethrough);
+    assert_eq!(markdown_strikethrough.fg, Some(Color::DarkGrey));
 
     let markdown_list_marker =
         theme.resolve_style(&StyleName::new(crate::names::MARKDOWN_LIST_MARKER));

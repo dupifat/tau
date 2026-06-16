@@ -133,6 +133,7 @@ pub struct Style {
     pub bold: bool,
     pub underline: bool,
     pub italic: bool,
+    pub strikethrough: bool,
 }
 
 impl Style {
@@ -158,6 +159,11 @@ impl Style {
 
     pub fn italic(mut self) -> Self {
         self.italic = true;
+        self
+    }
+
+    pub fn strikethrough(mut self) -> Self {
+        self.strikethrough = true;
         self
     }
 }

@@ -18,6 +18,7 @@ pub fn convert_style(ts: ThemeStyle) -> Style {
         bold: ts.bold,
         underline: ts.underline,
         italic: ts.italic,
+        strikethrough: ts.strikethrough,
     }
 }
 

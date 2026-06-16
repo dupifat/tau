@@ -14,7 +14,7 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     selfci = {
-      url = "github:dpc/selfci";
+      url = "git+https://radicle.dpc.pw/z2tDzYbAXxTQEKTGFVwiJPajkbeDU.git";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
       # TODO: temporarily broken because of wild 0.9.0 hackery
@@ -47,9 +47,7 @@
         projectName = "tau";
         cargoCrap = pkgs.callPackage ./nix/pkgs/cargo-crap.nix { };
         selfciPkg = selfci.packages.${system}.default;
-        mq = pkgs.writeShellScriptBin "mq" ''
-          exec ${selfciPkg}/bin/selfci mq add --wait "$@"
-        '';
+        selfciMq = selfci.packages.${system}.mq;
 
         flakeboxLib = flakebox.lib.mkLib pkgs {
           config = {
@@ -482,7 +480,7 @@
           TAU_LOG = "tau_ext_shell=debug,tau_harness=debug,info";
           packages = [
             cargoCrap
-            mq
+            selfciMq
             pkgs.cargo-nextest
             pkgs.taplo
             selfciPkg

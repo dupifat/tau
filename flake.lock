@@ -521,17 +521,17 @@
         ]
       },
       "locked": {
-        "lastModified": 1781406197,
-        "narHash": "sha256-YbNuqZ4GaXT4+BIyz+Vb9ozUYcK1gIqXc+fna0r2qhM=",
-        "owner": "dpc",
-        "repo": "selfci",
-        "rev": "93dc2fe6705418357cb37270604986d89dd0f4e3",
-        "type": "github"
+        "lastModified": 1781636864,
+        "narHash": "sha256-ENHVYKVqsoVwadFWwuuiPFqI1jebSUdmTkCvnb6/K3s=",
+        "ref": "refs/heads/master",
+        "rev": "030c74a59d2325a669926d1ac4d7438e9621d30f",
+        "revCount": 129,
+        "type": "git",
+        "url": "https://radicle.dpc.pw/z2tDzYbAXxTQEKTGFVwiJPajkbeDU.git"
       },
       "original": {
-        "owner": "dpc",
-        "repo": "selfci",
-        "type": "github"
+        "type": "git",
+        "url": "https://radicle.dpc.pw/z2tDzYbAXxTQEKTGFVwiJPajkbeDU.git"
       }
     },
     "systems": {

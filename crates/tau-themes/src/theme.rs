@@ -66,21 +66,21 @@ impl Theme {
     pub fn builtin() -> Self {
         // The embedded JSON5 is validated by tests; parsing cannot
         // fail at runtime.
-        Self::parse(BUILTIN_DEFAULT_THEME).expect("built-in default theme is valid JSON5")
+        Self::parse(BUILTIN_DEFAULT_THEME).expect("built-in tau-plain-dark theme is valid JSON5")
     }
 
     /// Returns the built-in "tau-dpc" theme.
     pub fn builtin_dpc() -> Self {
         // The embedded JSON5 is validated by tests; parsing cannot
         // fail at runtime.
-        Self::parse(BUILTIN_DPC_THEME).expect("built-in dpc theme is valid JSON5")
+        Self::parse(BUILTIN_DPC_THEME).expect("built-in tau-dpc theme is valid JSON5")
     }
 
     /// Returns the built-in "tau-plain-light" theme.
     pub fn builtin_light() -> Self {
         // The embedded JSON5 is validated by tests; parsing cannot
         // fail at runtime.
-        Self::parse(BUILTIN_LIGHT_THEME).expect("built-in light theme is valid JSON5")
+        Self::parse(BUILTIN_LIGHT_THEME).expect("built-in tau-plain-light theme is valid JSON5")
     }
 
     /// Returns the built-in theme selected by `name`, case-insensitively.

@@ -629,6 +629,10 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
         "/set",
         "Set a UI setting (e.g. /set show-diff true); Tab cycles names + values",
     ),
+    (
+        "/theme",
+        "Switch this UI's theme for this run; Tab cycles available themes",
+    ),
     ("/version", "Print Tau version and build information"),
     (
         "/provider-auth",
@@ -994,6 +998,10 @@ pub(crate) fn run_chat(
         tau_cli_term::CommandName::new("/session"),
         build_session_arg_completer(),
     );
+    completion_data.set_arg_completer(
+        tau_cli_term::CommandName::new("/theme"),
+        build_theme_arg_completer(dirs.clone()),
+    );
     let roles_available = renderer.roles_available();
     let custom_prompts = renderer.custom_prompts();
     let role_groups_available = renderer.role_groups_available();
@@ -1017,6 +1025,7 @@ pub(crate) fn run_chat(
                         RendererCmd::SuspendAgent { agent_id } => renderer.suspend_agent(&agent_id),
                         RendererCmd::ResumeAgent { agent_id } => renderer.resume_agent(agent_id),
                         RendererCmd::ClearSelectedAgent => renderer.clear_selected_agent(),
+                        RendererCmd::SetTheme { theme } => renderer.apply_theme(theme),
                         RendererCmd::ToolTimerTick => renderer.handle_tool_timer_tick(),
                     }
                     ui_io_tracker.sample_if_due(&mut renderer);
@@ -1057,6 +1066,10 @@ pub(crate) fn run_chat(
             role_groups_available,
             role_group_memory,
             theme,
+            dirs: dirs.clone(),
+            cwd,
+            home_dir,
+            prompt_symbol: settings.prompt_symbol,
             agent_in_progress,
             remote_disconnected,
             renderer_tx: event_tx,
@@ -1220,6 +1233,10 @@ enum RendererCmd {
     },
     /// Return to the start-new-agent prompt state.
     ClearSelectedAgent,
+    /// `/theme <name>` — apply a theme to this UI process only.
+    SetTheme {
+        theme: tau_themes::Theme,
+    },
     Remote {
         event: Box<Event>,
         recorded_at: UnixMicros,
@@ -1237,6 +1254,10 @@ struct TerminalInputLoopCtx {
     role_groups_available: Arc<Mutex<Vec<tau_proto::HarnessRoleGroup>>>,
     role_group_memory: Arc<Mutex<HashMap<String, String>>>,
     theme: tau_themes::Theme,
+    dirs: tau_config::settings::TauDirs,
+    cwd: std::path::PathBuf,
+    home_dir: Option<std::path::PathBuf>,
+    prompt_symbol: String,
     agent_in_progress: Arc<std::sync::atomic::AtomicBool>,
     remote_disconnected: Arc<AtomicBool>,
     renderer_tx: mpsc::Sender<RendererCmd>,
@@ -1429,6 +1450,10 @@ struct LocalTerminalOutput {
 impl LocalTerminalOutput {
     fn new(handle: tau_cli_term::TermHandle, theme: tau_themes::Theme) -> Self {
         Self { handle, theme }
+    }
+
+    fn set_theme(&mut self, theme: tau_themes::Theme) {
+        self.theme = theme;
     }
 
     fn system_info(&self, message: &str) {
@@ -1812,6 +1837,10 @@ impl<'a> TerminalInputSession<'a> {
             run_provider_auth("", &|message| output.system_info(message));
             return true;
         }
+        if text == "/theme" || text.starts_with("/theme ") {
+            self.handle_theme_command(text);
+            return true;
+        }
         if text == "/agent" || text.starts_with("/agent ") {
             self.handle_agent_command(text);
             return true;
@@ -1837,6 +1866,55 @@ impl<'a> TerminalInputSession<'a> {
         }
 
         false
+    }
+
+    fn handle_theme_command(&mut self, text: &str) {
+        let name = text.strip_prefix("/theme").unwrap_or("").trim();
+        if name.is_empty() {
+            let names = crate::theme::available_theme_choices(&self.ctx.dirs)
+                .into_iter()
+                .map(|choice| choice.name)
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.output
+                .system_info(&format!("/theme <name>; available: {names}"));
+            return;
+        }
+        let theme = match crate::theme::select_theme_for_command(&self.ctx.dirs, name) {
+            Ok(theme) => theme,
+            Err(error) => {
+                self.output.system_info(&format!("/theme: {error}"));
+                return;
+            }
+        };
+        self.ctx.theme = theme.clone();
+        self.term.set_theme(theme.clone());
+        self.output.set_theme(theme.clone());
+        let current_role = self
+            .ctx
+            .current_role_state
+            .lock()
+            .ok()
+            .and_then(|role| role.clone());
+        self.term
+            .handle()
+            .set_left_prompt(crate::theme::active_prompt_marker(
+                &theme,
+                &self.ctx.prompt_symbol,
+                current_role.as_deref(),
+            ));
+        self.term
+            .handle()
+            .set_right_prompt(crate::theme::cwd_right_prompt(
+                &theme,
+                &self.ctx.cwd,
+                self.ctx.home_dir.as_deref(),
+            ));
+        let _ = self.ctx.renderer_tx.send(RendererCmd::SetTheme {
+            theme: theme.clone(),
+        });
+        self.output
+            .system_info(&format!("theme set to `{name}` for this UI"));
     }
 
     fn handle_agent_command(&mut self, text: &str) {
@@ -2532,6 +2610,31 @@ fn agent_completion_candidates(
     }
 }
 
+/// Build the `/theme` argument completer from built-in and user theme names.
+fn build_theme_arg_completer(dirs: tau_config::settings::TauDirs) -> tau_cli_term::ArgCompleter {
+    use tau_cli_term::CompletionItem;
+
+    Arc::new(move |args: &[&str]| {
+        if args.len() != 1 {
+            return Vec::new();
+        }
+        let needle = args[0].to_lowercase();
+        let mut prefix_matches = Vec::new();
+        let mut substr_matches = Vec::new();
+        for choice in crate::theme::available_theme_choices(&dirs) {
+            let lower = choice.name.to_lowercase();
+            let item = CompletionItem::new(choice.name, choice.description);
+            if needle.is_empty() || lower.starts_with(&needle) {
+                prefix_matches.push(item);
+            } else if lower.contains(&needle) {
+                substr_matches.push(item);
+            }
+        }
+        prefix_matches.extend(substr_matches);
+        prefix_matches
+    })
+}
+
 /// Build the `/set` argument completer. The first arg is a setting
 /// name (description = current value); the second arg is one of that
 /// setting's allowed values (description = value meaning). Returns
@@ -2675,6 +2778,7 @@ pub(crate) fn is_local_slash_command(text: &str) -> bool {
             | "/suspend"
             | "/resume"
             | "/set"
+            | "/theme"
             | "/role"
             | "/prompt"
             | "/model"

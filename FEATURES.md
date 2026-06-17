@@ -26,6 +26,15 @@ philosophy and motivation see [README.md](README.md); for design notes see
   history, fzf insertion, editor integration, Markdown-lite transcript styling,
   diffs, thinking blocks, and status telemetry are built into the terminal UI.
 
+### Terminal slash commands and theming
+
+The terminal UI includes local slash commands for session, agent, role/model,
+and display control. `/theme <name>` switches the theme for the currently
+attached CLI UI process only; it does not write `cli.yaml`, update persisted UI
+state, or affect other attached UIs. Completion for `/theme` lists built-in
+selectors such as `default`, `dpc`, `tau-light`, `auto`, `dark`, and `light`,
+plus valid user themes from `<config_dir>/themes/*.json5`.
+
 ### Markdown-lite transcript styling
 
 The terminal transcript applies lightweight Markdown-like formatting to submitted

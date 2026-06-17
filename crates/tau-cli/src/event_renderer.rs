@@ -1468,6 +1468,21 @@ impl EventRenderer {
         self.role_group_memory.clone()
     }
 
+    /// Applies a runtime `/theme` change to this renderer-only UI process.
+    pub(crate) fn apply_theme(&mut self, theme: tau_themes::Theme) {
+        self.theme = theme;
+        self.handle
+            .set_left_prompt(crate::theme::active_prompt_marker(
+                &self.theme,
+                &self.prompt_symbol,
+                self.current_role.as_deref(),
+            ));
+        self.refresh_prompt_placeholder();
+        self.render_model_status_if_present();
+        self.rerender_visible_for_current_settings();
+        self.handle.invalidate_screen();
+    }
+
     /// Apply a `/set <name> <value>` change. The caller (input loop)
     /// has already validated `name` and `value` against the
     /// [`crate::settings_registry`] table.

@@ -178,6 +178,18 @@ fn builtin_default_theme_parses_and_stays_palette_safe() {
     assert_eq!(tool_err, ThemeStyle::default());
 }
 
+/// Ensures every explicitly configured style in the conservative default theme
+/// stays free of hard-coded foreground/background colors.
+#[test]
+fn builtin_default_theme_styles_stay_palette_safe() {
+    let theme = Theme::builtin();
+
+    for (name, style) in &theme.styles {
+        assert!(style.fg.is_none(), "{name} sets a foreground color");
+        assert!(style.bg.is_none(), "{name} sets a background color");
+    }
+}
+
 /// Ensures the personalized `dpc` built-in theme parses without snapshotting
 /// any visual choices, so future theme tuning does not churn test expectations.
 #[test]

@@ -227,6 +227,13 @@ impl HighTerm {
         self.editor_context = editor_context;
     }
 
+    /// Replaces the prompt UI theme for future local rendering.
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+        self.sync_menu_block();
+        self.handle.redraw();
+    }
+
     /// Triggers a redraw.
     pub fn redraw(&self) {
         self.handle.redraw();

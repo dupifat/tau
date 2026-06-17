@@ -31,6 +31,55 @@ fn selected_named_builtin_theme() {
     assert_eq!(prompt.spans()[0].text, "/tmp/project");
 }
 
+/// Ensures explicitly named built-ins accept documented case-insensitive input.
+#[test]
+fn selected_named_builtin_theme_case_insensitively() {
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: None,
+        state_dir: None,
+    };
+
+    select_theme_for_command(&dirs, "DPC").expect("case-insensitive built-in loads");
+    select_theme_for_command(&dirs, "TAU-LIGHT").expect("case-insensitive built-in loads");
+    select_theme_for_command(&dirs, "Default").expect("case-insensitive built-in loads");
+}
+
+/// Ensures the runtime `/theme` selection helper honors the user's explicit
+/// argument instead of applying the startup-only `TAU_THEME` override.
+#[test]
+fn command_theme_selection_ignores_env_override() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let themes = temp.path().join("themes");
+    std::fs::create_dir(&themes).expect("themes dir");
+    std::fs::write(
+        themes.join("custom.json5"),
+        r##"{ styles: { "prompt.cwd": { fg: "red" } } }"##,
+    )
+    .expect("write theme");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(temp.path().to_owned()),
+        state_dir: None,
+    };
+    let startup = select_theme_with_env_override(
+        &dirs,
+        CliTheme::Named("dpc".to_owned()),
+        Some(CliTheme::Named("custom".to_owned())),
+    )
+    .expect("env theme loads");
+    let command = select_theme_for_command(&dirs, "dpc").expect("command theme loads");
+
+    let startup_prompt = cwd_right_prompt(&startup, Path::new("/tmp/project"), None);
+    let command_prompt = cwd_right_prompt(&command, Path::new("/tmp/project"), None);
+    assert_eq!(
+        startup_prompt.spans()[0].style.fg,
+        Some(tau_cli_term::Color::Red)
+    );
+    assert_ne!(
+        startup_prompt.spans()[0].style,
+        command_prompt.spans()[0].style
+    );
+}
+
 /// Ensures external theme names resolve to `themes/<name>.json5` under Tau's
 /// config directory and affect normal terminal style resolution.
 #[test]
@@ -53,6 +102,45 @@ fn selected_external_theme_from_config_themes_dir() {
 
     assert_eq!(prompt.spans()[0].style.fg, Some(tau_cli_term::Color::Red));
     assert!(prompt.spans()[0].style.bold);
+}
+
+/// Ensures `/theme` completion can show built-in selectors and valid user theme
+/// files without exposing path-like or duplicate external names.
+#[test]
+fn available_theme_choices_include_builtins_and_user_themes() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let themes = temp.path().join("themes");
+    std::fs::create_dir(&themes).expect("themes dir");
+    std::fs::write(themes.join("custom.json5"), "{ styles: {} }").expect("write custom theme");
+    std::fs::write(themes.join("dpc.json5"), "{ styles: {} }").expect("write shadowed theme");
+    std::fs::write(themes.join("DPC.json5"), "{ styles: {} }").expect("write shadowed theme");
+    std::fs::write(themes.join("not-a-theme.txt"), "ignored").expect("write ignored file");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(temp.path().to_owned()),
+        state_dir: None,
+    };
+
+    let names: Vec<String> = available_theme_choices(&dirs)
+        .into_iter()
+        .map(|choice| choice.name)
+        .collect();
+
+    for name in ["auto", "dark", "light"]
+        .into_iter()
+        .chain(tau_themes::theme::BUILTIN_THEME_NAMES.iter().copied())
+        .chain(["custom"])
+    {
+        assert!(names.iter().any(|choice| choice == name), "missing {name}");
+    }
+    assert_eq!(
+        names
+            .iter()
+            .filter(|choice| choice.as_str() == "dpc")
+            .count(),
+        1
+    );
+    assert!(!names.iter().any(|choice| choice == "DPC"));
+    assert!(!names.iter().any(|choice| choice == "not-a-theme"));
 }
 
 /// Ensures invalid external names fail visibly instead of escaping the themes

@@ -51,6 +51,9 @@ const BUILTIN_DEFAULT_THEME: &str = include_str!("../themes/default.json5");
 const BUILTIN_DPC_THEME: &str = include_str!("../themes/dpc.json5");
 const BUILTIN_LIGHT_THEME: &str = include_str!("../themes/tau-light.json5");
 
+/// User-selectable theme names embedded in Tau.
+pub const BUILTIN_THEME_NAMES: &[&str] = &["default", "dpc", "tau-light"];
+
 impl Theme {
     /// Creates an empty theme (everything uses default styling).
     pub fn new() -> Self {
@@ -83,6 +86,17 @@ impl Theme {
         // The embedded JSON5 is validated by tests; parsing cannot
         // fail at runtime.
         Self::parse(BUILTIN_LIGHT_THEME).expect("built-in light theme is valid JSON5")
+    }
+
+    /// Returns the built-in theme selected by `name`, case-insensitively.
+    #[must_use]
+    pub fn builtin_named(name: &str) -> Option<Self> {
+        Some(match name.to_ascii_lowercase().as_str() {
+            "default" => Self::builtin(),
+            "dpc" => Self::builtin_dpc(),
+            "tau-light" => Self::builtin_light(),
+            _ => return None,
+        })
     }
 
     /// Loads a theme from a JSON5 file.

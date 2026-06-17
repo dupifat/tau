@@ -44,12 +44,14 @@ their existing renderers unless there is a separate product decision.
 
 Status: confirmed, 2026-06-17, dpc
 
-The built-in `default` theme is intentionally conservative. It avoids
-hard-coded foreground/background colors and relies on semantic text attributes
-such as bold, italic, underline, and strikethrough so Tau stays readable even on
-unusual terminal palettes. More opinionated built-ins, including the personalized
-`dpc` theme and the light-background `tau-light` theme, remain selectable but are
-not the default.
+The built-in `default` theme is intentionally conservative. It keeps semantic
+text attributes such as bold, italic, underline, and strikethrough, and limits
+hard-coded foreground colors to default color plus yellow, cyan, green, and red.
+Those colors are considered generally safe terminal colors, while other `dpc`
+theme colors are dropped or mapped so Tau remains readable on unusual terminal
+palettes. More opinionated built-ins, including the personalized `dpc` theme and
+the light-background `tau-light` theme, remain selectable but are not the
+default.
 
 ## tau-cli testing strategy
 

@@ -1,47 +1,81 @@
 // Built-in "default" theme.
 //
-// This intentionally avoids hard-coded foreground/background colors so Tau stays
-// readable on unusual terminal color schemes. It keeps only text attributes that
-// do not assume a palette: bold, italic, underline, and strikethrough.
+// This is a conservative subset of the richer `dpc` theme. It keeps semantic
+// emphasis attributes and only uses default terminal color plus yellow, cyan,
+// green, and red foregrounds, which are considered generally safe terminal
+// colors. Other `dpc` colors are dropped or mapped to one of those colors.
 {
   styles: {
     // -- User input --
     "user.prompt":          { bold: true },
 
     // -- Agent responses --
+    "agent.response":       { fg: "cyan" },
     "agent.thinking":       { italic: true },
 
     // -- Markdown-lite transcript formatting --
     "markdown.strong":      { bold: true },
     "markdown.emphasis":    { bold: true, italic: true },
     "markdown.strikethrough": { strikethrough: true },
-    "markdown.heading":     { bold: true },
-    "markdown.list.marker": { bold: true },
+    "markdown.heading":     { fg: "cyan", bold: true },
+    "markdown.list.marker": { fg: "cyan", bold: true },
+    "markdown.code":        { fg: "cyan" },
+
+    // -- Tool execution --
+    "tool.name":            { fg: "yellow" },
+    "tool.mode":            { fg: "yellow" },
+    "tool.status.success":  { fg: "green" },
+    "tool.status.error":    { fg: "red" },
+    "tool.status.info":     { fg: "cyan" },
+    "progress.indicator":   { fg: "cyan", bold: true },
+
+    // -- Action output --
+    "action.id":            { fg: "yellow", bold: true },
+    "action.error":         { fg: "red" },
 
     // -- System --
-    "system.info.important": { bold: true },
-    "system.disconnect":    { bold: true },
+    "system.info.important": { fg: "red", bold: true },
+    "system.disconnect":    { fg: "red", bold: true },
+    "system.path":          { fg: "cyan" },
+
+    // -- Status bar --
+    "status.context":       { fg: "cyan" },
+    "status.effort":        { fg: "yellow" },
+    "status.service_tier":  { fg: "green" },
+    "status.tools":         { fg: "yellow" },
+    "status.agents":        { fg: "cyan" },
+    "status.ui_io.medium":  { fg: "yellow" },
+    "status.ui_io.high":    { fg: "red" },
+    "redraw.counter":       { fg: "red" },
 
     // -- Token stats --
     "token.stats.symbol.delta": { bold: true },
     "token.stats.symbol.sigma": { bold: true },
+    "token.stats.metric.cache_warn": { fg: "yellow" },
+    "token.stats.metric.cache_miss": { fg: "red" },
 
     // -- Prompt --
     "prompt.marker":           { bold: true },
     "prompt.placeholder":      { italic: true },
-    "prompt.marker.engineer":  { bold: true },
-    "prompt.marker.assistant": { bold: true },
-    "prompt.marker.manager":   { bold: true },
+    "prompt.marker.engineer":  { fg: "cyan", bold: true },
+    "prompt.marker.assistant": { fg: "red", bold: true },
+    "prompt.marker.manager":   { fg: "yellow", bold: true },
     "prompt.marker.submitted": { bold: true },
 
     // -- Completion menu --
+    "completion.label":     { fg: "green" },
     "completion.selected":  { bold: true, underline: true },
 
     // -- Banner --
+    "banner.accent":        { fg: "yellow" },
     "banner.name":          { bold: true },
+    "banner.pun":           { fg: "yellow" },
 
     // -- Diffs --
-    "diff.added.inline":    { bold: true },
-    "diff.removed.inline":  { bold: true },
+    "diff.added":           { fg: "green" },
+    "diff.removed":         { fg: "red" },
+    "diff.hunk_header":     { fg: "cyan" },
+    "diff.added.inline":    { fg: "green", bold: true },
+    "diff.removed.inline":  { fg: "red", bold: true },
   }
 }

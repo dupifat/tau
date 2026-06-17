@@ -156,11 +156,10 @@ fn nested_spans_inherit_and_override_styles() {
     assert!(resolved[1].style.italic);
 }
 
-/// Ensures the default built-in theme parses and remains free of hard-coded
-/// palette assumptions for representative styles that would otherwise be easy
-/// to make unreadable on unusual terminal color schemes.
+/// Ensures the default built-in theme parses and keeps representative colors
+/// inside its intentionally small safe-color set.
 #[test]
-fn builtin_default_theme_parses_and_stays_palette_safe() {
+fn builtin_default_theme_parses_and_uses_safe_colors() {
     let theme = Theme::builtin();
 
     let prompt = theme.resolve_style(&StyleName::new("user.prompt"));
@@ -168,24 +167,44 @@ fn builtin_default_theme_parses_and_stays_palette_safe() {
     assert!(prompt.fg.is_none());
     assert!(prompt.bg.is_none());
 
+    let tool_err = theme.resolve_style(&StyleName::new("tool.status.error"));
+    assert_eq!(tool_err.fg, Some(Color::Red));
+    assert!(tool_err.bg.is_none());
+
+    let tool_name = theme.resolve_style(&StyleName::new("tool.name"));
+    assert_eq!(tool_name.fg, Some(Color::Yellow));
+    assert!(tool_name.bg.is_none());
+
+    let progress = theme.resolve_style(&StyleName::new(crate::names::PROGRESS_INDICATOR));
+    assert_eq!(progress.fg, Some(Color::Cyan));
+    assert!(progress.bold);
+    assert!(progress.bg.is_none());
+
     let selected = theme.resolve_style(&StyleName::new("completion.selected"));
     assert!(selected.bold);
     assert!(selected.underline);
     assert!(selected.fg.is_none());
     assert!(selected.bg.is_none());
-
-    let tool_err = theme.resolve_style(&StyleName::new("tool.status.error"));
-    assert_eq!(tool_err, ThemeStyle::default());
 }
 
 /// Ensures every explicitly configured style in the conservative default theme
-/// stays free of hard-coded foreground/background colors.
+/// stays within the allowed foreground color set and does not set backgrounds.
 #[test]
 fn builtin_default_theme_styles_stay_palette_safe() {
     let theme = Theme::builtin();
 
     for (name, style) in &theme.styles {
-        assert!(style.fg.is_none(), "{name} sets a foreground color");
+        assert!(
+            matches!(
+                style.fg,
+                None | Some(Color::Yellow)
+                    | Some(Color::Cyan)
+                    | Some(Color::Green)
+                    | Some(Color::Red)
+            ),
+            "{name} sets an unsafe foreground color: {:?}",
+            style.fg
+        );
         assert!(style.bg.is_none(), "{name} sets a background color");
     }
 }

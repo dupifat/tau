@@ -8,5 +8,5 @@ themes from renderer tests; built-ins are product defaults and may change for
 readability without implying renderer behavior changed.
 
 Built-in theme tests should be limited to parsing and intentional invariants of
-those built-ins, such as the conservative default theme avoiding hard-coded
-terminal palette colors.
+those built-ins, such as the conservative default theme staying within its
+allowed safe foreground colors and avoiding background colors.

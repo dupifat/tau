@@ -758,8 +758,9 @@ avoid full repaints on each token.
 
 ### Theming
 
-The UI ships with a conservative built-in `default` theme that avoids hard-coded
-foreground/background colors so it remains readable on unusual terminal palettes.
+The UI ships with a conservative built-in `default` theme that keeps text
+attributes and limits hard-coded foreground colors to default color plus yellow,
+cyan, green, and red so it remains readable on unusual terminal palettes.
 More opinionated built-ins include `dpc` (the previous Tau theme) and
 `tau-light`. `cli.yaml` can set `theme: default`, `theme: dpc`,
 `theme: tau-light`, the legacy shade aliases `theme: dark`, `theme: light`,

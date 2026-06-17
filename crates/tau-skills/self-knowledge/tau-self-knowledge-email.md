@@ -6,7 +6,7 @@ advertise: false
 
 # Tau std-pim email configuration
 
-Tau's preferred built-in PIM extension is named `std-pim`. It runs `tau ext ext-pim`, registers split model-visible email tools such as `email_list_folders`, `email_read`, and `email_send`, and publishes `/email` approval/denial actions. The legacy `std-email` built-in alias remains for old email-only configs; do not enable both names together.
+Tau's preferred built-in PIM extension is named `std-pim`. It runs `tau component ext-pim`, registers split model-visible email tools such as `email_list_folders`, `email_read`, and `email_send`, and publishes `/email` approval/denial actions. The legacy `std-email` built-in alias remains for old email-only configs; do not enable both names together.
 
 Use this skill when helping a user configure email. Do not include personal addresses, server names, passwords, authserv-ids, or message contents unless the user explicitly provided them for that answer.
 

@@ -879,20 +879,20 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
     result
 }
 
-/// Entrypoint for `tau ext harness`.
+/// Entrypoint for `tau component harness`.
 pub fn run_component() -> Result<(), Box<dyn std::error::Error>> {
     run_component_with_internal_tools(Vec::new())
 }
 
-/// Entrypoint for `tau ext harness` with injected internal tool handlers.
+/// Entrypoint for `tau component harness` with injected internal tool handlers.
 pub fn run_component_with_internal_tools(
     internal_tool_handlers: crate::InternalToolHandlers,
 ) -> Result<(), Box<dyn std::error::Error>> {
     run_component_with_internal_tools_and_initial_client(internal_tool_handlers, None)
 }
 
-/// Entrypoint for `tau ext harness` with injected internal tool handlers and
-/// an initial UI connection carried over stdio.
+/// Entrypoint for `tau component harness` with injected internal tool handlers
+/// and an initial UI connection carried over stdio.
 pub fn run_component_with_internal_tools_and_initial_ui_stdio(
     internal_tool_handlers: crate::InternalToolHandlers,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -933,7 +933,7 @@ fn run_component_with_internal_tools_and_initial_client(
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "resolved config");
         // The CLI passes the minted/resumed session id via the harness's
         // SESSION_ID env var when spawning a daemon. Fallback to
-        // `default_session_id()` covers a bare `tau ext harness`
+        // `default_session_id()` covers a bare `tau component harness`
         // launched without a CLI in front of it.
         let eager_session_id = std::env::var("TAU_SESSION_ID")
             .unwrap_or_else(|_| tau_session_inspect::default_session_id().to_owned());

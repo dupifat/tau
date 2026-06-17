@@ -237,7 +237,7 @@ pub fn resolve_extensions_with_cli_overrides_and_diagnostics(
                     // Setting `command` replaces the built-in's full argv tail.
                     // `suffix` is cleared so users overriding only `command`
                     // don't accidentally inherit the built-in's subcommand
-                    // tokens (e.g. `["ext", "ext-provider-builtin"]`). Users
+                    // tokens (e.g. `["component", "ext-provider-builtin"]`). Users
                     // who want to keep them must set `suffix` explicitly below.
                     existing.suffix = Vec::new();
                 }
@@ -450,7 +450,7 @@ fn extension_cli_overrides_from_env() -> Vec<ExtensionCliOverride> {
 /// The set of extensions the harness ships with by default.
 ///
 /// Each entry's `command` is `[<current-exe>]` and `suffix` is
-/// `["ext", <name>]`, so a fresh `tau` install with no
+/// `["component", <name>]`, so a fresh `tau` install with no
 /// `harness.yaml` runs the in-binary provider and tool extensions out
 /// of the box. Users can override individual fields
 /// (or set `enable: false`) per entry in `harness.yaml` under

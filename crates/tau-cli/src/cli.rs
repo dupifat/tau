@@ -164,17 +164,18 @@ pub enum Command {
         command: DevCommand,
     },
 
-    /// Run an internal extension as a standalone process (used by the
-    /// harness to spawn extensions from the unified binary).
-    #[command(hide = true, alias = "component")]
-    Ext {
-        /// Extension name (harness, ext-provider-builtin, ext-shell,
+    /// Run a bundled Tau component as a standalone process.
+    ///
+    /// Bundled extensions are components too, but not every component is an
+    /// extension; for example, the harness is a component.
+    Component {
+        /// Component name (harness, ext-provider-builtin, ext-shell,
         /// ext-test-dummy, ext-std-notifications, ext-websearch, ext-email,
         /// ext-pim)
         name: String,
 
         /// Use stdin/stdout as the initial UI connection before starting
-        /// harness extensions. Only valid with `tau ext harness`.
+        /// harness extensions. Only valid with `tau component harness`.
         #[arg(long, hide = true)]
         initial_ui_stdio: bool,
     },

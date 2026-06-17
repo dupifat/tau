@@ -441,7 +441,7 @@ where
     Ok(overrides)
 }
 
-/// Describes how an `ext` component gets its global tracing subscriber.
+/// Describes how a bundled component gets its global tracing subscriber.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ComponentLogging {
     /// `tau-cli` installs a stderr subscriber before invoking the component.
@@ -452,7 +452,7 @@ pub enum ComponentLogging {
 }
 
 pub struct Component {
-    /// Name accepted by the hidden `tau ext <name>` dispatcher.
+    /// Name accepted by the `tau component <name>` dispatcher.
     pub name: &'static str,
     /// Function that runs the component over stdin/stdout.
     pub runner: ComponentRunner,
@@ -467,8 +467,8 @@ pub fn main_with_args() -> std::process::ExitCode {
 }
 
 /// Parses CLI arguments via clap and dispatches to the appropriate
-/// command, using caller-provided component registrations for hidden
-/// `ext`/`component` dispatch.
+/// command, using caller-provided component registrations for
+/// `component` dispatch.
 pub fn main_with_args_and_components(components: &[Component]) -> std::process::ExitCode {
     use std::process::ExitCode;
 
@@ -531,8 +531,8 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     "dev dump-initial-prompt",
                 )?;
             }
-            cli::Command::Ext { .. } => {
-                reject_harness_config_overrides(&harness_config_overrides, "ext")?;
+            cli::Command::Component { .. } => {
+                reject_harness_config_overrides(&harness_config_overrides, "component")?;
             }
         }
 
@@ -687,14 +687,14 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 }
             },
 
-            cli::Command::Ext {
+            cli::Command::Component {
                 name,
                 initial_ui_stdio,
             } => {
-                reject_harness_config_overrides(&harness_config_overrides, "ext")?;
+                reject_harness_config_overrides(&harness_config_overrides, "component")?;
                 if initial_ui_stdio && name != "harness" {
                     return Err(CliError::Participant(
-                        "--initial-ui-stdio is only valid for `tau ext harness`".to_owned(),
+                        "--initial-ui-stdio is only valid for `tau component harness`".to_owned(),
                     ));
                 }
                 if name == "harness" && initial_ui_stdio {
@@ -721,7 +721,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                             .collect::<Vec<_>>()
                             .join(", ");
                         CliError::Participant(format!(
-                            "unknown extension: {name}\navailable: {available}"
+                            "unknown component: {name}\navailable: {available}"
                         ))
                     })?;
                 match component.logging {

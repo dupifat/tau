@@ -962,7 +962,7 @@ pub struct ExtensionEntry {
 
     /// argv suffix appended after `command`. Symmetric to `prefix`.
     /// Built-in extensions use this to spell their subcommand (e.g.
-    /// `["ext", "ext-provider-builtin"]`) so the `command` slot stays
+    /// `["component", "ext-provider-builtin"]`) so the `command` slot stays
     /// as the tau binary path.
     pub suffix: Option<Vec<String>>,
 

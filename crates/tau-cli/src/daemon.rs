@@ -296,11 +296,11 @@ struct DaemonCommandSpec<'a> {
     cli_overrides: DaemonCliOverrides<'a>,
 }
 
-/// Build the `tau ext harness` command, reserving stdio for the initial UI
-/// protocol.
+/// Build the `tau component harness` command, reserving stdio for the initial
+/// UI protocol.
 fn build_daemon_command(spec: DaemonCommandSpec<'_>) -> Command {
     let mut cmd = Command::new(spec.tau_binary);
-    cmd.arg("ext")
+    cmd.arg("component")
         .arg("harness")
         .env("TAU_SESSION_ID", spec.session_id)
         .env("TAU_SESSION_STATUS", spec.session_status.as_str())

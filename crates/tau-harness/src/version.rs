@@ -98,7 +98,7 @@ fn short_built_time(_time: &str) -> Option<String> {
 /// Publish version metadata into the current process's environment so
 /// children spawned by extensions (e.g. shell commands) inherit it.
 /// Existing values are preserved — the env-var-only invocation path
-/// (`tau ext harness` launched without a parent CLI) still benefits
+/// (`tau component harness` launched without a parent CLI) still benefits
 /// from values set externally, e.g. by integration tests.
 pub fn export_to_env() {
     set_env_if_absent("TAU_VERSION", env!("CARGO_PKG_VERSION"));

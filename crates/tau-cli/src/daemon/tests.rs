@@ -96,5 +96,5 @@ fn daemon_command_uses_initial_ui_stdio() {
         .get_args()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect::<Vec<_>>();
-    assert_eq!(args, ["ext", "harness", "--initial-ui-stdio"]);
+    assert_eq!(args, ["component", "harness", "--initial-ui-stdio"]);
 }

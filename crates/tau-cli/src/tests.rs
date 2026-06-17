@@ -118,6 +118,29 @@ fn dev_print_tools_uses_shared_role_flag() {
 }
 
 #[test]
+fn component_command_parses_harness() {
+    let cli = super::cli::Cli::parse_from(["tau", "component", "harness"]);
+
+    assert!(matches!(
+        cli.command,
+        Some(super::cli::Command::Component {
+            name,
+            initial_ui_stdio: false,
+        }) if name == "harness"
+    ));
+}
+
+#[test]
+fn ext_command_is_not_a_component_alias() {
+    let err = match super::cli::Cli::try_parse_from(["tau", "ext", "harness"]) {
+        Ok(_) => panic!("ext should not remain a supported component alias"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
+}
+
+#[test]
 fn startup_role_flag_is_parsed_for_default_run() {
     let cli = super::cli::Cli::parse_from(["tau", "--role", "manager"]);
 

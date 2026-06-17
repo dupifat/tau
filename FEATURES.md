@@ -55,7 +55,8 @@ it with your init system, sandbox it with bubblewrap or Landlock, swap it for
 anything else that speaks the protocol, or write a new one in any language.
 
 The default `tau` binary bundles all first-party components and dispatches via
-hidden `tau ext <name>` subcommands; you can replace any of them by editing
+`tau component <name>` subcommands. Built-in extensions are bundled components
+(a subset of all components), and you can replace any extension by editing
 `harness.yaml`.
 
 ### Persisted event logs

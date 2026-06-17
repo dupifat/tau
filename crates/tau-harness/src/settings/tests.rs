@@ -19,7 +19,7 @@ fn builtin(
         name: name.to_owned(),
         prefix: Vec::new(),
         command: vec!["tau".into()],
-        suffix: vec!["ext".into(), suffix_arg.into()],
+        suffix: vec!["component".into(), suffix_arg.into()],
         role: Some(role.into()),
         cwd: None,
         enable,
@@ -101,7 +101,7 @@ fn resolve_extensions_returns_builtins_when_user_config_empty() {
     assert_eq!(resolved.len(), 4);
     assert_eq!(resolved[0].name, "provider-builtin");
     assert_eq!(resolved[0].command, "tau");
-    assert_eq!(resolved[0].args, vec!["ext", "ext-provider-builtin"]);
+    assert_eq!(resolved[0].args, vec!["component", "ext-provider-builtin"]);
     assert_eq!(resolved[0].role.as_deref(), Some("provider"));
     assert_eq!(resolved[1].name, "core-shell");
     assert_eq!(resolved[2].name, "std-notifications");
@@ -136,7 +136,7 @@ fn resolve_extensions_enables_disabled_std_pim_builtin() {
         .find(|e| e.name == "std-pim")
         .expect("std-pim enabled");
     assert_eq!(pim.command, "tau");
-    assert_eq!(pim.args, vec!["ext", "ext-pim"]);
+    assert_eq!(pim.args, vec!["component", "ext-pim"]);
     assert_eq!(pim.role.as_deref(), Some("tool"));
 }
 
@@ -159,7 +159,7 @@ fn resolve_extensions_enables_disabled_std_email_builtin() {
         .find(|e| e.name == "std-email")
         .expect("std-email enabled");
     assert_eq!(email.command, "tau");
-    assert_eq!(email.args, vec!["ext", "ext-pim"]);
+    assert_eq!(email.args, vec!["component", "ext-pim"]);
     assert_eq!(email.role.as_deref(), Some("tool"));
 }
 
@@ -297,7 +297,7 @@ fn resolve_extensions_prefix_wraps_builtin_command() {
     assert_eq!(provider.command, "ssh");
     assert_eq!(
         provider.args,
-        vec!["user@host", "tau", "ext", "ext-provider-builtin"]
+        vec!["user@host", "tau", "component", "ext-provider-builtin"]
     );
 }
 
@@ -433,7 +433,7 @@ fn resolve_extensions_loads_from_yaml() {
     assert_eq!(provider.command, "ssh");
     assert_eq!(
         provider.args,
-        vec!["host", "tau", "ext", "ext-provider-builtin"]
+        vec!["host", "tau", "component", "ext-provider-builtin"]
     );
     assert_eq!(
         provider.cwd.as_deref(),
@@ -474,7 +474,8 @@ fn built_in_extensions_json5_contains_std_notifications_idle_all_config() {
 fn built_in_extensions_json5_contains_disabled_std_pim_and_email_alias() {
     // Guard the real embedded JSON5, not the local test fixture, so the
     // disabled-by-default PIM extension and legacy email alias keep the
-    // documented tau ext suffix and tool role when future built-ins are edited.
+    // documented tau component suffix and tool role when future built-ins are
+    // edited.
     let defs = built_in_extension_defs();
     for name in ["std-pim", "std-email"] {
         let extension = defs
@@ -484,7 +485,7 @@ fn built_in_extensions_json5_contains_disabled_std_pim_and_email_alias() {
         assert!(!extension.enable);
         assert_eq!(
             extension.suffix.as_deref(),
-            Some(["ext".to_owned(), "ext-pim".to_owned()].as_slice())
+            Some(["component".to_owned(), "ext-pim".to_owned()].as_slice())
         );
         assert_eq!(extension.role.as_deref(), Some("tool"));
     }

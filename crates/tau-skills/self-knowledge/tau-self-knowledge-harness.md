@@ -19,7 +19,7 @@ When the CLI starts a harness child, it creates a runtime-dir daemon unless it i
 Common startup flow:
 
 1. The CLI chooses or resumes a session id.
-2. The CLI creates a child `tau ext harness` process and passes session metadata through `TAU_SESSION_ID` and `TAU_SESSION_STATUS`.
+2. The CLI creates a child `tau component harness` process and passes session metadata through `TAU_SESSION_ID` and `TAU_SESSION_STATUS`.
 3. The harness creates a per-process runtime directory under Tau's runtime root and binds `tau.sock` inside it.
 4. After startup is ready for discovery, the harness writes runtime markers: project directory, pid, and session id.
 5. Later UI clients discover the daemon through those markers and connect to the runtime-dir Unix socket.
@@ -28,7 +28,7 @@ The runtime-dir harness path always binds its generated socket path itself. It d
 
 ## CLI-spawned initial UI stdio mode
 
-When the terminal UI or one-shot CLI helpers start the harness, the CLI uses the hidden `tau ext harness --initial-ui-stdio` mode.
+When the terminal UI or one-shot CLI helpers start the harness, the CLI uses the `tau component harness --initial-ui-stdio` mode.
 
 In this mode:
 
@@ -71,9 +71,9 @@ Behavior:
 
 This is intended for externally supervised foreground harness processes where the supervisor owns the socket. It is not used by the normal CLI-managed runtime-dir harness path.
 
-## Direct `tau ext harness`
+## Direct `tau component harness`
 
-Running `tau ext harness` directly starts the harness component without the terminal UI parent. It uses the default session id when `TAU_SESSION_ID` is not set and binds its own runtime-dir socket.
+Running `tau component harness` directly starts the harness component without the terminal UI parent. It uses the default session id when `TAU_SESSION_ID` is not set and binds its own runtime-dir socket.
 
 This path is useful for debugging or embedding the harness component, but it does not receive an initial UI over stdio unless `--initial-ui-stdio` is supplied by the CLI-managed startup path.
 

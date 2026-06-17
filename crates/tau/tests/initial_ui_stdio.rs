@@ -3,9 +3,9 @@ use std::process::{Command, Stdio};
 
 use tau_proto::{HarnessOutputMessage, PeerInputReader};
 
-/// Ensures a real `tau ext harness --initial-ui-stdio` child flushes a fatal
-/// startup disconnect all the way to child stdout before exiting. This protects
-/// the child-process stdio path, not just the in-process UnixStream writer.
+/// Ensures a real `tau component harness --initial-ui-stdio` child flushes a
+/// fatal startup disconnect all the way to child stdout before exiting. This
+/// protects the child-process stdio path, not just the in-process UnixStream
 /// writer.
 #[test]
 fn initial_ui_stdio_startup_error_reaches_child_stdout() {
@@ -31,7 +31,7 @@ extensions:
 
     let tau_bin = std::env::var("CARGO_BIN_EXE_tau").expect("CARGO_BIN_EXE_tau");
     let mut child = Command::new(tau_bin)
-        .arg("ext")
+        .arg("component")
         .arg("harness")
         .arg("--initial-ui-stdio")
         .env("XDG_CONFIG_HOME", &config_home)

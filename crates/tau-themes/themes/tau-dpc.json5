@@ -98,9 +98,9 @@
     "prompt.marker.submitted": { bold: true },
 
     // -- Completion menu --
-    "completion.label":     { fg: "green" },
+    "completion.label":     { fg: "blue" },
     "completion.desc":      { fg: "dark_grey" },
-    "completion.selected":  { fg: "white", bg: "dark_blue", bold: true },
+    "completion.selected":  { fg: "white", bg: "blue", bold: true },
 
     // -- Banner --
     "banner.accent":        { fg: "yellow" },

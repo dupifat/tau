@@ -1,9 +1,9 @@
-// Built-in "default" theme.
+// Built-in "tau-plain-dark" theme.
 //
-// This is a conservative subset of the richer `dpc` theme. It keeps semantic
+// This is a conservative subset of the richer `tau-dpc` theme. It keeps semantic
 // emphasis attributes and only uses default terminal color plus yellow, cyan,
 // green, and red foregrounds, which are considered generally safe terminal
-// colors. Other `dpc` colors are dropped or mapped to one of those colors.
+// colors. Other `tau-dpc` colors are dropped or mapped to one of those colors.
 {
   styles: {
     // -- User input --

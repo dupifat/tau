@@ -49,7 +49,7 @@ fn cli_settings_user_scalar_override_wins_over_built_in() {
     assert_eq!(s.show_tools, ShowTools::Compact);
     assert_eq!(s.show_messages, ShowMessages::SelfSummary);
     assert_eq!(s.show_status, ShowStatus::Minimal);
-    assert_eq!(s.theme, CliTheme::Named("default".to_owned()));
+    assert_eq!(s.theme, CliTheme::Named("tau-plain-dark".to_owned()));
 }
 
 /// Ensures cli.yaml can select a built-in theme by name.
@@ -57,10 +57,10 @@ fn cli_settings_user_scalar_override_wins_over_built_in() {
 fn cli_settings_theme_override() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
-    std::fs::write(dir.join("cli.yaml"), r#"{ theme: "light" }"#).expect("write");
+    std::fs::write(dir.join("cli.yaml"), r#"{ theme: "tau-plain-light" }"#).expect("write");
 
     let s = load_cli_settings_in(&dirs_with_config(dir)).expect("load");
-    assert_eq!(s.theme, CliTheme::Light);
+    assert_eq!(s.theme, CliTheme::Named("tau-plain-light".to_owned()));
 }
 
 /// Ensures typos in top-level cli.yaml keys fail instead of being ignored.
@@ -83,7 +83,10 @@ fn cli_settings_reject_unknown_top_level_fields() {
 #[test]
 fn cli_theme_parse_name_rejects_empty_names() {
     assert_eq!(CliTheme::parse_name("  "), None);
-    assert_eq!(CliTheme::parse_name("dark"), Some(CliTheme::Dark));
+    assert_eq!(
+        CliTheme::parse_name("tau-plain-dark"),
+        Some(CliTheme::Named("tau-plain-dark".to_owned()))
+    );
     assert_eq!(
         CliTheme::parse_name("custom"),
         Some(CliTheme::Named("custom".to_owned()))

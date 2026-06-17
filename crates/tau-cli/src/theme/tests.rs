@@ -4,9 +4,10 @@ use super::*;
 /// including external names that must not be rejected during parsing.
 #[test]
 fn parses_theme_env_values() {
-    assert_eq!(parse_theme_name("auto"), Some(CliTheme::Auto));
-    assert_eq!(parse_theme_name("DARK"), Some(CliTheme::Dark));
-    assert_eq!(parse_theme_name(" light "), Some(CliTheme::Light));
+    assert_eq!(
+        parse_theme_name(" tau-plain-dark "),
+        Some(CliTheme::Named("tau-plain-dark".to_owned()))
+    );
     assert_eq!(
         parse_theme_name("solarized"),
         Some(CliTheme::Named("solarized".to_owned()))
@@ -24,7 +25,7 @@ fn selected_named_builtin_theme() {
         state_dir: None,
     };
 
-    let theme = select_theme(&dirs, CliTheme::Named("dpc".to_owned()))
+    let theme = select_theme(&dirs, CliTheme::Named("tau-dpc".to_owned()))
         .expect("built-in theme loads without config dir");
     let prompt = cwd_right_prompt(&theme, Path::new("/tmp/project"), None);
 
@@ -39,9 +40,9 @@ fn selected_named_builtin_theme_case_insensitively() {
         state_dir: None,
     };
 
-    select_theme_for_command(&dirs, "DPC").expect("case-insensitive built-in loads");
-    select_theme_for_command(&dirs, "TAU-LIGHT").expect("case-insensitive built-in loads");
-    select_theme_for_command(&dirs, "Default").expect("case-insensitive built-in loads");
+    select_theme_for_command(&dirs, "TAU-DPC").expect("case-insensitive built-in loads");
+    select_theme_for_command(&dirs, "TAU-PLAIN-LIGHT").expect("case-insensitive built-in loads");
+    select_theme_for_command(&dirs, "Tau-Plain-Dark").expect("case-insensitive built-in loads");
 }
 
 /// Ensures the runtime `/theme` selection helper honors the user's explicit
@@ -62,11 +63,11 @@ fn command_theme_selection_ignores_env_override() {
     };
     let startup = select_theme_with_env_override(
         &dirs,
-        CliTheme::Named("dpc".to_owned()),
+        CliTheme::Named("tau-dpc".to_owned()),
         Some(CliTheme::Named("custom".to_owned())),
     )
     .expect("env theme loads");
-    let command = select_theme_for_command(&dirs, "dpc").expect("command theme loads");
+    let command = select_theme_for_command(&dirs, "tau-dpc").expect("command theme loads");
 
     let startup_prompt = cwd_right_prompt(&startup, Path::new("/tmp/project"), None);
     let command_prompt = cwd_right_prompt(&command, Path::new("/tmp/project"), None);
@@ -112,8 +113,8 @@ fn available_theme_choices_include_builtins_and_user_themes() {
     let themes = temp.path().join("themes");
     std::fs::create_dir(&themes).expect("themes dir");
     std::fs::write(themes.join("custom.json5"), "{ styles: {} }").expect("write custom theme");
-    std::fs::write(themes.join("dpc.json5"), "{ styles: {} }").expect("write shadowed theme");
-    std::fs::write(themes.join("DPC.json5"), "{ styles: {} }").expect("write shadowed theme");
+    std::fs::write(themes.join("tau-dpc.json5"), "{ styles: {} }").expect("write shadowed theme");
+    std::fs::write(themes.join("TAU-DPC.json5"), "{ styles: {} }").expect("write shadowed theme");
     std::fs::write(themes.join("not-a-theme.txt"), "ignored").expect("write ignored file");
     let dirs = tau_config::settings::TauDirs {
         config_dir: Some(temp.path().to_owned()),
@@ -125,9 +126,9 @@ fn available_theme_choices_include_builtins_and_user_themes() {
         .map(|choice| choice.name)
         .collect();
 
-    for name in ["auto", "dark", "light"]
-        .into_iter()
-        .chain(tau_themes::theme::BUILTIN_THEME_NAMES.iter().copied())
+    for name in tau_themes::theme::BUILTIN_THEME_NAMES
+        .iter()
+        .copied()
         .chain(["custom"])
     {
         assert!(names.iter().any(|choice| choice == name), "missing {name}");
@@ -135,11 +136,14 @@ fn available_theme_choices_include_builtins_and_user_themes() {
     assert_eq!(
         names
             .iter()
-            .filter(|choice| choice.as_str() == "dpc")
+            .filter(|choice| choice.as_str() == "tau-dpc")
             .count(),
         1
     );
-    assert!(!names.iter().any(|choice| choice == "DPC"));
+    assert!(!names.iter().any(|choice| choice == "TAU-DPC"));
+    for removed_alias in ["auto", "dark", "light", "default", "dpc", "tau-light"] {
+        assert!(!names.iter().any(|choice| choice == removed_alias));
+    }
     assert!(!names.iter().any(|choice| choice == "not-a-theme"));
 }
 
@@ -155,36 +159,6 @@ fn selected_external_theme_rejects_path_components() {
     let err = select_theme(&dirs, CliTheme::Named("../bad".to_owned())).expect_err("rejects name");
 
     assert!(err.to_string().contains("invalid theme name"));
-}
-
-#[test]
-fn colorfgbg_detects_light_background() {
-    assert_eq!(
-        colorfgbg_terminal_shade_from("0;15"),
-        Some(TerminalShade::Light)
-    );
-    assert_eq!(
-        colorfgbg_terminal_shade_from("0;7"),
-        Some(TerminalShade::Light)
-    );
-}
-
-#[test]
-fn colorfgbg_detects_dark_background() {
-    assert_eq!(
-        colorfgbg_terminal_shade_from("15;0"),
-        Some(TerminalShade::Dark)
-    );
-    assert_eq!(
-        colorfgbg_terminal_shade_from("7;8"),
-        Some(TerminalShade::Dark)
-    );
-}
-
-#[test]
-fn colorfgbg_ignores_malformed_values() {
-    assert_eq!(colorfgbg_terminal_shade_from(""), None);
-    assert_eq!(colorfgbg_terminal_shade_from("0;wat"), None);
 }
 
 #[test]

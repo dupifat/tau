@@ -187,6 +187,24 @@ fn builtin_default_theme_parses_and_uses_safe_colors() {
     assert!(selected.bg.is_none());
 }
 
+/// Ensures the built-in theme registry stays synchronized with name lookup and
+/// does not accidentally keep removed legacy aliases selectable as built-ins.
+#[test]
+fn builtin_theme_names_match_lookup_registry() {
+    for name in BUILTIN_THEME_NAMES {
+        assert!(
+            Theme::builtin_named(name).is_some(),
+            "{name} should resolve"
+        );
+    }
+    for removed_alias in ["default", "dpc", "tau-light", "auto", "dark", "light"] {
+        assert!(
+            Theme::builtin_named(removed_alias).is_none(),
+            "{removed_alias} should not resolve as a built-in"
+        );
+    }
+}
+
 /// Ensures every explicitly configured style in the conservative default theme
 /// stays within the allowed foreground color set and does not set backgrounds.
 #[test]
@@ -209,8 +227,9 @@ fn builtin_default_theme_styles_stay_palette_safe() {
     }
 }
 
-/// Ensures the personalized `dpc` built-in theme parses without snapshotting
-/// any visual choices, so future theme tuning does not churn test expectations.
+/// Ensures the personalized `tau-dpc` built-in theme parses without
+/// snapshotting any visual choices, so future theme tuning does not churn test
+/// expectations.
 #[test]
 fn builtin_dpc_theme_parses() {
     let theme = Theme::builtin_dpc();

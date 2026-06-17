@@ -47,12 +47,12 @@ pub struct Theme {
     styles: HashMap<StyleName, ThemeStyle>,
 }
 
-const BUILTIN_DEFAULT_THEME: &str = include_str!("../themes/default.json5");
-const BUILTIN_DPC_THEME: &str = include_str!("../themes/dpc.json5");
-const BUILTIN_LIGHT_THEME: &str = include_str!("../themes/tau-light.json5");
+const BUILTIN_DEFAULT_THEME: &str = include_str!("../themes/tau-plain-dark.json5");
+const BUILTIN_DPC_THEME: &str = include_str!("../themes/tau-dpc.json5");
+const BUILTIN_LIGHT_THEME: &str = include_str!("../themes/tau-plain-light.json5");
 
 /// User-selectable theme names embedded in Tau.
-pub const BUILTIN_THEME_NAMES: &[&str] = &["default", "dpc", "tau-light"];
+pub const BUILTIN_THEME_NAMES: &[&str] = &["tau-plain-dark", "tau-plain-light", "tau-dpc"];
 
 impl Theme {
     /// Creates an empty theme (everything uses default styling).
@@ -60,7 +60,7 @@ impl Theme {
         Self::default()
     }
 
-    /// Returns the built-in "default" theme.
+    /// Returns the built-in "tau-plain-dark" theme.
     ///
     /// This is the default theme used when no user theme is configured.
     pub fn builtin() -> Self {
@@ -69,19 +69,14 @@ impl Theme {
         Self::parse(BUILTIN_DEFAULT_THEME).expect("built-in default theme is valid JSON5")
     }
 
-    /// Returns the built-in "dpc" theme.
+    /// Returns the built-in "tau-dpc" theme.
     pub fn builtin_dpc() -> Self {
         // The embedded JSON5 is validated by tests; parsing cannot
         // fail at runtime.
         Self::parse(BUILTIN_DPC_THEME).expect("built-in dpc theme is valid JSON5")
     }
 
-    /// Returns the built-in dark-background theme.
-    pub fn builtin_dark() -> Self {
-        Self::builtin_dpc()
-    }
-
-    /// Returns the built-in "tau-light" theme.
+    /// Returns the built-in "tau-plain-light" theme.
     pub fn builtin_light() -> Self {
         // The embedded JSON5 is validated by tests; parsing cannot
         // fail at runtime.
@@ -92,9 +87,9 @@ impl Theme {
     #[must_use]
     pub fn builtin_named(name: &str) -> Option<Self> {
         Some(match name.to_ascii_lowercase().as_str() {
-            "default" => Self::builtin(),
-            "dpc" => Self::builtin_dpc(),
-            "tau-light" => Self::builtin_light(),
+            "tau-plain-dark" => Self::builtin(),
+            "tau-dpc" => Self::builtin_dpc(),
+            "tau-plain-light" => Self::builtin_light(),
             _ => return None,
         })
     }

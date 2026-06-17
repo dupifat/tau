@@ -83,7 +83,7 @@ pub struct CliSettings {
     /// Whether to show a compact indicator when the prompt input is locally
     /// scrolled.
     pub show_prompt_scroll_indicator: bool,
-    /// Which built-in color theme to use for the terminal UI.
+    /// Which terminal color theme selector to use.
     pub theme: CliTheme,
     /// Prompt-text completion rules keyed by word prefix. Values name
     /// the completer to run, optionally followed by completer arguments.
@@ -200,49 +200,39 @@ pub struct CliState {
 }
 /// CLI color theme selection.
 ///
-/// Serialized names are `auto`, `dark`, `light`, or an arbitrary non-empty
-/// named theme resolved by the CLI.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Serialized names are non-empty named built-in or external themes resolved by
+/// the CLI.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CliTheme {
-    /// Choose a built-in theme from terminal background hints when available.
-    #[default]
-    Auto,
-    /// Use the built-in dark-background theme.
-    Dark,
-    /// Use the built-in light-background theme.
-    Light,
-    /// Load a named built-in theme such as `default`, `dpc`, or `tau-light`,
-    /// or an external theme from `themes/<name>.json5`.
+    /// Load a named built-in theme such as `tau-plain-dark`, `tau-plain-light`,
+    /// or `tau-dpc`, or an external theme from `themes/<name>.json5`.
     Named(String),
+}
+
+impl Default for CliTheme {
+    fn default() -> Self {
+        Self::Named("tau-plain-dark".to_owned())
+    }
 }
 
 impl CliTheme {
     /// Parses a user-authored theme name from `cli.yaml` or `TAU_THEME`.
-    ///
-    /// Leading and trailing whitespace is ignored. Built-in names are matched
-    /// case-insensitively after trimming, arbitrary non-empty names become
-    /// [`CliTheme::Named`], and empty or whitespace-only input returns `None`.
+    /// Leading and trailing whitespace is ignored, arbitrary non-empty names
+    /// become [`CliTheme::Named`], and empty or whitespace-only input returns
+    /// `None`.
     #[must_use]
     pub fn parse_name(value: &str) -> Option<Self> {
         let trimmed = value.trim();
         if trimmed.is_empty() {
             return None;
         }
-        Some(match trimmed.to_ascii_lowercase().as_str() {
-            "auto" => Self::Auto,
-            "dark" => Self::Dark,
-            "light" => Self::Light,
-            _ => Self::Named(trimmed.to_owned()),
-        })
+        Some(Self::Named(trimmed.to_owned()))
     }
 
-    /// Returns the normalized name used for serialization and diagnostics.
+    /// Returns the selector name used for serialization and diagnostics.
     #[must_use]
     pub fn as_name(&self) -> &str {
         match self {
-            Self::Auto => "auto",
-            Self::Dark => "dark",
-            Self::Light => "light",
             Self::Named(name) => name,
         }
     }

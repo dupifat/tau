@@ -6,12 +6,6 @@ use std::{fmt, io};
 use tau_config::settings::{CliTheme, TauDirs};
 use tau_themes::{SpanTree, ThemedText};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TerminalShade {
-    Dark,
-    Light,
-}
-
 const THEME_ENV: &str = "TAU_THEME";
 
 pub(crate) fn active_prompt_marker(
@@ -131,12 +125,6 @@ fn select_theme_without_env(
     mode: CliTheme,
 ) -> Result<tau_themes::Theme, ThemeError> {
     match mode {
-        CliTheme::Dark => Ok(tau_themes::Theme::builtin_dark()),
-        CliTheme::Light => Ok(tau_themes::Theme::builtin_light()),
-        CliTheme::Auto => Ok(match detect_terminal_shade() {
-            Some(TerminalShade::Light) => tau_themes::Theme::builtin_light(),
-            Some(TerminalShade::Dark) | None => tau_themes::Theme::builtin_dpc(),
-        }),
         CliTheme::Named(name) => select_named_theme(dirs, &name),
     }
 }
@@ -165,19 +153,9 @@ pub(crate) struct ThemeChoice {
     pub(crate) description: String,
 }
 
-/// Lists built-in aliases and user-defined theme files available to this UI.
+/// Lists built-in and user-defined theme files available to this UI.
 pub(crate) fn available_theme_choices(dirs: &TauDirs) -> Vec<ThemeChoice> {
     let mut choices = BTreeMap::new();
-    for (name, description) in [
-        (
-            "auto",
-            "choose dpc or tau-light from terminal background hints",
-        ),
-        ("dark", "alias for the built-in dpc dark theme"),
-        ("light", "alias for the built-in tau-light theme"),
-    ] {
-        choices.insert(name.to_owned(), description.to_owned());
-    }
     for name in tau_themes::theme::BUILTIN_THEME_NAMES {
         choices.insert((*name).to_owned(), format!("built-in {name} theme"));
     }
@@ -205,9 +183,9 @@ fn external_theme_names(dirs: &TauDirs) -> Vec<String> {
             return Vec::new();
         }
     };
-    let builtin_or_aliases: BTreeSet<String> = ["auto", "dark", "light"]
-        .into_iter()
-        .chain(tau_themes::theme::BUILTIN_THEME_NAMES.iter().copied())
+    let builtin_names: BTreeSet<String> = tau_themes::theme::BUILTIN_THEME_NAMES
+        .iter()
+        .copied()
         .map(str::to_ascii_lowercase)
         .collect();
     let mut names = Vec::new();
@@ -223,9 +201,7 @@ fn external_theme_names(dirs: &TauDirs) -> Vec<String> {
             continue;
         };
         let normalized_stem = stem.to_ascii_lowercase();
-        if builtin_or_aliases.contains(&normalized_stem)
-            || validate_external_theme_name(stem).is_err()
-        {
+        if builtin_names.contains(&normalized_stem) || validate_external_theme_name(stem).is_err() {
             continue;
         }
         names.push(stem.to_owned());
@@ -272,11 +248,7 @@ pub(crate) enum ThemeError {
 }
 
 fn builtin_theme_list() -> String {
-    ["auto", "dark", "light"]
-        .into_iter()
-        .chain(tau_themes::theme::BUILTIN_THEME_NAMES.iter().copied())
-        .collect::<Vec<_>>()
-        .join(", ")
+    tau_themes::theme::BUILTIN_THEME_NAMES.join(", ")
 }
 
 impl fmt::Display for ThemeError {
@@ -308,23 +280,6 @@ impl fmt::Display for ThemeError {
 }
 
 impl std::error::Error for ThemeError {}
-
-fn detect_terminal_shade() -> Option<TerminalShade> {
-    colorfgbg_terminal_shade()
-}
-
-fn colorfgbg_terminal_shade() -> Option<TerminalShade> {
-    let value = std::env::var("COLORFGBG").ok()?;
-    colorfgbg_terminal_shade_from(&value)
-}
-
-fn colorfgbg_terminal_shade_from(value: &str) -> Option<TerminalShade> {
-    let bg = value.rsplit([';', ':']).next()?.parse::<u8>().ok()?;
-    match bg {
-        7 | 15 => Some(TerminalShade::Light),
-        _ => Some(TerminalShade::Dark),
-    }
-}
 
 #[cfg(test)]
 mod tests;

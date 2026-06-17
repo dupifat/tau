@@ -156,112 +156,34 @@ fn nested_spans_inherit_and_override_styles() {
     assert!(resolved[1].style.italic);
 }
 
+/// Ensures the default built-in theme parses and remains free of hard-coded
+/// palette assumptions for representative styles that would otherwise be easy
+/// to make unreadable on unusual terminal color schemes.
 #[test]
-fn builtin_theme_parses() {
+fn builtin_default_theme_parses_and_stays_palette_safe() {
     let theme = Theme::builtin();
 
-    // Spot-check a few expected styles.
     let prompt = theme.resolve_style(&StyleName::new("user.prompt"));
     assert!(prompt.bold);
     assert!(prompt.fg.is_none());
-
-    let tool_err = theme.resolve_style(&StyleName::new("tool.status.error"));
-    assert_eq!(tool_err.fg, Some(Color::Red));
-
-    let tool_ok = theme.resolve_style(&StyleName::new("tool.status.success"));
-    assert_eq!(tool_ok.fg, Some(Color::Green));
-
-    let tool_mode = theme.resolve_style(&StyleName::new(crate::names::TOOL_MODE));
-    assert_eq!(tool_mode.fg, Some(Color::Yellow));
-
-    let tool_time = theme.resolve_style(&StyleName::new(crate::names::TOOL_STATUS_TIME));
-    assert_eq!(tool_time.fg, Some(Color::DarkGrey));
-
-    let progress = theme.resolve_style(&StyleName::new(crate::names::PROGRESS_INDICATOR));
-    assert_eq!(progress.fg, Some(Color::Cyan));
-    assert!(progress.bold);
-
-    let prompt_cwd = theme.resolve_style(&StyleName::new(crate::names::PROMPT_CWD));
-    assert_eq!(prompt_cwd.fg, Some(Color::DarkGrey));
-
-    let extension_status = theme.resolve_style(&StyleName::new("extension.status"));
-    assert_eq!(extension_status, ThemeStyle::default());
-
-    let session_status = theme.resolve_style(&StyleName::new("session.status"));
-    assert_eq!(session_status, ThemeStyle::default());
+    assert!(prompt.bg.is_none());
 
     let selected = theme.resolve_style(&StyleName::new("completion.selected"));
     assert!(selected.bold);
-    assert_eq!(selected.fg, Some(Color::White));
-    assert_eq!(selected.bg, Some(Color::DarkBlue));
+    assert!(selected.underline);
+    assert!(selected.fg.is_none());
+    assert!(selected.bg.is_none());
 
-    let redraw_counter = theme.resolve_style(&StyleName::new("redraw.counter"));
-    assert_eq!(redraw_counter.fg, Some(Color::Red));
+    let tool_err = theme.resolve_style(&StyleName::new("tool.status.error"));
+    assert_eq!(tool_err, ThemeStyle::default());
+}
 
-    let token_stats = theme.resolve_style(&StyleName::new("token.stats"));
-    assert_eq!(token_stats.fg, Some(Color::DarkGrey));
-
-    let delta = theme.resolve_style(&StyleName::new("token.stats.symbol.delta"));
-    assert!(delta.bold);
-
-    let sigma = theme.resolve_style(&StyleName::new("token.stats.symbol.sigma"));
-    assert!(sigma.bold);
-
-    let markdown_strong = theme.resolve_style(&StyleName::new(crate::names::MARKDOWN_STRONG));
-    assert!(markdown_strong.bold);
-
-    let markdown_emphasis = theme.resolve_style(&StyleName::new(crate::names::MARKDOWN_EMPHASIS));
-    assert!(markdown_emphasis.bold);
-
-    let markdown_heading = theme.resolve_style(&StyleName::new(crate::names::MARKDOWN_HEADING));
-    assert!(markdown_heading.bold);
-    assert_eq!(
-        markdown_heading.fg,
-        Some(Color::Rgb {
-            r: 0x80,
-            g: 0xff,
-            b: 0xff,
-        })
-    );
-    assert!(!markdown_heading.underline);
-
-    let markdown_strikethrough =
-        theme.resolve_style(&StyleName::new(crate::names::MARKDOWN_STRIKETHROUGH));
-    assert!(markdown_strikethrough.strikethrough);
-    assert_eq!(markdown_strikethrough.fg, Some(Color::DarkGrey));
-
-    let markdown_list_marker =
-        theme.resolve_style(&StyleName::new(crate::names::MARKDOWN_LIST_MARKER));
-    assert!(markdown_list_marker.bold);
-    assert_eq!(
-        markdown_list_marker.fg,
-        Some(Color::Rgb {
-            r: 0x80,
-            g: 0xff,
-            b: 0xff,
-        })
-    );
-
-    let markdown_code = theme.resolve_style(&StyleName::new(crate::names::MARKDOWN_CODE));
-    assert_eq!(
-        markdown_code.fg,
-        Some(Color::Rgb {
-            r: 0x66,
-            g: 0xaa,
-            b: 0xff,
-        })
-    );
-    assert_eq!(markdown_code.bg, None);
-
-    let markdown_escape = theme.resolve_style(&StyleName::new(crate::names::MARKDOWN_ESCAPE));
-    assert_eq!(
-        markdown_escape.bg,
-        Some(Color::Rgb {
-            r: 0x2a,
-            g: 0x20,
-            b: 0x30,
-        })
-    );
+/// Ensures the personalized `dpc` built-in theme parses without snapshotting
+/// any visual choices, so future theme tuning does not churn test expectations.
+#[test]
+fn builtin_dpc_theme_parses() {
+    let theme = Theme::builtin_dpc();
+    let _ = theme.resolve_style(&StyleName::new("user.prompt"));
 }
 
 #[test]
@@ -280,81 +202,12 @@ fn theme_rejects_unknown_fields() {
     assert!(error.to_string().contains("unknown field"), "got: {error}");
 }
 
+/// Ensures the light built-in theme parses without snapshotting its visual
+/// choices, which are intentionally independent from renderer behavior tests.
 #[test]
 fn builtin_light_theme_parses() {
     let theme = Theme::builtin_light();
-
-    // Light mode intentionally uses darker colors for contrast on a
-    // bright terminal background while preserving the dark theme's
-    // semantic style names.
-    let tool_err = theme.resolve_style(&StyleName::new("tool.status.error"));
-    assert_eq!(tool_err.fg, Some(Color::DarkRed));
-
-    let tool_ok = theme.resolve_style(&StyleName::new("tool.status.success"));
-    assert_eq!(tool_ok.fg, Some(Color::DarkGreen));
-
-    let tool_mode = theme.resolve_style(&StyleName::new(crate::names::TOOL_MODE));
-    assert_eq!(tool_mode.fg, Some(Color::DarkYellow));
-
-    let tool_time = theme.resolve_style(&StyleName::new(crate::names::TOOL_STATUS_TIME));
-    assert_eq!(tool_time.fg, Some(Color::DarkGrey));
-
-    let progress = theme.resolve_style(&StyleName::new(crate::names::PROGRESS_INDICATOR));
-    assert_eq!(progress.fg, Some(Color::DarkCyan));
-    assert!(progress.bold);
-
-    let prompt_cwd = theme.resolve_style(&StyleName::new(crate::names::PROMPT_CWD));
-    assert_eq!(prompt_cwd.fg, Some(Color::DarkBlue));
-
-    let selected = theme.resolve_style(&StyleName::new("completion.selected"));
-    assert!(selected.bold);
-    assert_eq!(selected.fg, Some(Color::Black));
-    assert_eq!(selected.bg, Some(Color::Cyan));
-
-    let token_stats = theme.resolve_style(&StyleName::new("token.stats"));
-    assert_eq!(token_stats.fg, Some(Color::Grey));
-
-    let markdown_strong = theme.resolve_style(&StyleName::new(crate::names::MARKDOWN_STRONG));
-    assert!(markdown_strong.bold);
-
-    let markdown_emphasis = theme.resolve_style(&StyleName::new(crate::names::MARKDOWN_EMPHASIS));
-    assert!(markdown_emphasis.bold);
-
-    let markdown_heading = theme.resolve_style(&StyleName::new(crate::names::MARKDOWN_HEADING));
-    assert!(markdown_heading.bold);
-    assert_eq!(markdown_heading.fg, Some(Color::Blue));
-    assert!(!markdown_heading.underline);
-
-    let markdown_strikethrough =
-        theme.resolve_style(&StyleName::new(crate::names::MARKDOWN_STRIKETHROUGH));
-    assert!(markdown_strikethrough.strikethrough);
-    assert_eq!(markdown_strikethrough.fg, Some(Color::DarkGrey));
-
-    let markdown_list_marker =
-        theme.resolve_style(&StyleName::new(crate::names::MARKDOWN_LIST_MARKER));
-    assert!(markdown_list_marker.bold);
-    assert_eq!(markdown_list_marker.fg, Some(Color::Blue));
-
-    let markdown_code = theme.resolve_style(&StyleName::new(crate::names::MARKDOWN_CODE));
-    assert_eq!(
-        markdown_code.fg,
-        Some(Color::Rgb {
-            r: 0x00,
-            g: 0x5f,
-            b: 0xff,
-        })
-    );
-    assert_eq!(markdown_code.bg, None);
-
-    let markdown_escape = theme.resolve_style(&StyleName::new(crate::names::MARKDOWN_ESCAPE));
-    assert_eq!(
-        markdown_escape.bg,
-        Some(Color::Rgb {
-            r: 0xf1,
-            g: 0xe8,
-            b: 0xf5,
-        })
-    );
+    let _ = theme.resolve_style(&StyleName::new("user.prompt"));
 }
 
 #[test]

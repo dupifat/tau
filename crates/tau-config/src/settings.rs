@@ -211,8 +211,8 @@ pub enum CliTheme {
     Dark,
     /// Use the built-in light-background theme.
     Light,
-    /// Load a named built-in theme or an external theme from
-    /// `themes/<name>.json5`.
+    /// Load a named built-in theme such as `default`, `dpc`, or `tau-light`,
+    /// or an external theme from `themes/<name>.json5`.
     Named(String),
 }
 

@@ -47,7 +47,8 @@ pub struct Theme {
     styles: HashMap<StyleName, ThemeStyle>,
 }
 
-const BUILTIN_DARK_THEME: &str = include_str!("../themes/tau.json5");
+const BUILTIN_DEFAULT_THEME: &str = include_str!("../themes/default.json5");
+const BUILTIN_DPC_THEME: &str = include_str!("../themes/dpc.json5");
 const BUILTIN_LIGHT_THEME: &str = include_str!("../themes/tau-light.json5");
 
 impl Theme {
@@ -56,18 +57,25 @@ impl Theme {
         Self::default()
     }
 
-    /// Returns the built-in "tau" dark theme.
+    /// Returns the built-in "default" theme.
     ///
     /// This is the default theme used when no user theme is configured.
     pub fn builtin() -> Self {
-        Self::builtin_dark()
-    }
-
-    /// Returns the built-in "tau" dark theme.
-    pub fn builtin_dark() -> Self {
         // The embedded JSON5 is validated by tests; parsing cannot
         // fail at runtime.
-        Self::parse(BUILTIN_DARK_THEME).expect("built-in dark theme is valid JSON5")
+        Self::parse(BUILTIN_DEFAULT_THEME).expect("built-in default theme is valid JSON5")
+    }
+
+    /// Returns the built-in "dpc" theme.
+    pub fn builtin_dpc() -> Self {
+        // The embedded JSON5 is validated by tests; parsing cannot
+        // fail at runtime.
+        Self::parse(BUILTIN_DPC_THEME).expect("built-in dpc theme is valid JSON5")
+    }
+
+    /// Returns the built-in dark-background theme.
+    pub fn builtin_dark() -> Self {
+        Self::builtin_dpc()
     }
 
     /// Returns the built-in "tau-light" theme.

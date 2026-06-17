@@ -749,19 +749,22 @@ avoid full repaints on each token.
 
 ### Theming
 
-The UI ships with built-in dark and light "tau" themes. `cli.yaml` can set
-`theme: dark`, `theme: light`, `theme: auto`, `theme: tau`, `theme: tau-light`,
-or a custom theme name; `TAU_THEME` accepts the same names and overrides config
-for one process. Auto currently uses terminal background hints such as
-`COLORFGBG` and falls back to dark. Custom themes load from
-`~/.config/tau/themes/<name>.json5` (or the active Tau config directory) and
-Tau fails visibly if a configured theme is missing or malformed. Themes map
+The UI ships with a conservative built-in `default` theme that avoids hard-coded
+foreground/background colors so it remains readable on unusual terminal palettes.
+More opinionated built-ins include `dpc` (the previous Tau theme) and
+`tau-light`. `cli.yaml` can set `theme: default`, `theme: dpc`,
+`theme: tau-light`, the legacy shade aliases `theme: dark`, `theme: light`,
+`theme: auto`, or a custom theme name; `TAU_THEME` accepts the same names and
+overrides config for one process. Auto currently uses terminal background hints
+such as `COLORFGBG` and falls back to the `dpc` dark theme. Custom themes load
+from `~/.config/tau/themes/<name>.json5` (or the active Tau config directory)
+and Tau fails visibly if a configured theme is missing or malformed. Themes map
 semantic style names (`prompt.marker`, `prompt.cwd`, `banner.accent`,
 `system.info`, diff hunks, reasoning blocks, …) to terminal attributes. Style
 attributes include `fg`, `bg`, `bold`, `underline`, `italic`, and
 `strikethrough`; `strikethrough` maps to terminal crossed-out SGR where the
-terminal supports it. See `crates/tau-themes/themes/tau.json5` and
-`tau-light.json5` for the full style key list.
+terminal supports it. See `crates/tau-themes/themes/default.json5`, `dpc.json5`,
+and `tau-light.json5` for built-in examples.
 
 ### Session resume and detach
 

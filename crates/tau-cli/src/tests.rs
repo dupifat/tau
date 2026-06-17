@@ -23,6 +23,34 @@ use super::chat::{
 };
 use super::event_renderer::EventRenderer;
 
+fn cli_test_theme() -> tau_themes::Theme {
+    tau_themes::Theme::parse(
+        r##"
+        {
+            styles: {
+                "tool.mode": { fg: "yellow" },
+                "tool.status.success": { fg: "green" },
+                "tool.status.error": { fg: "red" },
+                "status.agents": { fg: "cyan" },
+                "diff.added": { fg: "dark_green" },
+                "diff.removed": { fg: "dark_red" },
+                "diff.added.inline": { fg: "green", bold: true },
+                "diff.removed.inline": { fg: "red", bold: true },
+                "action.label": { fg: "dark_grey" },
+                "action.id": { fg: "yellow", bold: true },
+                "action.error": { fg: "red" },
+                "token.stats": { fg: "dark_grey" },
+                "token.stats.symbol.delta": { bold: true },
+                "token.stats.symbol.sigma": { bold: true },
+                "token.stats.metric.cache_warn": { fg: "dark_yellow" },
+                "token.stats.metric.cache_miss": { fg: "red" },
+            }
+        }
+        "##,
+    )
+    .expect("CLI test theme parses")
+}
+
 fn agent_id(value: &str) -> tau_proto::AgentId {
     tau_proto::AgentId::parse(value).expect("valid test agent id")
 }
@@ -104,7 +132,7 @@ fn renderer_learns_agent_from_tool_started_event() {
     let mut renderer = EventRenderer::new(
         handle,
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     let event = Event::ToolStarted(tau_proto::ToolStarted {
         call_id: "hidden-tool".into(),
@@ -418,7 +446,7 @@ fn renderer_tracks_custom_prompts_from_harness_event() {
     let mut renderer = EventRenderer::new(
         handle,
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     let prompt = tau_proto::HarnessCustomPrompt {
         id: "review".to_owned(),
@@ -610,7 +638,7 @@ fn renderer_starts_without_selected_or_default_agent() {
     let renderer = EventRenderer::new(
         handle,
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     assert_eq!(
@@ -645,7 +673,7 @@ fn first_agent_prompt_created_selects_new_agent_and_new_session_clears_it() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::SessionStarted(SessionStarted {
@@ -697,7 +725,7 @@ fn initial_session_started_renders_session_status_without_role_placeholder() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::SessionStarted(SessionStarted {
@@ -719,7 +747,7 @@ fn extension_prompt_with_target_does_not_select_from_empty_state() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "s1".into(),
@@ -782,7 +810,7 @@ fn replayed_durable_first_user_prompt_selects_live_agent() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::SessionStarted(SessionStarted {
@@ -1003,7 +1031,7 @@ fn first_agent_event_does_not_force_full_redraw() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
         session_id: "s1".into(),
@@ -1034,7 +1062,7 @@ fn new_agent_after_new_session_does_not_force_full_redraw() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "s1".into(),
@@ -1076,7 +1104,7 @@ fn selecting_same_agent_does_not_force_full_redraw() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     renderer.switch_agent("worker-1".to_owned());
     sync(&handle);
@@ -1097,7 +1125,7 @@ fn switching_between_displayed_agents_restores_transcripts() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     renderer.switch_agent("worker-1".to_owned());
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
@@ -1139,7 +1167,7 @@ fn switching_agents_preserves_turn_stats_cache_hit_baseline() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     renderer.apply_setting("show-turn-stats", "true");
     renderer.switch_agent("worker-1".to_owned());
@@ -1181,7 +1209,7 @@ fn switching_to_hidden_agent_preserves_turn_stats_cache_hit_baseline() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     renderer.apply_setting("show-turn-stats", "true");
     renderer.switch_agent("worker-1".to_owned());
@@ -1219,7 +1247,7 @@ fn extension_context_ready_routes_to_agent_ui_state() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::ExtensionContextReady(
@@ -1242,7 +1270,7 @@ fn hidden_agent_events_do_not_force_visible_full_redraw() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
         session_id: "s1".into(),
@@ -1278,7 +1306,7 @@ fn delegate_progress_does_not_overwrite_display_name_with_task_name() {
     let mut renderer = EventRenderer::new(
         handle,
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
@@ -1319,7 +1347,7 @@ fn suspended_agent_stays_blocked_after_lifecycle_updates_until_resume() {
     let mut renderer = EventRenderer::new(
         handle,
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
@@ -1394,7 +1422,7 @@ fn selected_suspended_agent_placeholder_refreshes_until_resume() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
@@ -1427,7 +1455,7 @@ fn delegated_agent_is_active_until_start_agent_result() {
     let mut renderer = EventRenderer::new(
         handle,
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
@@ -1474,7 +1502,7 @@ fn extension_agent_prompt_lifecycle_is_active_until_response_finishes() {
     let mut renderer = EventRenderer::new(
         handle,
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::AgentPromptCreated(AgentPromptCreated {
@@ -1553,7 +1581,7 @@ fn clearing_selected_agent_preserves_previous_transcript() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
@@ -1587,7 +1615,7 @@ fn new_session_resets_agent_transcripts() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
         query_id: "q-worker".to_owned(),
@@ -1617,7 +1645,7 @@ fn hidden_agent_activity_keeps_global_in_progress() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     let in_progress = renderer.agent_in_progress_state();
     renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
@@ -1651,7 +1679,7 @@ fn switched_agent_shows_its_tool_usage() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
         session_id: "s1".into(),
@@ -1710,7 +1738,7 @@ fn delegate_progress_routes_to_hidden_tool_owner() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
         session_id: "s1".into(),
@@ -1784,7 +1812,7 @@ fn shell_progress_routes_to_command_owner_after_agent_switch() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
         session_id: "s1".into(),
@@ -1834,7 +1862,7 @@ fn shell_command_target_field_survives_switch_before_echo_and_replay() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
         session_id: "s1".into(),
@@ -1874,7 +1902,7 @@ fn shell_command_target_field_survives_switch_before_echo_and_replay() {
     let mut replay = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     replay.handle(&Event::SessionStarted(tau_proto::SessionStarted {
         session_id: "s1".into(),
@@ -1906,7 +1934,7 @@ fn replay_learns_side_agent_from_durable_agent_prompt_submission() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
         session_id: "s1".into(),
@@ -1950,7 +1978,7 @@ fn agent_switch_preserves_separate_transcripts() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
         session_id: "s1".into(),
@@ -1998,7 +2026,7 @@ fn deselect_then_first_prompt_for_new_agent_does_not_inherit_prior_transcript() 
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
         session_id: "s1".into(),
@@ -2042,7 +2070,7 @@ fn queued_prompt_from_old_agent_does_not_steal_no_agent_selection() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
         session_id: "s1".into(),
@@ -2112,7 +2140,7 @@ fn queued_prompt_selects_agent_from_empty_state() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::AgentPromptQueued(AgentPromptQueued {
@@ -2142,7 +2170,7 @@ fn manual_compaction_selects_agent_from_empty_state() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::AgentCompactionTriggered(AgentCompactionTriggered {
@@ -2304,7 +2332,7 @@ fn agent_messages_render_all_recipients_as_history() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&agent_message(
@@ -2336,7 +2364,7 @@ fn show_messages_none_leaves_no_visible_message_output() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     let before = visible_lines(&vt, 80);
 
@@ -2359,7 +2387,7 @@ fn user_recipient_agent_messages_broadcast_to_visible_agent_even_when_hidden() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
@@ -2385,7 +2413,7 @@ fn show_messages_summary_modes_do_not_show_body() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.apply_setting("show-messages", "all-summary");
@@ -2406,7 +2434,7 @@ fn show_messages_toggle_retroactively_hides_and_shows_history() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.apply_setting("show-messages", "none");
@@ -2432,7 +2460,7 @@ fn new_session_clears_session_ui_state() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
@@ -2508,7 +2536,7 @@ fn new_session_replays_startup_context_and_kept_extensions() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::ExtAgentsMdAvailable(ExtAgentsMdAvailable {
@@ -2537,7 +2565,7 @@ fn minimal_status_hides_normal_harness_info_but_keeps_important() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     renderer.apply_setting("show-status", "minimal");
 
@@ -2564,7 +2592,7 @@ fn minimal_status_hides_routine_extension_status() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     renderer.apply_setting("show-status", "minimal");
 
@@ -2587,7 +2615,7 @@ fn new_session_preserves_role_status() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
@@ -2617,7 +2645,7 @@ fn model_status_uses_symbol_prefixed_chips() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
@@ -2661,7 +2689,7 @@ fn status_identity_matches_no_agent_placeholder_semantics() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
@@ -2724,7 +2752,7 @@ fn status_agent_chip_keeps_id_primary_and_display_name_secondary() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::SessionStarted(SessionStarted {
@@ -2763,7 +2791,7 @@ fn model_status_shows_context_window_until_usage_is_known() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
@@ -2789,7 +2817,7 @@ fn focused_agent_context_usage_event_replaces_unknown_context_window() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
@@ -2828,7 +2856,7 @@ fn model_status_shows_main_tool_usage_before_context() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
@@ -3042,7 +3070,7 @@ fn agent_in_progress_ignores_completed_replayed_prompt_history() {
     let mut renderer = EventRenderer::new(
         handle,
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     let in_progress = renderer.agent_in_progress_state();
 
@@ -3073,7 +3101,7 @@ fn prompt_termination_clears_live_response_and_activity() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     let in_progress = renderer.agent_in_progress_state();
 
@@ -3105,7 +3133,7 @@ fn agent_in_progress_clears_when_tool_is_cancelled() {
     let mut renderer = EventRenderer::new(
         handle,
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     let in_progress = renderer.agent_in_progress_state();
 
@@ -3141,7 +3169,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::HarnessRoleSelected(HarnessRoleSelected {
@@ -3284,7 +3312,7 @@ fn role_default_knobs_are_hidden_and_overrides_follow_role() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::HarnessRolesAvailable(HarnessRolesAvailable {
@@ -3353,7 +3381,7 @@ fn role_state_overrides_are_compared_to_role_baseline() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     // HarnessRolesAvailable describes the current role including
@@ -3402,7 +3430,7 @@ fn single_prompt_response_cycle() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     // User submits prompt.
@@ -3453,7 +3481,7 @@ fn thinking_renders_as_separate_block_above_response() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
@@ -3542,7 +3570,7 @@ fn set_show_thinking_round_trip_restores_history() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
@@ -3623,7 +3651,7 @@ fn thinking_created_while_off_stays_invisible_after_toggle_on() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     renderer.apply_setting("show-thinking", "false");
 
@@ -3664,7 +3692,7 @@ fn no_thinking_block_when_summary_absent() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
@@ -3699,7 +3727,7 @@ fn queued_prompt_renders_after_first_completes() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     // First prompt.
@@ -3802,7 +3830,7 @@ fn queued_prompt_then_late_ui_submit_advances_without_duplicate() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     // Regression: replay/late-subscribe paths can observe a queued event before
@@ -3841,7 +3869,7 @@ fn queued_prompt_steered_promotes_without_duplicate() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     // Regression: steering folds a queued prompt into the in-flight turn
@@ -3893,7 +3921,7 @@ fn internal_prompt_events_are_hidden() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     // Background tool completion prompts are delivered to the model as
@@ -3933,7 +3961,7 @@ fn queued_prompt_does_not_replace_dispatched_same_text() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     // Regression: once a local echo has been accepted as a normal prompt,
@@ -3976,7 +4004,7 @@ fn three_queued_prompts_render_sequentially() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     // Three rapid prompts.
@@ -4048,7 +4076,7 @@ fn streaming_indicator_appends_during_updates() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
@@ -4077,7 +4105,7 @@ fn streaming_indicator_appends_during_updates() {
 
 #[test]
 fn render_compaction_block_styles_completed_status() {
-    let theme = tau_themes::Theme::builtin();
+    let theme = cli_test_theme();
 
     let block = render_compaction_block(&theme, "ok", CompactionStatus::Success);
     let spans = block.content.spans();
@@ -4097,7 +4125,7 @@ fn render_empty_provider_response_placeholder_without_context_item() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     // Regression: the empty-response notice is a CLI presentation fallback, not
@@ -4117,7 +4145,7 @@ fn render_provider_error_from_non_context_field() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     let mut finished = finished_response("sp-error", Vec::new());
     finished.stop_reason = ProviderStopReason::Error;
@@ -4138,7 +4166,7 @@ fn manual_compaction_trigger_does_not_render_progress_status() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::AgentCompactionTriggered(AgentCompactionTriggered {
@@ -4157,7 +4185,7 @@ fn render_provider_compaction_update_as_compact_progress() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::ProviderResponseUpdated(ProviderResponseUpdated {
@@ -4184,7 +4212,7 @@ fn render_provider_compaction_item_when_response_finishes() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     // Regression: a manual trigger event only records the user request. The UI
@@ -4211,7 +4239,7 @@ fn delegate_progress_redraws_live_parent_block() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     let delegate_args = CborValue::Map(vec![(
@@ -4286,7 +4314,7 @@ fn provider_tool_error_before_tool_started_is_ignored() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle_recorded_at(
@@ -4330,7 +4358,7 @@ fn logical_and_provider_tool_errors_render_one_terminal_line() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle_recorded_at(
@@ -4378,7 +4406,7 @@ fn provider_tool_error_without_logical_tool_error_does_not_finish_live_tool() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle_recorded_at(
@@ -4423,7 +4451,7 @@ fn running_tool_call_shows_ellipsis_until_result() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle_recorded_at(
@@ -4500,7 +4528,7 @@ fn tool_progress_display_replaces_live_state_generically() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle_recorded_at(
@@ -4539,7 +4567,7 @@ fn tool_started_renders_pending_until_provider_progress() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle_recorded_at(
@@ -4583,7 +4611,7 @@ fn backgrounded_tool_stays_visibly_running_until_background_result() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     let in_progress = renderer.agent_in_progress_state();
 
@@ -4688,7 +4716,7 @@ fn running_shell_tool_shows_multiline_command_body_in_full_mode() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     let command = "printf hello\nprintf world";
 
@@ -4784,7 +4812,7 @@ fn finished_tool_result_preserves_message_and_tool_item_order() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::ProviderResponseFinished(finished_response(
@@ -4848,7 +4876,7 @@ fn live_tool_timer_updates_do_not_mutate_scrolled_history() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::ProviderResponseFinished(finished_response(
@@ -4896,7 +4924,7 @@ fn live_multiline_payload_tool_uses_static_duration_placeholder() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     renderer.apply_setting("show-tools", "compact");
     let args = CborValue::Map(vec![(
@@ -4981,7 +5009,7 @@ fn show_tools_summarize_turn_summarizes_tool_batch() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     renderer.apply_setting("show-tools", "summarize-turn");
 
@@ -5057,7 +5085,7 @@ fn show_tools_summarize_prompt_aggregates_across_tool_followups() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     renderer.apply_setting("show-tools", "summarize-prompt");
 
@@ -5143,7 +5171,7 @@ fn show_tools_compact_hides_payload_body() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     renderer.apply_setting("show-tools", "compact");
 
@@ -5209,7 +5237,7 @@ fn show_tools_off_hides_tool_blocks() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
     renderer.apply_setting("show-tools", "off");
 
@@ -5246,7 +5274,7 @@ fn websearch_tool_result_shows_result_count_and_size() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::ToolResult(ToolResult {
@@ -5280,7 +5308,7 @@ fn streaming_block_does_not_duplicate_on_finish() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
@@ -5326,7 +5354,7 @@ fn agents_md_loaded_event_shows_output_stats() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::ExtAgentsMdAvailable(ExtAgentsMdAvailable {
@@ -5391,7 +5419,7 @@ fn render_tool_use_state_keeps_range_separate_from_args() {
 }
 #[test]
 fn running_shell_display_keeps_mode_separate_for_dedicated_style() {
-    let theme = tau_themes::Theme::builtin();
+    let theme = cli_test_theme();
     let display = tau_proto::ToolUseState {
         args: "printf hello".to_owned(),
         mode: "rw".to_owned(),
@@ -5420,7 +5448,7 @@ fn running_shell_display_keeps_mode_separate_for_dedicated_style() {
 fn render_tool_block_paints_mode_with_dedicated_style() {
     use tau_proto::{ToolUseState, ToolUseStatus};
 
-    let theme = tau_themes::Theme::builtin();
+    let theme = cli_test_theme();
     let display = ToolUseState {
         mode: "rw".into(),
         args: "printf hello".into(),
@@ -5530,7 +5558,7 @@ fn render_delegate_display_styles_agent_id_like_status_bar() {
 
     // Regression: the delegated agent id is visually the same semantic chip as
     // the bottom status-bar agent id, not part of the free-form tool args string.
-    let theme = tau_themes::Theme::builtin();
+    let theme = cli_test_theme();
     let display = ToolUseState {
         args: "[probe]".into(),
         status: ToolUseStatus::InProgress,
@@ -5758,7 +5786,7 @@ fn render_diff_tool_block_uses_unified_diff_line_prefixes() {
         }],
     };
 
-    let block = render_diff_tool_block(&tau_themes::Theme::builtin(), &display, &diff, true);
+    let block = render_diff_tool_block(&cli_test_theme(), &display, &diff, true);
     let text: String = block
         .content
         .spans()
@@ -5865,7 +5893,7 @@ fn render_multi_diff_tool_block_preserves_file_boundaries() {
 
     let suffixes: Vec<&str> = display.suffixes.iter().map(|s| s.text.as_str()).collect();
     assert_eq!(suffixes, vec!["+1", "-1", "ok"]);
-    let block = render_multi_diff_tool_block(&tau_themes::Theme::builtin(), &display, &files, true);
+    let block = render_multi_diff_tool_block(&cli_test_theme(), &display, &files, true);
     let text: String = block
         .content
         .spans()
@@ -5902,7 +5930,7 @@ fn fallback_error_status_is_abbreviated_only_by_renderer() {
     assert!(!display.status_text.contains('…'));
 
     let rendered = render_tool_use_state("ls", &display);
-    let block = render_tool_block(&tau_themes::Theme::builtin(), &rendered);
+    let block = render_tool_block(&cli_test_theme(), &rendered);
     let text: String = block
         .content
         .spans()
@@ -5954,7 +5982,7 @@ fn render_tool_block_abbreviates_inline_args_and_error_but_preserves_payload() {
         ..Default::default()
     };
     let rendered = render_tool_use_state("grep", &display);
-    let block = render_tool_block(&tau_themes::Theme::builtin(), &rendered);
+    let block = render_tool_block(&cli_test_theme(), &rendered);
     let text: String = block
         .content
         .spans()
@@ -5974,7 +6002,7 @@ fn render_shell_block_abbreviates_inline_command_and_status_but_preserves_output
     let command = "printf 1234567890123456789012345678901234567890";
     let status = "err: command failed after printing a very long diagnostic";
     let output = "full output line one\nfull output line two";
-    let block = render_shell_block(&tau_themes::Theme::builtin(), command, output, Some(status));
+    let block = render_shell_block(&cli_test_theme(), command, output, Some(status));
     let text: String = block
         .content
         .spans()
@@ -6104,7 +6132,7 @@ fn format_turn_stats_line_shows_zero_hit_when_no_prompt_sent() {
 
 #[test]
 fn render_action_output_block_highlights_approval_ids_and_labels() {
-    let theme = tau_themes::Theme::builtin();
+    let theme = cli_test_theme();
     let block = render_action_output_block(
         &theme,
         "Incoming approval 7\nstatus: pending\n8 account=personal folder=INBOX\n",
@@ -6138,7 +6166,7 @@ fn render_action_output_block_highlights_approval_ids_and_labels() {
 
 #[test]
 fn render_action_error_block_uses_action_error_styles() {
-    let theme = tau_themes::Theme::builtin();
+    let theme = cli_test_theme();
     let block = render_action_error_block(&theme, "7", "invalid input");
     let spans = block.content.spans();
     let id_style = tau_cli_term::resolve::resolve(&theme, tau_themes::names::ACTION_ID);
@@ -6171,13 +6199,8 @@ fn render_turn_stats_block_uses_dedicated_styles() {
         prompt_sent_tokens: 1_000,
         ..Default::default()
     };
-    let block = render_turn_stats_block(
-        &tau_themes::Theme::builtin(),
-        &usage,
-        Some(&previous_usage),
-        None,
-        None,
-    );
+    let block =
+        render_turn_stats_block(&cli_test_theme(), &usage, Some(&previous_usage), None, None);
     let spans = block.content.spans();
 
     assert_eq!(spans[0].text, "Δ");
@@ -6213,13 +6236,8 @@ fn render_turn_stats_block_greys_cache_hit_within_512_rounding_bucket() {
         prompt_sent_tokens: 19_500,
         ..Default::default()
     };
-    let block = render_turn_stats_block(
-        &tau_themes::Theme::builtin(),
-        &usage,
-        Some(&previous_usage),
-        None,
-        None,
-    );
+    let block =
+        render_turn_stats_block(&cli_test_theme(), &usage, Some(&previous_usage), None, None);
     let spans = block.content.spans();
 
     assert_eq!(spans[1].text, "99% 19.4k/19.5k");
@@ -6245,13 +6263,8 @@ fn render_turn_stats_block_warns_cache_hit_above_90_percent() {
         prompt_sent_tokens: 10_000,
         ..Default::default()
     };
-    let block = render_turn_stats_block(
-        &tau_themes::Theme::builtin(),
-        &usage,
-        Some(&previous_usage),
-        None,
-        None,
-    );
+    let block =
+        render_turn_stats_block(&cli_test_theme(), &usage, Some(&previous_usage), None, None);
     let spans = block.content.spans();
 
     assert_eq!(spans[1].text, "91% 9.1k/10k");
@@ -6277,13 +6290,8 @@ fn render_turn_stats_block_highlights_cache_hit_at_or_below_90_percent() {
         prompt_sent_tokens: 10_000,
         ..Default::default()
     };
-    let block = render_turn_stats_block(
-        &tau_themes::Theme::builtin(),
-        &usage,
-        Some(&previous_usage),
-        None,
-        None,
-    );
+    let block =
+        render_turn_stats_block(&cli_test_theme(), &usage, Some(&previous_usage), None, None);
     let spans = block.content.spans();
 
     assert_eq!(spans[1].text, "90% 9k/10k");
@@ -6300,7 +6308,7 @@ fn cache_hit_percent_clamps_to_possible_cached_tokens() {
 
 #[test]
 fn streaming_block_handles_each_trailing_case() {
-    let theme = tau_themes::Theme::builtin();
+    let theme = cli_test_theme();
     let cases = [
         ("", "…"),
         ("Hello", "Hello …"),
@@ -6330,7 +6338,7 @@ fn three_prompts_during_streaming_all_render_correctly() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     // User sends first prompt.
@@ -6494,7 +6502,7 @@ fn emoji_in_response_renders_correctly() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
@@ -6553,7 +6561,7 @@ fn multiple_emoji_no_column_drift() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
@@ -6594,7 +6602,7 @@ fn overflowing_stream_replaced_cleanly_on_finish() {
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
-        tau_themes::Theme::builtin(),
+        cli_test_theme(),
     );
 
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {

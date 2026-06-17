@@ -1,0 +1,47 @@
+// Built-in "default" theme.
+//
+// This intentionally avoids hard-coded foreground/background colors so Tau stays
+// readable on unusual terminal color schemes. It keeps only text attributes that
+// do not assume a palette: bold, italic, underline, and strikethrough.
+{
+  styles: {
+    // -- User input --
+    "user.prompt":          { bold: true },
+
+    // -- Agent responses --
+    "agent.thinking":       { italic: true },
+
+    // -- Markdown-lite transcript formatting --
+    "markdown.strong":      { bold: true },
+    "markdown.emphasis":    { bold: true, italic: true },
+    "markdown.strikethrough": { strikethrough: true },
+    "markdown.heading":     { bold: true },
+    "markdown.list.marker": { bold: true },
+
+    // -- System --
+    "system.info.important": { bold: true },
+    "system.disconnect":    { bold: true },
+
+    // -- Token stats --
+    "token.stats.symbol.delta": { bold: true },
+    "token.stats.symbol.sigma": { bold: true },
+
+    // -- Prompt --
+    "prompt.marker":           { bold: true },
+    "prompt.placeholder":      { italic: true },
+    "prompt.marker.engineer":  { bold: true },
+    "prompt.marker.assistant": { bold: true },
+    "prompt.marker.manager":   { bold: true },
+    "prompt.marker.submitted": { bold: true },
+
+    // -- Completion menu --
+    "completion.selected":  { bold: true, underline: true },
+
+    // -- Banner --
+    "banner.name":          { bold: true },
+
+    // -- Diffs --
+    "diff.added.inline":    { bold: true },
+    "diff.removed.inline":  { bold: true },
+  }
+}

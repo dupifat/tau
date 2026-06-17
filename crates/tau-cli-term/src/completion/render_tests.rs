@@ -24,7 +24,7 @@ fn block_text(block: &StyledBlock) -> String {
 
 #[test]
 fn menu_height_is_capped_to_percent_of_terminal_height() {
-    let block = render_menu_block(&view(20, None), &Theme::builtin(), 80, 24);
+    let block = render_menu_block(&view(20, None), &Theme::new(), 80, 24);
     let text = block_text(&block);
 
     assert_eq!(text.lines().count(), 7);
@@ -35,7 +35,7 @@ fn menu_height_is_capped_to_percent_of_terminal_height() {
 
 #[test]
 fn selected_candidate_stays_visible_inside_capped_menu() {
-    let block = render_menu_block(&view(20, Some(15)), &Theme::builtin(), 80, 24);
+    let block = render_menu_block(&view(20, Some(15)), &Theme::new(), 80, 24);
     let text = block_text(&block);
 
     assert_eq!(text.lines().count(), 7);
@@ -53,7 +53,7 @@ fn long_candidates_are_truncated_to_one_terminal_row() {
         }],
         selected: None,
     };
-    let block = render_menu_block(&view, &Theme::builtin(), 24, 24);
+    let block = render_menu_block(&view, &Theme::new(), 24, 24);
     let text = block_text(&block);
 
     assert_eq!(text.lines().count(), 1);
@@ -71,7 +71,7 @@ fn emoji_candidates_are_truncated_by_grapheme_width() {
         }],
         selected: None,
     };
-    let block = render_menu_block(&view, &Theme::builtin(), 6, 24);
+    let block = render_menu_block(&view, &Theme::new(), 6, 24);
     let text = block_text(&block);
 
     assert_eq!(text.lines().count(), 1);
@@ -89,7 +89,7 @@ fn very_narrow_completion_menu_does_not_wrap() {
         }],
         selected: None,
     };
-    let block = render_menu_block(&view, &Theme::builtin(), 3, 24);
+    let block = render_menu_block(&view, &Theme::new(), 3, 24);
     let text = block_text(&block);
 
     assert_eq!(text.lines().count(), 1);

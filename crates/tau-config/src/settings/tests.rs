@@ -49,7 +49,7 @@ fn cli_settings_user_scalar_override_wins_over_built_in() {
     assert_eq!(s.show_tools, ShowTools::Compact);
     assert_eq!(s.show_messages, ShowMessages::SelfSummary);
     assert_eq!(s.show_status, ShowStatus::Minimal);
-    assert_eq!(s.theme, CliTheme::Auto);
+    assert_eq!(s.theme, CliTheme::Named("default".to_owned()));
 }
 
 /// Ensures cli.yaml can select a built-in theme by name.

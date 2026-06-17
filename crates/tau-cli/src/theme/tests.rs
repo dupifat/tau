@@ -14,8 +14,9 @@ fn parses_theme_env_values() {
     assert_eq!(parse_theme_name("   "), None);
 }
 
-/// Ensures built-in theme file names remain selectable in addition to the
-/// legacy dark/light aliases documented before external theme support.
+/// Ensures built-in theme file names remain selectable without requiring a Tau
+/// config directory. This intentionally avoids asserting built-in palette
+/// details so theme tuning does not churn selector tests.
 #[test]
 fn selected_named_builtin_theme() {
     let dirs = tau_config::settings::TauDirs {
@@ -23,14 +24,11 @@ fn selected_named_builtin_theme() {
         state_dir: None,
     };
 
-    let theme = select_theme(&dirs, CliTheme::Named("tau-light".to_owned()))
+    let theme = select_theme(&dirs, CliTheme::Named("dpc".to_owned()))
         .expect("built-in theme loads without config dir");
     let prompt = cwd_right_prompt(&theme, Path::new("/tmp/project"), None);
 
-    assert_eq!(
-        prompt.spans()[0].style.fg,
-        Some(tau_cli_term::Color::DarkBlue)
-    );
+    assert_eq!(prompt.spans()[0].text, "/tmp/project");
 }
 
 /// Ensures external theme names resolve to `themes/<name>.json5` under Tau's
@@ -165,7 +163,7 @@ fn suspended_prompt_input_placeholder_explains_messages_are_blocked() {
     // Regression coverage for the disabled-input copy shown while the selected
     // agent is suspended. The text must make clear that users need to resume it
     // before sending messages.
-    let theme = tau_themes::Theme::builtin();
+    let theme = tau_themes::Theme::new();
     let prompt = prompt_input_placeholder(&theme, Some("engineer"), Some("engineer_abc"), true);
     let text: String = prompt
         .spans()
@@ -181,11 +179,9 @@ fn suspended_prompt_input_placeholder_explains_messages_are_blocked() {
 
 #[test]
 fn cwd_right_prompt_uses_prompt_cwd_style() {
-    let prompt = cwd_right_prompt(
-        &tau_themes::Theme::builtin(),
-        Path::new("/tmp/project"),
-        None,
-    );
+    let theme = tau_themes::Theme::parse(r##"{ styles: { "prompt.cwd": { fg: "dark_grey" } } }"##)
+        .expect("test theme parses");
+    let prompt = cwd_right_prompt(&theme, Path::new("/tmp/project"), None);
 
     assert_eq!(prompt.spans()[0].text, "/tmp/project");
     assert_eq!(

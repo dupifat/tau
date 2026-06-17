@@ -40,12 +40,26 @@ reasoning/thinking text. Tool calls, tool payloads/results, shell output,
 status/progress lines, and agent-to-agent message debug displays must stay on
 their existing renderers unless there is a separate product decision.
 
+## Theme defaults
+
+Status: confirmed, 2026-06-17, dpc
+
+The built-in `default` theme is intentionally conservative. It avoids
+hard-coded foreground/background colors and relies on semantic text attributes
+such as bold, italic, underline, and strikethrough so Tau stays readable even on
+unusual terminal palettes. More opinionated built-ins, including the personalized
+`dpc` theme and the light-background `tau-light` theme, remain selectable but are
+not the default.
+
 ## tau-cli testing strategy
 
 Status: unconfirmed
 
 Pure transcript renderers should be tested at the rendered block/span boundary,
-not by snapshotting built-in theme implementation details. Use representative
-fixture themes with distinct semantic attributes, assert exact text preservation
-except for documented display-only transforms such as table padding, and check
-that the resolved spans carry the intended semantic styling.
+not by snapshotting built-in theme implementation details. Rendering and theme
+behavior tests must use representative fixture themes with distinct semantic
+attributes, assert exact text preservation except for documented display-only
+transforms such as table padding, and check that the resolved spans carry the
+intended semantic styling. Built-in theme tests should only validate that the
+embedded files parse and satisfy intentional theme-level invariants, so built-in
+theme tweaks do not force unrelated renderer expectation churn.

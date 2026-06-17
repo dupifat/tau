@@ -108,7 +108,7 @@ pub(crate) fn select_theme(
         CliTheme::Light => Ok(tau_themes::Theme::builtin_light()),
         CliTheme::Auto => Ok(match detect_terminal_shade() {
             Some(TerminalShade::Light) => tau_themes::Theme::builtin_light(),
-            Some(TerminalShade::Dark) | None => tau_themes::Theme::builtin_dark(),
+            Some(TerminalShade::Dark) | None => tau_themes::Theme::builtin_dpc(),
         }),
         CliTheme::Named(name) => select_named_theme(dirs, &name),
     }
@@ -116,7 +116,8 @@ pub(crate) fn select_theme(
 
 fn select_named_theme(dirs: &TauDirs, name: &str) -> Result<tau_themes::Theme, ThemeError> {
     match name {
-        "tau" => return Ok(tau_themes::Theme::builtin_dark()),
+        "default" => return Ok(tau_themes::Theme::builtin()),
+        "dpc" => return Ok(tau_themes::Theme::builtin_dpc()),
         "tau-light" => return Ok(tau_themes::Theme::builtin_light()),
         _ => {}
     }
@@ -183,7 +184,7 @@ impl fmt::Display for ThemeError {
                 {
                     write!(
                         f,
-                        "theme file not found: {} (built-ins: auto, dark, light, tau, tau-light)",
+                        "theme file not found: {} (built-ins: auto, dark, light, default, dpc, tau-light)",
                         path.display()
                     )
                 } else {

@@ -18,13 +18,8 @@ fn new_test_term_with_data_and_bindings(
         Box::new(std::io::sink()),
         CursorShape::Bar,
     );
-    let (term, completion_data) = HighTerm::new_for_test(
-        raw_term,
-        handle.clone(),
-        commands,
-        Theme::builtin(),
-        bindings,
-    );
+    let (term, completion_data) =
+        HighTerm::new_for_test(raw_term, handle.clone(), commands, Theme::new(), bindings);
     (term, handle, completion_data, input_tx)
 }
 

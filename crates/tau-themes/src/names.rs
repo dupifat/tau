@@ -1,6 +1,6 @@
 //! Canonical style name constants.
 //!
-//! These match the keys in the built-in `tau.json5` theme.
+//! These match the semantic keys used by Tau's built-in themes.
 
 // -- User input --
 pub const USER_PROMPT: &str = "user.prompt";
